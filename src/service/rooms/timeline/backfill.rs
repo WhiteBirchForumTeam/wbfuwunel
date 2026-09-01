@@ -452,5 +452,12 @@ fn prepend_backfill_pdu(
 	let key = (room_id, origin_server_ts, count_key);
 	txn.put_raw(&self.db.roomid_tscount_pducount, key, pdu_id.count());
 
+	// Backfill stores an event the same way append does, so it owes the media
+	// reference index the same row. An event stored without one leaves its
+	// media reading as unreferenced.
+	self.services
+		.media_refs
+		.add_event_refs(&mut txn, event_id, json);
+
 	txn.execute();
 }

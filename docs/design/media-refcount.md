@@ -2,8 +2,8 @@
 
 > **狀態：索引部分已實作，刪除部分仍是提案。**
 >
-> ✅ 已實作：`mxc_holder` 索引（服務 `src/service/media_refs/`），以及在事件寫入、redact、
-> 歷史清除、房間清除、頭像設定、帳號停用**六處**的維護。
+> ✅ 已實作：`mxc_holder` 索引（服務 `src/service/media_refs/`），以及在事件寫入、backfill、
+> redact、歷史清除、房間清除、頭像設定、帳號停用**七處**的維護。
 > ⏳ 未實作：**任何會刪掉 bytes 的東西**、墓碑、重建工具。
 >
 > ⚠️ §3.1 的設計在實作時被修正過兩次（三個 column family 變一個；索引一般化成帶種類碼的
@@ -122,7 +122,8 @@ txn.execute();
 
 | 動作 | 位置 | 狀態 |
 |---|---|---|
-| **記錄引用** | `append_pdu_json` 的既有交易裡 | ✅ |
+| **記錄引用** | `timeline/append.rs` 的 `append_pdu_json`，在它既有的交易裡 | ✅ |
+| **記錄引用（backfill）** | `timeline/backfill.rs` 的 `prepend_backfill_pdu`，同位交易 | ✅ |
 | **移除引用（redact）** | `timeline/redact.rs` 的 `redact_pdu` | ✅ |
 | **移除引用（歷史清除）** | `timeline/purge.rs` 的 `purge_history`，跟著它每筆 PDU 的既有交易 | ✅ |
 | **移除引用（房間清除）** | `timeline/pdus.rs` 的 `delete_pdus`，跟著它每筆 PDU 的既有交易 | ✅ |
@@ -133,6 +134,12 @@ txn.execute();
 ⚠️ **頭像必須跟 profile 寫入同一個交易**，因為拆成兩步**沒有安全的順序**：先寫引用再寫
 profile，中斷會留下 profile 還指著舊頭像、舊引用已釋放；反過來則是新頭像沒人持有。
 這也是 `set_profile_keys` 順帶改成單一交易的原因（以前是一個欄位一次寫入）。
+
+📌 **新增一個寫 `pduid_pdu` 的地方，就欠這個索引一筆。** 目前共三處：`append_pdu_json`、
+`prepend_backfill_pdu`（兩者都記錄），以及 `replace_pdu`（不記錄 —— 它只取代已存在的事件，
+redact 自己處理引用，而另一個呼叫者 `threads` 只改 `unsigned`、不動 `content`）。
+⚠️ **backfill 那筆是審查時才被拓出來的** —— 漏掉的原因是當初只掃了「誰刪 `pduid_pdu`」，
+沒掃「誰寫」。寫入端漏一個，那些事件的媒體就會讀成「無人引用」—— 而那是不可逆的方向。
 
 ⚠️ **`redact_pdu` 的移除不在交易裡**，因為它收尾用的 `replace_pdu` 本身不是交易。所以順序是：
 **先把剝空的事件存好，成功之後才移除引用列**。中間 crash 的話會留下「引用列還在、事件已剝空」
