@@ -6,10 +6,12 @@
 
 pub mod event;
 pub mod event_id;
+pub mod media_ref;
 pub mod pdu;
 pub mod room_version;
 
 pub use event::{Event, StateKey, TypeExt as EventTypeExt, TypeStateKey, state_key};
+pub use media_ref::list_content_mxc_uris;
 pub use pdu::{EventHash, Pdu, PduBuilder, PduCount, PduEvent, PduId, RawPduId};
 pub use room_version::{RoomVersion, RoomVersionRules};
 
