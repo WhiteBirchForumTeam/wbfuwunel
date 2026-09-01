@@ -4,15 +4,37 @@
 > 程式碼結構看 [repo-structure.md](repo-structure.md)，設計方向看
 > [why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md)。
 
-## 來源
+## 來源與去處
 
 | | |
 |---|---|
 | 上游 | [`matrix-construct/tuwunel`](https://github.com/matrix-construct/tuwunel)（Apache-2.0） |
-| 這個 fork | `amaid/new-tuwunel`，放在維護者自架的 Forgejo |
-| fork 的目的 | 見 [why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md)：把媒體層改成分塊 + Merkle + 引用計數，拿到續傳、串流播放與真正的刪除 |
+| 這個專案 | **wbfuwunel** |
+| 開發用 | `amaid/wbfuwunel`，維護者自架的 Forgejo。PR 在這裡開 |
+| 對外 | [`WhiteBirchForumTeam/wbfuwunel`](https://github.com/WhiteBirchForumTeam/wbfuwunel)（GitHub，**公開**） |
+| 目的 | 見 [why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md)：把媒體層改成分塊 + Merkle + 引用計數，拿到續傳、串流播放與真正的刪除 |
 
-**上游的授權、著作權標示與 `LICENSE` 一律保留。** 這個 fork 不對外發佈，也不冒充上游。
+### 授權：這是公開重新發佈，有義務要盡
+
+因為對外那份是**公開**的，Apache-2.0 的義務就是實際生效的，不是形式：
+
+- 保留上游的 `LICENSE`、著作權標示與作者名單 —— **一個字都不刪**。
+- **聲明本專案已對上游做過修改**（README 最上面那段就是）。改了什麼，用
+  `git log --oneline upstream/main..main` 列得出來。
+- 🚫 **不冒充上游、不代表上游。** README 明講了問題要回報到這裡，不要去麻煩上游的維護者。
+
+⚠️ 這一段在 2026-09-01 之前寫的是「這個 fork 不對外發佈」—— 那句話當時就已經不成立
+（GitHub 上那份是 public），已改正。**文件講反話比沒有文件更糟。**
+
+### 命名：專案改名，程式碼不改名
+
+專案叫 **wbfuwunel**，但 **crate 名（`tuwunel-*`）、binary 名（`tuwunel`）、設定路徑一律維持
+上游的名字**。這是維護者 2026-09-01 的決定。
+
+理由是成本不對稱：改名的收益只是好看，代價卻是**跟上游的每一次 merge 都在幾千行 `use`
+語句上衝突，而且是永久的**。這個 fork 的價值來自持續跟上游同步，不值得為了名字把那條路弄難走。
+
+👉 **所以看到 `tuwunel` 出現在程式碼、路徑或 binary 名裡，那是正確的，不是漏改的。**
 
 ## 這些文件不進 `docs/SUMMARY.md`
 

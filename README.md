@@ -1,10 +1,30 @@
 # Tuwunel<sup>💕</sup>
 
-> ## ⚠️ 這是一個 fork，不是上游
+> ## ⚠️ 這是 wbfuwunel，一個 fork，不是上游
 >
-> **上游**：[`matrix-construct/tuwunel`](https://github.com/matrix-construct/tuwunel)（Apache-2.0，授權與著作權標示全數保留）
-> **這裡**：`amaid/new-tuwunel` —— 維護者自己的 fork，**不對外發佈，也不冒充上游**。
-> 這一段以下全部是上游的原文，講的是上游的 releases、Docker image 與支援管道。
+> **上游**：[`matrix-construct/tuwunel`](https://github.com/matrix-construct/tuwunel)
+> **這個專案**：**wbfuwunel** —— 對外在
+> [`WhiteBirchForumTeam/wbfuwunel`](https://github.com/WhiteBirchForumTeam/wbfuwunel)，
+> 開發在維護者自架的 Forgejo `amaid/wbfuwunel`。
+>
+> ### 授權與修改聲明
+>
+> 本專案是 `matrix-construct/tuwunel` 的**修改版**，依 **Apache License 2.0** 發佈，
+> 與上游相同。上游的 [`LICENSE`](LICENSE)、著作權標示與作者名單全數保留。
+> **本專案已對上游程式碼做過修改**；改了哪些東西，執行：
+>
+> ```sh
+> git log --oneline upstream/main..main
+> ```
+>
+> 🚫 **本專案不是上游的官方發佈，也不代表上游。** 遇到問題請到本專案回報，
+> 不要去麻煩上游的維護者。這一段以下全部是上游的原文，其中的 releases、
+> Docker image 與支援管道都是**上游的**，不是這裡的。
+>
+> ### 命名
+>
+> 專案叫 **wbfuwunel**，但 **crate 名、binary 名、設定路徑一律維持上游的 `tuwunel`**。
+> 這是刻意的：改掉它們等於跟上游的每一次 merge 都大量衝突，而且是永久的。
 >
 > **fork 的目的**：把媒體層改成分塊 + Merkle 樹 + 引用計數，藉此拿到續傳、串流播放與真正的刪除。
 > 完整的理由、取捨與待驗項目在 [`docs/design/`](docs/design/)。
@@ -15,6 +35,7 @@
 > | 為什麼要 fork、要改成什麼樣子 | [docs/design/why-not-matrix-and-core-design.md](docs/design/why-not-matrix-and-core-design.md) |
 > | 程式碼結構導覽（要改東西時去哪裡找） | [docs/design/repo-structure.md](docs/design/repo-structure.md) |
 > | Windows 建置與實跑驗證 | [docs/design/windows-build.md](docs/design/windows-build.md) |
+> | 媒體引用計數與真正的刪除（提案） | [docs/design/media-refcount.md](docs/design/media-refcount.md) |
 >
 > **改動的流程**：先寫文件／方案 → 維護者同意 → 開分支 → 開 PR（目標分支 `main`）。
 > 跟上游同步只用 `git merge`，🚫 不 rebase、不 force push。
