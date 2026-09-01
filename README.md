@@ -36,6 +36,7 @@
 > | 程式碼結構導覽（要改東西時去哪裡找） | [docs/design/repo-structure.md](docs/design/repo-structure.md) |
 > | Windows 建置與實跑驗證 | [docs/design/windows-build.md](docs/design/windows-build.md) |
 > | 媒體引用計數與真正的刪除（提案） | [docs/design/media-refcount.md](docs/design/media-refcount.md) |
+> | 流式訊息（文字 token 串流，草案） | [docs/design/streaming-messages.md](docs/design/streaming-messages.md) |
 >
 > **改動的流程**：先寫文件／方案 → 維護者同意 → 開分支 → 開 PR（目標分支 `main`）。
 > 跟上游同步只用 `git merge`，🚫 不 rebase、不 force push。
