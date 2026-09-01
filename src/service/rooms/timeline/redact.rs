@@ -64,6 +64,13 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 		.delete_typed_relation(&pdu_id, &pdu)
 		.await;
 
+	// Read before the strip, because the strip is what removes the content the
+	// list comes from.
+	let media_refs = self
+		.services
+		.media_refs
+		.list_event_mxc_uris(&pdu);
+
 	redact_in_place(
 		&mut pdu,
 		&room_version_rules.redaction,
@@ -71,5 +78,18 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 	)
 	.map_err(|err| err!("invalid event: {err}"))?;
 
-	self.replace_pdu(&pdu_id, &pdu).await
+	self.replace_pdu(&pdu_id, &pdu).await?;
+
+	// Dropped only once the stripped event is stored. A row outliving its event
+	// holds media that could have been released; an event outliving its row
+	// points at media that could be removed.
+	if !media_refs.is_empty() {
+		let mut txn = self.db.db.txn();
+		self.services
+			.media_refs
+			.del_event_refs(&mut txn, event_id, &media_refs);
+		txn.execute();
+	}
+
+	Ok(())
 }

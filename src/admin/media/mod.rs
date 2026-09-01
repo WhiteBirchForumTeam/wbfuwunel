@@ -8,6 +8,7 @@ mod delete_range;
 mod get_file_info;
 mod get_remote_file;
 mod get_remote_thumbnail;
+mod list_references;
 mod preview;
 
 use clap::{ArgGroup, Subcommand};
@@ -82,6 +83,16 @@ pub(super) enum MediaCommand {
 
 	GetFileInfo {
 		/// The MXC URL to lookup info for.
+		mxc: OwnedMxcUri,
+	},
+
+	/// - Lists what references an MXC URL.
+	///
+	/// Reports the media reference index only. An empty result is not a
+	/// licence to delete: anything stored before the index existed was never
+	/// recorded.
+	ListReferences {
+		/// The MXC URL to look up references for.
 		mxc: OwnedMxcUri,
 	},
 

@@ -432,6 +432,12 @@ fn append_pdu_json(&self, pdu_id: &RawPduId, pdu: &PduEvent, json: &CanonicalJso
 	let key = (pdu.room_id(), ts, count_key);
 	txn.put_raw(&self.db.roomid_tscount_pducount, key, pdu_id.count());
 
+	// Sharing the event's own batch is what keeps a media reference from
+	// existing without the event justifying it, or the other way round.
+	self.services
+		.media_refs
+		.add_event_refs(&mut txn, pdu.event_id(), json);
+
 	txn.execute();
 }
 
