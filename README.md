@@ -1,5 +1,24 @@
 # Tuwunel<sup>💕</sup>
 
+> ## ⚠️ 這是一個 fork，不是上游
+>
+> **上游**：[`matrix-construct/tuwunel`](https://github.com/matrix-construct/tuwunel)（Apache-2.0，授權與著作權標示全數保留）
+> **這裡**：`amaid/new-tuwunel` —— 維護者自己的 fork，**不對外發佈，也不冒充上游**。
+> 這一段以下全部是上游的原文，講的是上游的 releases、Docker image 與支援管道。
+>
+> **fork 的目的**：把媒體層改成分塊 + Merkle 樹 + 引用計數，藉此拿到續傳、串流播放與真正的刪除。
+> 完整的理由、取捨與待驗項目在 [`docs/design/`](docs/design/)。
+>
+> | 想知道 | 看 |
+> |---|---|
+> | 這個 fork 跟上游的關係、分支模型、改動的流程 | [docs/design/fork-overview.md](docs/design/fork-overview.md) |
+> | 為什麼要 fork、要改成什麼樣子 | [docs/design/why-not-matrix-and-core-design.md](docs/design/why-not-matrix-and-core-design.md) |
+> | 程式碼結構導覽（要改東西時去哪裡找） | [docs/design/repo-structure.md](docs/design/repo-structure.md) |
+> | Windows 建置與實跑驗證 | [docs/design/windows-build.md](docs/design/windows-build.md) |
+>
+> **改動的流程**：先寫文件／方案 → 維護者同意 → 開分支 → 開 PR（目標分支 `main`）。
+> 跟上游同步只用 `git merge`，🚫 不 rebase、不 force push。
+
 ![GitHub License](https://img.shields.io/github/license/matrix-construct/tuwunel?style=flat%2Dsquare&color=%238A2BE2)
 ![GitHub Created At](https://img.shields.io/github/created-at/matrix-construct/tuwunel?style=flat%2Dsquare&color=%238A2BE2)
 ![GitHub Commit Activity](https://img.shields.io/github/commit-activity/m/matrix-construct/tuwunel?style=flat%2Dsquare&link=https%3A%2F%2Fgithub.com%2Fmatrix-construct%2Ftuwunel%2Fpulse%2Fmonthly&color=%238A2BE2)
