@@ -29,6 +29,8 @@
 > **fork 的目的**：把媒體層改成分塊 + Merkle 樹 + 引用計數，藉此拿到續傳、串流播放與真正的刪除。
 > 完整的理由、取捨與待驗項目在 [`docs/design/`](docs/design/)。
 >
+> 📌 **這個 fork 加了什麼，看 [`CHANGELOG-fork.md`](CHANGELOG-fork.md)。** 新功能一律在那裡留一筆。
+>
 > | 想知道 | 看 |
 > |---|---|
 > | 這個 fork 跟上游的關係、分支模型、改動的流程 | [docs/design/fork-overview.md](docs/design/fork-overview.md) |
