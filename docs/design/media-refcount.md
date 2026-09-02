@@ -5,6 +5,9 @@
 > ✅ 已實作：`mxc_holder` 索引（服務 `src/service/media_refs/`），以及在事件寫入、backfill、
 > redact、歷史清除、房間清除、頭像設定、帳號停用**七處**的維護。
 > ⏳ 未實作：**任何會刪掉 bytes 的東西**、墓碑、重建工具。
+> 👉 那一半的方案在 [media-gc.md](media-gc.md)。
+> ⚠️ 2026-09-02：維護者要求**精確的數字計數**，[media-gc.md](media-gc.md) 第二版用 RocksDB merge operator
+> 做到純寫入的 ±1；本文件的列式索引 `mxc_holder` 將在該階段退場。
 >
 > ⚠️ §3.1 的設計在實作時被修正過兩次（三個 column family 變一個；索引一般化成帶種類碼的
 > holder，把頭像也納入），理由都寫在該節與 §3.7。
