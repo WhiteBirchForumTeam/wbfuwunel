@@ -1,188 +1,183 @@
-# 媒體的真正刪除：候選、寬限、墓碑、重建
+# 媒體的真正刪除：精確計數、哨兵、立即清理、migrate
 
 > **狀態：提案，尚未實作。** 這份文件要先經維護者同意，才動 `src/`。
 >
-> 撰寫日期：2026-09-02。上位文件：[media-refcount.md](media-refcount.md)（索引已於 PR #5 合併），
+> 撰寫日期：2026-09-02（第二版，取代同日第一版的「候選表」設計）。
+> 上位文件：[media-refcount.md](media-refcount.md)（PR #5 的列式索引）；
 > 更上位：[why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md) §5.4。
 >
-> 這是「引用計數」的**下半部**：上半部只建索引、一個 byte 都不刪；這一半才真的刪 bytes。
-> 刪除不可逆，所以整份文件的每個選擇都先問同一句：**壞掉的時候，是垃圾留著，還是內容不見？**
+> ⚠️ **這一版改變了計數的形狀**：PR #5 的「列就是計數」被**精確的有號整數**取代，理由在 §2。
+> 列式索引（`mxc_holder`）在本階段退場。
 
 ---
 
-## 1. 目標與範圍
+## 1. 維護者的要求
 
-拿到 §5.4 承諾的東西：**引用歸零的媒體，經過寬限期後真的從磁碟消失，容量因此有界。**
+1. **引用計數是精確的數字**：被引用 +1、除引用 −1。
+2. **扣到 `MIN < 計數 ≤ 0` 就觸發刪除，立刻生效**，不要寬限期。
+3. **既存資料不重建**：給哨兵值 `MIN`，哨兵**不遞增**、也永不觸發刪除。
+4. 另給 **`migrate` 指令**（預設不跑）：全部歸零、掃房間與使用者重算、達到條件的直接清 —— 像一個 clean CLI。
 
-| 做 | 不做 |
+第一版做不到 1 和 2：列式索引在 redact 當下答不出現在幾個，只能等 worker 去 seek。維護者的批評成立。
+
+## 2. 純寫入、又精確：RocksDB merge operator
+
+`Txn` 是純寫入的 WriteBatch，寫入端讀不到現值 —— 第一版因此放棄數字。但 RocksDB 有為此而生的原語：
+**merge operator**。`merge(key, +1)` 是一筆**寫入**，排進 WriteBatch，讀取或 compaction 時才用我們給的函數合併。
+
+已查證這條路是通的：
+
+| 需要 | 現況 |
 |---|---|
-| 判定「歸零且曾經被引用」的候選 | 🚫 跨使用者去重（E2EE 下不存在） |
-| 寬限期 → 刪 bytes → 留墓碑 | 🚫 動事件 DAG |
-| 墓碑讓 404 可區分 | 🚫 分塊 / Merkle（獨立的功能） |
-| 啟動時一次性重建索引（讓舊資料不再是盲區） | 🚫 遠端快取媒體（照舊走既有 TTL，見 §6） |
-| 預設**關閉**，明確開啟才會刪 | |
+| `WriteBatch::merge_cf` | ✅ vendored rust-rocksdb（rev `9c0aad8`）有 |
+| `Options::set_merge_operator_associative(name, fn)` | ✅ 有；callback 拿到現值與 operand 迭代器 |
+| 有號整數的編碼 | ✅ `ser.rs` / `de.rs` 都有 `i64`（`i32` 的 de 是 stub，所以用 **i64**） |
+| engine 掛 merge operator 的位置 | `src/database/engine/cf_opts.rs` 的 `descriptor_cf_options`；目前**沒有任何 CF 用 merge**，要新增 |
+| `Txn::merge` | **不存在**，照 `put_raw` 加一個（`self.batch.merge_cf(&map.cf(), key, operand)`） |
 
-## 2. 核心問題：「曾經 ≥ 1、現在歸零」怎麼知道
+### 2.1 新的 column family：`mxc_refcount`
 
-索引的設計是**列本身就是計數**（[media-refcount.md](media-refcount.md) §3.1）。它答得了「現在有沒有人用」，
-但答不了「以前有沒有人用過」—— 列刪光之後什麼痕跡都沒有。而 §3.5 的安全規則正是：
-**只回收「曾經 ≥ 1、現在歸零」的，從未被引用過的完全不碰**（否則剛上傳、還沒送出的檔案會被刪）。
+鍵 `mxc`，值 **`i64`**（big-endian，走既有編碼）。合併函數：
 
-而且寫入端**不能讀**（`Txn` 是純寫入的 WriteBatch），所以移除引用的那一刻，程式**不知道**自己刪的是不是最後一列。
+```
+fn merge(current: Option<i64>, operands: [Operand]) -> i64 {
+    let mut count = current.unwrap_or(0);
+    for op in operands {
+        match op {
+            Set(v)  => count = v,                        // 種哨兵用
+            Add(d)  => if count != i64::MIN { count = count.saturating_add(d) },
+        }
+    }
+    count
+}
+```
 
-### 解法：一個只寫不讀的「候選」表
+- **不存在 → 視為 0**。剛上傳、還沒被事件引用的媒體，第一次 +1 就是 1。
+- **`i64::MIN` 是哨兵**：一旦是哨兵，`Add` 全部被吞掉 —— 這就是「哨兵不遞增」。
+- operand 是 9 bytes：1 byte tag（`Set` / `Add`）＋ 8 bytes 值。
 
-新增 column family **`mxc_gc_candidate`**：鍵 `mxc`，值 `最後一次移除引用的時間`。
+⭐ **比列式索引好在哪**：寫入端仍然不讀，但 worker 讀到的是**一個精確的數字**，O(1)；而且 ±1 塞進事件既有的交易，
+**原子性跟 PR #5 完全一樣**。
 
-- **每一個移除引用的地方**（redact、歷史清除、房間清除、換頭像、清頭像）**順手寫一列**，
-  不判斷、不讀 —— 純寫入，塞得進它們既有的交易。
-- **從未被引用過的媒體永遠不會出現在這張表**，因為沒有任何移除發生過 → §3.5 的保護**自動成立**，
-  不需要額外的計時器或上傳時間。
-- 真正的判斷交給 **worker**（它可以讀）：對每個候選，seek 一次 `mxc_holder` 前綴。
+⚠️ **代價，明寫**：merge 加法**不冪等**。同一事件若被 append 兩次，計數會多 1（列式重插是無事）。現況下
+`append_pdu_json` 每個 PDU id 只呼叫一次；redact 後內容已剝空、第二次 redact 讀不到 mxc 所以不會重複 −1。
+**這仰賴呼叫端的性質，不是資料庫保證** —— §10 要求一個測試把它釘住。
 
-| 候選的狀態 | worker 做什麼 |
-|---|---|
-| 又有人引用了（seek 到列） | 刪掉候選，什麼都不做 —— 它回到「活著」 |
-| 沒人引用、但還在寬限期內 | 跳過，下一輪再看 |
-| 沒人引用、寬限期已過 | 刪 bytes → 寫墓碑 → 刪候選 |
-| 找不到任何檔案鍵（已經被人手動刪了） | 寫墓碑 → 刪候選 |
+### 2.2 ±1 的位置：跟 PR #5 一模一樣
 
-⭐ 這個切法讓**所有需要讀的邏輯都集中在 worker 一處**，寫入端維持「只多寫一列」的零成本。
+PR #5 已把七個維護點接好（事件寫入、backfill、redact、歷史清除、房間清除、設頭像、清頭像）。本階段**只換底層呼叫**：
+`add_event_refs` → `txn.merge(mxc_refcount, mxc, Add(+1))`，`del_*` → `Add(−1)`。`media_refs` 服務介面不動，呼叫端零改動。
 
-### 這樣安全嗎 —— 失敗方向逐條看
+## 3. 觸發刪除：立刻，不等
 
-| 情境 | 結果 | 方向 |
-|---|---|---|
-| 候選寫了、worker 還沒跑、程式 crash | 候選留著，下次啟動再看 | ✅ 垃圾留著 |
-| 移除引用成功、候選那筆沒寫到（不在同一交易時） | 媒體永遠不會被候選 → 永遠不刪 | ✅ 垃圾留著 |
-| worker 判定歸零 → 刪 bytes 之間，有人**新引用**了它 | ❌ bytes 沒了、新事件指著它 | ⚠️ **內容不見** —— 見下 |
-| 墓碑寫了、bytes 沒刪成 | 下一輪候選還在、再試；GET 回墓碑 | ✅ 可重試 |
+### 3.1 誰觸發
 
-⚠️ **唯一會「內容不見」的是第三列**：check-then-delete 的競態。`Txn` 不能讀，所以做不到原子的
-「確認沒人用 → 刪」。壓縮這個窗口的辦法：
+每個 −1 的地方，在交易 `execute()` 之後**立刻**把 mxc 丟給 worker（`tokio::sync::mpsc`），worker 收到就處理，
+不是每小時掃。redact 到 bytes 消失是**毫秒級**。
 
-1. **寬限期本身**就把「剛歸零」和「真的刪」隔開，大多數的重新引用（例如刪錯了立刻重送）都落在寬限期內。
-2. worker 在**刪 bytes 之前的最後一刻再 seek 一次** —— 把窗口縮到毫秒級。
-3. **寬限期內的重新引用要重置計時**：任何 `add_*_refs` 順手**刪掉候選列**（純寫入，`txn.del`），
-   於是媒體回到「活著」，下次歸零會重新開始算。
+程序若在 `execute()` 之後、送進 channel 之前 crash：計數已是 0 但沒人處理 → **媒體留著**（安全方向）。
+§5 的 migrate 會把這種漏網的補掉。
 
-剩下的毫秒級窗口是這個設計的**已知殘餘風險**，寫在這裡而不是假裝沒有。要完全消除得改資料庫層
-（帶讀的交易），那是另一個量級的改動，本階段不做。
+### 3.2 worker 對每個 mxc 做什麼
 
-## 3. 寬限期與設定
+```
+count = read(mxc_refcount, mxc)                      // merge 已合併，精確
+None 或 i64::MIN  → skip（沒被算過 / 哨兵）
+> 0               → skip（還有人用）
+≤ 0               → delete_bytes → write_tombstone → del(mxc_refcount, mxc)
+```
+
+- **只碰本地媒體**（`media.is_local()`）；遠端快取照舊走既有 TTL。
+- `delete_bytes` 就是既有的 `media.delete()`：`(mxc, Interfix)` 前綴，**縮圖一起刪**。
+- 找不到任何檔案鍵（已被手動刪）→ 一樣寫墓碑、清計數。
+
+### 3.3 唯一的競態，明寫
+
+worker `read` 到 0 → `delete` 之間，若有人**新引用**同一 mxc（轉發一則舊訊息），bytes 會在事件寫入後消失 ——
+「內容不見」的方向。窗口是毫秒級，沒有寬限期把它拉開。刪 bytes 前**再讀一次**可再壓縮，但 +1 的交易與 worker 的
+delete 沒有共同的鎖，殘餘窗口存在。維護者選了「立刻生效」，這是那個選擇的已知代價；完全消除要資料庫層帶讀的交易，本階段不做。
+
+📎 **副作用**：`save_unredacted_events` 會把被 redact 的原文留 60 天給管理員查證，媒體立刻刪掉後那份原文指向一張
+已不存在的圖。這是「隱私與空間優先於事後查證」，維護者已知。
+
+## 4. 既存資料：種哨兵，不重建
+
+啟動時跑一次（`global` marker，照 `rebuild_relatesto_typed` 的樣子）：枚舉 `mediaid_file` 裡**所有本地媒體**
+（`media.get_all_mxcs()` 已存在），每個 mxc 寫 `merge(Set(i64::MIN))`。
+
+之後：舊媒體被舊事件 redact → −1 被哨兵吞掉 → 仍是哨兵 → **不刪**；被新事件轉發 → +1 也被吞掉 → 仍是哨兵，
+**永遠不會被自動刪，直到 migrate**。新上傳的媒體不在種哨兵那一刻存在 → 從 0 開始正常計數。
+
+⭐ 這正是「既存資料當作不知道，不猜、不誤刪」。代價是既存媒體在 migrate 之前永不回收 —— 那是 migrate 存在的理由。
+種哨兵是**枚舉媒體鍵**的一次掃描；規模 = 媒體數，不是事件數。
+
+## 5. `migrate`：重算 ＋ 清理，像一個 clean CLI
+
+```
+!admin media migrate-references [--dry-run]
+```
+
+**預設不跑**。跑的時候：
+
+1. **暫停 worker**（記憶體旗標）。
+2. **全部歸零**：`mxc_refcount.clear()`。
+3. **掃事件**：走 `pduid_pdu` 全表（照 `rebuild_typed_relations` 的 `raw_stream`），每筆用 `list_content_mxc_uris(content)`
+   對每個 mxc `merge(Add(+1))`。已 redact 的內容為空，自然不加。
+4. **掃使用者**：`users.list_local_users()` × `profile.avatar_url()` → `merge(Add(+1))`。
+5. **掃媒體**：`get_all_mxcs()` 逐個讀計數 —— **不存在或 0 ＝ 孤兒** → 刪 bytes、寫墓碑。
+   ⚠️ 跳過「最近 N 分鐘內建立」的（上傳空窗；建立時間走既有的 `mtime_millis`）。
+6. 恢復 worker；印摘要（掃了幾個事件／使用者／媒體，刪了幾個，跳過幾個）。
+
+`--dry-run` 只做 1–4 ＋ 印**會刪哪些**，不刪。**第一次一定先 dry-run。**
+
+📎 **為什麼掃事件而不是「逐個 room」**：`pduid_pdu` 的鍵以 room 為前綴，全表順掃**就是**逐個 room，不必另外枚舉房間。
+使用者那邊才需要 `list_local_users()`。跑完後哨兵全部消失（被 `clear()` 清掉、重算成真實數字），之後就是純自動模式。
+
+## 6. 墓碑（維護者已同意）
+
+新增 `mxc_tombstone`：鍵 `mxc`，值 `(刪除時間, 原因)`，原因 = `GarbageCollected | Migrated | AdminDeleted`。
+
+- **擋點**：內容與縮圖的讀取都收束在 `media.db.search_file_metadata(mxc, dim)`，墓碑就查在它前面。
+- **HTTP**：`410 Gone`，errcode 維持 `M_NOT_FOUND`（客戶端只認標準碼）。📎 `Err!(Request(...))` 巨集一律填
+  `BAD_REQUEST` 當提示，`response::status_code` 只在提示是 `BAD_REQUEST` 時才依 kind 換算 —— 所以 410 要
+  **直接建構** `Error::Request(NotFound, msg, StatusCode::GONE)`。
+- **TTL**：CF 設 `ttl = 365 天`（descriptor 既有欄位）。
+- `!admin media list-references` 改名 **`refcount`**：印計數，含「哨兵」與「已刪除 + 墓碑」兩種特殊狀態。
+  列式索引退場後「誰引用」查不到了 —— 維護者要數字，這是明知的取捨。
+
+## 7. 設定
 
 | 設定 | 預設 | 意義 |
 |---|---|---|
-| `media_gc_enabled` | **`false`** | 主開關。關著時 worker 只**記錄**會刪什麼，不刪（見 §7 的上線順序） |
-| `media_gc_grace_seconds` | `604800`（7 天） | 歸零後多久才真的刪 |
-| `media_gc_interval_seconds` | `3600` | worker 每隔多久掃一次候選 |
+| `media_gc_enabled` | **`true`** | 主開關；`false` 時 worker 只 `info!` 會刪什麼，不刪 |
+| `media_gc_migrate_skip_recent_seconds` | `600` | migrate 掃媒體時，跳過多新的上傳 |
 
-**為什麼不對齊 `redaction_retention_seconds`（60 天）**：那是「保留未 redact 的原文」的期限，
-語意不同 —— 原文保留是為了管理員事後查證，媒體寬限是為了「刪錯了還能救回」。兩者可以獨立設定；
-但**寬限期不該長於原文保留期**，否則會出現「原文還在、檔案沒了」。文件在 §8 待決 1 留這一題。
+沒有寬限期設定 —— 維護者要立刻生效。「刪錯能救」在 Matrix 的答案本來就是重新上傳。
 
-三個都 `reloadable: yes`，寫在 `src/core/config/mod.rs`，照 `redaction_retention_seconds` 的樣子宣告。
+## 8. 從 PR #5 到這一版：要拆掉什麼
 
-## 4. 墓碑
+| PR #5 的東西 | 處置 |
+|---|---|
+| `mxc_holder` column family | 標記 `DROPPED`（descriptor 既有做法），資料丟棄 |
+| `media_refs` 服務與七個維護點 | **保留介面**，底層換成 merge |
+| `Holder` 種類碼、`describe_holder`、鍵編碼測試 | 刪除（沒有列了） |
+| `list-references` admin 指令 | 改成 `refcount` |
+| `CHANGELOG-fork.md` 那一筆 | 補一段「計數形狀改變」 |
 
-新增 column family **`mxc_tombstone`**：鍵 `mxc`，值 `(刪除時間, 原因)`。原因是一個小 enum：
-`GarbageCollected`、`AdminDeleted`（未來 `!admin media delete` 也可以寫它）。
+## 9. 待決（需要維護者決定）
 
-### 4.1 讀取端：讓 404 可區分
+1. **哨兵種在「所有本地媒體」對嗎？** 另一選項是只種在「有事件引用過的」—— 但那要掃事件，等於半個 migrate。
+2. **migrate 的「最近 N 分鐘跳過」預設 10 分鐘可以嗎？**
+3. **非冪等的 +1**（§2.1）可以接受嗎？替代是保留列式索引當去重層 —— 兩份資料，維護者之前反對過類似的重複。
+4. `delete_by_event` 讀源（上一份文件待決 4）仍建議**分開修**。
 
-內容與縮圖的讀取都收束在 `media.db.search_file_metadata(mxc, dim)`（`get_stored` 與
-`get_stored_thumbnail` 都呼叫它）—— 墓碑就擋在**這一個點的前面**：找不到檔案鍵時先查墓碑，
-有墓碑就回「已刪除」，沒有才回原本的 `NotFound`。
-
-**HTTP 表達**：`410 Gone` ＋ errcode 維持 `M_NOT_FOUND`。
-
-- 為什麼 `410`：語意就是「曾經存在、已永久移除」，而且**不會**破壞客戶端 —— 它們對非 200 一律當失敗，
-  差別只在錯誤訊息。
-- 為什麼 errcode 不自訂：非聯邦環境雖然可以自由，但 Element 這類客戶端只認標準碼；自訂碼在它們眼裡
-  跟未知錯誤沒兩樣。分辨的責任交給 HTTP 狀態碼 ＋ `error` 字串（`"Media was deleted on <date>"`）。
-- 📎 實作細節：`Err!(Request(...))` 巨集**一律填 `BAD_REQUEST`** 當提示，而 `response::status_code`
-  只在提示是 `BAD_REQUEST` 時才依 kind 換算。所以 410 要**直接建構**
-  `Error::Request(ErrorKind::NotFound, msg, StatusCode::GONE)`，不能走巨集。
-
-### 4.2 墓碑保留多久
-
-RocksDB 的 column family 支援 `ttl`（descriptor 已有多處在用，例如 `mediaid_lazy`）。
-建議 **`ttl = 365 天`**：一年內的「為什麼這張圖沒了」查得到，之後自然消失，表不會無限長。
-📎 §8 待決 2。
-
-### 4.3 墓碑與 `!admin media list-references` 的關係
-
-`list-references` 對已刪除的 mxc 應該把墓碑也印出來（`deleted 2026-09-02 (garbage-collected)`），
-否則管理員看到「Nothing references」會以為索引壞了。
-
-## 5. 重建：讓「上線前的舊資料」不再是盲區
-
-索引只認它上線之後發生的事（[media-refcount.md](media-refcount.md) 的唯一剩餘限制）。
-**沒有重建就開 GC，第一次就會刪掉所有舊事件引用的媒體** —— 這是刪除功能的**閘門**，不是可選項。
-
-### 5.1 做法：抄 `rebuild_typed_relations`
-
-那條路已經存在（`src/service/rooms/pdu_metadata/purge.rs`）：`clear()` 整個 CF → `raw_stream()`
-掃過全部 `pduid_pdu` → 逐筆重新索引；並在 `src/service/migrations/mod.rs` 用 `global` marker
-（`db["global"].get(b"rebuild_relatesto_typed")`）保證**啟動時只跑一次**。
-
-`media_refs` 照做：
-
-1. `mxc_holder.clear()`。
-2. 掃全部 `pduid_pdu`，對每筆用 `list_content_mxc_uris(content)` 重寫事件列（已 redact 的內容為空，
-   自然不寫 —— 這正是 [media-refcount.md](media-refcount.md) §3.4 說「從內容重算是正確的」的理由）。
-3. 掃全部本地使用者（`users.list_local_users()`），對每個 `profile.avatar_url()` 重寫頭像列。
-4. marker：`db["global"].insert(b"rebuild_mxc_holder", [])`。
-
-也提供 `!admin media rebuild-references` 隨時手動重跑（跟 `rebuild_typed_relations` 一樣有 admin 入口）。
-
-### 5.2 重建期間不能刪
-
-worker 在**重建進行中**看到的索引是不完整的（清空到掃完之間）。所以：**重建期間 worker 必須暫停**，
-用一個記憶體內的旗標即可（`AtomicBool`），重建結束才放行。
-⚠️ 而且 `mxc_gc_candidate` **不在重建範圍內** —— 它記的是「何時歸零」，重建重算不出來；留著即可，
-worker 之後看到「其實還有人引用」就會把候選刪掉。
-
-## 6. 只碰本地媒體
-
-候選與刪除都只對**本地** mxc（`mxc.server_name == 我們的 server_name`，媒體服務已有 `is_local()`）。
-遠端快取的媒體照舊走既有的 TTL 路徑（`mediaid_lazy` 等），不納入引用計數 —— 那些是快取，本來就會過期，
-而且它們的「真正持有者」在另一台 server 上，我們算不準。📎 這回答了 [media-refcount.md](media-refcount.md) §4 待決 5。
-
-## 7. 上線順序（每一步都可以停下來）
-
-```
-① 合併：預設 media_gc_enabled = false
-        ↓  啟動時自動重建索引（一次），worker 只記錄「會刪什麼」
-② 觀察：用 !admin media list-references 抽查幾筆舊資料，確認重建後看得到引用
-        ↓  看 worker 的 dry-run 日誌，確認候選清單合理
-③ 開啟：media_gc_enabled = true
-        ↓  第一輪只會刪「已歸零且超過寬限期」的
-④ 驗證：找一個被刪的 mxc，GET 應回 410 + 墓碑；list-references 印出墓碑
-```
-
-**dry-run 模式**（`media_gc_enabled = false` 時 worker 仍跑，但只 `info!` 不刪）是刻意的：
-讓維護者在真的刪之前**看到它打算刪什麼**。這比「關著就完全不動」更有用，也更安全。
-
-## 8. 待決（需要維護者決定）
-
-1. **寬限期預設 7 天對嗎？** 以及要不要強制 `media_gc_grace_seconds ≤ redaction_retention_seconds`。
-2. **墓碑 TTL 一年對嗎？** 還是永久（表會單調成長，但每列很小）。
-3. **`410 Gone` 可以接受嗎？** 另一個選項是維持 404 只改 `error` 字串 —— 更保守，但客戶端完全分不出來。
-4. **`delete_by_event` 讀源**（[media-refcount.md](media-refcount.md) §4 待決 4，前一階段留下的）：
-   要不要在這一支順便改成讀 `retention.get_original_pdu()`？我傾向**分開**，它是獨立的行為修正。
-5. **競態的殘餘風險**（§2 第三列）可以接受嗎？替代方案是等資料庫層有帶讀的交易再做，那會讓這整個
-   階段延後到不知何時。
-
-## 9. 測試計畫
+## 10. 測試計畫
 
 | 層 | 內容 |
 |---|---|
-| 單元 | 候選判定的純函數（歸零＋過期 → 刪；歸零未過期 → 等；有引用 → 撤銷候選）；墓碑的序列化來回；410 的錯誤建構 |
-| 端到端（真伺服器，抄 PR #5 那套腳本） | 送圖 → redact → 候選出現（dry-run 日誌） → 把寬限期設成 0 → 開 GC → bytes 消失 → GET 回 410 → list-references 印墓碑 → **再送一則引用同一 mxc 的訊息** → 應回 410 而非 200（確認墓碑不會被新引用「復活」）|
-| 端到端（重建） | 用**索引上線前**的舊資料庫（PR #5 之前的 `testdb` 還在）啟動 → 確認 marker 觸發重建 → list-references 看得到舊事件 |
-| 變異 | 只打候選判定那個純函數 |
-
-⭐ 端到端裡「再送一則引用已刪 mxc 的訊息」那條很重要：它驗的是**墓碑是終局**——
-被刪的媒體不能因為有人再貼一次 mxc 就變回「活的」。實作上 `add_event_refs` 不需要查墓碑（它不能讀），
-但 GET 會先看墓碑，所以結果仍是 410。這條測試把這個推論釘死。
+| 單元 | 合併函數：`None+1=1`、`1−1=0`、**哨兵吞 ±1**、`Set(MIN)` 覆蓋、飽和；i64 與 operand 的編碼來回 |
+| 端到端（真伺服器，抄 PR #5 的腳本） | 送圖 → `refcount`=1 → 轉發到第二房 → 2 → redact 一則 → 1（**bytes 還在**）→ redact 另一則 → **bytes 立刻消失**、GET 回 410、`refcount` 印墓碑 → 再送一則引用同一 mxc 的訊息 → 仍 410（墓碑是終局）|
+| 端到端（哨兵） | 用 PR #5 之前的舊資料庫啟動 → 舊媒體 `refcount` 印「哨兵」→ redact 舊事件 → **不刪** |
+| 端到端（migrate） | 同一舊資料庫 `--dry-run` 印孤兒清單 → 真跑 → 孤兒消失、被引用的留著、哨兵全變成真實數字 |
+| 非冪等的守門 | 同一 PDU 兩次 `append_pdu_json` 會怎樣 —— 至少一個測試把「現況只呼叫一次」釘住，壞了會被看到 |
+| 變異 | 只打合併函數 |
