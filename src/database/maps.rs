@@ -226,14 +226,30 @@ pub(super) static MAPS: &[Descriptor] = &[
 		name: "mediaid_user",
 		..descriptor::RANDOM_SMALL
 	},
-	// Media reference index: `mxc || holder kind || holder id` with an empty
-	// value. Seeking the mxc prefix answers whether anything still holds a
-	// reference to that media, whatever kind of thing holds it, and the empty
-	// value keeps the row to its key.
+	// Superseded by `mxc_refcount`: the row-per-holder index could not answer
+	// "how many" at the moment a reference was removed.
 	Descriptor {
 		name: "mxc_holder",
-		key_size_hint: Some(128),
-		val_size_hint: Some(0),
+		..descriptor::DROPPED
+	},
+	// Media reference count: `mxc` -> i64, folded by the counter merge operator
+	// so an increment is a pure write inside the transaction that justifies
+	// it. A missing row is media created before the counter existed, and the
+	// first operand it receives turns it into the sentinel rather than a count.
+	Descriptor {
+		name: "mxc_refcount",
+		merge: descriptor::MergeKind::Counter,
+		key_size_hint: Some(64),
+		val_size_hint: Some(8),
+		..descriptor::RANDOM_SMALL
+	},
+	// Deleted media: `mxc` -> (deleted at, reason), so a later fetch can say
+	// "gone" rather than "never existed". Rows age out after a year.
+	Descriptor {
+		name: "mxc_tombstone",
+		ttl: 60 * 60 * 24 * 365,
+		key_size_hint: Some(64),
+		val_size_hint: Some(16),
 		..descriptor::RANDOM_SMALL
 	},
 	Descriptor {

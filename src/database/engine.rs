@@ -16,6 +16,7 @@ mod env;
 mod events;
 mod files;
 mod logger;
+pub(crate) mod merge;
 mod memory_usage;
 mod open;
 mod repair;

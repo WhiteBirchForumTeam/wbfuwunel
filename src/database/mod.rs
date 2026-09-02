@@ -37,7 +37,10 @@ pub use self::{
 	cork::Cork,
 	de::{Ignore, IgnoreAll, from_slice as deserialize_from_slice},
 	deserialized::Deserialized,
-	engine::Engine,
+	engine::{
+		Engine,
+		merge::{COUNTER_SENTINEL, CounterOperand, decode_counter},
+	},
 	handle::Handle,
 	keyval::{KeyBuf, KeyVal, Slice, serialize_key, serialize_val},
 	map::{Get, Map, Qry, compact},

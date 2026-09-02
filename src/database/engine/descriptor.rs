@@ -24,6 +24,18 @@ use tuwunel_core::utils::string::EMPTY;
 
 use super::cf_opts::SENTINEL_COMPRESSION_LEVEL;
 
+/// Merge operator a column family folds its values with, if any.
+///
+/// A family with a merge operator accepts `Txn::merge` operands that RocksDB
+/// folds into the stored value on read and compaction. See `engine::merge`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MergeKind {
+	/// Plain values; `Txn::merge` must not be used on this family.
+	None,
+	/// A signed 64-bit counter driven by `CounterOperand`s.
+	Counter,
+}
+
 /// Describes a column family and its RocksDB tuning.
 ///
 /// Catalog entries inherit workload presets and override fields for their key,
@@ -34,6 +46,7 @@ pub(crate) struct Descriptor {
 	pub(crate) name: &'static str,
 	pub(crate) ignored: bool,
 	pub(crate) dropped: bool,
+	pub(crate) merge: MergeKind,
 	pub(crate) cache_disp: CacheDisp,
 	pub(crate) key_size_hint: Option<usize>,
 	pub(crate) val_size_hint: Option<usize>,
@@ -81,6 +94,7 @@ static BASE: Descriptor = Descriptor {
 	name: EMPTY,
 	ignored: false,
 	dropped: false,
+	merge: MergeKind::None,
 	cache_disp: CacheDisp::Shared,
 	key_size_hint: None,
 	val_size_hint: None,

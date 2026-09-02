@@ -270,6 +270,28 @@ where
 	self.batch.put_cf(&map.cf(), key, val);
 }
 
+/// Serializes the key and queues one merge operand.
+///
+/// The operand bytes are copied unchanged into the batch and folded into the
+/// stored value by the map's merge operator on read and compaction. The map
+/// must belong to the transaction's database engine and must declare a merge
+/// operator in its descriptor; RocksDB rejects a merge on a family without one.
+///
+/// # Panics
+///
+/// Panics when the map belongs to another database engine or serialization of
+/// the key fails.
+#[implement(Txn)]
+pub fn merge<K, V>(&mut self, map: &Map, key: K, operand: V)
+where
+	K: Serialize + Debug,
+	V: AsRef<[u8]>,
+{
+	self.assert_map(map);
+	let key = serialize_key(key).expect("failed to serialize batch key");
+	self.batch.merge_cf(&map.cf(), key, operand);
+}
+
 /// Queues one raw-key insertion after serializing the value.
 ///
 /// The key bytes are copied unchanged into the batch, while the value uses the
