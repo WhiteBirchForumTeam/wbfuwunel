@@ -8,7 +8,7 @@
 //! overwritten; run it in a maintenance window.
 
 use std::{
-	collections::HashMap,
+	collections::{HashMap, HashSet},
 	sync::atomic::{AtomicBool, Ordering},
 	time::Duration,
 };
@@ -206,6 +206,8 @@ async fn overwrite_counts(&self, counts: &HashMap<String, i64>, all_media: &[Own
 
 	self.db.mxc_refcount.clear().await;
 
+	let known: HashSet<&str> = all_media.iter().map(|mxc| mxc.as_str()).collect();
+
 	let mut rows: Vec<(&str, i64)> = all_media
 		.iter()
 		.map(|mxc| (mxc.as_str(), counts.get(mxc.as_str()).copied().unwrap_or(0)))
@@ -214,7 +216,7 @@ async fn overwrite_counts(&self, counts: &HashMap<String, i64>, all_media: &[Own
 	rows.extend(
 		counts
 			.iter()
-			.filter(|(mxc, _)| !all_media.iter().any(|known| known.as_str() == mxc.as_str()))
+			.filter(|(mxc, _)| !known.contains(mxc.as_str()))
 			.map(|(mxc, count)| (mxc.as_str(), *count)),
 	);
 
