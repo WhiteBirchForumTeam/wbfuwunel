@@ -136,8 +136,17 @@ None 或 i64::MIN  → skip（沒被算過 / 哨兵）
 「內容不見」的方向。它不發生在 redact 當下（那時不扣），只發生在 7 天後那一次 reap 的毫秒窗口。
 刪 bytes 前**再讀一次**可再壓縮，但 +1 的交易與 worker 的 `delete` 沒有共同的鎖，殘餘窗口存在。
 
-📎 **之後可以改進（維護者已同意後做）**：這台是單一程序，一把「每個 mxc 一鎖」的 in-process 鎖罩住
-「讀計數 → 刪 bytes」與 +1，就能關掉這個窗口，不用動資料庫層。本階段先不做。
+✅ **已關掉（維護者 2026-09-03 同意）**：`media_refs` 服務一張 `MutexMap<String, ()>`，每個 mxc 一把 in-process 鎖。
+- **+1 那邊**：`hold_event_media(json)`（事件寫入 `append_pdu`、backfill `backfill_pdu`）與 `hold_media(new_avatar)`
+  （`set_profile_keys`）在 **async 層**先持鎖，再呼叫同步的寫入函式，`execute()` 之後才放。事件裡多個 mxc 依排序去重後依序取鎖，
+  兩則事件用不同順序引用同一組媒體也不會互等。−1 那邊不用鎖。
+- **收集器**：`collect()` 先持鎖，再讀計數、再 `media.collect()`，放鎖前 bytes 已刪或已決定不刪。
+- **rebuild 刪孤兒**：開頭重算的 map 只是快照，rebuild 跑的期間 +1 的人不會被 `collector_paused` 擋（那只停收集器）。
+  所以刪之前**持鎖重讀一次計數**，> 0 就跳過（PR #12 審查 rumia 指出：鎖只包刪除、不包決策，等於沒關）。
+  離線維護視窗內這條不會觸發，但正確性不該靠「大家都遵守維護視窗」。
+- 結果只有兩種：+1 先落地，收集器讀到 ≥ 1 跳過；或刪除先落地，新引用指向墓碑（410），也就是 §6 說的「墓碑是終局」。
+  不再有「讀到 0、+1 落地、bytes 消失」這第三種。
+- 沒有單元測試（要 Services 才跑得動）；靠 e2e 沒有 hang 與讀碼確認鎖的順序（media 鎖在 room 的 `insert_lock` 之內取得、之內釋放）。
 
 **第二個窗口，在 `drop_original` 裡（PR #7 審查 salvia 指出、rumia 重審確認；已關閉）**：它先讀備份取 mxc，再在
 **另一個**交易刪備份＋ −1。retention worker 與 `purge_history` 若同時處理同一事件，兩邊都在對方刪之前讀到備份，

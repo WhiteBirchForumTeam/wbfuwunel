@@ -206,9 +206,18 @@ where
 	let count = PduCount::Normal(*next_count);
 	let pdu_id: RawPduId = PduId { shortroomid, count }.into();
 
+	// Hold the media this event references until its count has committed,
+	// so the collector cannot remove it between reading zero and deleting.
+	let media_held = self
+		.services
+		.media_refs
+		.hold_event_media(&pdu_json)
+		.await;
+
 	// Insert pdu
 	self.append_pdu_json(&pdu_id, pdu, &pdu_json);
 
+	drop(media_held);
 	drop(insert_lock);
 
 	// Only local senders can own pushers.

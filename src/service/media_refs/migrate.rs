@@ -179,6 +179,24 @@ async fn rebuild_with_collector_paused(&self, dry_run: bool) -> Result<RebuildRe
 		}
 
 		if !dry_run {
+			let _held = self.hold_media(mxc.as_str()).await;
+
+			// The recount is a snapshot; a reference added since then has
+			// either been written over by `overwrite_counts` or landed after
+			// it. Decide on the count as it stands under the lock, the same
+			// way the collector does.
+			match self.refcount(mxc.as_str()).await {
+				| Ok(Some(count)) if count > 0 => {
+					info!(?mxc, count, "Referenced since the recount; kept.");
+					continue;
+				},
+				| Ok(_) => {},
+				| Err(e) => {
+					warn!(?mxc, ?e, "Reference count unreadable under the lock; kept.");
+					continue;
+				},
+			}
+
 			match self
 				.services
 				.media
