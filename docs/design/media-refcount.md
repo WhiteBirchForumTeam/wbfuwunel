@@ -1,10 +1,16 @@
 # 媒體引用計數與真正的刪除
 
-> **狀態：索引部分已實作，刪除部分仍是提案。**
+> **狀態：本文件的列式索引已被精確計數取代；留作設計紀錄。**
 >
-> ✅ 已實作：`mxc_holder` 索引（服務 `src/service/media_refs/`），以及在事件寫入、backfill、
-> redact、歷史清除、房間清除、頭像設定、帳號停用**七處**的維護。
-> ⏳ 未實作：**任何會刪掉 bytes 的東西**、墓碑、重建工具。
+> ✅ 2026-09-02：`mxc_holder`（一列一個持有者）退場，標為 `DROPPED`。取代它的是 `mxc_refcount: mxc → i64`，
+> ±1 走 RocksDB merge operator，純寫入、同一交易 —— 見 [media-gc.md](media-gc.md) §2。
+> 七個維護點（事件寫入、backfill、redact、歷史清除、房間清除、頭像設定、帳號停用）**保留**，只換底層呼叫。
+> ⚠️ 一條語意跟著變：**redact 不再當下釋放引用** —— 原文備份（`save_unredacted_events`）才是持有者，
+> 備份被丟掉時才 −1；見 [media-gc.md](media-gc.md) §3.0。
+> ⏳ 仍未實作：**任何會刪掉 bytes 的東西**、墓碑、`migrate-references`。
+>
+> 下面的內容是列式索引時期的推理。§3.1「為什麼不是計數器」的前提（`Txn` 不能讀）**仍然成立**，
+> 只是後來找到了 merge operator 這條不需要讀的路。
 >
 > ⚠️ §3.1 的設計在實作時被修正過兩次（三個 column family 變一個；索引一般化成帶種類碼的
 > holder，把頭像也納入），理由都寫在該節與 §3.7。
