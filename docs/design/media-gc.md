@@ -140,7 +140,10 @@ None 或 i64::MIN  → skip（沒被算過 / 哨兵）
 - **+1 那邊**：`hold_event_media(json)`（事件寫入 `append_pdu`、backfill `backfill_pdu`）與 `hold_media(new_avatar)`
   （`set_profile_keys`）在 **async 層**先持鎖，再呼叫同步的寫入函式，`execute()` 之後才放。事件裡多個 mxc 依排序去重後依序取鎖，
   兩則事件用不同順序引用同一組媒體也不會互等。−1 那邊不用鎖。
-- **收集器**：`collect()` 先持鎖，再讀計數、再 `media.collect()`，放鎖前 bytes 已刪或已決定不刪；rebuild 的孤兒刪除同樣持鎖。
+- **收集器**：`collect()` 先持鎖，再讀計數、再 `media.collect()`，放鎖前 bytes 已刪或已決定不刪。
+- **rebuild 刪孤兒**：開頭重算的 map 只是快照，rebuild 跑的期間 +1 的人不會被 `collector_paused` 擋（那只停收集器）。
+  所以刪之前**持鎖重讀一次計數**，> 0 就跳過（PR #12 審查 rumia 指出：鎖只包刪除、不包決策，等於沒關）。
+  離線維護視窗內這條不會觸發，但正確性不該靠「大家都遵守維護視窗」。
 - 結果只有兩種：+1 先落地，收集器讀到 ≥ 1 跳過；或刪除先落地，新引用指向墓碑（410），也就是 §6 說的「墓碑是終局」。
   不再有「讀到 0、+1 落地、bytes 消失」這第三種。
 - 沒有單元測試（要 Services 才跑得動）；靠 e2e 沒有 hang 與讀碼確認鎖的順序（media 鎖在 room 的 `insert_lock` 之內取得、之內釋放）。
