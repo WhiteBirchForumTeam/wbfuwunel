@@ -81,7 +81,7 @@ Windows 上的完整流程、依賴與實跑驗證在
 1. 先寫文件或方案（`docs/design/`）。
 2. 維護者同意。
 3. 開分支，開 PR，目標分支 `main`。
-4. 合併進 `main` 之後，在 `CHANGELOG-fork.md` 留一筆。
+4. feat、重大 fix、refactor 合併進 `main` 之後，在 `CHANGELOG-fork.md` 留一筆；純文件的分支不用。
 
 跟上游同步只用 `git merge`。🚫 不 rebase、不 force push、不改已推出去的歷史。
 
