@@ -42,7 +42,9 @@ const PER_OP: usize = 16;
 /// Record tags per rocksdb `write_batch.cc`; puts, deletes and merges
 /// against column family id 0 encode as the legacy untagged types. A merge
 /// record is laid out exactly like a value record: the operand takes the
-/// value's place.
+/// value's place. These tag the record; the first byte of a counter operand
+/// (`engine::merge`) is a separate tag with its own meanings, so 0x2 here and
+/// 0x02 there are unrelated.
 #[derive(Clone, Copy)]
 enum Tag {
 	Deletion = 0x0,

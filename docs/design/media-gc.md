@@ -120,6 +120,10 @@ None 或 i64::MIN  → skip（沒被算過 / 哨兵）
 - **只碰本地媒體**（`media.is_local()`）；遠端快取照舊走既有 TTL。
 - `delete_bytes` 就是既有的 `media.delete()`：`(mxc, Interfix)` 前綴，**縮圖一起刪**。
 - 找不到任何檔案鍵（已被手動刪）→ 一樣寫墓碑、清計數。
+- ⚠️ **負數是配平錯誤，不是「更該刪」**。七個 ±1 的呼叫點配平時計數不會低於 0；讀到負數代表某處多扣了一次
+  （或扣了從未加過的），媒體可能還有人用。現況 `is_mxc_referenced` 把負數當可刪（PR #7 審查 salvia 指出，
+  維護者要求「MIN < 計數 ≤ 0 就刪」）；**刪除 worker 那支要決定**：照字面刪，或負數視為未知、只 `error!` 不刪
+  （fail closed）。設計上傾向後者 —— 壞掉的方向要是「留著」。
 
 ### 3.3 唯一的競態，明寫
 
@@ -129,6 +133,12 @@ None 或 i64::MIN  → skip（沒被算過 / 哨兵）
 
 📎 **之後可以改進（維護者已同意後做）**：這台是單一程序，一把「每個 mxc 一鎖」的 in-process 鎖罩住
 「讀計數 → 刪 bytes」與 +1，就能關掉這個窗口，不用動資料庫層。本階段先不做。
+
+**第二個窗口，在 `drop_original` 裡（PR #7 審查 salvia 指出，尚未處理）**：它先讀備份取 mxc，再在**另一個**交易
+刪備份＋ −1。retention worker 與 `purge_history` 若同時處理同一事件，兩邊都在對方刪之前讀到備份，那個事件的引用
+會被扣兩次 —— 一次 −1 落到了不該落的地方。順序執行時靠「讀不到就扣零個」擋住；只有並發才穿過去。
+影響有界（單一事件），但方向是「多扣」，也就是可能提早刪。**同一把「每個 mxc 一鎖」（或改成讀＋刪同一原子操作）
+一起關掉**，刪除 worker 那支處理。
 
 ## 4. 既存資料：哨兵懶惰植入，零掃描
 
@@ -212,6 +222,8 @@ None 或 i64::MIN  → skip（沒被算過 / 哨兵）
 | 層 | 內容 |
 |---|---|
 | 單元 | 合併函數：`None+Init=0`、`Some(c)+Init=c`（縮圖後生不歸零）、**`None+Add=MIN`（懶惰哨兵）**、`0+1=1`、`1−1=0`、**哨兵吞 ±1**、`Set` 覆蓋、飽和；i64 與 operand 的編碼來回 |
+| DB 級（真 RocksDB，`engine/tests.rs`） | 透過 descriptor 的掛點註冊 operator，真的 `merge_cf` 後 `get_cf` 折出數字；flush＋compact 之後讀到的一樣、再 merge 仍疊在存下來的值上。這是單元＋型別＋build 都抓不到、兩次咬到我們的那條接縫（PR #5 的 u8 round-trip、PR #7 的 WriteBatch walker）|
+| 🔲 尚缺（PR #7 審查 rumia 🟢3） | 「備份存在時 purge 只釋放一次」的雙路徑互斥：`purge.rs` 從 raw 內容扣 vs `drop_original` 從備份扣，靠「redact 後內容為空」互斥。純函數那半（`a_redacted_event_names_nothing`）已釘住；整條路徑要 Services 才跑得動，目前只有 e2e 情境 1 涵蓋 |
 | 端到端（真伺服器，抄 PR #5 的腳本） | 送圖 → `refcount`=1 → 轉發到第二房 → 2 → redact 一則 → 1（**bytes 還在**）→ redact 另一則 → **bytes 立刻消失**、GET 回 410、`refcount` 印墓碑 → 再送一則引用同一 mxc 的訊息 → 仍 410（墓碑是終局）|
 | 端到端（哨兵） | 用 PR #5 之前的舊資料庫啟動 → 舊媒體 `refcount` 印「哨兵」→ redact 舊事件 → **不刪** |
 | 端到端（migrate） | 同一舊資料庫 `--dry-run` 印孤兒清單 → 真跑 → 孤兒消失、被引用的留著、哨兵全變成真實數字 |

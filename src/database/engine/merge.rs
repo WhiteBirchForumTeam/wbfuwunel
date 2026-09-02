@@ -36,6 +36,9 @@ pub enum CounterOperand {
 	Set(i64),
 }
 
+// Tags inside an operand's own bytes. They share values with the record tags
+// in `txn.rs` (`Tag::Merge` is also 0x02) but live in a different byte: the
+// record tag says "this is a merge", these say which merge it is.
 const TAG_INIT: u8 = 0x01;
 const TAG_ADD: u8 = 0x02;
 const TAG_SET: u8 = 0x03;
@@ -92,6 +95,8 @@ pub(crate) fn fold_counter(
 			| (Some(count), Init) => Some(count),
 			| (None, Add(_)) => Some(COUNTER_SENTINEL),
 			| (Some(COUNTER_SENTINEL), Add(_)) => Some(COUNTER_SENTINEL),
+			// Saturation keeps the sentinel a floor: a count one above it that
+			// loses two lands on the sentinel instead of wrapping to i64::MAX.
 			| (Some(count), Add(delta)) => Some(count.saturating_add(delta)),
 			| (_, Set(value)) => Some(value),
 		})

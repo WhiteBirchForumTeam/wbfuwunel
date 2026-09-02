@@ -67,6 +67,10 @@ pub(crate) fn add_event_refs(
 /// original, is truly gone: a count that stays high holds media that could be
 /// released, while a count that drops early releases media something still
 /// points at.
+///
+/// A count never goes below zero when every release pairs with a count:
+/// a negative count read back is a caller releasing what it never counted, or
+/// releasing the same event twice, and is the bug to find.
 #[implement(Service)]
 pub(crate) fn del_event_refs(&self, txn: &mut Txn, _event_id: &EventId, mxc_uris: &[String]) {
 	for mxc in mxc_uris {
@@ -125,7 +129,8 @@ pub fn set_avatar_ref(
 ///
 /// `Ok(None)` is media the counter never saw created and that nothing has
 /// touched since; `Ok(Some(COUNTER_SENTINEL))` is such media after something
-/// touched it. Both mean "unknown", never "zero".
+/// touched it. Both mean "unknown", never "zero": a caller that treats
+/// either as zero releases media it knows nothing about.
 #[implement(Service)]
 pub async fn refcount(&self, mxc: &str) -> Result<Option<i64>> {
 	match self.db.mxc_refcount.get(mxc).await {
