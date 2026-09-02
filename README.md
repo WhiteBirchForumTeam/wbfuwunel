@@ -54,6 +54,7 @@ fork 專屬的文件都在 [`docs/design/`](docs/design/)。它們刻意不進�
 
 | 想知道 | 看 |
 |---|---|
+| **接下來做什麼、可能做什麼、明確不做什麼** | [docs/design/roadmap.md](docs/design/roadmap.md) |
 | 這個 fork 跟上游的關係、分支模型、改動的流程 | [docs/design/fork-overview.md](docs/design/fork-overview.md) |
 | 為什麼要 fork、目標與非目標、核心設計方向 | [docs/design/why-not-matrix-and-core-design.md](docs/design/why-not-matrix-and-core-design.md) |
 | 程式碼結構導覽（要改東西時去哪裡找） | [docs/design/repo-structure.md](docs/design/repo-structure.md) |
