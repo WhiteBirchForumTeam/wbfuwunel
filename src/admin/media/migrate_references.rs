@@ -16,6 +16,12 @@ pub(super) async fn migrate_references(&self, dry_run: bool) -> Result {
 		report.events, report.retained_originals, report.avatars, report.media
 	)?;
 
+	writeln!(
+		out,
+		"This is offline maintenance: references added while it ran were not counted. Run \
+		 it in a maintenance window, and again if the server was busy."
+	)?;
+
 	if report.dry_run {
 		writeln!(out, "Dry run: counts were not written and nothing was removed.")?;
 		writeln!(out, "{} media would be removed as unreferenced:", report.orphans.len())?;

@@ -7,7 +7,11 @@
 //! row becomes a real number. References added while the rebuild runs are
 //! overwritten; run it in a maintenance window.
 
-use std::{collections::HashMap, sync::atomic::Ordering, time::Duration};
+use std::{
+	collections::HashMap,
+	sync::atomic::{AtomicBool, Ordering},
+	time::Duration,
+};
 
 use futures::StreamExt;
 use ruma::{CanonicalJsonObject, OwnedMxcUri};
@@ -63,11 +67,26 @@ fn count_event(counts: &mut HashMap<String, i64>, event_bytes: &[u8]) -> bool {
 /// standing aside for the duration.
 #[implement(Service)]
 pub async fn rebuild(&self, dry_run: bool) -> Result<RebuildReport> {
-	self.collector_paused.store(true, Ordering::Release);
-	let report = self.rebuild_with_collector_paused(dry_run).await;
-	self.collector_paused.store(false, Ordering::Release);
+	let _collector_stands_aside = CollectorPause::new(&self.collector_paused);
 
-	report
+	self.rebuild_with_collector_paused(dry_run).await
+}
+
+/// Holds the collector paused for as long as it lives, so a rebuild that
+/// panics or is cancelled cannot leave the collector stopped for good.
+struct CollectorPause<'a> {
+	paused: &'a AtomicBool,
+}
+
+impl<'a> CollectorPause<'a> {
+	fn new(paused: &'a AtomicBool) -> Self {
+		paused.store(true, Ordering::Release);
+		Self { paused }
+	}
+}
+
+impl Drop for CollectorPause<'_> {
+	fn drop(&mut self) { self.paused.store(false, Ordering::Release); }
 }
 
 #[implement(Service)]
