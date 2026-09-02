@@ -39,14 +39,18 @@ const HEADER: usize = 12;
 /// Worst-case per-record overhead: a type tag and three varint32s.
 const PER_OP: usize = 16;
 
-/// Record tags per rocksdb `write_batch.cc`; puts and deletes against
-/// column family id 0 encode as the legacy untagged types.
+/// Record tags per rocksdb `write_batch.cc`; puts, deletes and merges
+/// against column family id 0 encode as the legacy untagged types. A merge
+/// record is laid out exactly like a value record: the operand takes the
+/// value's place.
 #[derive(Clone, Copy)]
 enum Tag {
 	Deletion = 0x0,
 	Value = 0x1,
+	Merge = 0x2,
 	CfDeletion = 0x4,
 	CfValue = 0x5,
+	CfMerge = 0x6,
 }
 
 impl TryFrom<u8> for Tag {
@@ -56,8 +60,10 @@ impl TryFrom<u8> for Tag {
 		match byte {
 			| 0x0 => Ok(Self::Deletion),
 			| 0x1 => Ok(Self::Value),
+			| 0x2 => Ok(Self::Merge),
 			| 0x4 => Ok(Self::CfDeletion),
 			| 0x5 => Ok(Self::CfValue),
+			| 0x6 => Ok(Self::CfMerge),
 			| unrecognized => Err(unrecognized),
 		}
 	}
@@ -572,13 +578,15 @@ pub(crate) fn next_record<'a>(data: &mut &'a [u8]) -> Option<(u32, &'a [u8])> {
 	let tag = Tag::try_from(tag).ok()?;
 
 	let cf_id = match tag {
-		| Tag::Value | Tag::Deletion => 0,
-		| Tag::CfValue | Tag::CfDeletion => take_varint32(data)?,
+		| Tag::Value | Tag::Deletion | Tag::Merge => 0,
+		| Tag::CfValue | Tag::CfDeletion | Tag::CfMerge => take_varint32(data)?,
 	};
 
 	let key = take_varstring(data)?;
 
-	if matches!(tag, Tag::Value | Tag::CfValue) {
+	// Value records carry a value and merge records carry an operand; both
+	// are one varstring to skip.
+	if matches!(tag, Tag::Value | Tag::CfValue | Tag::Merge | Tag::CfMerge) {
 		take_varstring(data)?;
 	}
 
