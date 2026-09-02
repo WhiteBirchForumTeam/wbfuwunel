@@ -91,7 +91,7 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 		let mut txn = self.db.db.txn();
 		self.services
 			.media_refs
-			.del_event_refs(&mut txn, event_id, &media_refs);
+			.del_event_refs(&mut txn, &media_refs);
 		txn.execute();
 	}
 

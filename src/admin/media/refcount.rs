@@ -6,6 +6,21 @@ use crate::admin_command;
 
 #[admin_command]
 pub(super) async fn refcount(&self, mxc: OwnedMxcUri) -> Result {
+	if let Some(tombstone) = self
+		.services
+		.media
+		.find_tombstone(&mxc.as_str().try_into()?)
+		.await
+	{
+		let report = format!(
+			"{mxc} was deleted at {} ({:?}).\n\nFetches answer 410 Gone until the tombstone \
+			 expires; the media cannot come back under this MXC.",
+			tombstone.deleted_at_secs, tombstone.reason
+		);
+
+		return self.write_str(&report).await;
+	}
+
 	let mxc = mxc.as_str();
 
 	let report = match self.services.media_refs.refcount(mxc).await? {

@@ -436,7 +436,7 @@ fn append_pdu_json(&self, pdu_id: &RawPduId, pdu: &PduEvent, json: &CanonicalJso
 	// existing without the event justifying it, or the other way round.
 	self.services
 		.media_refs
-		.add_event_refs(&mut txn, pdu.event_id(), json);
+		.add_event_refs(&mut txn, json);
 
 	txn.execute();
 }

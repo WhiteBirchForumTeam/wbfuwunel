@@ -74,7 +74,7 @@ pub async fn purge_history(
 
 			self.services
 				.media_refs
-				.del_event_refs(&mut txn, &event_id, &media_refs);
+				.del_event_refs(&mut txn, &media_refs);
 
 			let room_id_ts_id = (room_id, ts, bias_count(raw_id.count()));
 			txn.del(&self.db.roomid_tscount_pducount, room_id_ts_id);

@@ -172,6 +172,6 @@ async fn drop_original(&self, event_id: &EventId, time_redacted: Option<u64>) {
 	}
 	self.services
 		.media_refs
-		.del_event_refs(&mut txn, event_id, &media_refs);
+		.del_event_refs(&mut txn, &media_refs);
 	txn.execute();
 }

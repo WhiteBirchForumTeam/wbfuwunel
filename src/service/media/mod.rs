@@ -41,7 +41,11 @@ use url::Url;
 #[cfg(feature = "media_thumbnail")]
 use self::video::{FAILURES, Failures, sweep_staging_dir};
 use self::{data::Data, preview::Agent, remote::Fetch};
-pub use self::{data::Metadata, preview::UrlPreviewData, thumbnail::Dim};
+pub use self::{
+	data::{Metadata, Tombstone, TombstoneReason},
+	preview::UrlPreviewData,
+	thumbnail::Dim,
+};
 use crate::storage::Provider;
 
 #[derive(Debug)]
@@ -302,6 +306,57 @@ impl Service {
 		}
 	}
 
+	/// Removes `mxc` for good and leaves a tombstone: bytes, metadata, the
+	/// reference count row, and a record of when and why, so a later fetch
+	/// answers 410 rather than 404.
+	///
+	/// Media whose files are already gone (removed by hand) still gets its
+	/// tombstone and loses its count row.
+	#[tracing::instrument(level = "debug", skip(self))]
+	pub async fn collect(&self, mxc: &Mxc<'_>, reason: TombstoneReason) -> Result {
+		if self.db.search_mxc_metadata_prefix(mxc).await.is_ok() {
+			self.delete(mxc).await?;
+		} else {
+			debug_info!(?mxc, "No media files to remove; leaving the tombstone only.");
+		}
+
+		let tombstone = Tombstone { deleted_at_secs: utils::time::now().as_secs(), reason };
+		let mut txn = self.services.db.txn();
+		self.db.write_tombstone(&mut txn, mxc, &tombstone);
+		txn.execute();
+
+		// The bytes are already gone; the record that says so must not be the
+		// part a crash loses. A cork elsewhere would otherwise leave this batch
+		// in the manual-flush WAL buffer.
+		if let Err(e) = self.services.db.engine.flush() {
+			warn!(?mxc, ?e, "Tombstone written but the WAL flush failed.");
+		}
+
+		Ok(())
+	}
+
+	/// Reads the tombstone left when `mxc` was removed, if any.
+	pub async fn find_tombstone(&self, mxc: &Mxc<'_>) -> Option<Tombstone> {
+		self.db.find_tombstone(mxc).await
+	}
+
+	/// Modification time of the stored object behind `mxc`, in milliseconds,
+	/// or `None` when nothing is stored for it.
+	pub async fn find_mtime_millis(&self, mxc: &Mxc<'_>) -> Option<u64> {
+		let Metadata { key, .. } = self.get_metadata(mxc).await?;
+
+		self.head_meta(&key)
+			.await
+			.map(|object| mtime_millis(&object))
+	}
+
+	/// Returns whether `mxc` names media this server is the origin of.
+	pub fn is_local(&self, mxc: &Mxc<'_>) -> bool {
+		self.services
+			.globals
+			.server_is_ours(mxc.server_name)
+	}
+
 	/// Deletes all media by the specified user
 	///
 	/// currently, this is only practical for local users
@@ -345,8 +400,10 @@ impl Service {
 		skip(self),
 	)]
 	pub async fn get_or_fetch(&self, mxc: &Mxc<'_>, timeout_ms: Duration) -> Result<Media> {
-		if let Ok(media) = self.get(mxc, Some(timeout_ms)).await {
-			return Ok(media);
+		match self.get(mxc, Some(timeout_ms)).await {
+			| Ok(media) => return Ok(media),
+			| Err(e) if is_gone(&e) => return Err(e),
+			| Err(_) => {},
 		}
 
 		if self
@@ -380,8 +437,10 @@ impl Service {
 		skip(self),
 	)]
 	pub async fn get(&self, mxc: &Mxc<'_>, timeout: Option<Duration>) -> Result<Media> {
-		if let Ok(meta) = self.get_stored(mxc).await {
-			return Ok(meta);
+		match self.get_stored(mxc).await {
+			| Ok(meta) => return Ok(meta),
+			| Err(e) if is_gone(&e) => return Err(e),
+			| Err(_) => {},
 		}
 
 		let Some(timeout) = timeout else {
@@ -421,9 +480,11 @@ impl Service {
 			.search_file_metadata(mxc, &Dim::default())
 			.await;
 
-		let Ok(Metadata { content_type, content_disposition, key }) = meta else {
+		let Metadata { content_type, content_disposition, key } = match meta {
+			| Ok(meta) => meta,
+			| Err(e) if is_gone(&e) => return Err(e),
 			// query-depth firewall
-			return Box::pin(self.fetch_lazy_media(mxc)).await;
+			| Err(_) => return Box::pin(self.fetch_lazy_media(mxc)).await,
 		};
 
 		let path = self.get_media_name_sha256(&key);
@@ -681,7 +742,7 @@ impl Service {
 		let deleted: Vec<OwnedMxcUri> = candidates
 			.into_iter()
 			.stream()
-			.ready_filter(|mxc| self.is_local(mxc) && !spared.contains(mxc))
+			.ready_filter(|mxc| self.is_local_uri(mxc) && !spared.contains(mxc))
 			.broad_filter_map(async |mxc| {
 				let parts = mxc.parts().ok()?;
 				let Metadata { key, .. } = self.get_metadata(&parts).await?;
@@ -728,7 +789,7 @@ impl Service {
 		user_avatars.chain(room_avatars).collect().await
 	}
 
-	fn is_local(&self, mxc: &OwnedMxcUri) -> bool {
+	fn is_local_uri(&self, mxc: &OwnedMxcUri) -> bool {
 		mxc.server_name()
 			.is_ok_and(|server| self.services.globals.server_is_ours(server))
 	}
@@ -994,6 +1055,10 @@ impl Service {
 #[inline]
 #[must_use]
 pub fn encode_key(key: &[u8]) -> String { general_purpose::URL_SAFE_NO_PAD.encode(key) }
+
+/// Whether `error` is the answer for removed media, which callers that would
+/// otherwise fall back to another source must pass through unchanged.
+fn is_gone(error: &Error) -> bool { error.status_code() == StatusCode::GONE }
 
 fn mtime_millis(object: &ObjectMeta) -> u64 {
 	u64::try_from(object.last_modified.timestamp_millis()).unwrap_or(0)

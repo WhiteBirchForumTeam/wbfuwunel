@@ -457,7 +457,7 @@ fn prepend_backfill_pdu(
 	// media reading as unreferenced.
 	self.services
 		.media_refs
-		.add_event_refs(&mut txn, event_id, json);
+		.add_event_refs(&mut txn, json);
 
 	txn.execute();
 }
