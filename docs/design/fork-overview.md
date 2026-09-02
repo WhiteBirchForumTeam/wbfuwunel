@@ -12,7 +12,7 @@
 | 這個專案 | **wbfuwunel** |
 | 開發用 | `amaid/wbfuwunel`，維護者自架的 Forgejo。PR 在這裡開 |
 | 對外 | [`WhiteBirchForumTeam/wbfuwunel`](https://github.com/WhiteBirchForumTeam/wbfuwunel)（GitHub，**公開**） |
-| 目的 | 見 [why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md)：把媒體層改成分塊 + Merkle + 引用計數，拿到續傳、串流播放與真正的刪除 |
+| 目的 | 一套由維護者完全掌控的即時通訊服務，見 [why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md)。分岔會很大：媒體層、訊息模型、管理介面都會照自己的需求改，與 Matrix 規格相容不是目標。第一步是媒體層（引用計數與真正的刪除） |
 
 ### 授權：這是公開重新發佈，有義務要盡
 
