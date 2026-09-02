@@ -29,7 +29,10 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 			err!(Database(error!(?pdu_id, ?event_id, ?e, "PDU ID points to invalid PDU.")))
 		})?;
 
-	self.services
+	// While the original is retained, it is the reference holder: the media
+	// stays exactly as long as an administrator can still see the message.
+	let original_retained = self
+		.services
 		.retention
 		.save_original_pdu(event_id, &pdu, state_lock)
 		.await;
@@ -80,10 +83,11 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 
 	self.replace_pdu(&pdu_id, &pdu).await?;
 
-	// Dropped only once the stripped event is stored. A row outliving its event
-	// holds media that could have been released; an event outliving its row
-	// points at media that could be removed.
-	if !media_refs.is_empty() {
+	// Released only once the stripped event is stored, and only when no
+	// retained original holds the references instead; retention releases them
+	// when it drops the original. A count held too long keeps media that could
+	// have gone; a count released early frees media something still shows.
+	if !original_retained && !media_refs.is_empty() {
 		let mut txn = self.db.db.txn();
 		self.services
 			.media_refs

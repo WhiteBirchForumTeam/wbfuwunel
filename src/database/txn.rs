@@ -39,14 +39,20 @@ const HEADER: usize = 12;
 /// Worst-case per-record overhead: a type tag and three varint32s.
 const PER_OP: usize = 16;
 
-/// Record tags per rocksdb `write_batch.cc`; puts and deletes against
-/// column family id 0 encode as the legacy untagged types.
+/// Record tags per rocksdb `write_batch.cc`; puts, deletes and merges
+/// against column family id 0 encode as the legacy untagged types. A merge
+/// record is laid out exactly like a value record: the operand takes the
+/// value's place. These tag the record; the first byte of a counter operand
+/// (`engine::merge`) is a separate tag with its own meanings, so 0x2 here and
+/// 0x02 there are unrelated.
 #[derive(Clone, Copy)]
 enum Tag {
 	Deletion = 0x0,
 	Value = 0x1,
+	Merge = 0x2,
 	CfDeletion = 0x4,
 	CfValue = 0x5,
+	CfMerge = 0x6,
 }
 
 impl TryFrom<u8> for Tag {
@@ -56,8 +62,10 @@ impl TryFrom<u8> for Tag {
 		match byte {
 			| 0x0 => Ok(Self::Deletion),
 			| 0x1 => Ok(Self::Value),
+			| 0x2 => Ok(Self::Merge),
 			| 0x4 => Ok(Self::CfDeletion),
 			| 0x5 => Ok(Self::CfValue),
+			| 0x6 => Ok(Self::CfMerge),
 			| unrecognized => Err(unrecognized),
 		}
 	}
@@ -268,6 +276,28 @@ where
 	let key = serialize_key(key).expect("failed to serialize batch key");
 
 	self.batch.put_cf(&map.cf(), key, val);
+}
+
+/// Serializes the key and queues one merge operand.
+///
+/// The operand bytes are copied unchanged into the batch and folded into the
+/// stored value by the map's merge operator on read and compaction. The map
+/// must belong to the transaction's database engine and must declare a merge
+/// operator in its descriptor; RocksDB rejects a merge on a family without one.
+///
+/// # Panics
+///
+/// Panics when the map belongs to another database engine or serialization of
+/// the key fails.
+#[implement(Txn)]
+pub fn merge<K, V>(&mut self, map: &Map, key: K, operand: V)
+where
+	K: Serialize + Debug,
+	V: AsRef<[u8]>,
+{
+	self.assert_map(map);
+	let key = serialize_key(key).expect("failed to serialize batch key");
+	self.batch.merge_cf(&map.cf(), key, operand);
 }
 
 /// Queues one raw-key insertion after serializing the value.
@@ -550,13 +580,15 @@ pub(crate) fn next_record<'a>(data: &mut &'a [u8]) -> Option<(u32, &'a [u8])> {
 	let tag = Tag::try_from(tag).ok()?;
 
 	let cf_id = match tag {
-		| Tag::Value | Tag::Deletion => 0,
-		| Tag::CfValue | Tag::CfDeletion => take_varint32(data)?,
+		| Tag::Value | Tag::Deletion | Tag::Merge => 0,
+		| Tag::CfValue | Tag::CfDeletion | Tag::CfMerge => take_varint32(data)?,
 	};
 
 	let key = take_varstring(data)?;
 
-	if matches!(tag, Tag::Value | Tag::CfValue) {
+	// Value records carry a value and merge records carry an operand; both
+	// are one varstring to skip.
+	if matches!(tag, Tag::Value | Tag::CfValue | Tag::Merge | Tag::CfMerge) {
 		take_varstring(data)?;
 	}
 

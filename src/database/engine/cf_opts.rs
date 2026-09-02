@@ -7,7 +7,8 @@ use tuwunel_core::{Config, Result, err, utils::math::Expected};
 
 use super::{
 	context::{ColCache, ColCaches, SHARED_POOL},
-	descriptor::{CacheDisp, Descriptor},
+	descriptor::{CacheDisp, Descriptor, MergeKind},
+	merge::{counter_full_merge, counter_partial_merge},
 };
 use crate::{Context, util::map_err};
 
@@ -86,7 +87,20 @@ fn descriptor_cf_options(
 	)
 	.map_err(map_err)?;
 
+	set_merge_operator(&mut opts, desc.merge);
+
 	Ok(opts)
+}
+
+/// A merge operator is part of the family's on-disk contract: once rows hold
+/// operands, opening the family without the operator makes them unreadable.
+pub(super) fn set_merge_operator(opts: &mut Options, merge: MergeKind) {
+	match merge {
+		| MergeKind::None => {},
+		| MergeKind::Counter => {
+			opts.set_merge_operator("counter", counter_full_merge, counter_partial_merge);
+		},
+	}
 }
 
 fn set_table_options(opts: &mut Options, desc: &Descriptor, cache: Option<&Cache>) -> Result {

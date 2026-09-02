@@ -79,12 +79,31 @@ fn merge(current: Option<i64>, operands: [Operand]) -> i64 {
 PR #5 已把七個維護點接好（事件寫入、backfill、redact、歷史清除、房間清除、設頭像、清頭像）。本階段**只換底層呼叫**：
 `add_event_refs` → `txn.merge(mxc_refcount, mxc, Add(+1))`，`del_*` → `Add(−1)`。`media_refs` 服務介面不動，呼叫端零改動。
 
-## 3. 觸發刪除：立刻，不等
+## 3. 觸發刪除：原文備份被丟掉的那一刻
 
-### 3.1 誰觸發
+### 3.0 redact 不歸零 —— 備份才是持有者（維護者 2026-09-02 同步；已實作）
 
-每個 −1 的地方，在交易 `execute()` 之後**立刻**把 mxc 丟給 worker（`tokio::sync::mpsc`），worker 收到就處理，
-不是每小時掃。redact 到 bytes 消失是**毫秒級**。
+`save_unredacted_events`（預設開）會把被 redact 的原文存進 `eventid_originalpdu`，保留
+`redaction_retention_seconds`（上游預設 60 天，維護者預計改成 7 天）。**那份備份就是引用的持有者**：
+管理員還看得到訊息的期間，圖也還在。
+
+規則一句話：**原文備份被丟掉的地方，就是 −1 的地方。**
+
+| 路徑 | 誰 −1 |
+|---|---|
+| redact，備份有存 | **不扣**。`save_original_pdu` 回報「已保留」（現在回傳 `bool`），redact 只剝空事件 |
+| retention worker 每小時 reap 過期備份 | **在這裡扣**：`drop_original` 從備份內容讀出 mxc → `Add(−1)`、刪備份、刪索引，同一交易 |
+| `purge_history` 直接 `purge_original` 丟備份 | **同樣走 `drop_original`**（否則已 redact 又被 purge 的事件永遠不歸零） |
+| redact，`save_unredacted_events = false` | 沒有備份可持有 → **redact 當下就扣** |
+| 房間清除、換頭像、清頭像 | 照舊當場扣（這些沒有備份這回事） |
+
+備份就在手上，所以**不需要另存 mxc 清單**；備份讀不出來就不扣（媒體多扣住一份可回收，少扣一份不可逆）。
+📌 這也讓上一版標的副作用「原文留著但圖已不在」自然消失。
+
+### 3.1 誰觸發（尚未實作）
+
+每個 −1 的地方，在交易 `execute()` 之後**立刻**把 mxc 丟給刪除 worker（`tokio::sync::mpsc`），worker 收到就處理，
+不另外排程。對一般的 redact 來說，這發生在 **7 天後 reap 的那一刻**；對房間清除、換頭像則是當下。
 
 程序若在 `execute()` 之後、送進 channel 之前 crash：計數已是 0 但沒人處理 → **媒體留著**（安全方向）。
 §5 的 migrate 會把這種漏網的補掉。
@@ -101,15 +120,26 @@ None 或 i64::MIN  → skip（沒被算過 / 哨兵）
 - **只碰本地媒體**（`media.is_local()`）；遠端快取照舊走既有 TTL。
 - `delete_bytes` 就是既有的 `media.delete()`：`(mxc, Interfix)` 前綴，**縮圖一起刪**。
 - 找不到任何檔案鍵（已被手動刪）→ 一樣寫墓碑、清計數。
+- **負數照刪，但要出聲**（維護者 2026-09-02 定案：規則就是「MIN < 計數 ≤ 0 就刪」，負數在範圍內）。
+  七個 ±1 的呼叫點配平時計數不會低於 0；讀到負數代表某處多扣了一次（或扣了從未加過的），是配平 bug 的訊號，
+  所以 worker 刪之前先 `error!` 印出 mxc 與計數，讓人找得到那個呼叫點。`is_mxc_referenced` 現況已是這條規則。
+  📎 PR #7 審查（salvia）曾建議負數改成 fail closed 不刪；維護者沒採納 —— 刪除規則要單純，配平錯誤靠日誌抓。
 
 ### 3.3 唯一的競態，明寫
 
-worker `read` 到 0 → `delete` 之間，若有人**新引用**同一 mxc（轉發一則舊訊息），bytes 會在事件寫入後消失 ——
-「內容不見」的方向。窗口是毫秒級，沒有寬限期把它拉開。刪 bytes 前**再讀一次**可再壓縮，但 +1 的交易與 worker 的
-delete 沒有共同的鎖，殘餘窗口存在。維護者選了「立刻生效」，這是那個選擇的已知代價；完全消除要資料庫層帶讀的交易，本階段不做。
+只在**備份被 reap 歸零 → 刪 bytes** 之間，若剛好有人 **forward** 同一 mxc（+1），bytes 會在事件寫入後消失 ——
+「內容不見」的方向。它不發生在 redact 當下（那時不扣），只發生在 7 天後那一次 reap 的毫秒窗口。
+刪 bytes 前**再讀一次**可再壓縮，但 +1 的交易與 worker 的 `delete` 沒有共同的鎖，殘餘窗口存在。
 
-📎 **副作用**：`save_unredacted_events` 會把被 redact 的原文留 60 天給管理員查證，媒體立刻刪掉後那份原文指向一張
-已不存在的圖。這是「隱私與空間優先於事後查證」，維護者已知。
+📎 **之後可以改進（維護者已同意後做）**：這台是單一程序，一把「每個 mxc 一鎖」的 in-process 鎖罩住
+「讀計數 → 刪 bytes」與 +1，就能關掉這個窗口，不用動資料庫層。本階段先不做。
+
+**第二個窗口，在 `drop_original` 裡（PR #7 審查 salvia 指出、rumia 重審確認；已關閉）**：它先讀備份取 mxc，再在
+**另一個**交易刪備份＋ −1。retention worker 與 `purge_history` 若同時處理同一事件，兩邊都在對方刪之前讀到備份，
+那個事件的引用會被扣兩次 —— 方向是「多扣」，也就是可能提早刪。順序執行時靠「讀不到就扣零個」擋住；只有並發才穿過去。
+**處置**：`retention::Service` 加一把 `tokio::sync::Mutex<()>`，`drop_original` 從讀備份到 `execute()` 全程持有。
+一把全域鎖而不是每事件一鎖，因為兩個呼叫端都低頻（reap 每小時一次、purge 是管理指令），而臨界區只有一次點讀＋一筆小交易；
+第二個進來的人讀到 not-found、扣零個。這條沒有單元測試（要 Services 才跑得動），靠讀碼確認。
 
 ## 4. 既存資料：哨兵懶惰植入，零掃描
 
@@ -193,6 +223,8 @@ delete 沒有共同的鎖，殘餘窗口存在。維護者選了「立刻生效�
 | 層 | 內容 |
 |---|---|
 | 單元 | 合併函數：`None+Init=0`、`Some(c)+Init=c`（縮圖後生不歸零）、**`None+Add=MIN`（懶惰哨兵）**、`0+1=1`、`1−1=0`、**哨兵吞 ±1**、`Set` 覆蓋、飽和；i64 與 operand 的編碼來回 |
+| DB 級（真 RocksDB，`engine/tests.rs`） | 透過 descriptor 的掛點註冊 operator，真的 `merge_cf` 後 `get_cf` 折出數字；flush＋compact 之後讀到的一樣、再 merge 仍疊在存下來的值上。這是單元＋型別＋build 都抓不到、兩次咬到我們的那條接縫（PR #5 的 u8 round-trip、PR #7 的 WriteBatch walker）|
+| 🔲 尚缺（PR #7 審查 rumia 🟢3） | 「備份存在時 purge 只釋放一次」的雙路徑互斥：`purge.rs` 從 raw 內容扣 vs `drop_original` 從備份扣，靠「redact 後內容為空」互斥。純函數那半（`a_redacted_event_names_nothing`）已釘住；整條路徑要 Services 才跑得動，目前只有 e2e 情境 1 涵蓋 |
 | 端到端（真伺服器，抄 PR #5 的腳本） | 送圖 → `refcount`=1 → 轉發到第二房 → 2 → redact 一則 → 1（**bytes 還在**）→ redact 另一則 → **bytes 立刻消失**、GET 回 410、`refcount` 印墓碑 → 再送一則引用同一 mxc 的訊息 → 仍 410（墓碑是終局）|
 | 端到端（哨兵） | 用 PR #5 之前的舊資料庫啟動 → 舊媒體 `refcount` 印「哨兵」→ redact 舊事件 → **不刪** |
 | 端到端（migrate） | 同一舊資料庫 `--dry-run` 印孤兒清單 → 真跑 → 孤兒消失、被引用的留著、哨兵全變成真實數字 |

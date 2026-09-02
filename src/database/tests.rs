@@ -1122,8 +1122,38 @@ fn txn_record_cf() {
 }
 
 #[test]
+fn txn_record_merge() {
+	// A merge record is laid out like a put: the operand takes the value's
+	// place. Txn::execute walks the batch to notify watchers, so a merge the
+	// walker could not parse used to panic every transaction that queued one.
+	let mut batch = WriteBatch::default();
+	batch.merge(b"count", b"+1");
+	batch.put(b"after", b"v");
+
+	let data = batch.data();
+	let mut records = data
+		.get(12..)
+		.expect("batch shorter than its header");
+
+	assert_eq!(next_record(&mut records), Some((0, b"count".as_slice())));
+	assert_eq!(next_record(&mut records), Some((0, b"after".as_slice())));
+	assert!(records.is_empty(), "{records:?}");
+}
+
+#[test]
+fn txn_record_cf_merge() {
+	// kTypeColumnFamilyMerge cf=7 "k" operand "op", then a cf=7 deletion "d"
+	let mut records: &[u8] = &[0x6, 0x7, 0x1, b'k', 0x2, b'o', b'p', 0x4, 0x7, 0x1, b'd'];
+
+	assert_eq!(next_record(&mut records), Some((7, b"k".as_slice())));
+	assert_eq!(next_record(&mut records), Some((7, b"d".as_slice())));
+	assert!(records.is_empty(), "{records:?}");
+}
+
+#[test]
 fn txn_record_unrecognized() {
-	let mut records: &[u8] = &[0x2, 0x1, b'k', 0x1, b'v'];
+	// kTypeLogData: not a key-bearing record, and not something a Txn queues.
+	let mut records: &[u8] = &[0x3, 0x1, b'k', 0x1, b'v'];
 
 	assert_eq!(next_record(&mut records), None);
 }

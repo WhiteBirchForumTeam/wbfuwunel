@@ -94,7 +94,12 @@ pub async fn purge_history(
 				.purge_event_relations(shortroomid, count, room_id, &event_id)
 				.await;
 
-			self.services.retention.purge_original(&event_id);
+			// Dropping the retained original releases the media references it
+			// held; the stripped event above had none left to release.
+			self.services
+				.retention
+				.purge_original(&event_id)
+				.await;
 
 			trace!(?event_id, ?room_id, "Purged");
 

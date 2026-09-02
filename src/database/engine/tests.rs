@@ -208,3 +208,87 @@ fn preview_columns_cover_configured_lifetime() {
 		assert!(lazy_media.ttl >= preview.ttl, "mediaid_lazy ttl below url_preview ttl");
 	}
 }
+
+/// The seam the unit tests in `engine::merge` cannot reach: the operator
+/// registered through the descriptor, folding real operands inside a real
+/// RocksDB, on point reads and again after flush and compaction.
+#[test]
+fn counter_family_folds_operands_on_read_and_after_compaction() {
+	use rocksdb::{ColumnFamilyDescriptor, WriteBatch};
+
+	use super::{
+		cf_opts::set_merge_operator,
+		descriptor::MergeKind,
+		merge::{COUNTER_SENTINEL, CounterOperand, decode_counter},
+	};
+
+	let root = temp_dir().join(format!("tuwunel-counter-test-{}", process::id()));
+	fs::create_dir_all(&root).expect("create db dir");
+
+	let mut opts = Options::default();
+	opts.create_if_missing(true);
+	opts.create_missing_column_families(true);
+
+	let mut family_opts = Options::default();
+	set_merge_operator(&mut family_opts, MergeKind::Counter);
+	let families = [ColumnFamilyDescriptor::new("mxc_refcount", family_opts)];
+	let db = DB::open_cf_descriptors(&opts, &root, families).expect("open db with counter family");
+	let family = db
+		.cf_handle("mxc_refcount")
+		.expect("counter family exists");
+
+	let read = |key: &[u8]| -> Option<i64> {
+		db.get_cf(&family, key)
+			.expect("read counter")
+			.and_then(|bytes| decode_counter(&bytes))
+	};
+
+	// Created media: opened at zero in the same batch as its first reference,
+	// then referenced once more and released once.
+	let mut batch = WriteBatch::default();
+	batch.merge_cf(&family, b"created", CounterOperand::Init.to_bytes());
+	batch.merge_cf(&family, b"created", CounterOperand::Add(1).to_bytes());
+	db.write(&batch).expect("write init and first reference");
+	db.merge_cf(&family, b"created", CounterOperand::Add(1).to_bytes())
+		.expect("second reference");
+	db.merge_cf(&family, b"created", CounterOperand::Add(-1).to_bytes())
+		.expect("release one");
+
+	assert_eq!(read(b"created"), Some(1));
+
+	// Media predating the counter: the first touch marks it, and no later
+	// touch can move it.
+	db.merge_cf(&family, b"predating", CounterOperand::Add(-1).to_bytes())
+		.expect("first touch");
+	db.merge_cf(&family, b"predating", CounterOperand::Add(1).to_bytes())
+		.expect("later touch");
+
+	assert_eq!(read(b"predating"), Some(COUNTER_SENTINEL));
+
+	// Only a rebuild replaces the marker.
+	db.merge_cf(&family, b"predating", CounterOperand::Set(3).to_bytes())
+		.expect("rebuild");
+
+	assert_eq!(read(b"predating"), Some(3));
+
+	// Never-touched media reads as no value, not as zero.
+	assert_eq!(read(b"untouched"), None);
+
+	// Compaction folds the queued operands into stored values through the
+	// same operator; what is read must not change, and later operands must
+	// fold onto the stored result.
+	db.flush_cf(&family).expect("flush");
+	db.compact_range_cf(&family, None::<&[u8]>, None::<&[u8]>);
+
+	assert_eq!(read(b"created"), Some(1));
+	assert_eq!(read(b"predating"), Some(3));
+
+	db.merge_cf(&family, b"created", CounterOperand::Add(-1).to_bytes())
+		.expect("release after compaction");
+
+	assert_eq!(read(b"created"), Some(0));
+
+	drop(family);
+	drop(db);
+	fs::remove_dir_all(&root).ok();
+}

@@ -8,8 +8,8 @@ mod delete_range;
 mod get_file_info;
 mod get_remote_file;
 mod get_remote_thumbnail;
-mod list_references;
 mod preview;
+mod refcount;
 
 use clap::{ArgGroup, Subcommand};
 use ruma::{OwnedEventId, OwnedMxcUri, OwnedServerName};
@@ -86,13 +86,13 @@ pub(super) enum MediaCommand {
 		mxc: OwnedMxcUri,
 	},
 
-	/// - Lists what references an MXC URL.
+	/// - Reports how many references an MXC URL holds.
 	///
-	/// Reports the media reference index only. An empty result is not a
-	/// licence to delete: anything stored before the index existed was never
-	/// recorded.
-	ListReferences {
-		/// The MXC URL to look up references for.
+	/// Media created before counting existed reports no count, or the
+	/// sentinel once something has touched it; neither is zero, and neither
+	/// is collected until references are rebuilt.
+	Refcount {
+		/// The MXC URL to look up.
 		mxc: OwnedMxcUri,
 	},
 

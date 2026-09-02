@@ -13,7 +13,9 @@ use tuwunel_core::{
 		string_from_bytes,
 	},
 };
-use tuwunel_database::{Cbor, Database, Deserialized, Ignore, Interfix, Map, Txn, serialize_key};
+use tuwunel_database::{
+	Cbor, CounterOperand, Database, Deserialized, Ignore, Interfix, Map, Txn, serialize_key,
+};
 
 use super::{Media, preview::CachedPreview, thumbnail::Dim};
 
@@ -24,6 +26,7 @@ pub(crate) struct Data {
 	mediaid_lazycontent: Arc<Map>,
 	mediaid_pending: Arc<Map>,
 	mediaid_user: Arc<Map>,
+	mxc_refcount: Arc<Map>,
 	url_preview: Arc<Map>,
 }
 
@@ -77,6 +80,7 @@ impl Data {
 			mediaid_lazycontent: db["mediaid_lazycontent"].clone(),
 			mediaid_pending: db["mediaid_pending"].clone(),
 			mediaid_user: db["mediaid_user"].clone(),
+			mxc_refcount: db["mxc_refcount"].clone(),
 			url_preview: db["url_preview"].clone(),
 		}
 	}
@@ -95,6 +99,13 @@ impl Data {
 		let mut txn = self.db.txn();
 
 		txn.insert_raw(&self.mediaid_file, &key, []);
+
+		// Opens the reference count at zero in the same batch that creates the
+		// media, so media without a count row is exactly media that predates
+		// the counter. Init leaves an existing row alone, so a thumbnail made
+		// later for already counted media cannot reset it.
+		txn.merge(&self.mxc_refcount, mxc.to_string(), CounterOperand::Init.to_bytes());
+
 		if let Some(user) = user {
 			let key = (mxc, user);
 
