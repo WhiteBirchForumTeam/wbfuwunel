@@ -1,33 +1,25 @@
 use ruma::OwnedMxcUri;
 use tuwunel_core::Result;
+use tuwunel_database::COUNTER_SENTINEL;
 
 use crate::admin_command;
 
 #[admin_command]
-pub(super) async fn list_references(&self, mxc: OwnedMxcUri) -> Result {
+pub(super) async fn refcount(&self, mxc: OwnedMxcUri) -> Result {
 	let mxc = mxc.as_str();
 
-	let holders = self
-		.services
-		.media_refs
-		.list_mxc_holders(mxc)
-		.await;
+	let report = match self.services.media_refs.refcount(mxc).await? {
+		| None => format!(
+			"{mxc} has no reference count.\n\nIt was created before counting existed and nothing \
+			 has touched it since. It will not be collected until references are rebuilt."
+		),
+		| Some(COUNTER_SENTINEL) => format!(
+			"{mxc} predates reference counting (sentinel).\n\nSomething referenced or released \
+			 it after counting began, but its true count is unknown. It will not be collected \
+			 until references are rebuilt."
+		),
+		| Some(count) => format!("{mxc} has {count} reference(s)."),
+	};
 
-	if holders.is_empty() {
-		return self
-			.write_str(&format!(
-				"Nothing references {mxc}.\n\nThat is not on its own a reason to delete it: \
-				 anything stored before the index existed was never recorded.",
-			))
-			.await;
-	}
-
-	let listed = holders
-		.iter()
-		.map(|holder| format!("- {holder}"))
-		.collect::<Vec<_>>()
-		.join("\n");
-
-	self.write_str(&format!("{} reference(s) to {mxc}:\n\n{listed}", holders.len()))
-		.await
+	self.write_str(&report).await
 }
