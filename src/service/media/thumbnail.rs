@@ -80,11 +80,13 @@ impl super::Service {
 		timeout_ms: Duration,
 		user: &UserId,
 	) -> Result<Media> {
-		if let Ok(media) = self
+		match self
 			.get_thumbnail(mxc, dim, Some(timeout_ms))
 			.await
 		{
-			return Ok(media);
+			| Ok(media) => return Ok(media),
+			| Err(e) if super::is_gone(&e) => return Err(e),
+			| Err(_) => {},
 		}
 
 		if self
@@ -122,8 +124,10 @@ impl super::Service {
 		dim: &Dim,
 		timeout_duration: Option<Duration>,
 	) -> Result<Media> {
-		if let Ok(meta) = self.get_stored_thumbnail(mxc, dim).await {
-			return Ok(meta);
+		match self.get_stored_thumbnail(mxc, dim).await {
+			| Ok(meta) => return Ok(meta),
+			| Err(e) if super::is_gone(&e) => return Err(e),
+			| Err(_) => {},
 		}
 
 		let Some(timeout_duration) = timeout_duration else {

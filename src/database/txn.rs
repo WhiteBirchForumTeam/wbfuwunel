@@ -25,6 +25,10 @@ use crate::{
 pub struct Txn {
 	batch: WriteBatch,
 	engine: Arc<Engine>,
+	/// Runs once the batch has been written, in registration order. A caller
+	/// whose follow-up must see the committed write registers it here instead
+	/// of racing the commit from outside.
+	after_execute: Vec<Box<dyn FnOnce() + Send>>,
 }
 
 /// Record parser yielding each queued key with its resolved map.
@@ -80,6 +84,7 @@ pub fn new(engine: &Arc<Engine>) -> Self {
 	Self {
 		batch: WriteBatch::default(),
 		engine: engine.clone(),
+		after_execute: Vec::new(),
 	}
 }
 
@@ -93,7 +98,17 @@ pub fn with_capacity_bytes(engine: &Arc<Engine>, capacity_bytes: usize) -> Self 
 	Self {
 		batch: WriteBatch::with_capacity_bytes(capacity_bytes),
 		engine: engine.clone(),
+		after_execute: Vec::new(),
 	}
+}
+
+/// Registers `follow_up` to run after this transaction commits.
+///
+/// It does not run when the transaction is dropped unexecuted, nor when the
+/// batch is empty at execution: there is nothing committed for it to follow.
+#[implement(Txn)]
+pub fn on_execute(&mut self, follow_up: impl FnOnce() + Send + 'static) {
+	self.after_execute.push(Box::new(follow_up));
 }
 
 /// Queues raw key and value pairs for one map from a single pass.
@@ -398,6 +413,10 @@ pub fn execute(self) {
 	}
 
 	self.notify();
+
+	for follow_up in self.after_execute {
+		follow_up();
+	}
 }
 
 /// Notifies watchers after a successful commit for queued keys that resolve to

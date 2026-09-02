@@ -2,11 +2,10 @@ use std::sync::Arc;
 
 use futures::{Stream, StreamExt, pin_mut};
 use ruma::{Mxc, OwnedMxcUri, OwnedUserId, UserId, http_headers::ContentDisposition};
-use serde::Deserialize;
-#[cfg(feature = "url_preview")]
-use serde::Serialize;
+use http::StatusCode;
+use serde::{Deserialize, Serialize};
 use tuwunel_core::{
-	Err, Result, at, debug, debug_info, err,
+	Err, Error, Result, at, debug, debug_info, err,
 	utils::{
 		ReadyExt, str_from_bytes,
 		stream::{TryExpect, TryIgnore},
@@ -27,7 +26,39 @@ pub(crate) struct Data {
 	mediaid_pending: Arc<Map>,
 	mediaid_user: Arc<Map>,
 	mxc_refcount: Arc<Map>,
+	mxc_tombstone: Arc<Map>,
 	url_preview: Arc<Map>,
+}
+
+/// Why media was removed. Stored in the tombstone so an operator reading it
+/// back can tell a collection from a rebuild from a manual delete.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum TombstoneReason {
+	/// The collector saw its reference count reach zero.
+	GarbageCollected,
+	/// `migrate-references` found it referenced by nothing.
+	Migrated,
+	/// An administrator deleted it by MXC.
+	AdminDeleted,
+}
+
+/// The record left behind when media is removed, so a later fetch answers
+/// "gone" rather than "never existed".
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Tombstone {
+	pub deleted_at_secs: u64,
+	pub reason: TombstoneReason,
+}
+
+/// The error a fetch of removed media gets: 410 with the standard not-found
+/// code, since clients only know the standard codes. Built directly because
+/// the `Err!` macro's status hint is always 400.
+pub(super) fn gone(mxc: &Mxc<'_>) -> Error {
+	Error::Request(
+		ruma::api::error::ErrorKind::NotFound,
+		format!("Media {mxc} has been deleted.").into(),
+		StatusCode::GONE,
+	)
 }
 
 #[derive(Debug)]
@@ -81,8 +112,32 @@ impl Data {
 			mediaid_pending: db["mediaid_pending"].clone(),
 			mediaid_user: db["mediaid_user"].clone(),
 			mxc_refcount: db["mxc_refcount"].clone(),
+			mxc_tombstone: db["mxc_tombstone"].clone(),
 			url_preview: db["url_preview"].clone(),
 		}
+	}
+
+	/// Reads the tombstone left when `mxc` was removed, if any.
+	pub(super) async fn find_tombstone(&self, mxc: &Mxc<'_>) -> Option<Tombstone> {
+		self.mxc_tombstone
+			.get(&mxc.to_string())
+			.await
+			.deserialized::<Cbor<Tombstone>>()
+			.map(|Cbor(tombstone)| tombstone)
+			.ok()
+	}
+
+	/// Queues, in `txn`, the tombstone for `mxc` and the removal of its
+	/// reference count row. Both land with the deletion they describe.
+	pub(super) fn write_tombstone(
+		&self,
+		txn: &mut Txn,
+		mxc: &Mxc<'_>,
+		tombstone: &Tombstone,
+	) {
+		let key = mxc.to_string();
+		txn.put(&self.mxc_tombstone, &key, Cbor(tombstone));
+		txn.del(&self.mxc_refcount, &key);
 	}
 
 	pub(super) fn create_file_metadata(
@@ -306,6 +361,12 @@ impl Data {
 		mxc: &Mxc<'_>,
 		dim: &Dim,
 	) -> Result<Metadata> {
+		// Removed media answers "gone" here, at the one lookup every fetch of
+		// content or a thumbnail goes through, rather than "not found".
+		if self.find_tombstone(mxc).await.is_some() {
+			return Err(gone(mxc));
+		}
+
 		let dim: &[u32] = &[dim.width, dim.height];
 		let prefix = (mxc, dim, Interfix);
 

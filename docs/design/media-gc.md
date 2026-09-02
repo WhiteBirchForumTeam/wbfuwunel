@@ -100,13 +100,18 @@ PR #5 已把七個維護點接好（事件寫入、backfill、redact、歷史清
 備份就在手上，所以**不需要另存 mxc 清單**；備份讀不出來就不扣（媒體多扣住一份可回收，少扣一份不可逆）。
 📌 這也讓上一版標的副作用「原文留著但圖已不在」自然消失。
 
-### 3.1 誰觸發（尚未實作）
+### 3.1 誰觸發（已實作）
 
-每個 −1 的地方，在交易 `execute()` 之後**立刻**把 mxc 丟給刪除 worker（`tokio::sync::mpsc`），worker 收到就處理，
-不另外排程。對一般的 redact 來說，這發生在 **7 天後 reap 的那一刻**；對房間清除、換頭像則是當下。
+每個 −1 的地方（`del_event_refs`、`set_avatar_ref` 的舊頭像）在交易 `execute()` **之後**把 mxc 丟給收集器
+（`media_refs` 服務的 worker，`tokio::sync::mpsc::unbounded_channel`），收到就處理，不另外排程。
+對一般的 redact 來說，這發生在 **reap 的那一刻**；對房間清除、換頭像則是當下。
 
-程序若在 `execute()` 之後、送進 channel 之前 crash：計數已是 0 但沒人處理 → **媒體留著**（安全方向）。
-§5 的 migrate 會把這種漏網的補掉。
+📌 **「之後」怎麼保證**：`Txn::on_execute(closure)` —— 交易自己在寫入落地、通知 watcher 之後跑登記的閉包；空 batch 與被
+丟掉的交易不跑。七個呼叫點都不用改，送 channel 這件事和 −1 這筆寫入綁在同一個地方，收集器不可能讀到還沒扣的計數。
+它有單元測試（`txn_follow_up_runs_after_the_committed_write`）。
+
+程序若在 `execute()` 之後、收集器處理之前 crash，或收集器還沒起來（啟動、關機中）：計數已是 0 但沒人處理 →
+**媒體留著**（安全方向）。§5 的 migrate 會把這種漏網的補掉。
 
 ### 3.2 worker 對每個 mxc 做什麼
 
@@ -166,13 +171,17 @@ None 或 i64::MIN  → skip（沒被算過 / 哨兵）
 1. **暫停 worker**（記憶體旗標）。
 2. **全部歸零**：`mxc_refcount.clear()`。
 3. **掃事件**：走 `pduid_pdu` 全表（照 `rebuild_typed_relations` 的 `raw_stream`），每筆用 `list_content_mxc_uris(content)`
-   對每個 mxc `merge(Add(+1))`。已 redact 的內容為空，自然不加。
-4. **掃使用者**：`users.list_local_users()` × `profile.avatar_url()` → `merge(Add(+1))`。
-5. **掃媒體**：`get_all_mxcs()` 逐個讀計數 —— **不存在或 0 ＝ 孤兒** → 刪 bytes、寫墓碑。
-   ⚠️ 跳過「最近 N 分鐘內建立」的（上傳空窗；建立時間走既有的 `mtime_millis`）。
-6. 恢復 worker；印摘要（掃了幾個事件／使用者／媒體，刪了幾個，跳過幾個）。
+   在**記憶體裡**累加。已 redact 的內容為空，自然不加 —— 但它的**原文備份才是持有者**（§3.0），所以再走一遍
+   `retention.retained_pdus_raw()` 把備份內容也算進去。漏了這一步，每一則已 redact 但備份還在的訊息的媒體都會被當孤兒刪掉。
+4. **掃使用者**：`users.list_local_users()` × `profile.avatar_url()` → 累加。
+5. **寫回**（非 dry-run）：`mxc_refcount.clear()` 後，對 `get_all_mxcs()` 的每一個媒體 `merge(Set(計數))`，沒被引用的寫 0
+   （不是留空 —— 留空的列下次被 ±1 就變哨兵）；被引用但沒有檔案列的（遠端尚未快取）也寫。每 1000 列一筆交易。
+6. **掃媒體**：`get_all_mxcs()` 裡**本地**且計數 ≤ 0 的 ＝ 孤兒 → `media.collect(Migrated)`（刪 bytes、寫墓碑、刪計數列）。
+   ⚠️ 跳過「最近 N 秒內建立」的（上傳空窗；建立時間走既有的 `mtime_millis`，讀不到 mtime 也視為太新，不刪）。
+7. 恢復 worker；印摘要（掃了幾個事件／備份／頭像／媒體，刪了哪些，跳過哪些）。
 
-`--dry-run` 只做 1–4 ＋ 印**會刪哪些**，不刪。**第一次一定先 dry-run。**
+`--dry-run` 只做 1–4 ＋ 6 的判斷，印**會刪哪些**，不寫計數、不刪。**第一次一定先 dry-run。**
+實作在 `src/service/media_refs/migrate.rs`（`rebuild`），admin 包裝在 `src/admin/media/migrate_references.rs`。
 
 📎 **為什麼掃事件而不是「逐個 room」**：`pduid_pdu` 的鍵以 room 為前綴，全表順掃**就是**逐個 room，不必另外枚舉房間。
 使用者那邊才需要 `list_local_users()`。跑完後哨兵全部消失（被 `clear()` 清掉、重算成真實數字），之後就是純自動模式。
@@ -188,6 +197,12 @@ None 或 i64::MIN  → skip（沒被算過 / 哨兵）
 - **TTL**：CF 設 `ttl = 365 天`（descriptor 既有欄位）。
 - `!admin media list-references` 改名 **`refcount`**：印計數，含「哨兵」與「已刪除 + 墓碑」兩種特殊狀態。
   列式索引退場後「誰引用」查不到了 —— 維護者要數字，這是明知的取捨。
+- **實作**：值是 `Cbor(Tombstone { deleted_at_secs, reason })`；寫墓碑與刪 `mxc_refcount` 列同一交易（`media.collect()`），
+  **交易後強制 `engine.flush()`**。⚠️ 理由（e2e 抓到的）：引擎是 `manual_wal_flush`，每筆寫入後才手動 flush WAL，而別處持有
+  cork 時那次 flush 會被略過；程序若在那之後被強制結束，墓碑就留在程序內的緩衝裡不見了 —— bytes 已刪、墓碑沒了，GET 變 404、
+  計數列停在 0 沒人再碰。所有寫入都有這個窗口（正常關機會 flush），但「檔案已經不在了」這件事不該是被丟掉的那一半，所以墓碑多付一次 flush。
+  擋點在 `Data::search_file_metadata` 開頭；`get`、`get_stored`、`get_thumbnail` 及縮圖的遠端回退都把 410 **原樣傳出**，
+  不再落到 lazy preview 或「not found」。`!admin media delete --mxc` 也寫墓碑（`AdminDeleted`）；其他批次刪除指令不寫（它們大多是遠端快取）。
 
 ## 7. 設定
 

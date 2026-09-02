@@ -3468,6 +3468,34 @@ pub struct Config {
 	#[serde(default = "default_redaction_retention_seconds")]
 	pub redaction_retention_seconds: u64,
 
+	/// Delete local media once nothing references it any more.
+	///
+	/// A reference is an event naming the media in its content, or a user's
+	/// avatar. A redacted event keeps its reference while its unredacted
+	/// original is retained (see `save_unredacted_events`), so media goes when
+	/// the last retained original is dropped, not when the message is redacted.
+	/// Media created before reference counting existed is never collected
+	/// until `!admin media migrate-references` has rebuilt the counts.
+	///
+	/// When false, the collector only logs what it would delete.
+	///
+	/// reloadable: yes
+	/// default: true
+	#[serde(default = "true_fn")]
+	pub media_gc_enabled: bool,
+
+	/// How recent an upload may be before `!admin media migrate-references`
+	/// refuses to treat it as an orphan, in seconds.
+	///
+	/// An upload is not a reference: the message naming it may still be on
+	/// its way. Media created within this window is skipped by the rebuild and
+	/// looked at again next time.
+	///
+	/// reloadable: yes
+	/// default: 600
+	#[serde(default = "default_media_gc_migrate_skip_recent_seconds")]
+	pub media_gc_migrate_skip_recent_seconds: u64,
+
 	/// Allows users with `redact` power level to request unredacted events with
 	/// MSC2815.
 	///
@@ -5670,6 +5698,8 @@ fn default_max_join_attempts_per_join_request() -> usize { 3 }
 fn default_sso_grant_session_duration() -> Option<u64> { Some(300) }
 
 fn default_redaction_retention_seconds() -> u64 { 5_184_000 }
+
+fn default_media_gc_migrate_skip_recent_seconds() -> u64 { 600 }
 
 fn default_media_storage_providers() -> BTreeSet<String> { ["media".to_owned()].into() }
 

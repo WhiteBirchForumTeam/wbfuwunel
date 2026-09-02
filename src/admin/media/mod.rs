@@ -8,6 +8,7 @@ mod delete_range;
 mod get_file_info;
 mod get_remote_file;
 mod get_remote_thumbnail;
+mod migrate_references;
 mod preview;
 mod refcount;
 
@@ -94,6 +95,19 @@ pub(super) enum MediaCommand {
 	Refcount {
 		/// The MXC URL to look up.
 		mxc: OwnedMxcUri,
+	},
+
+	/// - Recounts every media reference from stored events, retained
+	///   originals and avatars, then removes local media nothing references.
+	///
+	/// Offline maintenance: run it in a maintenance window, and run it with
+	/// --dry-run first. It replaces every count, so media from before
+	/// counting existed becomes collectable afterwards.
+	MigrateReferences {
+		/// Recount and list what would be removed, without writing counts or
+		/// removing anything.
+		#[arg(long)]
+		dry_run: bool,
 	},
 
 	GetRemoteFile {

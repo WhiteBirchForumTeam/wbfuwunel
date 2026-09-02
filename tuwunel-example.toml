@@ -3028,6 +3028,32 @@
 #
 #redaction_retention_seconds = 5184000
 
+# Delete local media once nothing references it any more.
+#
+# A reference is an event naming the media in its content, or a user's
+# avatar. A redacted event keeps its reference while its unredacted
+# original is retained (see `save_unredacted_events`), so media goes when
+# the last retained original is dropped, not when the message is redacted.
+# Media created before reference counting existed is never collected
+# until `!admin media migrate-references` has rebuilt the counts.
+#
+# When false, the collector only logs what it would delete.
+#
+# reloadable: yes
+#
+#media_gc_enabled = true
+
+# How recent an upload may be before `!admin media migrate-references`
+# refuses to treat it as an orphan, in seconds.
+#
+# An upload is not a reference: the message naming it may still be on
+# its way. Media created within this window is skipped by the rebuild and
+# looked at again next time.
+#
+# reloadable: yes
+#
+#media_gc_migrate_skip_recent_seconds = 600
+
 # Allows users with `redact` power level to request unredacted events with
 # MSC2815.
 #

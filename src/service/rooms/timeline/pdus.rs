@@ -63,7 +63,7 @@ pub async fn delete_pdus(&self, room_id: &RoomId) -> Result {
 
 			self.services
 				.media_refs
-				.del_event_refs(&mut txn, event_id, &media_refs);
+				.del_event_refs(&mut txn, &media_refs);
 
 			let room_id_ts_key = (room_id, ts, bias_count(RawPduId::from(key).count()));
 			txn.del(&self.db.roomid_tscount_pducount, room_id_ts_key);

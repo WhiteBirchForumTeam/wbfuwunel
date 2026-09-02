@@ -1291,6 +1291,83 @@ async fn txn_insert_raw_preserves_bytes() -> Result {
 	Ok(())
 }
 
+/// A follow-up registered on a transaction runs after the write it follows
+/// has landed, and only then: not for an empty batch, not for a dropped one.
+#[tokio::test]
+async fn txn_follow_up_runs_after_the_committed_write() -> Result {
+	use std::sync::atomic::{AtomicUsize, Ordering};
+
+	let root = var("TMPDIR").unwrap_or_else(|_| "/nvme/target/tmp".into());
+
+	let path = format!("{root}/tuwunel-database-txn-follow-up-{}", process_id());
+	let raw_config = Figment::new()
+		.merge(("server_name", "localhost"))
+		.merge(("database_path", &path))
+		.merge(("test", ["fresh", "cleanup"]));
+
+	let config = Config::new(&raw_config)?;
+	let runtime = Handle::current();
+	let logging = Logging {
+		subscriber: Arc::new(NoSubscriber::new()),
+		reload: LogLevelReloadHandles::default(),
+		capture: Arc::new(State::new()),
+	};
+
+	let metrics = Metrics::new(Some(&runtime));
+	let server =
+		Arc::new(Server::new(config, Sources::default(), Some(&runtime), logging, metrics));
+	let database = Database::open(&server).await?;
+	let map = database.get("alias_roomid")?;
+	let key: &[u8] = b"follow-up";
+	let value: &[u8] = b"landed";
+
+	// Runs once the write is visible: the follow-up itself reads the row.
+	let seen = Arc::new(AtomicUsize::new(0));
+	let mut txn = database.txn();
+	txn.put_raw(map, key, value);
+	txn.on_execute({
+		let seen = seen.clone();
+		let map = map.clone();
+		move || {
+			let landed = map.get_blocking(&key).is_ok_and(|read| read.as_ref() == value);
+			seen.store(usize::from(landed) + 1, Ordering::SeqCst);
+		}
+	});
+
+	assert_eq!(seen.load(Ordering::SeqCst), 0, "must not run before execute");
+	txn.execute();
+	assert_eq!(seen.load(Ordering::SeqCst), 2, "ran once, and saw the committed value");
+
+	// Nothing committed, nothing followed up.
+	let empty_ran = Arc::new(AtomicUsize::new(0));
+	let mut txn = database.txn();
+	txn.on_execute({
+		let empty_ran = empty_ran.clone();
+		move || {
+			empty_ran.fetch_add(1, Ordering::SeqCst);
+		}
+	});
+	txn.execute();
+	assert_eq!(empty_ran.load(Ordering::SeqCst), 0, "empty batch commits nothing");
+
+	let dropped_ran = Arc::new(AtomicUsize::new(0));
+	let mut txn = database.txn();
+	txn.put_raw(map, &b"dropped"[..], &b"never"[..]);
+	txn.on_execute({
+		let dropped_ran = dropped_ran.clone();
+		move || {
+			dropped_ran.fetch_add(1, Ordering::SeqCst);
+		}
+	});
+	drop(txn);
+	assert_eq!(dropped_ran.load(Ordering::SeqCst), 0, "dropped transaction commits nothing");
+
+	drop(database);
+	drop(server);
+
+	Ok(())
+}
+
 #[tokio::test]
 async fn a_restore_is_not_repeated_on_reopen() -> Result {
 	let root = var("TMPDIR").unwrap_or_else(|_| "/nvme/target/tmp".into());
