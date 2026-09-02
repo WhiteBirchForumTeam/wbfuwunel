@@ -23,7 +23,7 @@
 | fork 定位、分支模型、改動流程、Windows 建置 | ✅ | [fork-overview.md](fork-overview.md)、[windows-build.md](windows-build.md) |
 | 媒體引用計數（精確計數、merge operator、哨兵） | ✅ PR #7 | [media-gc.md](media-gc.md) §2、§4 |
 | 媒體的真正刪除：收集器、墓碑 410、`migrate-references` | ✅ PR #10 | [media-gc.md](media-gc.md) §3、§5、§6 |
-| 每個 mxc 一鎖，關掉收集器與同時 +1 的窗口 | 🔧 PR #12 等審 | [media-gc.md](media-gc.md) §3.3 |
+| 每個 mxc 一鎖，關掉收集器與同時 +1 的窗口 | ✅ PR #12 | [media-gc.md](media-gc.md) §3.3 |
 
 這三支合起來就是核心設計 §5.4「刪除語意」的 server 端，**寬限期被維護者拿掉了**（立刻生效），
 TTL 兜底改成「不確定就持有」加 `migrate-references` 重算。
