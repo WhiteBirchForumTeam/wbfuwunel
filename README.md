@@ -37,7 +37,8 @@
 > | 為什麼要 fork、要改成什麼樣子 | [docs/design/why-not-matrix-and-core-design.md](docs/design/why-not-matrix-and-core-design.md) |
 > | 程式碼結構導覽（要改東西時去哪裡找） | [docs/design/repo-structure.md](docs/design/repo-structure.md) |
 > | Windows 建置與實跑驗證 | [docs/design/windows-build.md](docs/design/windows-build.md) |
-> | 媒體引用計數與真正的刪除（提案） | [docs/design/media-refcount.md](docs/design/media-refcount.md) |
+> | 媒體引用計數與真正的刪除（上半：索引，已合併） | [docs/design/media-refcount.md](docs/design/media-refcount.md) |
+> | 媒體的真正刪除：候選、寬限、墓碑、重建（提案） | [docs/design/media-gc.md](docs/design/media-gc.md) |
 > | 流式訊息（文字 token 串流，草案） | [docs/design/streaming-messages.md](docs/design/streaming-messages.md) |
 >
 > **改動的流程**：先寫文件／方案 → 維護者同意 → 開分支 → 開 PR（目標分支 `main`）。
