@@ -1,6 +1,13 @@
 # 媒體引用計數與真正的刪除
 
-> **狀態：提案，尚未實作。** 這份文件要先經維護者同意，才動 `src/`。
+> **狀態：索引部分已實作，刪除部分仍是提案。**
+>
+> ✅ 已實作：`mxc_holder` 索引（服務 `src/service/media_refs/`），以及在事件寫入、backfill、
+> redact、歷史清除、房間清除、頭像設定、帳號停用**七處**的維護。
+> ⏳ 未實作：**任何會刪掉 bytes 的東西**、墓碑、重建工具。
+>
+> ⚠️ §3.1 的設計在實作時被修正過兩次（三個 column family 變一個；索引一般化成帶種類碼的
+> holder，把頭像也納入），理由都寫在該節與 §3.7。
 >
 > 撰寫日期：2026-09-01。上位文件：
 > [why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md) §5.4。
@@ -50,13 +57,53 @@
 
 ## 3. 設計
 
-### 3.1 三個新的 column family
+### 3.1 一個新的 column family
 
-| 名稱 | 鍵 → 值 | 為什麼要它 |
+> ⚠️ **2026-09-01 修正。** 這一節原本規劃**三個** column family：`eventid_mxc`（事件→媒體）、
+> `mxc_refcount`（計數）、`mxc_tombstone`（墓碑）。實作時讀了程式碼，前兩個都不需要，
+> 而且 `mxc_refcount` 根本行不通。理由在下面，因為它同時是這個設計為什麼安全的理由。
+
+| 名稱 | 鍵 → 值 | 狀態 |
 |---|---|---|
-| `eventid_mxc` | event id → 該事件引用的 mxc 清單 | **讓 GC 能離線重建計數。** 見 §3.4 |
-| `mxc_refcount` | mxc → 計數 | 「還有沒有人在用」 |
-| `mxc_tombstone` | mxc → (刪除時間, 原因) | 讓 404 可區分。見 §3.6 |
+| `mxc_holder` | `mxc \|\| holder 種類 \|\| holder id` → 空值 | ✅ 已實作 |
+| `mxc_tombstone` | mxc → (刪除時間, 原因) | ⏳ 提案中，見 §3.6。刪除功能接上時才需要 |
+
+**「還有沒有人在用」＝ 對 mxc 前綴 seek 一次，有沒有列。列本身就是計數。**
+
+#### holder 種類（`src/service/media_refs/mod.rs` 的 `Holder`）
+
+| 碼 | 種類 | 誰寫的 |
+|---|---|---|
+| `0x01` | 事件 | 事件寫入時，從 `content` 讀出 mxc |
+| `0x02` | 個人頭像 | profile 寫入時 |
+
+⭐ 種類碼放在 mxc 的**後面**，所以**一個前綴 seek 就答完所有種類** —— GC 只問一個問題，
+不需要知道有幾種 holder。種類只在檢視與除錯時才需要區分。
+
+🚨 **這張表就是刪除功能可以上線的閘門：每一種持有者都必須在裡面。** 沒列進來的持有者，
+在索引看來就是「沒人用」。種類碼是**磁碟上的格式**，改了等於把舊列改名成沒人找得到的東西。
+
+#### 為什麼不是 `mxc_refcount`（一個數字）
+
+🚨 **`Txn` 是純寫入的 WriteBatch —— 它沒有讀取能力**（`src/database/txn.rs` 只有
+`put` / `del` / `insert` / `execute`）。一個數字要 +1 就得先讀，所以計數器**根本塞不進
+`append_pdu_json` 那個既有交易**，只能另開一次讀-改-寫 —— 那正好會失去我們要的原子性，
+還引入丟失更新的競態。
+
+而複合鍵的插入與刪除是**純寫入、且冪等**：重試同一個交易不會把計數算成兩次。
+⭐ **這不只是比較好，是唯一塞得進既有接縫的作法。**
+
+#### 為什麼不需要 `eventid_mxc`
+
+原本以為 −1 的時候讀不到內容（因為 redaction 會剝空），所以需要一份事件→媒體的索引。
+**讀了程式碼之後發現不成立**：兩個 −1 的地方**都拿得到未剝空的內容**。
+
+- `redact_pdu` 在呼叫 `redact_in_place` **之前**就持有完整的 PDU JSON。
+- `delete_pdus`（房間清除）讀的是資料庫裡存的 PDU JSON。
+
+⭐ 而「redaction 毀掉指標」這件事對**重建**也不成問題：一個已經 redact 的事件**本來就不該
+有引用**（它的引用在 redact 當下就移除了），所以「掃描所有事件、從內容重算」得到的正是正確的
+集合。少一個索引就少一份會漂移的資料。
 
 ### 3.2 加減的位置：接縫已經存在
 
@@ -70,15 +117,33 @@ txn.put_raw(&self.db.roomid_tscount_pducount, ...);
 txn.execute();
 ```
 
-`eventid_mxc` 與 `mxc_refcount` 的 **+1 加進這個交易**，就天然原子 —— 不會出現「事件寫進去了
-但計數沒加」。而且本地與遠端事件都經過 `append_pdu`（`append_incoming_pdu` 也呼叫它），
-是**單一咽喉點**。
+`mxc_holder` 的**寫入加進這個交易**，就天然原子 —— 不會出現「事件寫進去了但引用沒記」。
+而且本地與遠端事件都經過 `append_pdu`（`append_incoming_pdu` 也呼叫它），是**單一咽喉點**。
 
-| 動作 | 位置 |
-|---|---|
-| **+1** | `append_pdu_json` 的既有交易裡 |
-| **−1** | `redact.rs` 的 `redact_pdu`、`rooms/delete` 的 `purge_room`（批次） |
-| **實際刪 bytes** | 新的 worker，抄 `src/service/rooms/retention/mod.rs` 的形狀 |
+| 動作 | 位置 | 狀態 |
+|---|---|---|
+| **記錄引用** | `timeline/append.rs` 的 `append_pdu_json`，在它既有的交易裡 | ✅ |
+| **記錄引用（backfill）** | `timeline/backfill.rs` 的 `prepend_backfill_pdu`，同位交易 | ✅ |
+| **移除引用（redact）** | `timeline/redact.rs` 的 `redact_pdu` | ✅ |
+| **移除引用（歷史清除）** | `timeline/purge.rs` 的 `purge_history`，跟著它每筆 PDU 的既有交易 | ✅ |
+| **移除引用（房間清除）** | `timeline/pdus.rs` 的 `delete_pdus`，跟著它每筆 PDU 的既有交易 | ✅ |
+| **記錄頭像引用** | `profile/mod.rs` 的 `set_profile_keys`，與 profile 寫入同一交易 | ✅ |
+| **移除頭像引用（停用）** | `profile/mod.rs` 的 `clear_profile_keys` | ✅ |
+| **實際刪 bytes** | 新的 worker，抄 `src/service/rooms/retention/mod.rs` 的形狀 | ⏳ 尚未實作 |
+
+⚠️ **頭像必須跟 profile 寫入同一個交易**，因為拆成兩步**沒有安全的順序**：先寫引用再寫
+profile，中斷會留下 profile 還指著舊頭像、舊引用已釋放；反過來則是新頭像沒人持有。
+這也是 `set_profile_keys` 順帶改成單一交易的原因（以前是一個欄位一次寫入）。
+
+📌 **新增一個寫 `pduid_pdu` 的地方，就欠這個索引一筆。** 目前共三處：`append_pdu_json`、
+`prepend_backfill_pdu`（兩者都記錄），以及 `replace_pdu`（不記錄 —— 它只取代已存在的事件，
+redact 自己處理引用，而另一個呼叫者 `threads` 只改 `unsigned`、不動 `content`）。
+⚠️ **backfill 那筆是審查時才被拓出來的** —— 漏掉的原因是當初只掃了「誰刪 `pduid_pdu`」，
+沒掃「誰寫」。寫入端漏一個，那些事件的媒體就會讀成「無人引用」—— 而那是不可逆的方向。
+
+⚠️ **`redact_pdu` 的移除不在交易裡**，因為它收尾用的 `replace_pdu` 本身不是交易。所以順序是：
+**先把剝空的事件存好，成功之後才移除引用列**。中間 crash 的話會留下「引用列還在、事件已剝空」
+—— 媒體被多扣住一份，這是安全的方向。反過來就會變成事件還指著一份已經沒人保護的媒體。
 
 ### 3.3 ⚠️ 順序：先減計數並 redact，bytes 的刪除交給非同步 worker
 
@@ -96,12 +161,13 @@ txn.execute();
 
 ### 3.4 計數一定會漂移，所以「能重算」比「算得準」重要
 
-crash、bug、migration、有人手動改 DB —— 任何引用計數都會漂移。所以真正的要求是**能離線重掃
-重建**，而重建需要「事件 → mxc」可枚舉。
+crash、bug、migration、有人手動改 DB —— 任何索引都會漂移。所以真正的要求是**能離線重掃重建**。
 
-⚠️ **這正是 `eventid_mxc` 存在的理由**：redaction 會毀掉 `content.url`，一旦 redact，那個事件
-對 GC 就變成隱形的，事後再也掃不出它引用過什麼。**所以引用關係必須在事件寫入時就記下來，
-不能靠刪除時解析內容。**
+重建的作法是掃描所有存下來的 PDU、從內容重算引用集合。⭐ 這是**正確的**，即使 redaction 已經
+剝空了那些事件的內容 —— 因為一個被 redact 的事件本來就不該有引用，它的引用在 redact 當下
+就移除了。所以「內容裡沒有 mxc」與「不該有引用列」是同一件事。
+
+⚠️ **重建工具尚未實作。** 它要跟刪除功能一起來 —— 在沒有東西會被刪之前，漂移只是佔一點空間。
 
 **漂移的方向要選**：
 
@@ -133,6 +199,43 @@ mimetype），只是縮圖破圖、下載失敗 —— 看起來像「壞掉」�
 
 ⭐ 墓碑同時是引用計數的安全網：日後若發現還有人引用它，至少知道「它是被刪的」，不是
 「從來沒存在過」，可以往下查。
+
+### 3.7 索引的涵蓋範圍
+
+**事件**的部分只認 `content` 裡四個位置，定義在 `src/core/matrix/media_ref.rs` 的
+`MXC_CONTENT_PATHS`：
+
+| 位置 | 涵蓋 |
+|---|---|
+| `url` | 未加密的 `m.image` / `m.file` / `m.video` / `m.audio`，以及 `m.room.avatar` |
+| `info.thumbnail_url` | 未加密的縮圖 |
+| `file.url` | 加密內容（`EncryptedFile`） |
+| `info.thumbnail_file.url` | 加密縮圖 |
+
+**個人頭像**不走這條，它有自己的 holder 種類（`0x02`），寫在 profile 的寫入點上。
+
+📎 **房間頭像不需要特別處理** —— `m.room.avatar` 是 state 事件，它的 `content.url` 已經在上表裡。
+它的引用會一直留著，因為那個 state 事件一直存在，而**那是正確的**：時間軸上還看得到那則事件，
+媒體當然還被引用著。
+
+#### ⭐ 為什麼頭像用索引，不用 `avatar_mxcs()` 全掃
+
+媒體服務有一個 `avatar_mxcs()`，會枚舉每個本地使用者的頭像加上每個房間的頭像；
+`delete_by_date_size` 就用它豁免頭像。**但那不該拿來當 GC 的判斷依據**：
+
+- 它是 O(使用者 + 房間) 的**全掃**，而 GC 問的是**單一 mxc 的成員關係** —— 那是索引的工作。
+  （`delete_by_date_size` 用得合理，是因為它本來就是要掃過全部 mxc 的批次指令。）
+- 🚫 **而「把 `avatar_url` 加進 `MXC_CONTENT_PATHS`」是錯的做法**，兩個理由：
+  1. **它關不上真正的缺口。** 使用者的頭像存在 profile 裡，`m.room.member` 事件只是副本。
+     不在任何房間的使用者，索引裡一筆都沒有。
+  2. **舊頭像永遠回收不了。** member 是 state 事件，而 `purge_history` 明確跳過 state 事件，
+     所以每個歷史頭像的 member 事件都永遠留著，索引會永遠說「還被引用」。
+     索引變成只會加不會減 —— 那等於沒做。
+
+👉 所以頭像的引用**寫在 profile 的寫入點**，跟事件一樣是「誰持有、誰負責記」。
+
+📎 **改動 `MXC_CONTENT_PATHS` 或新增 holder 種類，都需要重建索引**，因為已經存下來的資料是用
+舊規則掃過的。
 
 ## 4. 待決
 

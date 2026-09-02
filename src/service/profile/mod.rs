@@ -19,10 +19,11 @@ use tuwunel_core::{
 	},
 	warn,
 };
-use tuwunel_database::{Deserialized, Ignore, Interfix, Json, Map};
+use tuwunel_database::{Database, Deserialized, Ignore, Interfix, Json, Map};
 
 pub struct Service {
 	services: Arc<crate::services::OnceServices>,
+	db: Arc<Database>,
 	useridprofilekey_value: Arc<Map>,
 }
 
@@ -30,6 +31,7 @@ impl crate::Service for Service {
 	fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
 		Ok(Arc::new(Self {
 			services: args.services.clone(),
+			db: args.db.clone(),
 			useridprofilekey_value: args.db["useridprofilekey_value"].clone(),
 		}))
 	}
@@ -303,6 +305,10 @@ pub fn all_profile_keys(&self, user_id: &UserId) -> impl Stream<Item = ProfileFi
 
 #[implement(Service)]
 pub async fn clear_profile_keys(&self, user_id: &UserId) {
+	// Read before the keys go, because afterwards there is nothing to read it
+	// from.
+	let avatar_url = self.avatar_url(user_id).await.ok();
+
 	let prefix = (user_id, Interfix);
 
 	self.useridprofilekey_value
@@ -313,6 +319,16 @@ pub async fn clear_profile_keys(&self, user_id: &UserId) {
 		})
 		.await
 		.ok();
+
+	// Dropped only once the profile is gone. Interrupted the other way round,
+	// a profile would point at media nothing holds.
+	if let Some(avatar_url) = avatar_url.as_deref() {
+		let mut txn = self.db.txn();
+		self.services
+			.media_refs
+			.set_avatar_ref(&mut txn, user_id, Some(avatar_url.as_str()), None);
+		txn.execute();
+	}
 }
 
 /// Sets new profile key values, removes the key if value is None
@@ -351,17 +367,55 @@ pub async fn set_profile_keys(
 			.await;
 	}
 
+	// Read the avatar the profile still holds, so its media reference can move
+	// in the same batch that replaces it.
+	let avatar_change = match find_avatar_update(profile_values) {
+		| None => None,
+		| Some(new_avatar) => Some((self.avatar_url(user_id).await.ok(), new_avatar)),
+	};
+
+	let mut txn = self.db.txn();
+
 	for (name, value) in profile_values {
 		let key = (user_id, name.as_str());
 
 		if let Some(value) = value {
-			self.useridprofilekey_value.put(key, Json(value));
+			txn.put(&self.useridprofilekey_value, key, Json(value));
 		} else {
-			self.useridprofilekey_value.del(key);
+			txn.del(&self.useridprofilekey_value, key);
 		}
 	}
 
+	if let Some((old_avatar, new_avatar)) = &avatar_change {
+		self.services.media_refs.set_avatar_ref(
+			&mut txn,
+			user_id,
+			old_avatar.as_ref().map(|url| url.as_str()),
+			new_avatar.as_deref(),
+		);
+	}
+
+	txn.execute();
+
 	Ok(())
+}
+
+/// Finds the avatar url an update sets.
+///
+/// Returns `None` when the update does not touch the avatar at all, and
+/// `Some(None)` when it removes it.
+fn find_avatar_update(
+	profile_values: &[(ProfileFieldName, Option<Value>)],
+) -> Option<Option<String>> {
+	profile_values
+		.iter()
+		.find(|(name, _)| name.as_str() == ProfileFieldName::AvatarUrl.as_str())
+		.map(|(_, value)| {
+			value
+				.as_ref()
+				.and_then(Value::as_str)
+				.map(ToOwned::to_owned)
+		})
 }
 
 /// Gets a specific user profile key

@@ -1,5 +1,5 @@
-use ruma::{CanonicalJsonObject, CanonicalJsonValue, Mxc, OwnedEventId};
-use tuwunel_core::{Err, Result, debug, err, info, warn};
+use ruma::{CanonicalJsonValue, Mxc, OwnedEventId};
+use tuwunel_core::{Err, Result, err, info, matrix::list_content_mxc_uris, warn};
 
 use crate::admin_command;
 
@@ -22,10 +22,7 @@ pub(super) async fn delete_by_event(&self, event_id: OwnedEventId) -> Result {
 			)
 		})?;
 
-	let mut mxc_urls = Vec::with_capacity(3);
-	mxc_urls.extend(url_mxc_from_content(content));
-	mxc_urls.extend(thumbnail_mxc_from_content(content));
-	mxc_urls.extend(file_mxc_from_content(content));
+	let mxc_urls = list_content_mxc_uris(content);
 
 	if mxc_urls.is_empty() {
 		return Err!("Parsed event ID but found no MXC URLs.",);
@@ -34,11 +31,6 @@ pub(super) async fn delete_by_event(&self, event_id: OwnedEventId) -> Result {
 	let mut mxc_deletion_count: usize = 0;
 
 	for mxc_url in mxc_urls {
-		if !mxc_url.starts_with("mxc://") {
-			warn!("Ignoring non-mxc url {mxc_url}");
-			continue;
-		}
-
 		let mxc: Mxc<'_> = mxc_url.as_str().try_into()?;
 
 		match self.services.media.delete(&mxc).await {
@@ -58,38 +50,4 @@ pub(super) async fn delete_by_event(&self, event_id: OwnedEventId) -> Result {
 		 event ID {event_id}."
 	)
 	.await
-}
-
-fn url_mxc_from_content(content: &CanonicalJsonObject) -> Option<String> {
-	debug!("Attempting to go into \"url\" key for main media file");
-	let url = content
-		.get("url")
-		.and_then(CanonicalJsonValue::as_str)?;
-
-	debug!("Got main media URL: {url}");
-	Some(url.to_owned())
-}
-
-fn thumbnail_mxc_from_content(content: &CanonicalJsonObject) -> Option<String> {
-	debug!("Attempting to go into \"info\" key for thumbnails");
-	let thumbnail_url = content
-		.get("info")
-		.and_then(CanonicalJsonValue::as_object)
-		.and_then(|info| info.get("thumbnail_url"))
-		.and_then(CanonicalJsonValue::as_str)?;
-
-	debug!("Found a thumbnail_url in info key: {thumbnail_url}");
-	Some(thumbnail_url.to_owned())
-}
-
-fn file_mxc_from_content(content: &CanonicalJsonObject) -> Option<String> {
-	debug!("Attempting to go into \"file\" key");
-	let url = content
-		.get("file")
-		.and_then(CanonicalJsonValue::as_object)
-		.and_then(|file| file.get("url"))
-		.and_then(CanonicalJsonValue::as_str)?;
-
-	debug!("Found url in file key: {url}");
-	Some(url.to_owned())
 }

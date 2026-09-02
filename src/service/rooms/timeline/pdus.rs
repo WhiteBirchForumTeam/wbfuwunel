@@ -2,7 +2,9 @@ use futures::{
 	Stream, TryFutureExt, TryStreamExt,
 	future::Either::{Left, Right},
 };
-use ruma::{MilliSecondsSinceUnixEpoch, RoomId, UInt, UserId, api::Direction};
+use ruma::{
+	CanonicalJsonObject, MilliSecondsSinceUnixEpoch, RoomId, UInt, UserId, api::Direction,
+};
 use tuwunel_core::{
 	Result, at, err, implement,
 	matrix::pdu::{PduCount, PduEvent},
@@ -44,11 +46,24 @@ pub async fn delete_pdus(&self, room_id: &RoomId) -> Result {
 			let ts: u64 = pdu.origin_server_ts.into();
 			let event_id = &pdu.event_id;
 
+			// A second parse of the same bytes, because the media reference list
+			// is read from raw content rather than from the typed event. Room
+			// deletion is rare enough to pay for it.
+			let event_json = serde_json::from_slice::<CanonicalJsonObject>(value)?;
+			let media_refs = self
+				.services
+				.media_refs
+				.list_event_mxc_uris(&event_json);
+
 			let mut txn = self.db.db.txn();
 
 			txn.del_raw(&self.db.pduid_pdu, key);
 			txn.del_raw(&self.db.eventid_pduid, event_id);
 			txn.del_raw(&self.db.eventid_outlierpdu, event_id);
+
+			self.services
+				.media_refs
+				.del_event_refs(&mut txn, event_id, &media_refs);
 
 			let room_id_ts_key = (room_id, ts, bias_count(RawPduId::from(key).count()));
 			txn.del(&self.db.roomid_tscount_pducount, room_id_ts_key);

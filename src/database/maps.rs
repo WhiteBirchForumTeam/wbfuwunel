@@ -226,6 +226,16 @@ pub(super) static MAPS: &[Descriptor] = &[
 		name: "mediaid_user",
 		..descriptor::RANDOM_SMALL
 	},
+	// Media reference index: `mxc || holder kind || holder id` with an empty
+	// value. Seeking the mxc prefix answers whether anything still holds a
+	// reference to that media, whatever kind of thing holds it, and the empty
+	// value keeps the row to its key.
+	Descriptor {
+		name: "mxc_holder",
+		key_size_hint: Some(128),
+		val_size_hint: Some(0),
+		..descriptor::RANDOM_SMALL
+	},
 	Descriptor {
 		name: "oauthid_session",
 		..descriptor::RANDOM_SMALL

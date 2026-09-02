@@ -18,6 +18,7 @@ pub mod fetcher;
 pub mod globals;
 pub mod key_backups;
 pub mod media;
+pub mod media_refs;
 pub mod membership;
 pub mod oauth;
 pub mod presence;
