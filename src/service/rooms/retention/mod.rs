@@ -3,6 +3,7 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use futures::{Stream, TryStreamExt};
 use ruma::{CanonicalJsonObject, EventId, OwnedEventId};
+use tokio::sync::Mutex;
 use tuwunel_core::{
 	Result, debug_info, expected, implement,
 	matrix::pdu::PduEvent,
@@ -18,6 +19,10 @@ pub struct Service {
 	db: Arc<Database>,
 	eventid_originalpdu: Arc<Map>,
 	timeredacted_eventid: Arc<Map>,
+	/// Serialises `drop_original`, whose read of the original and deletion of
+	/// it are two steps: two callers reading before either deletes would each
+	/// release the same references.
+	drop_original_lock: Mutex<()>,
 }
 
 #[async_trait]
@@ -28,6 +33,7 @@ impl crate::Service for Service {
 			db: args.db.clone(),
 			eventid_originalpdu: args.db["eventid_originalpdu"].clone(),
 			timeredacted_eventid: args.db["timeredacted_eventid"].clone(),
+			drop_original_lock: Mutex::new(()),
 		}))
 	}
 
@@ -142,8 +148,14 @@ pub async fn purge_original(&self, event_id: &EventId) { self.drop_original(even
 /// media, so it is read for its references before it goes. An unreadable
 /// original releases nothing: media held one count too long is recoverable,
 /// media released one count too early is not.
+///
+/// The retention worker and a history purge can both reach here for one
+/// event. The lock is held from the read through the write, so the second
+/// caller finds the original already gone and releases nothing.
 #[implement(Service)]
 async fn drop_original(&self, event_id: &EventId, time_redacted: Option<u64>) {
+	let _serialised = self.drop_original_lock.lock().await;
+
 	let media_refs = match self.get_original_pdu_json(event_id).await {
 		| Ok(original) => self.services.media_refs.list_event_mxc_uris(&original),
 		| Err(e) if e.is_not_found() => Vec::new(),
