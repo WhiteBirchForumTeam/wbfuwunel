@@ -22,6 +22,13 @@
 //! and removes local media whose count is `MIN < count <= 0`: zero is the
 //! rule, and a negative count is a caller that released more than it counted,
 //! which is logged before the rule is applied.
+//!
+//! One lock per media closes the window between the collector reading a
+//! count of zero and removing the bytes: whoever adds a reference holds the
+//! media's lock from before the increment until it has committed, and the
+//! collector holds it from the read through the removal. Either the increment
+//! lands first and the collector reads it, or the removal lands first and the
+//! new reference points at a tombstone, which is the documented outcome.
 
 mod collect;
 mod migrate;
@@ -36,14 +43,24 @@ use std::sync::{
 use async_trait::async_trait;
 use ruma::{CanonicalJsonObject, CanonicalJsonValue, UserId};
 use tokio::sync::mpsc;
-use tuwunel_core::{Result, debug, error, implement, matrix::list_content_mxc_uris};
+use tuwunel_core::{
+	Result, debug, error, implement,
+	matrix::list_content_mxc_uris,
+	utils::{MutexMap, MutexMapGuard},
+};
 use tuwunel_database::{COUNTER_SENTINEL, CounterOperand, Map, Txn, decode_counter};
 
 pub use self::migrate::RebuildReport;
 
+/// Holds one media's lock; dropping it releases the media.
+pub type MediaHold = MutexMapGuard<String, ()>;
+
 pub struct Service {
 	services: Arc<crate::services::OnceServices>,
 	db: Data,
+	/// One lock per media, shared by whoever adds a reference and the
+	/// collector deciding whether to remove it.
+	mxc_locks: MutexMap<String, ()>,
 	/// Where a release sends the media it released, once the releasing
 	/// transaction has committed. Absent while the collector is not running.
 	released: StdRwLock<Option<mpsc::UnboundedSender<String>>>,
@@ -62,6 +79,7 @@ impl crate::Service for Service {
 		Ok(Arc::new(Self {
 			services: args.services.clone(),
 			db: Data { mxc_refcount: args.db["mxc_refcount"].clone() },
+			mxc_locks: MutexMap::new(),
 			released: StdRwLock::new(None),
 			collector_paused: AtomicBool::new(false),
 		}))
@@ -99,9 +117,34 @@ impl crate::Service for Service {
 	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }
 }
 
+/// Locks every media `event_json`'s content names, for the caller to hold
+/// until the transaction counting them has committed.
+///
+/// Taken in sorted order without repeats, so two events naming the same media
+/// in different orders cannot wait on each other.
+#[implement(Service)]
+pub async fn hold_event_media(&self, event_json: &CanonicalJsonObject) -> Vec<MediaHold> {
+	let mut mxc_uris = self.list_event_mxc_uris(event_json);
+	mxc_uris.sort_unstable();
+	mxc_uris.dedup();
+
+	let mut holds = Vec::with_capacity(mxc_uris.len());
+	for mxc in &mxc_uris {
+		holds.push(self.hold_media(mxc).await);
+	}
+
+	holds
+}
+
+/// Locks one media, for the caller to hold until its reference change has
+/// committed, or until its removal is done.
+#[implement(Service)]
+pub async fn hold_media(&self, mxc: &str) -> MediaHold { self.mxc_locks.lock(mxc).await }
+
 /// Counts, in `txn`, one reference to each media `event_json`'s content names.
 ///
-/// Content naming no media writes nothing.
+/// Content naming no media writes nothing. The caller holds the media
+/// (`hold_event_media`) until `txn` has committed.
 #[implement(Service)]
 pub(crate) fn add_event_refs(&self, txn: &mut Txn, event_json: &CanonicalJsonObject) {
 	for mxc in self.list_event_mxc_uris(event_json) {
@@ -156,7 +199,8 @@ fn list_event_mxc_uris_in(event_json: &CanonicalJsonObject) -> Vec<String> {
 ///
 /// Equal values write nothing, so a profile update leaving the avatar alone
 /// cannot release its own reference. Sharing the caller's transaction is what
-/// keeps the count and the profile it describes from disagreeing.
+/// keeps the count and the profile it describes from disagreeing. The caller
+/// holds `new_mxc` (`hold_media`) until `txn` has committed.
 #[implement(Service)]
 pub fn set_avatar_ref(
 	&self,

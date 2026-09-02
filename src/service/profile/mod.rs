@@ -374,6 +374,18 @@ pub async fn set_profile_keys(
 		| Some(new_avatar) => Some((self.avatar_url(user_id).await.ok(), new_avatar)),
 	};
 
+	// Hold the incoming avatar until its count has committed, so the
+	// collector cannot remove it between reading zero and deleting.
+	let media_held = match &avatar_change {
+		| Some((_, Some(new_avatar))) => Some(
+			self.services
+				.media_refs
+				.hold_media(new_avatar.as_str())
+				.await,
+		),
+		| _ => None,
+	};
+
 	let mut txn = self.db.txn();
 
 	for (name, value) in profile_values {
@@ -396,6 +408,7 @@ pub async fn set_profile_keys(
 	}
 
 	txn.execute();
+	drop(media_held);
 
 	Ok(())
 }

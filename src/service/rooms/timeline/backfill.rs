@@ -400,6 +400,14 @@ pub async fn backfill_pdu(
 	}
 	.into();
 
+	// Hold the media this event references until its count has committed,
+	// so the collector cannot remove it between reading zero and deleting.
+	let media_held = self
+		.services
+		.media_refs
+		.hold_event_media(&value)
+		.await;
+
 	// Insert pdu
 	self.prepend_backfill_pdu(
 		&pdu_id,
@@ -408,6 +416,7 @@ pub async fn backfill_pdu(
 		u64::from(pdu.origin_server_ts),
 		&value,
 	);
+	drop(media_held);
 	drop(insert_lock);
 
 	match pdu.kind {

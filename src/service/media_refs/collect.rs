@@ -20,6 +20,11 @@ pub(super) async fn collect(&self, mxc: &str) {
 		return;
 	}
 
+	// Held from the read through the removal, so a reference being added
+	// right now either lands before the read or waits until after the
+	// removal.
+	let _held = self.hold_media(mxc).await;
+
 	let count = match self.refcount(mxc).await {
 		| Ok(Some(count)) => count,
 		| Ok(None) => return,

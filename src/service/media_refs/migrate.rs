@@ -179,6 +179,8 @@ async fn rebuild_with_collector_paused(&self, dry_run: bool) -> Result<RebuildRe
 		}
 
 		if !dry_run {
+			let _held = self.hold_media(mxc.as_str()).await;
+
 			match self
 				.services
 				.media
