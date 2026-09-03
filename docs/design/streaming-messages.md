@@ -52,7 +52,11 @@ token 頻率（每 10–50 ms 一片）會把它打爆；一條長連線推分�
 | `Close` | 發送者 | 密文 `{ "event_id": "$…" }`（定案事件，§5） | 無。接收者收到就把該 stream 的顯示換成正式事件 |
 | `Abandon` | 發送者或 server | server 發的是明文 `{ "reason": "timeout" }`；發送者發的可密文 | 無 |
 
-`Fragment` 的 meta 與 data 各自 AEAD（`key_stream`，`nonce = base ‖ seq ‖ 段號`），接收者解開就是 JSON 與文字。
+`Fragment` 的 meta 與 data 各自 AEAD（`key_stream`，`nonce = base ‖ seq ‖ 段號`），發送者加密完**直接寫進 pack 的 slot**，接收者在拆包回來的切片上原地解；pack 本身不碰加密。
+
+**順序**（[wbf-wire-format.md](wbf-wire-format.md) §4）：發送者 → server 這段，`Fragment` 是**有序類**，同一個 stream 的 `seq` 必須遞增，
+server 記 `next_seq`，錯了回 `Error(OutOfOrder)`。server → 接收者這段是**事件驅動**，接收者不守順序：收到就顯示、只接受比目前大的 `seq`，
+舊的丟掉（全量分片讓這件事安全）。`Open`、`Close`、`Abandon` 是無序類一問一答。
 
 - **`text` 是全量不是 delta**：接收者永遠只顯示最後一片，掉一片不會亂。代價是頻寬隨長度線性長，
   對一則訊息的長度來說可忽略；真的長到在乎，那是檔案（§1）。

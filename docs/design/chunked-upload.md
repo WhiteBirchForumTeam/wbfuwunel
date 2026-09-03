@@ -32,18 +32,28 @@
 
 seek 靠 provider 的 **range get**：`object_store` 有 `get_range`，`src/service/storage/provider.rs` 露出一個方法即可；本地檔案系統就是 `pread`。
 
-### 2.2 塊大小：`Create` 時定下來，之後固定；預設 64 KiB
+### 2.2 塊大小：兩種規格，`Create` 時定下來，之後固定
 
-- client 在 `Create` 宣告 `chunk_size` 與 `total_len`；沒宣告 `chunk_size` 用 server 預設 `media_chunk_size_default`（**64 KiB**；32 KiB 也在範圍內，§9 問維護者）。
+同一套架構，兩種預設：
+
+| 規格 | `chunk_size`（明文塊） | 用在 | 理由 |
+|---|---|---|---|
+| **small** | **64 KiB** | 小檔、線路差、要細粒度 seek 的媒體 | 一次 AEAD、一個 pack、一次 range 讀取都舒服；斷線重傳損失小；標籤開銷 0.02% |
+| **large** | **4 MiB** | 大檔、好線路 | 塊數少 64 倍，bitmap 與 Ack 數量都小；4 MiB 在記憶體裡加密一次不到 10 ms |
+
+- client 在 `Create` 宣告 `chunk_size`（任一規格，或範圍內任意 2 的冪）與 `total_len`；沒宣告就用 server 的 `media_chunk_size_default`（small，64 KiB）。
 - 之後 `chunk_size` **不能改**。最後一塊可以短：120 KB 用 64 KiB 就是 64 ＋ 56。
-- server 檢查：`media_chunk_size_min ≤ chunk_size ≤ media_chunk_size_max`（預設 16 KiB 到 1 MiB），且 `≤ wbf_data_max_bytes`。
+- server 檢查：`media_chunk_size_min ≤ chunk_size ≤ media_chunk_size_max`（預設 16 KiB 到 **16 MiB**），且 `chunk_size + 16 ≤ wbf_data_max_bytes`。
 - 塊數 = `ceil(total_len / chunk_size)`。`total_len` 若不知道（串流產生的檔）可以先給上限，seal 時給真值（§9 問維護者接不接受）。
+- **一個塊正好是一個 pack 的 data 段**：client 把第 i 塊明文加密後直接寫進 pack 的 `data_slot`（[wbf-wire-format.md](wbf-wire-format.md) §5），
+  沒有第二次加密、沒有複製。data 的長度就是 `chunk_size + 16`（AEAD 標籤），最後一塊是 `餘數 + 16`。
 
 ### 2.3 以塊為單位加密，server 只看 CRC
 
 client 端：`key` 每個檔案一把；`nonce_i = base ‖ i`；`ct_i = AEAD(key, nonce_i, pt_i)`，含 16 byte 標籤。
-送上來的是 `ct_i`；線上的塊大小 `wire_chunk_size = chunk_size + 16`，暫存檔與最終物件存的是密文，`total_len` 指**密文物件**總長。
-每塊各自的標籤在 client 解密時驗；壞一塊只壞一塊。CRC 由 pack 的 `data_crc` 驗（§4），不合就拒收要重送。
+送上來的是 `ct_i`，它**就是** pack 的 data 段；`wire_chunk_size = chunk_size + 16`，暫存檔與最終物件存的是密文，`total_len` 指**密文物件**總長。
+每塊各自的標籤在 client 解密時驗；壞一塊只壞一塊。CRC 由 pack 的 `data_crc` 驗（硬體 CRC-32C），不合就拒收要重送。
+**pack 不碰加密**：加密在封裝前、解密在拆包後，都在同一塊緩衝上原地做。server 收到 `Chunk` 是把 data 切片直接 `pwrite` 進暫存檔，也不複製。
 
 **Merkle 樹拿掉**：server 是維護者自己的，每塊有 AEAD 標籤、client 拿到任一塊都能自驗，樹沒多買到東西。
 
@@ -86,7 +96,10 @@ TTL 設 `media_upload_ttl × 2` 當兜底，真正的清理是 §6 的 sweeper�
 | `0x04 Seal` | `{ "total_len"?: <真值> }` | 無 | `{ "mxc": "…" }`。缺塊 → `Error(Conflict)` 帶 `missing` |
 | `0x05 Abort` | 無 | 無 | `{ "ok": true }` |
 
-`Chunk` 可以連續送、不等回應（滑動窗口 client 決定）；要逐塊確認就帶 `WANT_ACK`，server 每塊回 `Ack`，沒回的超時重送。
+`Chunk` 是**有序類**（[wbf-wire-format.md](wbf-wire-format.md) §4）：同一個 `id` 之內 `seq` 必須 0, 1, 2, … 遞增，server 記 `next_seq`；來的不是 `next_seq`
+→ `Error(OutOfOrder)` 帶 `expected_seq`，client 從那裡重送。WebSocket 保證到達順序，所以順序錯一定是 client 邏輯錯。
+可以連續送不等回應（滑動窗口 client 決定）；要逐塊確認就帶 `WANT_ACK`。續傳：先 `Status` 拿到 `missing`，從缺的第一塊的 index 當 `seq` 接著送（server 的 `next_seq`
+就是缺的第一塊）。`Create`、`Status`、`Seal`、`Abort` 是無序類（一問一答）。
 只有 owner 能碰自己的上傳；`id` 對不上或不是 owner → `Error(NotFound)`（不區分，避免探測）。
 
 ## 5. 下載：kind = `Download`
@@ -125,18 +138,19 @@ client 想解第 i 塊：`pos = i × wire_chunk_size`、`len = wire_chunk_size`�
 
 | 設定 | 預設 | 意義 |
 |---|---|---|
-| `media_chunk_size_default` | 64 KiB | `Create` 沒宣告時用 |
-| `media_chunk_size_min` / `max` | 16 KiB / 1 MiB | 允許範圍 |
+| `media_chunk_size_default` | 64 KiB（small） | `Create` 沒宣告時用 |
+| `media_chunk_size_large` | 4 MiB | client 選 large 規格時的建議值（`Info` 回給 client 參考） |
+| `media_chunk_size_min` / `max` | 16 KiB / 16 MiB | 允許範圍 |
 | `media_upload_ttl` | 86400 | 最後一塊之後多久沒動視為遺棄 |
 | `media_upload_max_len` | 0（不限） | 單一上傳總長上限 |
 | `media_download_default_len` | 1 MiB | `Read` 沒給 `len` 時一次回多少 |
-| `wbf_meta_max_bytes` / `wbf_data_max_bytes` | 64 KiB / 1 MiB | pack 外框上限（[wbf-wire-format.md](wbf-wire-format.md)） |
+| `wbf_meta_max_bytes` / `wbf_data_max_bytes` | 64 KiB / 16 MiB | pack 外框上限（[wbf-wire-format.md](wbf-wire-format.md)） |
 
 `max_pending_media_uploads`、`media_rc_create_*` 沿用。
 
 ## 9. 需要維護者定的
 
-1. **預設塊大小 32 KiB 還是 64 KiB？** 我傾向 64。
+1. **small 規格選 64 KiB（我選的）、large 規格 4 MiB（我訂的）**，可以嗎？
 2. **AEAD 選 AES-256-GCM 還是 ChaCha20-Poly1305？** 可以兩者都支援、事件裡標 `cipher`。
 3. **`total_len` 可否先給上限、seal 再給真值**（為了串流產生的檔）？不接受就必填真值。
 4. **命名空間 `/_wbf/`** 這個字。
