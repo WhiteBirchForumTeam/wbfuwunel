@@ -1,9 +1,9 @@
 # 流式訊息（Streaming Messages）設計草案，第二版
 
 > **狀態：草案，等維護者同意。** 對應核心設計 [why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md) §5.3。
-> 第二版依維護者 2026-09-03 的指示改：**走 WebSocket over TLS 的二進位通道**（外框在
-> [wbf-wire-format.md](wbf-wire-format.md)），分片是**加密後的 JSON 流**、不定長、不需要 seek；
-> 預設**沒收到就丟**，需要時有 Ack 與重送。第一版「分片走 sync ephemeral」降為**退化路徑**（§6）。
+> 第二版依維護者 2026-09-03 的指示改：**走 WebSocket over TLS 的二進位通道**，每一片是一個 pack
+> （[wbf-wire-format.md](wbf-wire-format.md)：標頭＋密文 meta＋密文 data），不定長、不需要 seek；
+> 預設**沒收到就丟**，需要時用標頭的 `WANT_ACK` 與 `seq` 做 Ack 與重送。第一版「分片走 sync ephemeral」降為**退化路徑**（§6）。
 >
 > 撰寫日期：2026-09-01；第二版 2026-09-03。**尚未實作**，同意前不動 `src/`。
 
@@ -34,35 +34,35 @@
 ## 3. 傳輸：WebSocket 二進位通道
 
 分片走 [wbf-wire-format.md](wbf-wire-format.md) 的通道，kind = `Stream`。**不走 sync**：sync 的模型是「有變化就 wake、wake 後重拉」，
-token 頻率（每 10–50 ms 一片）會把它打爆；一條長連線推分片，開銷是 12 bytes 的外框。
+token 頻率（每 10–50 ms 一片）會把它打爆；一條長連線推分片，開銷是 32 bytes 的外框。
 
-**加密**：分片 payload = Cbor 標頭（明文，server 要看）＋ 密文（server 不看）。密文解開是一段 JSON。server 只負責
-把密文原樣轉給同房間、連著通道的其他 client；它驗的是順序與存在，不是內容。
+**加密**：一片就是一個 pack。server 只讀明文標頭（`kind`、`subtype`、`id` = stream id、`seq`、`flags`）；
+**meta 與 data 都是密文**（`META_ENCRYPTED = 1`），server 原樣轉給同房間、連著通道的其他 client。
+它驗的是順序與存在，不是內容。一個欄位一個職權：meta 放這一片的語意（JSON），data 放本文本體。
 
 ## 4. 訊框（kind = `Stream`）
 
-| subtype | 誰發 | Cbor 標頭 | 密文 |
+標頭：`id` = stream id（`Open` 時 0，server 在 `Ack` 的 meta 發），`seq` = 片序號（`Open` 是 0，`Fragment` 從 1 起遞增）。
+除了 `Open` 的請求 meta（server 要知道房間），其餘 meta 與 data 都是密文。
+
+| subtype | 誰發 | meta | data |
 |---|---|---|---|
-| `Open` | 發送者 | `{ id, room, device, ack: bool }` | 無。server 回 `Ack`（含 server 指定的 `id` 若 client 沒給） |
-| `Fragment` | 發送者 → server → 接收者 | `{ id, seq }` | AEAD(`key_stream`, `nonce(seq)`, JSON) |
-| `Close` | 發送者 | `{ id, seq_last, event_id? }` | 無。`event_id` 是定案事件（§5）；接收者收到就把該 stream 的顯示換成正式事件 |
-| `Abandon` | 發送者或 server | `{ id, reason }` | 無。發送者中止、或 server 超時／連線斷了 |
+| `Open` | 發送者 | **明文** `{ "room": "!…", "device": "…", "ack": bool }`（server 要查房間成員） | 無。server 回 `Ack`，meta `{ "id": <stream id> }` |
+| `Fragment` | 發送者 → server → 接收者 | 密文 JSON `{ "done": false }` —— 這一片的語意，有需要再加欄位 | 密文：到目前為止的**全文**（UTF-8） |
+| `Close` | 發送者 | 密文 `{ "event_id": "$…" }`（定案事件，§5） | 無。接收者收到就把該 stream 的顯示換成正式事件 |
+| `Abandon` | 發送者或 server | server 發的是明文 `{ "reason": "timeout" }`；發送者發的可密文 | 無 |
 
-密文解開的 JSON（給 client 用，server 不定義它，但建議形狀）：
-
-```json
-{ "seq": 12, "text": "…到目前為止的全文…", "done": false }
-```
+`Fragment` 的 meta 與 data 各自 AEAD（`key_stream`，`nonce = base ‖ seq ‖ 段號`），接收者解開就是 JSON 與文字。
 
 - **`text` 是全量不是 delta**：接收者永遠只顯示最後一片，掉一片不會亂。代價是頻寬隨長度線性長，
   對一則訊息的長度來說可忽略；真的長到在乎，那是檔案（§1）。
-- 不定長，能塞多少塞多少；外框有 `wbf_frame_max_bytes` 擋極端值。
+- 不定長，能塞多少塞多少；外框有 `wbf_meta_max_bytes`、`wbf_data_max_bytes` 擋極端值。
 
 ## 5. 送達語意：預設丟，選用 Ack
 
-- **預設（`ack: false`）**：server 收到 `Fragment` 就轉發，不存、不重送。接收者掉了一片，下一片是全量、自然補上。
+- **預設（`ack: false`，也就是標頭不帶 `WANT_ACK`）**：server 收到 `Fragment` 就轉發，不存、不重送。接收者掉了一片，下一片是全量、自然補上。
   這跟 typing 一樣是「最新狀態」語意，不是「每一片都要到」。
-- **選用（`ack: true`，`Open` 時宣告）**：server 對每片回 `Ack { id, seq }`；發送者沒在 `T_ack`（client 端自訂，建議 1 s）內收到就重送。
+- **選用（`Open` 時 `ack: true`，之後每片帶 `WANT_ACK`）**：server 對每片回 `Ack`（標頭抄回同一組 `id`、`seq`，不用讀 meta）；發送者沒在 `T_ack`（client 端自訂，建議 1 s）內收到就重送。
   server 端對接收者也一樣：接收者可以回 `Ack`，server 據此重送給沒收到的接收者（保留最後 N 片在記憶體，`N = wbf_stream_replay_depth`，預設 8）。
   這是給「一片都不能掉」的場合（例如流的內容不是純顯示、接收端要逐片處理）。
 - **定案永遠可靠**：`Close` 帶 `event_id`，定案事件走既有 append 路徑進 RocksDB、進 sync。分片掉光了也沒關係，
@@ -102,7 +102,7 @@ Stream {
 ```
 
 上限（config）：`wbf_stream_timeout`（預設 30 s 沒新片就 Abandon）、`wbf_stream_max_per_room`（預設 16）、
-`wbf_stream_max_fragment_bytes`（預設 64 KiB，同時受外框上限管）。全部記憶體、全部有上限、全部有超時 —— 呼應核心設計 §1 的「容量有界」。
+`wbf_stream_max_fragment_bytes`（預設 64 KiB，同時受 pack 的 `wbf_data_max_bytes` 管）。全部記憶體、全部有上限、全部有超時 —— 呼應核心設計 §1 的「容量有界」。
 
 ## 9. 必須守住的語意（驗收條件）
 
@@ -110,7 +110,7 @@ Stream {
 2. **歷史單一版本**：定案前事件層沒有半成品。
 3. **容量有界**：分片全記憶體、有上限、有超時。
 4. **不污染 `next_batch`**：分片不走 sync，自然不推進 timeline token；只有定案事件推進。
-5. **E2EE 下 server 不碰明文**：server 只看 Cbor 標頭，密文原樣轉發。
+5. **E2EE 下 server 不碰明文**：server 只看 pack 的明文標頭，meta 與 data 原樣轉發。
 6. **通道斷了不丟定案**：發送者重連後仍能 `Close`（stream 還在 `wbf_stream_timeout` 內）或重發定案事件。
 
 ## 10. 開放問題
