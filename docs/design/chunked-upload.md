@@ -188,7 +188,7 @@ TTL 設 `media_upload_ttl × 2` 當兜底，真正的清理是 §6 的 sweeper�
 | 支 | 內容 | 驗收 |
 |---|---|---|
 | A | `core/wbf/pack.rs` 與 `file_info.rs`（Pack、`EncryptedFileInfo`、單元測試）；`mediaid_upload`／`mxc_chunk`／`mxc_chunked` CF；暫存檔；`handle_pack` 的 `Upload` 與 `Download` 兩個 kind；`POST /_wbf/v1/pack`；sweeper；provider `get_range` | **以 [chunked-upload-spec.md](chunked-upload-spec.md) 為準**，e2e（HTTP 送 pack 的腳本）覆蓋：Create 的各種拒絕；有序上傳、跳號回 `OutOfOrder`、重送冪等、壞 CRC 被拒且說是 data；`IS_LAST`；seal 後標準 download 與原 bytes 逐 byte 相同；`Info` 回加密描述；`Read` 按塊與按明文位置整塊交回；變長塊；截斷；串流模式；abort；過期被 sweeper 清；`refcount` 是 0 |
-| B | WebSocket 通道（`/_wbf/v1/ws`，`src/api/client/wbf/ws.rs`）：升級時驗 Bearer、每個 binary message 一個 pack、依序處理依序回、`Hello`（回 server 名、features、建議塊大小、單包上限）、`Ping`、連線內多 id 分流、每連線 `id → 下一塊` 小表（明顯跳號不碰 DB）、超大 frame 由 socket 層拒；同一個 `handle_pack` | e2e7（PowerShell `ClientWebSocket`）：無 token 升級被拒；Hello／Ping；字串 frame 回 Corrupt；兩個上傳在同一連線交錯；跳號由連線表回 OutOfOrder；三個 pack 連發不等回應、回應依序；seal 後標準下載逐 byte 相同；Info／Read 走 WS；標頭壞回 MetaCrc；同一上傳 HTTP 送前半、WS 送後半、seal 成功；17 MiB frame 被拒 |
+| B | WebSocket 通道（`/_wbf/v1/ws`，`src/api/client/wbf/ws.rs`）：升級時驗 Bearer、每個 binary message 一個 pack、依序處理依序回、`Hello`（回 server 名、features、建議塊大小、單包上限）、`Ping`、連線內多 id 分流、連線不保存上傳狀態（`OutOfOrder` 一律由 DB 列判）、idle 超時（`wbf_ws_idle_timeout`）、超大 frame 由 socket 層拒；同一個 `handle_pack` | e2e7（PowerShell `ClientWebSocket`）：無 token 升級被拒；Hello／Ping；字串 frame 回 Corrupt；兩個上傳在同一連線交錯；跳號回 OutOfOrder；重送舊塊後下一塊仍收；WS 先、HTTP 中、WS 後的同一上傳；三個 pack 連發不等回應、回應依序；idle 超時關連線；seal 後標準下載逐 byte 相同；Info／Read 走 WS；標頭壞回 MetaCrc；同一上傳 HTTP 送前半、WS 送後半、seal 成功；17 MiB frame 被拒 |
 
 A 先，因為它把 pack 與儲存定下來；B 與流式訊息共用通道。
 

@@ -4,12 +4,17 @@
 //! binary message is decoded and handed to the same `handle_pack` the HTTP
 //! transport uses, and its reply goes back as one binary message. Many
 //! uploads may interleave on one connection; the pack header's `id` tells
-//! them apart. The connection keeps one small table, `id -> next expected
-//! chunk`, so a chunk that is plainly out of order is refused without a
-//! database read. The database row stays the truth: a reconnecting client
-//! resumes from `Status`, not from anything this connection remembered.
+//! them apart.
+//!
+//! The connection keeps no upload state of its own. The database row is the
+//! only truth about where an upload stands, so a chunk that arrives out of
+//! order is refused by the upload service, from that row, whether it came
+//! over this connection, another one, or HTTP. (A first version kept a
+//! per-connection `id -> next chunk` table as a shortcut; review showed it
+//! could disagree with the row after an idempotent resend or a chunk sent
+//! over another transport, and refuse chunks the row would take.)
 
-use std::collections::HashMap;
+use std::time::Duration;
 
 use axum::{
 	extract::{
@@ -23,17 +28,15 @@ use futures::{SinkExt, StreamExt};
 use ruma::OwnedUserId;
 use tuwunel_core::{
 	debug,
-	wbf::{HEADER_LEN, Kind, PackError, decode},
-};
-use tuwunel_service::media::UploadError;
-
-use super::{
-	Reject, authenticate, control, error_pack, handle_pack, header_id_seq, pack_error_code,
-	pack_response, upload,
+	wbf::{HEADER_LEN, PackError, decode},
 };
 
-/// Room for the two CRCs and the two length fields around meta and data.
-const FRAME_SLACK: usize = 64;
+use super::{authenticate, error_pack, handle_pack, header_id_seq, pack_error_code, pack_response};
+
+/// Bytes a pack carries besides its header, meta and data: `meta_len`,
+/// `meta_crc`, `data_len`, `data_crc` (4 each, 16 in all), doubled to leave
+/// room for the WebSocket layer's own framing on top.
+const FRAME_SLACK: usize = 2 * 4 * 4;
 
 /// # `GET /_wbf/v1/ws`
 ///
@@ -54,7 +57,8 @@ pub(crate) async fn ws_route(
 
 	// One pack is at most the configured meta and data plus the frame around
 	// them; anything larger is refused by the WebSocket layer before it is
-	// buffered in full.
+	// buffered in full. A pack is one message in one frame, so the frame
+	// limit is the message limit: change one, change both.
 	let max_message = services
 		.config
 		.wbf_meta_max_bytes
@@ -72,12 +76,23 @@ pub(crate) async fn ws_route(
 ///
 /// Messages are handled one at a time in arrival order, which is what keeps
 /// the ordered kinds ordered; a client that wants more in flight sends more
-/// without waiting for acks, and gets the acks back in the same order.
+/// without waiting for acks, and gets the acks back in the same order. A
+/// connection that stays silent for `wbf_ws_idle_timeout` is closed, so an
+/// abandoned socket does not hold its slot forever.
 async fn serve(services: crate::State, user: OwnedUserId, socket: WebSocket) {
+	let idle_timeout = Duration::from_secs(services.config.wbf_ws_idle_timeout);
 	let (mut sink, mut stream) = socket.split();
-	let mut next_chunk: HashMap<u64, u32> = HashMap::new();
 
-	while let Some(message) = stream.next().await {
+	loop {
+		let message = match tokio::time::timeout(idle_timeout, stream.next()).await {
+			| Ok(Some(message)) => message,
+			| Ok(None) => break,
+			| Err(_elapsed) => {
+				debug!(%user, "wbf WebSocket connection idle; closing");
+				break;
+			},
+		};
+
 		let mut bytes = match message {
 			| Ok(Message::Binary(bytes)) => bytes.to_vec(),
 			| Ok(Message::Close(_)) | Err(_) => break,
@@ -93,23 +108,7 @@ async fn serve(services: crate::State, user: OwnedUserId, socket: WebSocket) {
 		};
 
 		let reply = match decode(&mut bytes) {
-			| Ok(view) => {
-				let header = view.header;
-				let is_chunk = header.kind == Kind::Upload && header.subtype == upload::CHUNK;
-				let plainly_out_of_order = is_chunk
-					&& next_chunk
-						.get(&header.id)
-						.is_some_and(|&expected| header.seq > expected);
-
-				if plainly_out_of_order {
-					let expected = next_chunk[&header.id];
-					Reject::from(UploadError::OutOfOrder { expected }).into_pack(header.id, header.seq)
-				} else {
-					let reply = handle_pack(&services, &user, view).await;
-					remember_order(&mut next_chunk, header.kind, header.subtype, header.id, header.seq, &reply);
-					reply
-				}
-			},
+			| Ok(view) => handle_pack(&services, &user, view).await,
 			| Err(error) => {
 				debug!(?error, "Rejected pack on the WebSocket channel");
 				let (id, seq) = match error {
@@ -125,37 +124,6 @@ async fn serve(services: crate::State, user: OwnedUserId, socket: WebSocket) {
 		}
 	}
 
+	let _closed = sink.close().await;
 	debug!(%user, "wbf WebSocket connection closed");
-}
-
-/// Keeps the connection's `id -> next chunk` table in step with what the
-/// handler accepted: an acknowledged chunk advances it, a seal or abort
-/// forgets the id. Anything else leaves it alone; the database is the truth.
-fn remember_order(
-	next_chunk: &mut HashMap<u64, u32>,
-	kind: Kind,
-	subtype: u8,
-	id: u64,
-	seq: u32,
-	reply: &[u8],
-) {
-	if kind != Kind::Upload {
-		return;
-	}
-	let acknowledged = reply.len() > HEADER_LEN
-		&& reply[1] == Kind::Control as u8
-		&& reply[2] == control::ACK;
-	if !acknowledged {
-		return;
-	}
-
-	match subtype {
-		| upload::CHUNK => {
-			next_chunk.insert(id, seq.saturating_add(1));
-		},
-		| upload::SEAL | upload::ABORT => {
-			next_chunk.remove(&id);
-		},
-		| _ => {},
-	}
 }

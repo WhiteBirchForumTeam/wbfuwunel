@@ -21,7 +21,7 @@ client 把檔案切成**明文固定大小**的塊，每塊自己加密，一塊
 | request | 一個 binary message = **一個 pack** | body = **一個 pack**，`Content-Type: application/octet-stream` |
 | response | 一個 binary message = 一個 pack，**依請求到達的順序**送回 | body = 一個 pack；HTTP 一律 200（沒 token 是 401，body 仍是 pack） |
 | 連發 | 可以：送幾個都行、不等回應，回應依序回來（同一個 `id` 的 `Chunk` 自己要送對順序） | 一請求一包 |
-| 限制 | 字串 frame 回 `Error(Corrupt)`；單個 message 超過 `wbf_meta_max_bytes + wbf_data_max_bytes + 外框`（預設約 16.06 MiB）連線被關 | 同樣的 pack 上限 |
+| 限制 | 字串 frame 回 `Error(Corrupt)`；單個 message 超過 `wbf_meta_max_bytes + wbf_data_max_bytes + 外框`（預設約 16.06 MiB）連線被關；沉默超過 `wbf_ws_idle_timeout`（預設 300 秒）server 關連線，上傳進度不受影響，重連後從 `Status` 接 | 同樣的 pack 上限 |
 
 沒有 JSON 外框、沒有 base64、沒有 multipart。多個上傳可以在同一條連線交錯，靠 pack 標頭的 `id` 分流。
 同一個上傳可以一半走 HTTP、一半走 WebSocket：進度在 server 的 DB，不在連線上。
@@ -227,6 +227,7 @@ Read(mxc, pos=p)     → Ack{chunk=i, pos=i×chunk_size, data=ct_i} → 解密�
 | `media_upload_ttl` | 86400 秒 | 最後一塊後多久沒動視為遺棄 |
 | `max_pending_media_uploads` | 5 | 每人同時進行中的上傳數 |
 | `wbf_meta_max_bytes` / `wbf_data_max_bytes` | 64 KiB / 16 MiB + 4 KiB | 單包硬上限 |
+| `wbf_ws_idle_timeout` | 300 秒 | WebSocket 連線沉默多久被關 |
 
 ## 9. 實際 bytes（由 e2e 的組包函式印出）
 
