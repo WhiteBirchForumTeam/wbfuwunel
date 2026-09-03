@@ -3,8 +3,8 @@
 //! `Create` declares the file once: plaintext size, plaintext chunk size,
 //! chunk count, and an encrypted description the server stores opaquely and
 //! hands back to downloaders. Chunks then arrive in order and are appended to
-//! one staging file; the row in `mediaid_upload` says how many have arrived
-//! and how many bytes that is. The seal streams the staging file into the storage
+//! one staging file; a small progress row says how many have arrived and how
+//! many bytes that is. The seal streams the staging file into the storage
 //! provider as a single object and writes the same rows `create()` writes, so
 //! a sealed upload is an ordinary media item to everything else: reads,
 //! thumbnails, deletion, reference counting.
@@ -19,6 +19,15 @@
 //! chunk exactly as it arrived. The server does not know how long a chunk
 //! will be until it sees it, and every chunk may differ, so it records where
 //! each one landed (`mxc_chunk`) and judges nothing about it.
+//!
+//! Uploads in progress are held in memory (`uploads_hot`: the progress plus
+//! the few numbers a chunk is checked against, never the encrypted
+//! description) and serialized per id (`upload_locks`): a chunk is validated
+//! against the in-memory copy, the bytes go to the staging file, then one
+//! transaction writes the chunk's position and the progress row, and only
+//! after it has executed is the in-memory copy advanced. The rows are the
+//! truth after a restart; the memory is the truth while running, and never
+//! runs ahead of the rows.
 
 use std::{
 	io::{self, ErrorKind},
@@ -27,7 +36,7 @@ use std::{
 
 use bytes::Bytes;
 use futures::{StreamExt, stream};
-use ruma::{OwnedMxcUri, UserId};
+use ruma::{OwnedMxcUri, OwnedUserId, UserId};
 use tokio::{fs, io::AsyncReadExt};
 use tuwunel_core::{
 	Err, Result, debug, err, implement, info,
@@ -35,7 +44,7 @@ use tuwunel_core::{
 	warn,
 };
 
-use super::{ChunkSpan, ChunkedMedia, Dim, Upload};
+use super::{ChunkSpan, ChunkedMedia, Dim, Upload, UploadProgress};
 
 /// What a client declares when it starts an upload. The numbers are
 /// plaintext facts the server runs the upload by; `meta` is the client's
@@ -43,11 +52,12 @@ use super::{ChunkSpan, ChunkedMedia, Dim, Upload};
 /// which the server stores as it is and returns to downloaders unread.
 #[derive(Debug)]
 pub struct UploadRequest {
-	/// Plaintext size of the whole file.
+	/// Plaintext size of the whole file; 0 with `chunk_count` 0 is a stream.
 	pub file_size: u64,
 	/// Plaintext chunk size; `None` takes the server default. Fixed once set.
 	pub chunk_size: Option<u32>,
-	/// How many chunks the client will send: `ceil(file_size / chunk_size)`.
+	/// How many chunks the client will send: `ceil(file_size / chunk_size)`,
+	/// or 0 for a stream.
 	pub chunk_count: u32,
 	/// Encrypted file description, opaque to the server.
 	pub meta: Vec<u8>,
@@ -86,6 +96,19 @@ pub struct ChunkStored {
 	pub truncated: bool,
 }
 
+/// An upload in progress as the service keeps it in memory: what a chunk is
+/// checked against and where the upload stands. The declaration's encrypted
+/// description is not here; it is read from its row once, at the seal.
+#[derive(Clone, Debug)]
+pub(super) struct UploadHot {
+	owner: OwnedUserId,
+	mxc: OwnedMxcUri,
+	chunk_size: u32,
+	chunk_count: u32,
+	file_size: u64,
+	progress: UploadProgress,
+}
+
 /// Why an upload operation was refused. Maps onto pack error codes.
 #[derive(Debug)]
 pub enum UploadError {
@@ -117,7 +140,7 @@ impl From<io::Error> for UploadError {
 type UploadResult<T> = std::result::Result<T, UploadError>;
 
 /// Starts an upload: checks the declaration, mints the mxc and the upload
-/// id, writes the row. No file is touched until the first chunk.
+/// id, writes the rows. No file is touched until the first chunk.
 #[implement(super::Service)]
 pub async fn upload_create(&self, user: &UserId, request: UploadRequest) -> UploadResult<UploadCreated> {
 	let config = &self.services.config;
@@ -198,14 +221,18 @@ pub async fn upload_create(&self, user: &UserId, request: UploadRequest) -> Uplo
 		chunk_count: request.chunk_count,
 		file_size: request.file_size,
 		meta: request.meta,
-		total_len: 0,
-		received_count: 0,
-		finished: false,
-		truncated: false,
 		created_at_secs: now_secs,
-		last_chunk_at_secs: now_secs,
 	};
-	self.db.put_upload(upload_id, &upload);
+	let progress = UploadProgress { last_chunk_at_secs: now_secs, ..UploadProgress::default() };
+	self.db.create_upload(upload_id, &upload, &progress);
+	self.remember_upload(upload_id, UploadHot {
+		owner: upload.owner,
+		mxc: upload.mxc,
+		chunk_size,
+		chunk_count: upload.chunk_count,
+		file_size: upload.file_size,
+		progress,
+	});
 
 	Ok(UploadCreated {
 		upload_id,
@@ -237,36 +264,39 @@ pub async fn upload_chunk(
 	is_last: bool,
 ) -> UploadResult<ChunkStored> {
 	let config = &self.services.config;
-	let mut upload = self.owned_upload(user, upload_id).await?;
+	// Chunks of one upload run one at a time: two arriving together would
+	// both pass the checks against the same state and write the same offset.
+	let _one_at_a_time = self.upload_locks.lock(&upload_id).await;
+	let mut hot = self.owned_upload(user, upload_id).await?;
 
-	if index < upload.received_count {
+	if index < hot.progress.received_count {
 		debug!(upload_id, index, "Chunk already received; acknowledging again.");
-		return Ok(stored(&upload));
+		return Ok(stored(&hot));
 	}
-	if index > upload.received_count {
-		return Err(UploadError::OutOfOrder { expected: upload.received_count });
+	if index > hot.progress.received_count {
+		return Err(UploadError::OutOfOrder { expected: hot.progress.received_count });
 	}
-	if upload.finished {
+	if hot.progress.finished {
 		return Err(UploadError::Conflict(format!(
 			"upload finished at chunk {}; nothing may follow",
-			upload.received_count.saturating_sub(1)
+			hot.progress.received_count.saturating_sub(1)
 		)));
 	}
-	let is_stream = upload.chunk_count == 0;
+	let is_stream = hot.chunk_count == 0;
 	let finishes = if is_stream {
 		is_last
 	} else {
-		if index >= upload.chunk_count {
+		if index >= hot.chunk_count {
 			return Err(UploadError::Conflict(format!(
 				"chunk {index} is past the declared last chunk {}",
-				upload.chunk_count.saturating_sub(1)
+				hot.chunk_count.saturating_sub(1)
 			)));
 		}
-		let is_final_index = index.saturating_add(1) == upload.chunk_count;
+		let is_final_index = index.saturating_add(1) == hot.chunk_count;
 		if is_last && !is_final_index {
 			return Err(UploadError::Conflict(format!(
 				"chunk {index} carries IS_LAST but the declared last chunk is {}",
-				upload.chunk_count.saturating_sub(1)
+				hot.chunk_count.saturating_sub(1)
 			)));
 		}
 		is_final_index
@@ -275,7 +305,7 @@ pub async fn upload_chunk(
 	if chunk.is_empty() {
 		return Err(UploadError::Conflict("a chunk carries at least one byte".into()));
 	}
-	let chunk_max_bytes = (upload.chunk_size as usize).saturating_add(config.media_chunk_overhead_max);
+	let chunk_max_bytes = (hot.chunk_size as usize).saturating_add(config.media_chunk_overhead_max);
 	if chunk.len() > chunk_max_bytes {
 		return Err(UploadError::TooLarge(format!(
 			"chunk {index} is {} bytes; this upload's chunks are at most {chunk_max_bytes}",
@@ -283,57 +313,69 @@ pub async fn upload_chunk(
 		)));
 	}
 	let len = u32::try_from(chunk.len()).map_err(|_| UploadError::TooLarge("chunk too large".into()))?;
-	let total_len = upload.total_len.saturating_add(u64::from(len));
+	let total_len = hot.progress.total_len.saturating_add(u64::from(len));
 	let received_count = index.saturating_add(1);
-	if crosses_upload_limit(config.media_upload_max_len, upload.chunk_size, total_len, received_count) {
+	if crosses_upload_limit(config.media_upload_max_len, hot.chunk_size, total_len, received_count) {
 		// The file ends here, short. The row says so, and stays sealable: an
 		// incomplete file marked incomplete beats nothing at all.
-		upload.finished = true;
-		upload.truncated = true;
-		upload.last_chunk_at_secs = now().as_secs();
-		self.db.put_upload(upload_id, &upload);
-		warn!(upload_id, index, total_len = upload.total_len, "Chunked upload hit media_upload_max_len; ended truncated.");
+		hot.progress.finished = true;
+		hot.progress.truncated = true;
+		hot.progress.last_chunk_at_secs = now().as_secs();
+		self.db.put_progress(upload_id, &hot.progress);
+		warn!(
+			upload_id,
+			index,
+			total_len = hot.progress.total_len,
+			"Chunked upload hit media_upload_max_len; ended truncated."
+		);
+		let answer = stored(&hot);
+		self.remember_upload(upload_id, hot);
 
-		return Err(UploadError::Truncated(stored(&upload)));
+		return Err(UploadError::Truncated(answer));
 	}
 
-	// The file and the chunk's span are written before the upload row: if the
-	// server dies between them, the row still says this chunk is missing and
-	// the resend lands on the same offset and overwrites the same span.
+	// The file is written first: if the server dies before the transaction
+	// below, the progress row still says this chunk is missing and the resend
+	// lands on the same offset. The chunk's position and the advanced
+	// progress then go in one transaction, and the in-memory copy follows
+	// only once it executed.
 	let path = self.staging_path(upload_id);
-	write_at(&path, upload.total_len, chunk).await?;
+	write_at(&path, hot.progress.total_len, chunk).await?;
 
-	let mxc_parts = upload.mxc.parts().map_err(|e| UploadError::Conflict(format!("stored mxc is invalid: {e}")))?;
-	self.db.put_chunk_span(&mxc_parts, index, ChunkSpan { offset: upload.total_len, len });
+	let mxc_parts = hot.mxc.parts().map_err(|e| UploadError::Conflict(format!("stored mxc is invalid: {e}")))?;
+	let span = ChunkSpan { offset: hot.progress.total_len, len };
+	hot.progress.total_len = total_len;
+	hot.progress.received_count = received_count;
+	hot.progress.finished = finishes;
+	hot.progress.last_chunk_at_secs = now().as_secs();
+	self.db
+		.put_chunk_and_progress(&mxc_parts, index, span, upload_id, &hot.progress);
 
-	upload.total_len = total_len;
-	upload.received_count = received_count;
-	upload.finished = finishes;
-	upload.last_chunk_at_secs = now().as_secs();
-	self.db.put_upload(upload_id, &upload);
+	let answer = stored(&hot);
+	self.remember_upload(upload_id, hot);
 
-	Ok(stored(&upload))
+	Ok(answer)
 }
 
 /// Reports where an upload stands, so a client can resume from
 /// `received_count`.
 #[implement(super::Service)]
 pub async fn upload_status(&self, user: &UserId, upload_id: u64) -> UploadResult<UploadStatus> {
-	let upload = self.owned_upload(user, upload_id).await?;
+	let hot = self.owned_upload(user, upload_id).await?;
 
 	Ok(UploadStatus {
-		received_count: upload.received_count,
-		chunk_count: upload.chunk_count,
-		total_len: upload.total_len,
-		finished: upload.finished,
-		truncated: upload.truncated,
-		chunk_size: upload.chunk_size,
-		file_size: upload.file_size,
+		received_count: hot.progress.received_count,
+		chunk_count: hot.chunk_count,
+		total_len: hot.progress.total_len,
+		finished: hot.progress.finished,
+		truncated: hot.progress.truncated,
+		chunk_size: hot.chunk_size,
+		file_size: hot.file_size,
 	})
 }
 
 /// Turns a finished upload into media: the staging file becomes one object,
-/// the same rows `create()` writes are written, the upload row goes.
+/// the same rows `create()` writes are written, the upload rows go.
 ///
 /// `new_meta` replaces the encrypted description declared at `Create`: a
 /// stream only knows its size at the end.
@@ -344,36 +386,45 @@ pub async fn upload_seal(
 	upload_id: u64,
 	new_meta: Option<Vec<u8>>,
 ) -> UploadResult<OwnedMxcUri> {
-	let mut upload = self.owned_upload(user, upload_id).await?;
-	if let Some(meta) = new_meta {
-		if meta.len() > self.services.config.wbf_meta_max_bytes {
-			return Err(UploadError::TooLarge("the encrypted description is too large".into()));
-		}
-		upload.meta = meta;
-	}
+	let _one_at_a_time = self.upload_locks.lock(&upload_id).await;
+	let hot = self.owned_upload(user, upload_id).await?;
 
-	if !upload.finished {
-		let message = if upload.chunk_count == 0 {
+	if !hot.progress.finished {
+		let message = if hot.chunk_count == 0 {
 			format!(
 				"stream not ended: {} chunks, {} bytes, no chunk carried IS_LAST yet",
-				upload.received_count, upload.total_len
+				hot.progress.received_count, hot.progress.total_len
 			)
 		} else {
 			format!(
 				"upload not finished: {} of {} chunks, {} bytes",
-				upload.received_count, upload.chunk_count, upload.total_len
+				hot.progress.received_count, hot.chunk_count, hot.progress.total_len
 			)
 		};
 		return Err(UploadError::Conflict(message));
 	}
-	if upload.received_count == 0 {
+	if hot.progress.received_count == 0 {
 		// Reachable only when the very first chunk crossed the size limit:
 		// an empty object is not a file, truncated or not.
 		return Err(UploadError::Conflict("nothing was received; abort this upload instead".into()));
 	}
 
+	// The declaration is read once, here: the description in it is the only
+	// part of the upload the memory does not carry.
+	let declared = self
+		.db
+		.find_upload(upload_id)
+		.await
+		.ok_or(UploadError::NotFound)?;
+	let meta = match new_meta {
+		| Some(meta) if meta.len() > self.services.config.wbf_meta_max_bytes =>
+			return Err(UploadError::TooLarge("the encrypted description is too large".into())),
+		| Some(meta) => meta,
+		| None => declared.meta,
+	};
+
 	let path = self.staging_path(upload_id);
-	let mxc_parts = upload.mxc.parts().map_err(|e| UploadError::Conflict(format!("stored mxc is invalid: {e}")))?;
+	let mxc_parts = hot.mxc.parts().map_err(|e| UploadError::Conflict(format!("stored mxc is invalid: {e}")))?;
 
 	// Same rows as a whole-file upload: metadata, uploader, and the count
 	// opened at zero, so everything downstream sees ordinary media. No name
@@ -382,41 +433,43 @@ pub async fn upload_seal(
 		.db
 		.create_file_metadata(&mxc_parts, Some(user), &Dim::default(), None, None)?;
 
-	self.store_staging_file(&key, &path, upload.total_len).await?;
+	self.store_staging_file(&key, &path, hot.progress.total_len).await?;
 
 	// The shape a downloader needs, and the client's encrypted description,
 	// exactly as declared; where each chunk sits was recorded as it arrived.
 	self.db.put_chunked_media(&mxc_parts, &ChunkedMedia {
-		chunk_size: upload.chunk_size,
-		chunk_count: upload.received_count,
-		file_size: upload.file_size,
-		total_len: upload.total_len,
-		truncated: upload.truncated,
-		meta: upload.meta.clone(),
+		chunk_size: hot.chunk_size,
+		chunk_count: hot.progress.received_count,
+		file_size: hot.file_size,
+		total_len: hot.progress.total_len,
+		truncated: hot.progress.truncated,
+		meta,
 	});
 
 	self.db.del_upload(upload_id);
+	self.forget_upload(upload_id);
 	if let Err(e) = fs::remove_file(&path).await {
 		warn!(?path, ?e, "Sealed upload's staging file could not be removed.");
 	}
 
 	info!(
-		%upload.mxc,
+		%hot.mxc,
 		upload_id,
-		total_len = upload.total_len,
-		chunks = upload.received_count,
-		truncated = upload.truncated,
+		total_len = hot.progress.total_len,
+		chunks = hot.progress.received_count,
+		truncated = hot.progress.truncated,
 		"Sealed chunked upload."
 	);
 
-	Ok(upload.mxc)
+	Ok(hot.mxc)
 }
 
-/// Drops an upload in progress: its staging file and its row.
+/// Drops an upload in progress: its staging file and its rows.
 #[implement(super::Service)]
 pub async fn upload_abort(&self, user: &UserId, upload_id: u64) -> UploadResult<()> {
-	let upload = self.owned_upload(user, upload_id).await?;
-	self.discard_upload(upload_id, &upload).await;
+	let _one_at_a_time = self.upload_locks.lock(&upload_id).await;
+	let hot = self.owned_upload(user, upload_id).await?;
+	self.discard_upload(upload_id, &hot.mxc).await;
 
 	Ok(())
 }
@@ -428,21 +481,30 @@ pub async fn sweep_uploads(&self) {
 	let ttl = self.services.config.media_upload_ttl;
 	let now_secs = now().as_secs();
 
-	let expired: Vec<(u64, Upload)> = self
+	let expired: Vec<u64> = self
 		.db
-		.list_uploads()
-		.filter(|(_, upload)| {
-			futures::future::ready(upload.last_chunk_at_secs.saturating_add(ttl) < now_secs)
+		.list_progress()
+		.filter_map(async |(id, progress)| {
+			(progress.last_chunk_at_secs.saturating_add(ttl) < now_secs).then_some(id)
 		})
 		.collect()
 		.await;
 
-	for (upload_id, upload) in &expired {
+	for upload_id in expired {
+		// Under the upload's lock, so a chunk arriving this instant cannot
+		// re-create the in-memory copy of rows being deleted.
+		let _one_at_a_time = self.upload_locks.lock(&upload_id).await;
+		let Some(declared) = self.db.find_upload(upload_id).await else {
+			// Progress without a declaration: half a row set, sweep it too.
+			self.db.del_upload(upload_id);
+			self.forget_upload(upload_id);
+			continue;
+		};
 		info!(upload_id, "Sweeping abandoned chunked upload.");
-		self.discard_upload(*upload_id, upload).await;
+		self.discard_upload(upload_id, &declared.mxc).await;
 	}
 
-	// Files without a row: the row is the truth, the file is not.
+	// Files without rows: the rows are the truth, the file is not.
 	let dir = self.staging_dir();
 	let Ok(mut entries) = fs::read_dir(&dir).await else {
 		return;
@@ -492,11 +554,56 @@ async fn is_upload_id_free(&self, upload_id: u64, mxc: &OwnedMxcUri) -> bool {
 /// The upload, if it exists and `user` owns it. Both failures answer the
 /// same, so an upload id cannot be probed.
 #[implement(super::Service)]
-async fn owned_upload(&self, user: &UserId, upload_id: u64) -> UploadResult<Upload> {
-	match self.db.find_upload(upload_id).await {
-		| Some(upload) if upload.owner == user => Ok(upload),
+async fn owned_upload(&self, user: &UserId, upload_id: u64) -> UploadResult<UploadHot> {
+	match self.hot_upload(upload_id).await {
+		| Some(hot) if hot.owner == user => Ok(hot),
 		| _ => Err(UploadError::NotFound),
 	}
+}
+
+/// The in-memory copy of an upload, loaded from its rows on first use.
+#[implement(super::Service)]
+async fn hot_upload(&self, upload_id: u64) -> Option<UploadHot> {
+	if let Some(hot) = self
+		.uploads_hot
+		.lock()
+		.expect("uploads_hot lock poisoned")
+		.get(&upload_id)
+	{
+		return Some(hot.clone());
+	}
+
+	let declared = self.db.find_upload(upload_id).await?;
+	let progress = self.db.find_progress(upload_id).await?;
+	let hot = UploadHot {
+		owner: declared.owner,
+		mxc: declared.mxc,
+		chunk_size: declared.chunk_size,
+		chunk_count: declared.chunk_count,
+		file_size: declared.file_size,
+		progress,
+	};
+	self.remember_upload(upload_id, hot.clone());
+
+	Some(hot)
+}
+
+/// Makes the in-memory copy match rows that have just been written.
+#[implement(super::Service)]
+fn remember_upload(&self, upload_id: u64, hot: UploadHot) {
+	self.uploads_hot
+		.lock()
+		.expect("uploads_hot lock poisoned")
+		.insert(upload_id, hot);
+}
+
+/// Drops the in-memory copy of an upload whose rows are gone.
+#[implement(super::Service)]
+fn forget_upload(&self, upload_id: u64) {
+	self.uploads_hot
+		.lock()
+		.expect("uploads_hot lock poisoned")
+		.remove(&upload_id);
 }
 
 #[implement(super::Service)]
@@ -508,11 +615,13 @@ async fn count_uploads_for_user(&self, user: &UserId) -> usize {
 		.await
 }
 
-/// Drops the row, the chunk spans written so far, and the staging file.
+/// Drops the rows, the in-memory copy, the chunk spans written so far, and
+/// the staging file.
 #[implement(super::Service)]
-async fn discard_upload(&self, upload_id: u64, upload: &Upload) {
+async fn discard_upload(&self, upload_id: u64, mxc: &OwnedMxcUri) {
 	self.db.del_upload(upload_id);
-	if let Ok(mxc) = upload.mxc.parts() {
+	self.forget_upload(upload_id);
+	if let Ok(mxc) = mxc.parts() {
 		self.db.delete_chunk_rows(&mxc).await;
 	}
 	match fs::remove_file(self.staging_path(upload_id)).await {
@@ -569,13 +678,13 @@ async fn store_staging_file(&self, key: &[u8], path: &PathBuf, len: u64) -> Resu
 	Ok(())
 }
 
-fn stored(upload: &Upload) -> ChunkStored {
+fn stored(hot: &UploadHot) -> ChunkStored {
 	ChunkStored {
-		received_count: upload.received_count,
-		chunk_count: upload.chunk_count,
-		total_len: upload.total_len,
-		finished: upload.finished,
-		truncated: upload.truncated,
+		received_count: hot.progress.received_count,
+		chunk_count: hot.chunk_count,
+		total_len: hot.progress.total_len,
+		finished: hot.progress.finished,
+		truncated: hot.progress.truncated,
 	}
 }
 

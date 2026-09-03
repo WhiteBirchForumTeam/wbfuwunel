@@ -82,13 +82,16 @@ WebSocket 上是一框一 pack；HTTP 上是 `POST /_wbf/v1/pack` 一次一 pack
 |---|---|---|---|
 | `mxc_chunk` | `(mxc, index)` | `Cbor(ChunkSpan)`：`offset`、`len` | 每一塊落在物件的哪裡、多長，**收到時寫**（記錄，不是檢查）。server 解不了密、看不出塊的分界，下載要把第 i 塊照原樣交回去只能靠這列；一次點讀。跟媒體同壽命，abort／sweep／刪媒體時整個前綴刪 |
 | `mxc_chunked` | mxc 字串 | `Cbor(ChunkedMedia)` | seal 後的分塊媒體長什麼樣：`chunk_size`、`file_size`（都是明文尺寸）、`chunk_count`、`total_len`（線上總長）、`truncated`（§6）、`meta`（client 加密的檔案描述，原樣）。整檔上傳沒有這列。刪媒體時一起刪 |
-| `mediaid_upload` | `upload_id`（u64 BE） | `Cbor(Upload)` | 進行中的上傳：`mxc`、`owner`、`chunk_size`、`chunk_count`、`file_size`、`meta`（加密描述）、`total_len`（目前累計，也就是暫存檔長度與下一塊的偏移）、`received_count`（下一塊的 index）、`finished`（收到 `IS_LAST` 了沒）、`truncated`（server 因上限強制結束，§6）、`created_at`、`last_chunk_at`。沒有檔名、沒有 MIME：server 從來沒被告知這堆 bytes 是什麼。沒有 bitmap：有序序列的「已收」永遠是 0..n 連續，一個數字就夠，每塊一次列更新也因此是常數大小。沒有 `state` 欄：兩個 seal 撞在一起靠冪等收尾（計數的 `Init` 對既有列不動、物件與媒體列覆寫、第二次刪列刪檔容忍不存在），不靠狀態機 |
+| `mediaid_upload` | `upload_id`（u64 BE） | `Cbor(Upload)` | 上傳的**宣告**，`Create` 寫一次之後不動：`mxc`、`owner`、`chunk_size`、`chunk_count`、`file_size`、`meta`（加密描述，最大 64 KiB）、`created_at`。沒有檔名、沒有 MIME：server 從來沒被告知這堆 bytes 是什麼 |
+| `mediaid_upload_progress` | `upload_id`（u64 BE） | `Cbor(UploadProgress)` | 上傳的**進度**，每塊重寫（幾十 byte）：`received_count`（下一塊的 index）、`total_len`（累計，也就是暫存檔長度與下一塊的偏移）、`finished`、`truncated`（§6）、`last_chunk_at`。與 `mxc_chunk` 那一塊的位置同一個 txn。宣告與進度分兩列，是為了每塊不重寫那 64 KiB 的描述。沒有 bitmap：有序序列的「已收」永遠是 0..n 連續。沒有 `state` 欄：兩個 seal 撞在一起靠鎖與冪等收尾 |
 
 鍵是 `upload_id` 而不是 mxc 字串，因為 pack 的標頭帶的是 `id`（u64），server 一個點讀就找到，不用解 meta。
 **`upload_id` 與 mxc 是同一個唯一值的兩種寫法**：server 在 `Create` 時隨機發 64 bit，mxc 的 media id 就是它的 16 位 hex（`mxc://server/1122334455667788`）。沒有對照表；上傳、下載、房間事件用的都是這一個地址。
 它是**隨機值，不是計數器**：不累加、不常駐、不落地，server 跑多久都沒有用完或溢位的問題。唯一的風險是撞號（一百萬個媒體下每次約 5×10⁻¹⁴），而撞到會蓋掉別人的媒體，所以 `Create` 發號前多兩次點讀：進行中的上傳、既有媒體、壓碑，任一個有就重抽（fail closed，成本可忽略）。
 
 TTL 設 `media_upload_ttl × 2` 當兜底，真正的清理是 §6 的 sweeper。**sealed 之後這列刪掉**。
+
+**中間層（維護者 2026-09-04 定）**：進行中的上傳同時放在 service 記憶體（`uploads_hot: HashMap<upload_id, UploadHot>`，**只有進度與驗塊要用的幾個數字**：owner、mxc、塊大小、塊數、明文總長、`UploadProgress`；加密描述不在記憶體，seal 時才從宣告列讀一次），每塊不再讀 DB；每個上傳一把鎖（`upload_locks`），同一 id 的 Chunk／Seal／Abort／sweep 序列化，兩塊同時到不會都通過檢查寫同一個 offset。寫入順序固定：`pwrite` 暫存檔 → **一個 txn** 同時寫 `mxc_chunk` 與 `mediaid_upload_progress` → txn 執行完才推進記憶體。DB 寫失敗在這個引擎是 fatal（程序結束，記憶體跟著消失），所以記憶體永遠不會跑在列前面；重啟後記憶體是空的，第一次碰到的 id 從列載回。記憶體是跨連線共用的（HTTP 與 WS 看同一份），不是每連線一份 —— 每連線那版在 review 被否決，因為它會與列脫節。
 
 ### 3.2 既有表：seal 時寫，跟現在一樣
 
