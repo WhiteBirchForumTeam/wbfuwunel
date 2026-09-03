@@ -71,7 +71,13 @@ pub(crate) async fn pack_route(
 		| Ok(view) => handle_pack(&services, &user, view).await,
 		| Err(error) => {
 			debug!(?error, "Rejected pack");
-			error_pack(Kind::Control, 0, 0, pack_error_code(error), &error.to_string())
+			// Only a data CRC failure leaves the header trustworthy (the meta
+			// CRC covers it), so only then can the error answer the request.
+			let (id, seq) = match error {
+				| PackError::DataCrc { .. } => header_id_seq(&body),
+				| _ => (0, 0),
+			};
+			error_pack(Kind::Control, id, seq, pack_error_code(error), &error.to_string())
 		},
 	};
 
@@ -337,6 +343,18 @@ fn error_pack(_for_kind: Kind, id: u64, seq: u32, code: &str, message: &str) -> 
 		.json_meta(&json!({ "code": code, "message": message }))
 		.map(PackBuilder::finish)
 		.unwrap_or_else(|_| PackBuilder::new(Kind::Control, control::ERROR, Flags::IS_RESPONSE, id, seq).finish())
+}
+
+/// The `id` and `seq` of a pack whose header has been checksummed but whose
+/// data has not: fixed offsets, nothing else read.
+fn header_id_seq(bytes: &[u8]) -> (u64, u32) {
+	if bytes.len() < 16 {
+		return (0, 0);
+	}
+	let id = u64::from_be_bytes(bytes[4..12].try_into().expect("8 bytes"));
+	let seq = u32::from_be_bytes(bytes[12..16].try_into().expect("4 bytes"));
+
+	(id, seq)
 }
 
 fn pack_error_code(error: PackError) -> &'static str {
