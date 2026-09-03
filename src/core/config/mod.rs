@@ -3543,11 +3543,14 @@ pub struct Config {
 	#[serde(default = "default_media_upload_ttl")]
 	pub media_upload_ttl: u64,
 
-	/// Largest total size a chunked upload may declare, in bytes. Zero means
-	/// no limit.
+	/// Largest chunked upload, in wire bytes. It also bounds the number of
+	/// chunks: at most this divided by the upload's chunk size, rounded up.
+	/// A chunk that would cross either bound is refused and the upload is
+	/// ended there, marked truncated; it can still be sealed and is served
+	/// with that mark. Zero means no limit.
 	///
-	/// default: 0
-	#[serde(default)]
+	/// default: 10737418240
+	#[serde(default = "default_media_upload_max_len")]
 	pub media_upload_max_len: u64,
 
 	/// How many bytes a chunked download read returns when the client does
@@ -5786,6 +5789,8 @@ fn default_media_chunk_size_max() -> usize { 16 * 1024 * 1024 }
 fn default_media_chunk_overhead_max() -> usize { 4096 }
 
 fn default_media_upload_ttl() -> u64 { 86400 }
+
+fn default_media_upload_max_len() -> u64 { 10 * 1024 * 1024 * 1024 }
 
 fn default_media_download_default_len() -> usize { 1024 * 1024 }
 

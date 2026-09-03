@@ -1,9 +1,10 @@
 //! Chunked upload: chunks are the transfer unit, not the storage unit.
 //!
-//! Chunks arrive in order and are appended to one staging file; the row in
-//! `mediaid_upload` says how many have arrived and how many bytes that is.
-//! The client marks the last chunk (`IS_LAST`), which is the only way the
-//! server learns the size. The seal streams the staging file into the storage
+//! `Create` declares the file once: plaintext size, plaintext chunk size,
+//! chunk count, and an encrypted description the server stores opaquely and
+//! hands back to downloaders. Chunks then arrive in order and are appended to
+//! one staging file; the row in `mediaid_upload` says how many have arrived
+//! and how many bytes that is. The seal streams the staging file into the storage
 //! provider as a single object and writes the same rows `create()` writes, so
 //! a sealed upload is an ordinary media item to everything else: reads,
 //! thumbnails, deletion, reference counting.
@@ -26,10 +27,7 @@ use std::{
 
 use bytes::Bytes;
 use futures::{StreamExt, stream};
-use ruma::{
-	OwnedMxcUri, UserId,
-	http_headers::{ContentDisposition, ContentDispositionType},
-};
+use ruma::{OwnedMxcUri, UserId};
 use tokio::{fs, io::AsyncReadExt};
 use tuwunel_core::{
 	Err, Result, debug, err, implement, info,
@@ -37,15 +35,22 @@ use tuwunel_core::{
 	warn,
 };
 
-use super::{ChunkSpan, ChunkedMedia, Dim, MXC_LENGTH, Upload};
+use super::{ChunkSpan, ChunkedMedia, Dim, Upload};
 
-/// What a client asks for when it starts an upload.
+/// What a client declares when it starts an upload. The numbers are
+/// plaintext facts the server runs the upload by; `meta` is the client's
+/// encrypted description of the file (name, type, keys, whatever it likes),
+/// which the server stores as it is and returns to downloaders unread.
 #[derive(Debug)]
 pub struct UploadRequest {
+	/// Plaintext size of the whole file.
+	pub file_size: u64,
 	/// Plaintext chunk size; `None` takes the server default. Fixed once set.
 	pub chunk_size: Option<u32>,
-	pub content_type: Option<String>,
-	pub filename: Option<String>,
+	/// How many chunks the client will send: `ceil(file_size / chunk_size)`.
+	pub chunk_count: u32,
+	/// Encrypted file description, opaque to the server.
+	pub meta: Vec<u8>,
 }
 
 /// What the client gets back from `Create`.
@@ -63,17 +68,22 @@ pub struct UploadCreated {
 #[derive(Clone, Copy, Debug)]
 pub struct UploadStatus {
 	pub received_count: u32,
+	pub chunk_count: u32,
 	pub total_len: u64,
 	pub finished: bool,
+	pub truncated: bool,
 	pub chunk_size: u32,
+	pub file_size: u64,
 }
 
 /// What a stored chunk changed: how many are in and how many bytes.
 #[derive(Clone, Copy, Debug)]
 pub struct ChunkStored {
 	pub received_count: u32,
+	pub chunk_count: u32,
 	pub total_len: u64,
 	pub finished: bool,
+	pub truncated: bool,
 }
 
 /// Why an upload operation was refused. Maps onto pack error codes.
@@ -88,6 +98,10 @@ pub enum UploadError {
 	OutOfOrder { expected: u32 },
 	/// A limit was exceeded.
 	TooLarge(String),
+	/// The chunk would have crossed `media_upload_max_len`, so the upload was
+	/// ended without it: what is in stays, marked truncated, and may be
+	/// sealed as an incomplete file.
+	Truncated(ChunkStored),
 	/// Something on the server failed.
 	Internal(tuwunel_core::Error),
 }
@@ -102,11 +116,25 @@ impl From<io::Error> for UploadError {
 
 type UploadResult<T> = std::result::Result<T, UploadError>;
 
-/// Starts an upload: checks the chunk size, mints the mxc and the upload id,
-/// writes the row. No file is touched until the first chunk.
+/// Starts an upload: checks the declaration, mints the mxc and the upload
+/// id, writes the row. No file is touched until the first chunk.
 #[implement(super::Service)]
 pub async fn upload_create(&self, user: &UserId, request: UploadRequest) -> UploadResult<UploadCreated> {
 	let config = &self.services.config;
+
+	if request.file_size == 0 {
+		return Err(UploadError::Conflict("file_size must be positive".into()));
+	}
+	if config.media_upload_max_len > 0 && request.file_size > config.media_upload_max_len {
+		return Err(UploadError::TooLarge("file_size exceeds media_upload_max_len".into()));
+	}
+	if request.meta.len() > config.wbf_meta_max_bytes {
+		return Err(UploadError::TooLarge(format!(
+			"the encrypted description is {} bytes; at most {} are kept",
+			request.meta.len(),
+			config.wbf_meta_max_bytes
+		)));
+	}
 
 	let chunk_size = request
 		.chunk_size
@@ -125,6 +153,17 @@ pub async fn upload_create(&self, user: &UserId, request: UploadRequest) -> Uplo
 	let chunk_max_bytes =
 		u32::try_from(chunk_max_bytes).map_err(|_| UploadError::Conflict("chunk_size too large".into()))?;
 
+	// Plaintext arithmetic the server is entitled to: the declared count must
+	// be what the declared sizes give, or the client's picture of its own file
+	// is wrong before a byte is sent.
+	let expected_count = request.file_size.div_ceil(u64::from(chunk_size));
+	if u64::from(request.chunk_count) != expected_count {
+		return Err(UploadError::Conflict(format!(
+			"chunk_count {} does not match file_size {} in chunks of {chunk_size}: expected {expected_count}",
+			request.chunk_count, request.file_size
+		)));
+	}
+
 	// One quota with pending uploads: both are media promised but not yet
 	// delivered.
 	let (pending, _) = self.db.count_pending_mxc_for_user(user).await;
@@ -133,20 +172,33 @@ pub async fn upload_create(&self, user: &UserId, request: UploadRequest) -> Uplo
 		return Err(UploadError::TooLarge("maximum number of pending media uploads reached".into()));
 	}
 
-	let media_id = utils::random_string(MXC_LENGTH);
-	let mxc: OwnedMxcUri = format!("mxc://{}/{media_id}", self.services.globals.server_name()).into();
-	let upload_id = mint_upload_id();
+	// One unique value, two spellings: the 64-bit id goes in pack headers,
+	// its hex is the mxc's media id. No table maps one to the other.
+	//
+	// 64 random bits make a collision negligible, but a collision would
+	// overwrite someone's media, so the id is checked against uploads in
+	// progress, existing media and tombstones before it is handed out.
+	let (upload_id, mxc) = loop {
+		let upload_id = mint_upload_id();
+		let mxc: OwnedMxcUri = format!("mxc://{}/{upload_id:016x}", self.services.globals.server_name()).into();
+		if self.is_upload_id_free(upload_id, &mxc).await {
+			break (upload_id, mxc);
+		}
+		warn!(upload_id, "Minted an upload id already in use; minting another.");
+	};
 	let now_secs = now().as_secs();
 
 	let upload = Upload {
 		mxc: mxc.clone(),
 		owner: user.to_owned(),
 		chunk_size,
+		chunk_count: request.chunk_count,
+		file_size: request.file_size,
+		meta: request.meta,
 		total_len: 0,
 		received_count: 0,
 		finished: false,
-		content_type: request.content_type,
-		filename: request.filename,
+		truncated: false,
 		created_at_secs: now_secs,
 		last_chunk_at_secs: now_secs,
 	};
@@ -161,8 +213,9 @@ pub async fn upload_create(&self, user: &UserId, request: UploadRequest) -> Uplo
 	})
 }
 
-/// Appends chunk `index` of upload `upload_id`; `is_last` marks the end of
-/// the upload.
+/// Appends chunk `index` of upload `upload_id`. The upload is finished when
+/// chunk `chunk_count - 1` is in; `is_last` (the `IS_LAST` flag) may mark
+/// that chunk and must not mark any other.
 ///
 /// Chunks are ordered: `index` must be `received_count`. A lower index was
 /// already received and is acknowledged again without rewriting (a lost
@@ -195,6 +248,19 @@ pub async fn upload_chunk(
 			upload.received_count.saturating_sub(1)
 		)));
 	}
+	if index >= upload.chunk_count {
+		return Err(UploadError::Conflict(format!(
+			"chunk {index} is past the declared last chunk {}",
+			upload.chunk_count.saturating_sub(1)
+		)));
+	}
+	let is_final_index = index.saturating_add(1) == upload.chunk_count;
+	if is_last && !is_final_index {
+		return Err(UploadError::Conflict(format!(
+			"chunk {index} carries IS_LAST but the declared last chunk is {}",
+			upload.chunk_count.saturating_sub(1)
+		)));
+	}
 
 	if chunk.is_empty() {
 		return Err(UploadError::Conflict("a chunk carries at least one byte".into()));
@@ -208,8 +274,17 @@ pub async fn upload_chunk(
 	}
 	let len = u32::try_from(chunk.len()).map_err(|_| UploadError::TooLarge("chunk too large".into()))?;
 	let total_len = upload.total_len.saturating_add(u64::from(len));
-	if config.media_upload_max_len > 0 && total_len > config.media_upload_max_len {
-		return Err(UploadError::TooLarge("upload exceeds media_upload_max_len".into()));
+	let received_count = index.saturating_add(1);
+	if crosses_upload_limit(config.media_upload_max_len, upload.chunk_size, total_len, received_count) {
+		// The file ends here, short. The row says so, and stays sealable: an
+		// incomplete file marked incomplete beats nothing at all.
+		upload.finished = true;
+		upload.truncated = true;
+		upload.last_chunk_at_secs = now().as_secs();
+		self.db.put_upload(upload_id, &upload);
+		warn!(upload_id, index, total_len = upload.total_len, "Chunked upload hit media_upload_max_len; ended truncated.");
+
+		return Err(UploadError::Truncated(stored(&upload)));
 	}
 
 	// The file and the chunk's span are written before the upload row: if the
@@ -222,8 +297,8 @@ pub async fn upload_chunk(
 	self.db.put_chunk_span(&mxc_parts, index, ChunkSpan { offset: upload.total_len, len });
 
 	upload.total_len = total_len;
-	upload.received_count = index.saturating_add(1);
-	upload.finished = is_last;
+	upload.received_count = received_count;
+	upload.finished = is_final_index;
 	upload.last_chunk_at_secs = now().as_secs();
 	self.db.put_upload(upload_id, &upload);
 
@@ -238,9 +313,12 @@ pub async fn upload_status(&self, user: &UserId, upload_id: u64) -> UploadResult
 
 	Ok(UploadStatus {
 		received_count: upload.received_count,
+		chunk_count: upload.chunk_count,
 		total_len: upload.total_len,
 		finished: upload.finished,
+		truncated: upload.truncated,
 		chunk_size: upload.chunk_size,
+		file_size: upload.file_size,
 	})
 }
 
@@ -252,35 +330,32 @@ pub async fn upload_seal(&self, user: &UserId, upload_id: u64) -> UploadResult<O
 
 	if !upload.finished {
 		return Err(UploadError::Conflict(format!(
-			"upload not finished: {} chunks, {} bytes, last chunk not yet sent",
-			upload.received_count, upload.total_len
+			"upload not finished: {} of {} chunks, {} bytes",
+			upload.received_count, upload.chunk_count, upload.total_len
 		)));
 	}
 
 	let path = self.staging_path(upload_id);
 	let mxc_parts = upload.mxc.parts().map_err(|e| UploadError::Conflict(format!("stored mxc is invalid: {e}")))?;
-	let content_disposition = upload.filename.as_deref().map(|filename| {
-		ContentDisposition::new(ContentDispositionType::Attachment).with_filename(Some(filename.to_owned()))
-	});
 
 	// Same rows as a whole-file upload: metadata, uploader, and the count
-	// opened at zero, so everything downstream sees ordinary media.
-	let key = self.db.create_file_metadata(
-		&mxc_parts,
-		Some(user),
-		&Dim::default(),
-		content_disposition.as_ref(),
-		upload.content_type.as_deref(),
-	)?;
+	// opened at zero, so everything downstream sees ordinary media. No name
+	// and no type: the server was never told what the bytes are.
+	let key = self
+		.db
+		.create_file_metadata(&mxc_parts, Some(user), &Dim::default(), None, None)?;
 
 	self.store_staging_file(&key, &path, upload.total_len).await?;
 
-	// The shape a downloader needs; where each chunk sits was recorded as it
-	// arrived.
-	self.db.put_chunked_media(&mxc_parts, ChunkedMedia {
+	// The shape a downloader needs, and the client's encrypted description,
+	// exactly as declared; where each chunk sits was recorded as it arrived.
+	self.db.put_chunked_media(&mxc_parts, &ChunkedMedia {
 		chunk_size: upload.chunk_size,
 		chunk_count: upload.received_count,
+		file_size: upload.file_size,
 		total_len: upload.total_len,
+		truncated: upload.truncated,
+		meta: upload.meta.clone(),
 	});
 
 	self.db.del_upload(upload_id);
@@ -288,7 +363,14 @@ pub async fn upload_seal(&self, user: &UserId, upload_id: u64) -> UploadResult<O
 		warn!(?path, ?e, "Sealed upload's staging file could not be removed.");
 	}
 
-	info!(%upload.mxc, upload_id, total_len = upload.total_len, chunks = upload.received_count, "Sealed chunked upload.");
+	info!(
+		%upload.mxc,
+		upload_id,
+		total_len = upload.total_len,
+		chunks = upload.received_count,
+		truncated = upload.truncated,
+		"Sealed chunked upload."
+	);
 
 	Ok(upload.mxc)
 }
@@ -338,6 +420,26 @@ pub async fn sweep_uploads(&self) {
 			_ = fs::remove_file(entry.path()).await;
 		}
 	}
+}
+
+/// Whether nothing is known under `upload_id` or its `mxc`: no upload in
+/// progress, no media, no tombstone. Anything unreadable counts as taken.
+#[implement(super::Service)]
+async fn is_upload_id_free(&self, upload_id: u64, mxc: &OwnedMxcUri) -> bool {
+	if self.db.find_upload(upload_id).await.is_some() {
+		return false;
+	}
+	let Ok(mxc) = mxc.parts() else {
+		return false;
+	};
+	if self.db.find_tombstone(&mxc).await.is_some() {
+		return false;
+	}
+
+	self.db
+		.search_file_metadata(&mxc, &Dim::default())
+		.await
+		.is_err()
 }
 
 /// The upload, if it exists and `user` owns it. Both failures answer the
@@ -423,14 +525,28 @@ async fn store_staging_file(&self, key: &[u8], path: &PathBuf, len: u64) -> Resu
 fn stored(upload: &Upload) -> ChunkStored {
 	ChunkStored {
 		received_count: upload.received_count,
+		chunk_count: upload.chunk_count,
 		total_len: upload.total_len,
 		finished: upload.finished,
+		truncated: upload.truncated,
 	}
 }
 
-/// A fresh upload id: random and non-zero. Zero means "no id" on the wire.
-/// Collisions are not checked: 64 random bits make one negligible, and its
-/// cost would be one owner's in-progress row.
+/// Whether an upload that would then hold `total_len` bytes in
+/// `received_count` chunks is over `max_len`. The chunk budget follows from
+/// the byte budget and the declared chunk size: a 10 GiB limit with 1 MiB
+/// chunks is 10240 chunks, however short the chunks actually are.
+fn crosses_upload_limit(max_len: u64, chunk_size: u32, total_len: u64, received_count: u32) -> bool {
+	if max_len == 0 {
+		return false;
+	}
+	let max_chunks = max_len.div_ceil(u64::from(chunk_size.max(1)));
+
+	total_len > max_len || u64::from(received_count) > max_chunks
+}
+
+/// A random, non-zero upload id. Zero means "no id" on the wire. Whether it
+/// is free is `is_upload_id_free`'s business.
 fn mint_upload_id() -> u64 {
 	loop {
 		let hex = utils::rand::string_from(b"0123456789abcdef", 16);
@@ -484,4 +600,31 @@ fn positioned_write(file: &std::fs::File, offset: u64, bytes: &[u8]) -> io::Resu
 	}
 
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::crosses_upload_limit;
+
+	#[test]
+	fn the_byte_limit_ends_an_upload() {
+		assert!(!crosses_upload_limit(100_000, 65536, 100_000, 2), "exactly at the limit is in");
+		assert!(crosses_upload_limit(100_000, 65536, 100_001, 2));
+	}
+
+	#[test]
+	fn the_chunk_budget_follows_from_the_byte_limit() {
+		// 40 000 bytes at 16 KiB chunks: three chunks at most, however short.
+		assert!(!crosses_upload_limit(40_000, 16384, 3, 3));
+		assert!(crosses_upload_limit(40_000, 16384, 4, 4), "a fourth 1-byte chunk is over budget");
+		// 10 GiB at 1 MiB: 10240 chunks.
+		let ten_gib = 10 * 1024 * 1024 * 1024;
+		assert!(!crosses_upload_limit(ten_gib, 1024 * 1024, ten_gib, 10240));
+		assert!(crosses_upload_limit(ten_gib, 1024 * 1024, ten_gib, 10241));
+	}
+
+	#[test]
+	fn zero_means_no_limit() {
+		assert!(!crosses_upload_limit(0, 4096, u64::MAX, u32::MAX));
+	}
 }

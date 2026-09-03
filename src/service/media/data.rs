@@ -48,6 +48,13 @@ pub struct Upload {
 	/// one's length as it arrived and caps it at `chunk_size` plus
 	/// `media_chunk_overhead_max`.
 	pub chunk_size: u32,
+	/// How many chunks the client declared it will send.
+	pub chunk_count: u32,
+	/// Plaintext size of the whole file, as declared.
+	pub file_size: u64,
+	/// The client's encrypted description of the file, stored as it came.
+	#[serde(with = "serde_bytes")]
+	pub meta: Vec<u8>,
 	/// Bytes received so far: the staging file's length and the next chunk's
 	/// offset.
 	pub total_len: u64,
@@ -55,8 +62,9 @@ pub struct Upload {
 	pub received_count: u32,
 	/// Whether the last chunk has arrived. Only a finished upload seals.
 	pub finished: bool,
-	pub content_type: Option<String>,
-	pub filename: Option<String>,
+	/// Whether the server ended the upload itself because the next chunk
+	/// would have crossed `media_upload_max_len`: finished, but not whole.
+	pub truncated: bool,
 	pub created_at_secs: u64,
 	pub last_chunk_at_secs: u64,
 }
@@ -73,14 +81,22 @@ pub struct ChunkSpan {
 }
 
 /// The shape of sealed chunked media: what the server knows, which is the
-/// plaintext chunk size the uploader declared, how many chunks came, and
-/// how many wire bytes they add up to. Plaintext position `p` lives in
-/// chunk `p / chunk_size`; the last chunk's plaintext may be shorter.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+/// plaintext sizes the uploader declared, how many chunks came, how many
+/// wire bytes they add up to, and the uploader's encrypted description of
+/// the file. Plaintext position `p` lives in chunk `p / chunk_size`; the
+/// last chunk's plaintext may be shorter.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ChunkedMedia {
 	pub chunk_size: u32,
 	pub chunk_count: u32,
+	pub file_size: u64,
 	pub total_len: u64,
+	/// Encrypted by the uploader; handed back by `Info`, never read here.
+	#[serde(with = "serde_bytes")]
+	pub meta: Vec<u8>,
+	/// The upload was cut off at the size limit; what is stored is the
+	/// beginning of the file, not all of it.
+	pub truncated: bool,
 }
 
 /// Why media was removed. Stored in the tombstone so an operator reading it
@@ -215,7 +231,7 @@ impl Data {
 	}
 
 	/// Records that `mxc` is chunked media with this shape.
-	pub(super) fn put_chunked_media(&self, mxc: &Mxc<'_>, chunked: ChunkedMedia) {
+	pub(super) fn put_chunked_media(&self, mxc: &Mxc<'_>, chunked: &ChunkedMedia) {
 		self.mxc_chunked.put(mxc.to_string(), Cbor(chunked));
 	}
 

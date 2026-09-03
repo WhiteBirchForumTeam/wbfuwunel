@@ -18,7 +18,7 @@ use ruma::{
 use serde_json::{Value, json};
 use tuwunel_core::{
 	Error, Result, debug, err,
-	wbf::{Flags, Kind, PackBuilder, PackError, PackView, decode},
+	wbf::{EncryptedFileInfo, Flags, Kind, PackBuilder, PackError, PackView, decode},
 };
 use tuwunel_service::{
 	Services,
@@ -175,6 +175,19 @@ impl From<UploadError> for Reject {
 			| UploadError::NotFound => Self::code("NotFound", "no such upload"),
 			| UploadError::Conflict(message) => Self::code("Conflict", message),
 			| UploadError::TooLarge(message) => Self::code("TooLarge", message),
+			| UploadError::Truncated(stored) => Self {
+				code: "Truncated",
+				message: format!(
+					"upload hit the size limit after {} chunks, {} bytes; it is finished as incomplete and may be sealed",
+					stored.received_count, stored.total_len
+				),
+				extra: json!({
+					"received": stored.received_count,
+					"total_len": stored.total_len,
+					"finished": stored.finished,
+					"truncated": stored.truncated,
+				}),
+			},
 			| UploadError::OutOfOrder { expected } => Self {
 				code: "OutOfOrder",
 				message: format!("expected chunk {expected}"),
@@ -203,14 +216,15 @@ impl From<PackError> for Reject {
 }
 
 async fn handle_upload_create(services: &Services, user: &UserId, view: &PackView<'_>) -> std::result::Result<Vec<u8>, Reject> {
-	let meta = view.meta_json()?;
+	// meta is the 16-byte EncryptedFileInfo, not JSON: plaintext facts only.
+	let info = EncryptedFileInfo::decode(view.meta).map_err(|e| Reject::code("Conflict", e.to_string()))?;
 	let request = UploadRequest {
-		chunk_size: meta["chunk_size"]
-			.as_u64()
-			.map(|size| u32::try_from(size).map_err(|_| Reject::code("Conflict", "chunk_size too large")))
-			.transpose()?,
-		content_type: meta["content_type"].as_str().map(ToOwned::to_owned),
-		filename: meta["filename"].as_str().map(ToOwned::to_owned),
+		file_size: info.file_size,
+		chunk_size: (info.chunk_size != 0).then_some(info.chunk_size),
+		chunk_count: info.chunk_count,
+		// The client's encrypted description of the file: stored and returned
+		// as it is, never read.
+		meta: view.data.to_vec(),
 	};
 
 	let created = services.media.upload_create(user, request).await?;
@@ -240,8 +254,10 @@ async fn handle_upload_chunk(services: &Services, user: &UserId, view: &PackView
 		view.header.seq,
 		json!({
 			"received": stored.received_count,
+			"chunk_count": stored.chunk_count,
 			"total_len": stored.total_len,
 			"finished": stored.finished,
+			"truncated": stored.truncated,
 		}),
 		Vec::new(),
 	))
@@ -255,9 +271,12 @@ async fn handle_upload_status(services: &Services, user: &UserId, view: &PackVie
 		view.header.seq,
 		json!({
 			"received": status.received_count,
+			"chunk_count": status.chunk_count,
 			"total_len": status.total_len,
 			"finished": status.finished,
+			"truncated": status.truncated,
 			"chunk_size": status.chunk_size,
+			"file_size": status.file_size,
 		}),
 		Vec::new(),
 	))
@@ -289,12 +308,15 @@ async fn handle_download_info(services: &Services, view: &PackView<'_>) -> std::
 		json!({
 			"total_len": info.total_len,
 			"content_type": info.content_type,
-			"chunk_size": info.chunked.map(|chunked| chunked.chunk_size),
-			"chunk_count": info.chunked.map(|chunked| chunked.chunk_count),
+			"file_size": info.chunked.as_ref().map(|chunked| chunked.file_size),
+			"chunk_size": info.chunked.as_ref().map(|chunked| chunked.chunk_size),
+			"chunk_count": info.chunked.as_ref().map(|chunked| chunked.chunk_count),
+			"truncated": info.chunked.as_ref().map(|chunked| chunked.truncated),
 			"read_len": services.config.media_download_default_len,
 			"chunk_size_large": services.config.media_chunk_size_large,
 		}),
-		Vec::new(),
+		// The uploader's encrypted description, exactly as it was declared.
+		info.chunked.map(|chunked| chunked.meta).unwrap_or_default(),
 	))
 }
 
@@ -321,7 +343,7 @@ async fn handle_download_read(services: &Services, view: &PackView<'_>) -> std::
 			view.header.seq,
 			json!({
 				"chunk": read.index,
-				"pos": read.pos,
+				"pos": read.plain_pos,
 				"len": read.bytes.len(),
 				"chunk_size": read.chunk_size,
 				"chunk_count": read.chunk_count,

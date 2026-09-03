@@ -3089,10 +3089,13 @@
 #
 #media_upload_ttl = 86400
 
-# Largest total size a chunked upload may declare, in bytes. Zero means
-# no limit.
+# Largest chunked upload, in wire bytes. It also bounds the number of
+# chunks: at most this divided by the upload's chunk size, rounded up.
+# A chunk that would cross either bound is refused and the upload is
+# ended there, marked truncated; it can still be sealed and is served
+# with that mark. Zero means no limit.
 #
-#media_upload_max_len = 0
+#media_upload_max_len = 10737418240
 
 # How many bytes a chunked download read returns when the client does
 # not say.

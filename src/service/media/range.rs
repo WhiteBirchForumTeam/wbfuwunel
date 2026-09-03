@@ -24,7 +24,10 @@ pub struct MediaInfo {
 #[derive(Debug)]
 pub struct ChunkRead {
 	pub index: u32,
-	pub pos: u64,
+	/// Plaintext position this chunk starts at (`index * chunk_size`): the
+	/// only coordinate a client thinks in. Where the ciphertext sits in the
+	/// object is the server's business.
+	pub plain_pos: u64,
 	pub bytes: Bytes,
 	/// Plaintext chunk size; plaintext position `p` is in chunk
 	/// `p / chunk_size`.
@@ -114,7 +117,7 @@ pub async fn read_chunk(&self, mxc: &Mxc<'_>, index: u32) -> Result<ChunkRead> {
 
 	Ok(ChunkRead {
 		index,
-		pos,
+		plain_pos: u64::from(index) * u64::from(chunked.chunk_size),
 		bytes,
 		chunk_size: chunked.chunk_size,
 		chunk_count: chunked.chunk_count,
