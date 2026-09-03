@@ -327,6 +327,31 @@ pub async fn load(&self, path: &str) -> Result<GetResult> {
 		.await
 }
 
+/// Reads `range` of the object at `path`, and nothing outside it.
+///
+/// Every backend `object_store` wraps supports this natively: a local file is
+/// one positioned read, an object store is one ranged GET. This is what makes
+/// a seek into a large media object cost only the bytes sought.
+#[implement(Provider)]
+#[tracing::instrument(
+	level = "debug",
+	err(level = "debug"),
+	skip_all,
+	fields(
+		provider = %self.name,
+		?path,
+		?range,
+	)
+)]
+pub async fn get_range(&self, path: &str, range: Range<u64>) -> Result<Bytes> {
+	let path = self.to_abs_path(path)?;
+
+	self.provider
+		.get_range(&path, range)
+		.map_err(Error::from)
+		.await
+}
+
 /// Presign a time-limited GET URL for an object, when this provider supports
 /// signing (S3).
 #[implement(Provider)]

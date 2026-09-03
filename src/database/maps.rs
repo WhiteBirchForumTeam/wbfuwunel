@@ -253,6 +253,35 @@ pub(super) static MAPS: &[Descriptor] = &[
 		..descriptor::RANDOM_SMALL
 	},
 	Descriptor {
+		name: "mediaid_upload",
+		// Chunked uploads in progress: upload id (u64) -> Cbor(Upload). The
+		// TTL is a backstop twice the abandonment window; the sweeper is
+		// what actually cleans up, and the row goes when the upload seals.
+		ttl: 60 * 60 * 24 * 2,
+		key_size_hint: Some(8),
+		..descriptor::RANDOM_SMALL
+	},
+	Descriptor {
+		name: "mxc_chunk",
+		// Where each chunk of chunked media sits: (mxc, index) ->
+		// Cbor(ChunkSpan). The server records each chunk's wire length as it
+		// arrived (it never judges it), so a download can hand chunk i back
+		// exactly as uploaded. Kept for the life of the media.
+		key_size_hint: Some(64),
+		val_size_hint: Some(16),
+		..descriptor::RANDOM_SMALL
+	},
+	Descriptor {
+		name: "mxc_chunked",
+		// Sealed chunked media: mxc -> Cbor(ChunkedMedia): plaintext chunk
+		// size, chunk count, total wire length and the uploader's encrypted
+		// description (up to wbf_meta_max_bytes). Absent for whole-file
+		// uploads.
+		key_size_hint: Some(64),
+		val_size_hint: Some(1024),
+		..descriptor::RANDOM_SMALL
+	},
+	Descriptor {
 		name: "oauthid_session",
 		..descriptor::RANDOM_SMALL
 	},

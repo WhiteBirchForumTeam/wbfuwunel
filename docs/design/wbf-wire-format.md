@@ -30,6 +30,7 @@ offset  size  欄位          說明
 3       1     flags         bit0 META_ENCRYPTED：meta 是密文，別當 JSON 讀
                             bit1 WANT_ACK：發送者要求對這個 pack 回 Ack
                             bit2 IS_RESPONSE：這是對 (id, seq) 那個請求的回應
+                            bit3 IS_LAST：這個有序序列的最後一個（上傳的最後一塊、流的最後一片）
                             其餘保留，必須為 0
 4       8     id            會話／物件識別（u64）：上傳的 upload id、流的 stream id；0 = 無
 12      4     seq           序號（u32）；語意依 kind 的順序類別（§4）
@@ -77,7 +78,40 @@ offset  size  欄位          說明
 | `0x02 Stream` | `Open` `Fragment` `Close` `Abandon` | [streaming-messages.md](streaming-messages.md) §4 | 密文本體 |
 | `0x03 Upload` | `Create` `Chunk` `Status` `Seal` `Abort` | [chunked-upload.md](chunked-upload.md) §4 | 塊 bytes（`Chunk`） |
 | `0x04 Download` | `Info` `Read` | [chunked-upload.md](chunked-upload.md) §5 | 回應的 data 是讀出的 bytes |
-| `0x05`–`0xFF` | — | 拒收並回 `Error(UnknownKind)` | |
+| 其餘 | — | 拒收並回 `Error(UnknownKind)` | |
+
+### 3.3 kind 的分配表（為之後把所有 HTTP 請求遷到 WS 預留）
+
+維護者 2026-09-03 預告：**未來所有 Matrix client API 都會走這條通道**。kind 是 8 位（256 個）、subtype 8 位（每個 kind 256 個），
+所以 kind 按 **API 領域**分、subtype 是領域內的操作；一個領域不超過 256 個操作，一個 kind 就夠。領域照 Matrix client-server 規格的章節切，
+這樣遷移時一章對一個 kind，不用猜。先占號、不先定 subtype；**已分配的號不改**。
+
+| kind | 領域 | 對應的 Matrix 章節 / 現在的 `src/api/client/` |
+|---|---|---|
+| `0x01` | Control | 通道自己的事 |
+| `0x02` | Stream | 流式訊息（fork 自己的） |
+| `0x03` | Upload | 分塊上傳（fork 自己的） |
+| `0x04` | Download | 分塊下載（fork 自己的） |
+| `0x05`–`0x0F` | 保留給 fork 自己的新功能 | |
+| `0x10` | Session | login、logout、refresh、register（`session/`、`register/`） |
+| `0x11` | Account | account data、profile、3pid、password（`account/`、`account_data/`、`profile.rs`） |
+| `0x12` | Sync | sync、filter（`sync/`、`filter.rs`） |
+| `0x13` | Room | create、join、leave、invite、kick、ban、alias、directory、space（`room/`、`membership/`、`alias/`、`directory.rs`、`space.rs`） |
+| `0x14` | Event | send、redact、state、context、relations、threads、messages（`send.rs`、`redact.rs`、`state.rs`、`context.rs`、`message.rs`、`relations.rs`、`threads.rs`） |
+| `0x15` | Receipt | read marker、receipts、typing、presence（`read_marker/`、`typing.rs`、`presence.rs`） |
+| `0x16` | Device | devices、to-device、dehydrated（`device/`、`to_device.rs`、`dehydrated_device.rs`） |
+| `0x17` | Keys | E2EE keys、backup、cross-signing（`keys/`、`backup/`） |
+| `0x18` | Push | pushers、push rules、notifications（`push/`） |
+| `0x19` | Media | 舊的整檔上傳、縮圖、preview、config（`media.rs`）—— 與 `Upload`/`Download` 分開，這裡是相容路徑 |
+| `0x1A` | Search | search、user directory（`search.rs`、`user_directory.rs`） |
+| `0x1B` | Voip | TURN、rtc（`voip.rs`、`rtc.rs`） |
+| `0x1C` | Misc | capabilities、versions、well-known、openid、thirdparty、report、tags（其餘） |
+| `0x1D`–`0x1F` | 保留給 Matrix 尚未引進的章節 | |
+| `0x20` | Admin | `!admin` 指令與 synapse admin API（`admin/`） |
+| `0x21`–`0xEF` | 未分配 | |
+| `0xF0`–`0xFF` | 實驗用，不保證穩定 | |
+
+遷移時每個操作的 meta 就是它現在的 JSON body（ruma 的 request 型別直接 serde 成 meta），回應同理 —— 所以遷移是換外框，不是重寫語意。
 
 ## 4. 順序守則：依 kind 分兩類
 
@@ -121,7 +155,7 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 
 ### 6.1 WebSocket（主要）
 
-`GET /_wbf/v1/ws`，`Authorization: Bearer <access token>`，Upgrade，只接受 TLS。每個 binary message = 一個 pack。
+`GET /_wbf/v1/ws`（維護者 2026-09-03 定：自己的前綴，照 `/_名字/版本/功能` 的慣例；端點本身就跟上游切開了，不用借 `/_tuwunel/`），`Authorization: Bearer <access token>`，Upgrade，只接受 TLS。每個 binary message = 一個 pack。
 一條連線同時跑很多 upload 與 stream，靠 `id` 分流；斷線後上傳進度在 DB（重連續傳）、流進入 abandoned 計時。
 伺服器：axum `ws` feature（目前**沒開**），落點 `src/api/client/wbf/ws.rs`。
 

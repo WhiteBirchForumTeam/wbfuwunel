@@ -59,6 +59,7 @@ axum-extra.workspace = true
 base64.workspace = true
 bytes.workspace = true
 bytesize.workspace = true
+crc32c.workspace = true
 cargo_toml.workspace = true
 checked_ops.workspace = true
 chrono.workspace = true

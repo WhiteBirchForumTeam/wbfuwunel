@@ -3496,6 +3496,83 @@ pub struct Config {
 	#[serde(default = "default_media_gc_migrate_skip_recent_seconds")]
 	pub media_gc_migrate_skip_recent_seconds: u64,
 
+	/// Chunk size a chunked upload uses when the client does not choose one,
+	/// in bytes. The client encrypts each chunk on its own, so this is the
+	/// plaintext size; what the encryption adds rides on top on the wire, up
+	/// to `media_chunk_overhead_max`.
+	///
+	/// default: 65536
+	#[serde(default = "default_media_chunk_size_default")]
+	pub media_chunk_size_default: usize,
+
+	/// Chunk size the server suggests for large files, in bytes. Reported to
+	/// clients; not enforced.
+	///
+	/// default: 1048576
+	#[serde(default = "default_media_chunk_size_large")]
+	pub media_chunk_size_large: usize,
+
+	/// Smallest chunk size a client may choose, in bytes. Within the range the
+	/// uploader decides; the server only records what it chose.
+	///
+	/// default: 4096
+	#[serde(default = "default_media_chunk_size_min")]
+	pub media_chunk_size_min: usize,
+
+	/// Largest chunk size a client may choose, in bytes. Also bounded by
+	/// `wbf_data_max_bytes` less `media_chunk_overhead_max`.
+	///
+	/// default: 16777216
+	#[serde(default = "default_media_chunk_size_max")]
+	pub media_chunk_size_max: usize,
+
+	/// How many bytes a chunk on the wire may exceed the upload's declared
+	/// chunk size by: room for the client's authentication tag, nonce and
+	/// framing. A chunk larger than `chunk_size` plus this is refused, so a
+	/// client cannot grow its chunks after declaring them.
+	///
+	/// default: 4096
+	#[serde(default = "default_media_chunk_overhead_max")]
+	pub media_chunk_overhead_max: usize,
+
+	/// How long a chunked upload may go without a new chunk before it counts
+	/// as abandoned and is swept, in seconds. Measured from the last chunk,
+	/// so a slow upload survives and a stopped one does not.
+	///
+	/// default: 86400
+	#[serde(default = "default_media_upload_ttl")]
+	pub media_upload_ttl: u64,
+
+	/// Largest chunked upload, in wire bytes. It also bounds the number of
+	/// chunks: at most this divided by the upload's chunk size, rounded up.
+	/// A chunk that would cross either bound is refused and the upload is
+	/// ended there, marked truncated; it can still be sealed and is served
+	/// with that mark. Zero means no limit.
+	///
+	/// default: 10737418240
+	#[serde(default = "default_media_upload_max_len")]
+	pub media_upload_max_len: u64,
+
+	/// How many bytes a chunked download read returns when the client does
+	/// not say.
+	///
+	/// default: 1048576
+	#[serde(default = "default_media_download_default_len")]
+	pub media_download_default_len: usize,
+
+	/// Largest meta section a wbf pack may carry, in bytes.
+	///
+	/// default: 65536
+	#[serde(default = "default_wbf_meta_max_bytes")]
+	pub wbf_meta_max_bytes: usize,
+
+	/// Largest data section a wbf pack may carry, in bytes. Must hold a
+	/// chunk of `media_chunk_size_max` plus `media_chunk_overhead_max`.
+	///
+	/// default: 16781312
+	#[serde(default = "default_wbf_data_max_bytes")]
+	pub wbf_data_max_bytes: usize,
+
 	/// Allows users with `redact` power level to request unredacted events with
 	/// MSC2815.
 	///
@@ -5700,6 +5777,26 @@ fn default_sso_grant_session_duration() -> Option<u64> { Some(300) }
 fn default_redaction_retention_seconds() -> u64 { 5_184_000 }
 
 fn default_media_gc_migrate_skip_recent_seconds() -> u64 { 600 }
+
+fn default_media_chunk_size_default() -> usize { 64 * 1024 }
+
+fn default_media_chunk_size_large() -> usize { 1024 * 1024 }
+
+fn default_media_chunk_size_min() -> usize { 4 * 1024 }
+
+fn default_media_chunk_size_max() -> usize { 16 * 1024 * 1024 }
+
+fn default_media_chunk_overhead_max() -> usize { 4096 }
+
+fn default_media_upload_ttl() -> u64 { 86400 }
+
+fn default_media_upload_max_len() -> u64 { 10 * 1024 * 1024 * 1024 }
+
+fn default_media_download_default_len() -> usize { 1024 * 1024 }
+
+fn default_wbf_meta_max_bytes() -> usize { 64 * 1024 }
+
+fn default_wbf_data_max_bytes() -> usize { 16 * 1024 * 1024 + 4096 }
 
 fn default_media_storage_providers() -> BTreeSet<String> { ["media".to_owned()].into() }
 

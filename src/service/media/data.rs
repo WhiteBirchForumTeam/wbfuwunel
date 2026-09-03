@@ -27,7 +27,76 @@ pub(crate) struct Data {
 	mediaid_user: Arc<Map>,
 	mxc_refcount: Arc<Map>,
 	mxc_tombstone: Arc<Map>,
+	mediaid_upload: Arc<Map>,
+	mxc_chunk: Arc<Map>,
+	mxc_chunked: Arc<Map>,
 	url_preview: Arc<Map>,
+}
+
+/// One chunked upload in progress, keyed by its upload id.
+///
+/// Chunks arrive in order and are appended, so what has arrived is a count
+/// and a byte total: chunk `received_count` is the next one expected and
+/// `total_len` is where it will land. The client says which chunk is the
+/// last; until then the upload has no known size.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Upload {
+	pub mxc: OwnedMxcUri,
+	pub owner: OwnedUserId,
+	/// Plaintext chunk size the client declared; fixed for the upload. What a
+	/// chunk is on the wire is the client's business: the server records each
+	/// one's length as it arrived and caps it at `chunk_size` plus
+	/// `media_chunk_overhead_max`.
+	pub chunk_size: u32,
+	/// How many chunks the client declared it will send.
+	pub chunk_count: u32,
+	/// Plaintext size of the whole file, as declared.
+	pub file_size: u64,
+	/// The client's encrypted description of the file, stored as it came.
+	#[serde(with = "serde_bytes")]
+	pub meta: Vec<u8>,
+	/// Bytes received so far: the staging file's length and the next chunk's
+	/// offset.
+	pub total_len: u64,
+	/// Chunks received so far: the next chunk's index.
+	pub received_count: u32,
+	/// Whether the last chunk has arrived. Only a finished upload seals.
+	pub finished: bool,
+	/// Whether the server ended the upload itself because the next chunk
+	/// would have crossed `media_upload_max_len`: finished, but not whole.
+	pub truncated: bool,
+	pub created_at_secs: u64,
+	pub last_chunk_at_secs: u64,
+}
+
+
+/// Where one chunk of chunked media sits in the stored object, as it
+/// arrived. The server cannot re-chunk ciphertext and does not know how
+/// long a chunk is until it sees it, so a download needs this to hand chunk
+/// `i` back exactly as uploaded.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub struct ChunkSpan {
+	pub offset: u64,
+	pub len: u32,
+}
+
+/// The shape of sealed chunked media: what the server knows, which is the
+/// plaintext sizes the uploader declared, how many chunks came, how many
+/// wire bytes they add up to, and the uploader's encrypted description of
+/// the file. Plaintext position `p` lives in chunk `p / chunk_size`; the
+/// last chunk's plaintext may be shorter.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ChunkedMedia {
+	pub chunk_size: u32,
+	pub chunk_count: u32,
+	pub file_size: u64,
+	pub total_len: u64,
+	/// Encrypted by the uploader; handed back by `Info`, never read here.
+	#[serde(with = "serde_bytes")]
+	pub meta: Vec<u8>,
+	/// The upload was cut off at the size limit; what is stored is the
+	/// beginning of the file, not all of it.
+	pub truncated: bool,
 }
 
 /// Why media was removed. Stored in the tombstone so an operator reading it
@@ -113,8 +182,87 @@ impl Data {
 			mediaid_user: db["mediaid_user"].clone(),
 			mxc_refcount: db["mxc_refcount"].clone(),
 			mxc_tombstone: db["mxc_tombstone"].clone(),
+			mediaid_upload: db["mediaid_upload"].clone(),
+			mxc_chunk: db["mxc_chunk"].clone(),
+			mxc_chunked: db["mxc_chunked"].clone(),
 			url_preview: db["url_preview"].clone(),
 		}
+	}
+
+	/// Reads the upload with `upload_id`, if any.
+	pub(super) async fn find_upload(&self, upload_id: u64) -> Option<Upload> {
+		self.mediaid_upload
+			.qry(&upload_id)
+			.await
+			.deserialized::<Cbor<Upload>>()
+			.map(|Cbor(upload)| upload)
+			.ok()
+	}
+
+	/// Writes the upload with `upload_id`, replacing what was there.
+	pub(super) fn put_upload(&self, upload_id: u64, upload: &Upload) {
+		self.mediaid_upload.put(upload_id, Cbor(upload));
+	}
+
+	/// Removes the upload row with `upload_id`.
+	pub(super) fn del_upload(&self, upload_id: u64) { self.mediaid_upload.del(upload_id); }
+
+	/// Every upload in progress, with its id.
+	pub(super) fn list_uploads(&self) -> impl Stream<Item = (u64, Upload)> + Send + '_ {
+		self.mediaid_upload
+			.stream::<u64, Cbor<Upload>>()
+			.ignore_err()
+			.map(|(id, Cbor(upload))| (id, upload))
+	}
+
+	/// Records where chunk `index` of `mxc` landed.
+	pub(super) fn put_chunk_span(&self, mxc: &Mxc<'_>, index: u32, span: ChunkSpan) {
+		self.mxc_chunk.put((mxc, index), Cbor(span));
+	}
+
+	/// Where chunk `index` of `mxc` sits, if it arrived.
+	pub(super) async fn find_chunk_span(&self, mxc: &Mxc<'_>, index: u32) -> Option<ChunkSpan> {
+		self.mxc_chunk
+			.qry(&(mxc, index))
+			.await
+			.deserialized::<Cbor<ChunkSpan>>()
+			.map(|Cbor(span)| span)
+			.ok()
+	}
+
+	/// Records that `mxc` is chunked media with this shape.
+	pub(super) fn put_chunked_media(&self, mxc: &Mxc<'_>, chunked: &ChunkedMedia) {
+		self.mxc_chunked.put(mxc.to_string(), Cbor(chunked));
+	}
+
+	/// The shape of `mxc` if it is chunked media; `None` for a whole-file
+	/// upload.
+	pub(super) async fn find_chunked_media(&self, mxc: &Mxc<'_>) -> Option<ChunkedMedia> {
+		self.mxc_chunked
+			.get(&mxc.to_string())
+			.await
+			.deserialized::<Cbor<ChunkedMedia>>()
+			.map(|Cbor(chunked)| chunked)
+			.ok()
+	}
+
+	/// Forgets every chunk span of `mxc` and its chunk shape: for an upload
+	/// that was abandoned, or media that was deleted.
+	pub(super) async fn delete_chunk_rows(&self, mxc: &Mxc<'_>) {
+		let prefix = (mxc, Interfix);
+		let mut txn = self
+			.mxc_chunk
+			.keys_prefix_raw(&prefix)
+			.ignore_err()
+			.ready_fold(self.db.txn(), |mut txn, key| {
+				txn.del_raw(&self.mxc_chunk, key);
+
+				txn
+			})
+			.await;
+
+		txn.del(&self.mxc_chunked, mxc.to_string());
+		txn.execute();
 	}
 
 	/// Reads the tombstone left when `mxc` was removed, if any.
@@ -320,6 +468,8 @@ impl Data {
 			.await;
 
 		txn.execute();
+
+		self.delete_chunk_rows(mxc).await;
 	}
 
 	/// Searches for all files with the given MXC
