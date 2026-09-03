@@ -290,7 +290,6 @@ async fn handle_download_info(services: &Services, view: &PackView<'_>) -> std::
 			"total_len": info.total_len,
 			"content_type": info.content_type,
 			"chunk_size": info.chunked.map(|chunked| chunked.chunk_size),
-			"wire_chunk_size": info.chunked.map(|chunked| chunked.wire_chunk_size),
 			"chunk_count": info.chunked.map(|chunked| chunked.chunk_count),
 			"read_len": services.config.media_download_default_len,
 			"chunk_size_large": services.config.media_chunk_size_large,
@@ -300,8 +299,9 @@ async fn handle_download_info(services: &Services, view: &PackView<'_>) -> std::
 }
 
 /// Chunked media comes back one whole chunk at a time, exactly as uploaded:
-/// by `chunk` index, or by `pos`, which picks the chunk containing that
-/// position. Whole-file media is read by `pos` and `len`.
+/// by `chunk` index, or by `pos`, a plaintext position, which picks the
+/// chunk holding it (`pos / chunk_size`). Whole-file media is read by `pos`
+/// and `len` in the object's own bytes.
 async fn handle_download_read(services: &Services, view: &PackView<'_>) -> std::result::Result<Vec<u8>, Reject> {
 	let meta = view.meta_json()?;
 	let mxc = mxc_from_meta(&meta)?;
@@ -311,13 +311,8 @@ async fn handle_download_read(services: &Services, view: &PackView<'_>) -> std::
 	if let Some(chunked) = services.media.chunked_shape(&mxc).await {
 		let index = match meta["chunk"].as_u64() {
 			| Some(index) => u32::try_from(index).map_err(|_| Reject::code("Conflict", "chunk index too large"))?,
-			| None => {
-				if pos >= chunked.total_len {
-					return Err(Reject::code("Conflict", "position is past the end of the media"));
-				}
-				u32::try_from(pos / u64::from(chunked.wire_chunk_size.max(1)))
-					.map_err(|_| Reject::code("Conflict", "position too large"))?
-			},
+			| None => u32::try_from(pos / u64::from(chunked.chunk_size.max(1)))
+				.map_err(|_| Reject::code("Conflict", "position too large"))?,
 		};
 		let read = services.media.read_chunk(&mxc, index).await?;
 
@@ -328,7 +323,7 @@ async fn handle_download_read(services: &Services, view: &PackView<'_>) -> std::
 				"chunk": read.index,
 				"pos": read.pos,
 				"len": read.bytes.len(),
-				"wire_chunk_size": read.wire_chunk_size,
+				"chunk_size": read.chunk_size,
 				"chunk_count": read.chunk_count,
 				"total_len": read.total_len,
 			}),

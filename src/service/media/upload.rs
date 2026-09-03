@@ -15,9 +15,9 @@
 //! it unwraps the chunk.
 //!
 //! The server cannot re-chunk ciphertext, so a download must hand back each
-//! chunk exactly as it arrived. Nothing is recorded per chunk for that: chunk
-//! 0 sets the wire chunk length, every chunk but the last must match it, and
-//! chunk `i` is then simply the bytes at `i * wire_chunk_size`.
+//! chunk exactly as it arrived. The server does not know how long a chunk
+//! will be until it sees it, and every chunk may differ, so it records where
+//! each one landed (`mxc_chunk`) and judges nothing about it.
 
 use std::{
 	io::{self, ErrorKind},
@@ -37,7 +37,7 @@ use tuwunel_core::{
 	warn,
 };
 
-use super::{ChunkedMedia, Dim, MXC_LENGTH, Upload};
+use super::{ChunkSpan, ChunkedMedia, Dim, MXC_LENGTH, Upload};
 
 /// What a client asks for when it starts an upload.
 #[derive(Debug)]
@@ -142,7 +142,6 @@ pub async fn upload_create(&self, user: &UserId, request: UploadRequest) -> Uplo
 		mxc: mxc.clone(),
 		owner: user.to_owned(),
 		chunk_size,
-		wire_chunk_size: 0,
 		total_len: 0,
 		received_count: 0,
 		finished: false,
@@ -169,9 +168,8 @@ pub async fn upload_create(&self, user: &UserId, request: UploadRequest) -> Uplo
 /// already received and is acknowledged again without rewriting (a lost
 /// ack); a higher one is out of order and told what was expected.
 ///
-/// Chunk 0 sets the wire chunk length; every later chunk must match it,
-/// except the last, which may be shorter. That keeps chunk `i` at
-/// `i * wire_chunk_size` so a download can find it without a table.
+/// How long a chunk is on the wire is the client's business; the server
+/// records where it landed and caps it, nothing more.
 #[implement(super::Service)]
 pub async fn upload_chunk(
 	&self,
@@ -209,29 +207,20 @@ pub async fn upload_chunk(
 		)));
 	}
 	let len = u32::try_from(chunk.len()).map_err(|_| UploadError::TooLarge("chunk too large".into()))?;
-	let wire_chunk_size = if index == 0 { len } else { upload.wire_chunk_size };
-	if !is_last && len != wire_chunk_size {
-		return Err(UploadError::Conflict(format!(
-			"chunk {index} is {len} bytes but chunk 0 was {wire_chunk_size}; only the last chunk may differ"
-		)));
-	}
-	if is_last && len > wire_chunk_size {
-		return Err(UploadError::Conflict(format!(
-			"last chunk {index} is {len} bytes, longer than the {wire_chunk_size} of the chunks before it"
-		)));
-	}
 	let total_len = upload.total_len.saturating_add(u64::from(len));
 	if config.media_upload_max_len > 0 && total_len > config.media_upload_max_len {
 		return Err(UploadError::TooLarge("upload exceeds media_upload_max_len".into()));
 	}
 
-	// The file is written before the row: if the server dies between them,
-	// the row still says this chunk is missing and the resend lands on the
-	// same offset.
+	// The file and the chunk's span are written before the upload row: if the
+	// server dies between them, the row still says this chunk is missing and
+	// the resend lands on the same offset and overwrites the same span.
 	let path = self.staging_path(upload_id);
 	write_at(&path, upload.total_len, chunk).await?;
 
-	upload.wire_chunk_size = wire_chunk_size;
+	let mxc_parts = upload.mxc.parts().map_err(|e| UploadError::Conflict(format!("stored mxc is invalid: {e}")))?;
+	self.db.put_chunk_span(&mxc_parts, index, ChunkSpan { offset: upload.total_len, len });
+
 	upload.total_len = total_len;
 	upload.received_count = index.saturating_add(1);
 	upload.finished = is_last;
@@ -286,10 +275,10 @@ pub async fn upload_seal(&self, user: &UserId, upload_id: u64) -> UploadResult<O
 
 	self.store_staging_file(&key, &path, upload.total_len).await?;
 
-	// The shape a downloader needs to find chunk `i` at `i * wire_chunk_size`.
+	// The shape a downloader needs; where each chunk sits was recorded as it
+	// arrived.
 	self.db.put_chunked_media(&mxc_parts, ChunkedMedia {
 		chunk_size: upload.chunk_size,
-		wire_chunk_size: upload.wire_chunk_size,
 		chunk_count: upload.received_count,
 		total_len: upload.total_len,
 	});
@@ -307,8 +296,8 @@ pub async fn upload_seal(&self, user: &UserId, upload_id: u64) -> UploadResult<O
 /// Drops an upload in progress: its staging file and its row.
 #[implement(super::Service)]
 pub async fn upload_abort(&self, user: &UserId, upload_id: u64) -> UploadResult<()> {
-	self.owned_upload(user, upload_id).await?;
-	self.discard_upload(upload_id).await;
+	let upload = self.owned_upload(user, upload_id).await?;
+	self.discard_upload(upload_id, &upload).await;
 
 	Ok(())
 }
@@ -320,18 +309,18 @@ pub async fn sweep_uploads(&self) {
 	let ttl = self.services.config.media_upload_ttl;
 	let now_secs = now().as_secs();
 
-	let expired: Vec<u64> = self
+	let expired: Vec<(u64, Upload)> = self
 		.db
 		.list_uploads()
-		.filter_map(async |(id, upload)| {
-			(upload.last_chunk_at_secs.saturating_add(ttl) < now_secs).then_some(id)
+		.filter(|(_, upload)| {
+			futures::future::ready(upload.last_chunk_at_secs.saturating_add(ttl) < now_secs)
 		})
 		.collect()
 		.await;
 
-	for upload_id in &expired {
+	for (upload_id, upload) in &expired {
 		info!(upload_id, "Sweeping abandoned chunked upload.");
-		self.discard_upload(*upload_id).await;
+		self.discard_upload(*upload_id, upload).await;
 	}
 
 	// Files without a row: the row is the truth, the file is not.
@@ -370,9 +359,13 @@ async fn count_uploads_for_user(&self, user: &UserId) -> usize {
 		.await
 }
 
+/// Drops the row, the chunk spans written so far, and the staging file.
 #[implement(super::Service)]
-async fn discard_upload(&self, upload_id: u64) {
+async fn discard_upload(&self, upload_id: u64, upload: &Upload) {
 	self.db.del_upload(upload_id);
+	if let Ok(mxc) = upload.mxc.parts() {
+		self.db.delete_chunk_rows(&mxc).await;
+	}
 	match fs::remove_file(self.staging_path(upload_id)).await {
 		| Ok(()) => {},
 		| Err(e) if e.kind() == ErrorKind::NotFound => {},

@@ -28,6 +28,7 @@ pub(crate) struct Data {
 	mxc_refcount: Arc<Map>,
 	mxc_tombstone: Arc<Map>,
 	mediaid_upload: Arc<Map>,
+	mxc_chunk: Arc<Map>,
 	mxc_chunked: Arc<Map>,
 	url_preview: Arc<Map>,
 }
@@ -42,13 +43,11 @@ pub(crate) struct Data {
 pub struct Upload {
 	pub mxc: OwnedMxcUri,
 	pub owner: OwnedUserId,
-	/// Plaintext chunk size the client declared; fixed for the upload. A chunk
-	/// on the wire may exceed it by at most `media_chunk_overhead_max`.
+	/// Plaintext chunk size the client declared; fixed for the upload. What a
+	/// chunk is on the wire is the client's business: the server records each
+	/// one's length as it arrived and caps it at `chunk_size` plus
+	/// `media_chunk_overhead_max`.
 	pub chunk_size: u32,
-	/// Length of chunk 0 on the wire, which every chunk but the last must
-	/// match: chunk `i` then sits at `i * wire_chunk_size`. Zero until chunk 0
-	/// arrives.
-	pub wire_chunk_size: u32,
 	/// Bytes received so far: the staging file's length and the next chunk's
 	/// offset.
 	pub total_len: u64,
@@ -63,33 +62,25 @@ pub struct Upload {
 }
 
 
-/// The shape of sealed chunked media. The server cannot re-chunk
-/// ciphertext, so a download must hand back exactly the bytes each chunk
-/// arrived as; with every chunk but the last the same length on the wire,
-/// chunk `i` is the `wire_chunk_size` bytes at `i * wire_chunk_size`.
+/// Where one chunk of chunked media sits in the stored object, as it
+/// arrived. The server cannot re-chunk ciphertext and does not know how
+/// long a chunk is until it sees it, so a download needs this to hand chunk
+/// `i` back exactly as uploaded.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-pub struct ChunkedMedia {
-	/// Plaintext chunk size the uploader declared.
-	pub chunk_size: u32,
-	/// Length of every chunk but the last on the wire and in the object.
-	pub wire_chunk_size: u32,
-	pub chunk_count: u32,
-	pub total_len: u64,
+pub struct ChunkSpan {
+	pub offset: u64,
+	pub len: u32,
 }
 
-impl ChunkedMedia {
-	/// Byte offset of chunk `index` in the object.
-	#[must_use]
-	pub fn chunk_offset(&self, index: u32) -> u64 { u64::from(index) * u64::from(self.wire_chunk_size) }
-
-	/// Bytes chunk `index` occupies: the wire chunk size, or what remains for
-	/// the last one.
-	#[must_use]
-	pub fn chunk_len(&self, index: u32) -> u64 {
-		self.total_len
-			.saturating_sub(self.chunk_offset(index))
-			.min(u64::from(self.wire_chunk_size))
-	}
+/// The shape of sealed chunked media: what the server knows, which is the
+/// plaintext chunk size the uploader declared, how many chunks came, and
+/// how many wire bytes they add up to. Plaintext position `p` lives in
+/// chunk `p / chunk_size`; the last chunk's plaintext may be shorter.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub struct ChunkedMedia {
+	pub chunk_size: u32,
+	pub chunk_count: u32,
+	pub total_len: u64,
 }
 
 /// Why media was removed. Stored in the tombstone so an operator reading it
@@ -176,6 +167,7 @@ impl Data {
 			mxc_refcount: db["mxc_refcount"].clone(),
 			mxc_tombstone: db["mxc_tombstone"].clone(),
 			mediaid_upload: db["mediaid_upload"].clone(),
+			mxc_chunk: db["mxc_chunk"].clone(),
 			mxc_chunked: db["mxc_chunked"].clone(),
 			url_preview: db["url_preview"].clone(),
 		}
@@ -207,6 +199,21 @@ impl Data {
 			.map(|(id, Cbor(upload))| (id, upload))
 	}
 
+	/// Records where chunk `index` of `mxc` landed.
+	pub(super) fn put_chunk_span(&self, mxc: &Mxc<'_>, index: u32, span: ChunkSpan) {
+		self.mxc_chunk.put((mxc, index), Cbor(span));
+	}
+
+	/// Where chunk `index` of `mxc` sits, if it arrived.
+	pub(super) async fn find_chunk_span(&self, mxc: &Mxc<'_>, index: u32) -> Option<ChunkSpan> {
+		self.mxc_chunk
+			.qry(&(mxc, index))
+			.await
+			.deserialized::<Cbor<ChunkSpan>>()
+			.map(|Cbor(span)| span)
+			.ok()
+	}
+
 	/// Records that `mxc` is chunked media with this shape.
 	pub(super) fn put_chunked_media(&self, mxc: &Mxc<'_>, chunked: ChunkedMedia) {
 		self.mxc_chunked.put(mxc.to_string(), Cbor(chunked));
@@ -223,8 +230,24 @@ impl Data {
 			.ok()
 	}
 
-	/// Forgets the chunk shape of `mxc`, with the media it described.
-	pub(super) fn del_chunked_media(&self, mxc: &Mxc<'_>) { self.mxc_chunked.del(mxc.to_string()); }
+	/// Forgets every chunk span of `mxc` and its chunk shape: for an upload
+	/// that was abandoned, or media that was deleted.
+	pub(super) async fn delete_chunk_rows(&self, mxc: &Mxc<'_>) {
+		let prefix = (mxc, Interfix);
+		let mut txn = self
+			.mxc_chunk
+			.keys_prefix_raw(&prefix)
+			.ignore_err()
+			.ready_fold(self.db.txn(), |mut txn, key| {
+				txn.del_raw(&self.mxc_chunk, key);
+
+				txn
+			})
+			.await;
+
+		txn.del(&self.mxc_chunked, mxc.to_string());
+		txn.execute();
+	}
 
 	/// Reads the tombstone left when `mxc` was removed, if any.
 	pub(super) async fn find_tombstone(&self, mxc: &Mxc<'_>) -> Option<Tombstone> {
@@ -430,7 +453,7 @@ impl Data {
 
 		txn.execute();
 
-		self.del_chunked_media(mxc);
+		self.delete_chunk_rows(mxc).await;
 	}
 
 	/// Searches for all files with the given MXC

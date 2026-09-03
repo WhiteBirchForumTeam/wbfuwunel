@@ -47,7 +47,7 @@ client 預設只有這兩個數字，64 KiB 是預設。但那是 client 的選�
 - client 在 `Create` 宣告 `chunk_size`（**明文**塊的精確大小）；沒宣告就用 server 的 `media_chunk_size_default`（small，64 KiB）。**之後不能改**。
 - `total_len` **不宣告**。server 不需要知道檔有多大：塊一塊一塊來，server 累計；最後一塊帶 `IS_LAST` 旗標，到那時大小才確定。串流產生的檔因此與一般檔沒有分別：client 的 buffer 滿 64 KiB 就發一塊，最後剩下的（例如 30 KiB）就是最後一塊。
 - **server 不檢查塊的長度是否「對」**。data 段是 client 封裝（加密、標籤、nonce、框架）之後的密文，封裝後多大是 client 的事；精確的 64 KiB 在**解封裝**那端檢查，解密出來不是 64 KiB 就是那一塊壞了。server 對「完整」的定義只有兩樣：`data_crc` 對、序列沒漏。
-- **每一塊（最後一塊除外）在線上必須一樣長**：server 拿第 0 塊的長度當這個上傳的 `wire_chunk_size`，之後每一塊必須等於它，最後一塊只能更短，不對就 `Error(Conflict)`。這不是 server 懂加密，是守住「第 i 塊在 `i × wire_chunk_size`」這條公式：server 解不了密、不能重新切塊，下載必須把每一塊照上傳時的樣子交回去，而這條公式讓它不用存任何邊界表（§5）。
+- **封裝後每一塊多長都可以不同**，server 不記住任何「應該多長」、不拿前一塊檢查後一塊；它只**記錄**每一塊落在哪、多長（`mxc_chunk`，§3.1）。server 知道的是明文塊大小（宣告的），而最後一塊的明文允許比它小。
 - server 檢查的是**上限**（防攻擊，不是定義）：`media_chunk_size_min ≤ chunk_size ≤ media_chunk_size_max`（預設 **4 KiB** 到 **16 MiB**）；每一塊 `data_len ≤ chunk_size + media_chunk_overhead_max`（預設冗餘 4 KiB，蓋標籤與封裝），超過就 `Error(TooLarge)`，所以 client 宣告了塊大小就不能中途把塊變大；`chunk_size + media_chunk_overhead_max ≤ wbf_data_max_bytes`（單包硬上限，meta 與 data 各一個，不讓任何一段無限長）。空塊拒收。
 - **一個塊正好是一個 pack 的 data 段**：client 把第 i 塊明文加密後直接寫進 pack 的 `data_slot`（[wbf-wire-format.md](wbf-wire-format.md) §5），
   沒有第二次加密、沒有複製。
@@ -77,8 +77,9 @@ WebSocket 上是一框一 pack；HTTP 上是 `POST /_wbf/v1/pack` 一次一 pack
 
 | CF | 鍵 | 值 | 說明 |
 |---|---|---|---|
-| `mxc_chunked` | mxc 字串 | `Cbor(ChunkedMedia)` | seal 後的分塊媒體長什麼樣：`chunk_size`（明文）、`wire_chunk_size`（線上，第 0 塊的長度）、`chunk_count`、`total_len`。下載靠它算第 i 塊在哪；整檔上傳沒有這列。刪媒體時一起刪 |
-| `mediaid_upload` | `upload_id`（u64 BE） | `Cbor(Upload)` | 進行中的上傳：`mxc`、`owner`、`chunk_size`、`wire_chunk_size`（第 0 塊到之前是 0）、`total_len`（目前累計，也就是暫存檔長度與下一塊的偏移）、`received_count`（下一塊的 index）、`finished`（收到 `IS_LAST` 了沒）、`content_type`、`filename`、`created_at`、`last_chunk_at`。沒有 bitmap：有序序列的「已收」永遠是 0..n 連續，一個數字就夠，每塊一次列更新也因此是常數大小。沒有 `state` 欄：兩個 seal 撞在一起靠冪等收尾（計數的 `Init` 對既有列不動、物件與媒體列覆寫、第二次刪列刪檔容忍不存在），不靠狀態機 |
+| `mxc_chunk` | `(mxc, index)` | `Cbor(ChunkSpan)`：`offset`、`len` | 每一塊落在物件的哪裡、多長，**收到時寫**（記錄，不是檢查）。server 解不了密、看不出塊的分界，下載要把第 i 塊照原樣交回去只能靠這列；一次點讀。跟媒體同壽命，abort／sweep／刪媒體時整個前綴刪 |
+| `mxc_chunked` | mxc 字串 | `Cbor(ChunkedMedia)` | seal 後的分塊媒體長什麼樣：`chunk_size`（明文）、`chunk_count`、`total_len`（線上總長）。整檔上傳沒有這列。刪媒體時一起刪 |
+| `mediaid_upload` | `upload_id`（u64 BE） | `Cbor(Upload)` | 進行中的上傳：`mxc`、`owner`、`chunk_size`、`total_len`（目前累計，也就是暫存檔長度與下一塊的偏移）、`received_count`（下一塊的 index）、`finished`（收到 `IS_LAST` 了沒）、`content_type`、`filename`、`created_at`、`last_chunk_at`。沒有 bitmap：有序序列的「已收」永遠是 0..n 連續，一個數字就夠，每塊一次列更新也因此是常數大小。沒有 `state` 欄：兩個 seal 撞在一起靠冪等收尾（計數的 `Init` 對既有列不動、物件與媒體列覆寫、第二次刪列刪檔容忍不存在），不靠狀態機 |
 
 鍵是 `upload_id` 而不是 mxc，因為 pack 的標頭帶的是 `id`（u64），server 一個點讀就找到，不用解 meta。
 `upload_id` 由 server 在 `Create` 時隨機發（64 bit），mxc 同時建好。
@@ -96,7 +97,7 @@ TTL 設 `media_upload_ttl × 2` 當兜底，真正的清理是 §6 的 sweeper�
 | subtype | 請求 meta | 請求 data | 回應（`Ack` 的 meta） |
 |---|---|---|---|
 | `0x01 Create` | `{ "chunk_size"?: …, "content_type"?: "…", "filename"?: "…" }` | 無 | `{ "id": <upload_id>, "mxc": "mxc://…", "chunk_size": …, "chunk_max_bytes": …, "expires_at": … }`（`chunk_max_bytes` = `chunk_size + media_chunk_overhead_max`，這個上傳每塊 data 的上限） |
-| `0x02 Chunk` | 無（`id`、`seq` 在標頭就夠） | 第 `seq` 塊的 bytes，長度由 client 定，但第 0 塊之後每塊必須與第 0 塊一樣長（最後一塊可短）；最後一塊標頭帶 `IS_LAST` | `{ "received": <已到塊數>, "total_len": <累計 bytes>, "finished": bool }`。`data_crc` 不合 → `Error(Corrupt)`；`data_len > chunk_max_bytes` → `Error(TooLarge)`；空塊、長度與第 0 塊不同、或 `IS_LAST` 之後還有塊 → `Error(Conflict)`；`seq < received_count`（重送）→ 不重寫、再 Ack 一次，冪等 |
+| `0x02 Chunk` | 無（`id`、`seq` 在標頭就夠） | 第 `seq` 塊的 bytes，長度由 client 定，每塊可以不同；最後一塊標頭帶 `IS_LAST` | `{ "received": <已到塊數>, "total_len": <累計 bytes>, "finished": bool }`。`data_crc` 不合 → `Error(Corrupt)`；`data_len > chunk_max_bytes` → `Error(TooLarge)`；空塊、或 `IS_LAST` 之後還有塊 → `Error(Conflict)`；`seq < received_count`（重送）→ 不重寫、再 Ack 一次，冪等 |
 | `0x03 Status` | 無 | 無 | `{ "received": <已到塊數>, "total_len": …, "finished": bool, "chunk_size": … }`；續傳從 `seq = received` 接著送 |
 | `0x04 Seal` | 無 | 無 | `{ "mxc": "…" }`。還沒收到 `IS_LAST` → `Error(Conflict)` 帶目前塊數與 bytes |
 | `0x05 Abort` | 無 | 無 | `{ "ok": true }` |
@@ -113,10 +114,10 @@ TTL 設 `media_upload_ttl × 2` 當兜底，真正的清理是 §6 的 sweeper�
 
 | subtype | 請求 meta | 回應 |
 |---|---|---|
-| `0x01 Info` | `{ "mxc": "…" }` | `Ack` meta：`{ "total_len": …, "content_type": "…"｜null, "chunk_size": …｜null, "wire_chunk_size": …｜null, "chunk_count": …｜null, "read_len": …, "chunk_size_large": … }`。三個 `chunk_*` 只有分塊媒體有（`mxc_chunked` 列）；`read_len` 是整檔媒體 `Read` 沒給 `len` 時的預設；`chunk_size_large` 是 server 建議的大檔塊大小 |
-| `0x02 Read` | `{ "mxc": "…", "chunk"?: i, "pos"?: …, "len"?: … }` | **分塊媒體**：一次回**整整一塊**，照上傳時的樣子，一個 byte 不差。給 `chunk` 就是那一塊；給 `pos`（沒給 `chunk`）server **seek** 出含那個位置的塊（`pos / wire_chunk_size`）；`len` 不理。`Ack` meta：`{ "chunk": i, "pos": <起點>, "len": <這塊長度>, "wire_chunk_size": …, "chunk_count": …, "total_len": … }`，**data = 那一塊**。`pos ≥ total_len` 或 `chunk ≥ chunk_count` → `Error(Conflict)`。**整檔媒體**（沒加密、沒塊）：`pos`/`len` 讀任意範圍，`len` 沒給用 `media_download_default_len`，`Ack` meta `{ "pos", "len", "total_len" }` |
+| `0x01 Info` | `{ "mxc": "…" }` | `Ack` meta：`{ "total_len": …, "content_type": "…"｜null, "chunk_size": …｜null, "chunk_count": …｜null, "read_len": …, "chunk_size_large": … }`。兩個 `chunk_*` 只有分塊媒體有（`mxc_chunked` 列）；`read_len` 是整檔媒體 `Read` 沒給 `len` 時的預設；`chunk_size_large` 是 server 建議的大檔塊大小 |
+| `0x02 Read` | `{ "mxc": "…", "chunk"?: i, "pos"?: …, "len"?: … }` | **分塊媒體**：一次回**整整一塊**，照上傳時的樣子，一個 byte 不差。給 `chunk` 就是那一塊；給 `pos`（沒給 `chunk`）—— **`pos` 是明文位置**，server **seek** 出含那個位置的塊（`pos / chunk_size`），client 不必知道任何封裝後的數字；`len` 不理。`Ack` meta：`{ "chunk": i, "pos": <這塊在物件裡的起點>, "len": <這塊長度>, "chunk_size": …, "chunk_count": …, "total_len": … }`，**data = 那一塊**。`chunk ≥ chunk_count`（含 `pos` 算出來的）→ `Error(Conflict)`。**整檔媒體**（沒加密、沒塊）：`pos`/`len` 讀任意範圍，`len` 沒給用 `media_download_default_len`，`Ack` meta `{ "pos", "len", "total_len" }` |
 
-分塊媒體的塊邊界不存表，算的：第 i 塊在 `i × wire_chunk_size`，長 `min(wire_chunk_size, total_len − 起點)`；上傳時 server 守住「每塊一樣長」（§2.2）就是為了這條。墓碑一樣擋在 `search_file_metadata`，已刪媒體回 `Error(NotFound)`；
+分塊媒體的塊邊界是收到時記下的（`mxc_chunk`，§3.1），不是算的：封裝後每塊多長 server 不知道也不管，所以要把第 i 塊照原樣交回去，只能靠當初記下的那一列。墓碑一樣擋在 `search_file_metadata`，已刪媒體回 `Error(NotFound)`；
 標準的 `/_matrix/client/v1/media/download` 對分塊媒體照樣整份給，也照樣 410。
 
 ## 6. 超時與遺棄
@@ -163,7 +164,7 @@ TTL 設 `media_upload_ttl × 2` 當兜底，真正的清理是 §6 的 sweeper�
 4. **命名**：`/_wbf/v1/…`（§2.5）。
 5. **舊的整檔上傳不設上限**，之後再說。
 6. **分塊媒體不做縮圖**：都加密了，縮不了。
-7. **下載交回去的必須是上傳時的那一塊**（2026-09-03）：server 解不了密、不能重新切塊。邊界不存表，算的（第 i 塊在 `i × wire_chunk_size`），所以上傳時每塊（最後一塊除外）必須一樣長；seal 只存 `chunk_size`、`wire_chunk_size`、`chunk_count`、`total_len`。client 用 `pos` 要，server seek 出含那個位置的塊，回起點、這塊長度、每塊長度、總塊數。最小塊 4 KiB、最大 16 MiB，範圍內上傳者決定；client 預設只有 64 KiB（預設）與 1 MiB。
+7. **下載交回去的必須是上傳時的那一塊**（2026-09-03）：server 解不了密、不能重新切塊。維護者明講：**封裝後每塊多長會浮動，server 不能記住第一塊多長拿來檢查後面的，server 從不檢查，檢查是 client 解碼的事**；server 知道的只有明文塊大小，最後一塊的明文可以比它小。所以邊界不是算的，是每塊收到時**記錄**下來的（`mxc_chunk`，記錄不是檢查）；seal 存 `chunk_size`、`chunk_count`、`total_len`。client 用**明文位置** `pos` 要，server 算 `pos / chunk_size` 找到那塊，回起點、這塊長度、明文塊大小、總塊數。（中間曾有一版「第 0 塊定長度、後面每塊一樣長、邊界用乘的」，維護者否決：那是 server 在檢查它不該懂的東西。）最小塊 4 KiB、最大 16 MiB，範圍內上傳者決定；client 預設只有 64 KiB（預設）與 1 MiB。
 8. **預告**：未來所有 HTTP 請求都會遷到 WS，kind 的分配見 [wbf-wire-format.md](wbf-wire-format.md) §3.3。
 
 ## 10. 分幾支

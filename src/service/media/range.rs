@@ -26,7 +26,9 @@ pub struct ChunkRead {
 	pub index: u32,
 	pub pos: u64,
 	pub bytes: Bytes,
-	pub wire_chunk_size: u32,
+	/// Plaintext chunk size; plaintext position `p` is in chunk
+	/// `p / chunk_size`.
+	pub chunk_size: u32,
 	pub chunk_count: u32,
 	pub total_len: u64,
 }
@@ -73,8 +75,7 @@ pub async fn chunked_shape(&self, mxc: &Mxc<'_>) -> Option<ChunkedMedia> {
 
 /// Reads chunk `index` of chunked `mxc`: the bytes that chunk arrived as,
 /// no more and no less, because only the uploader's key can make sense of
-/// them and it did so per chunk. Chunk `i` is at `i * wire_chunk_size`; the
-/// upload enforced that every chunk but the last has that length.
+/// them and it did so per chunk. Where it sits was recorded when it arrived.
 #[implement(super::Service)]
 pub async fn read_chunk(&self, mxc: &Mxc<'_>, index: u32) -> Result<ChunkRead> {
 	let Metadata { key, .. } = self
@@ -88,10 +89,13 @@ pub async fn read_chunk(&self, mxc: &Mxc<'_>, index: u32) -> Result<ChunkRead> {
 	if index >= chunked.chunk_count {
 		return Err!(Request(InvalidParam("Chunk index {index} is past the last chunk {}.", chunked.chunk_count.saturating_sub(1))));
 	}
+	let Some(span) = self.db.find_chunk_span(mxc, index).await else {
+		return Err!(Database("Chunk {index} of {mxc} has no span row."));
+	};
 
 	let path = self.get_media_name_sha256(&key);
-	let pos = chunked.chunk_offset(index);
-	let end = pos.saturating_add(chunked.chunk_len(index));
+	let pos = span.offset;
+	let end = pos.saturating_add(u64::from(span.len));
 	let reads = self
 		.storage_providers()
 		.stream()
@@ -112,7 +116,7 @@ pub async fn read_chunk(&self, mxc: &Mxc<'_>, index: u32) -> Result<ChunkRead> {
 		index,
 		pos,
 		bytes,
-		wire_chunk_size: chunked.wire_chunk_size,
+		chunk_size: chunked.chunk_size,
 		chunk_count: chunked.chunk_count,
 		total_len: chunked.total_len,
 	})
