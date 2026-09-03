@@ -1,215 +1,142 @@
-# 流式訊息（Streaming Messages）設計草案
+# 流式訊息（Streaming Messages）設計草案，第二版
 
-> **狀態：草案。** 這份文件是「流式訊息」的設計草案，對應
-> [why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md) 的 **§5.3 文字流**。
-> 目的是把要做的東西、為什麼、有哪些取捨，寫成下一個讀的人只有 repo 也能接手的文件。
-> 每個決定都還可以推翻；推翻時請連帶更新「為什麼」那一段。
+> **狀態：草案，等維護者同意。** 對應核心設計 [why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md) §5.3。
+> 第二版依維護者 2026-09-03 的指示改：**走 WebSocket over TLS 的二進位通道**，每一片是一個 pack
+> （[wbf-wire-format.md](wbf-wire-format.md)：標頭＋密文 meta＋密文 data），不定長、不需要 seek；
+> 預設**沒收到就丟**，需要時用標頭的 `WANT_ACK` 與 `seq` 做 Ack 與重送。第一版「分片走 sync ephemeral」降為**退化路徑**（§6）。
 >
-> 撰寫日期：2026-09-01。**尚未實作** —— 依 [fork-overview.md](fork-overview.md) 的流程，
-> 這份文件在維護者同意之前不動 `src/`。
+> 撰寫日期：2026-09-01；第二版 2026-09-03。**尚未實作**，同意前不動 `src/`。
 
-**同一個目錄裡的其他文件**：[fork-overview.md](fork-overview.md)、
-[why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md)、
-[repo-structure.md](repo-structure.md)、[windows-build.md](windows-build.md)、
-[media-refcount.md](media-refcount.md)。
+## 1. 這是什麼、不是什麼
 
----
+「流式訊息」是**文字／token 的串流**：一段訊息還在長，就把已經有的部分送給在線的人看，講完了才收成一個正式訊息。
+對標情境：LLM 回覆逐字吐出、長訊息分段輸入。
 
-## 1. 這是什麼、不是在講什麼
+它跟分塊上傳（[chunked-upload.md](chunked-upload.md)）**共用通道與外框**，但語意相反：
+上傳的塊是定長、要落盤、要 seek；流的分片是不定長、不落盤、能用多少就多少。太長的東西就不是流，是檔案。
 
-這裡講的「流式訊息」是**文字／token 的串流**：一段訊息的分片內容還在長，就先把已經
-有的部分送給對方看，講完了才收成一個正式訊息。對標情境：**LLM 回覆逐字吐出**、長訊息
-分段輸入、任何「內容產生需要時間」的對話。
+### 1.1 為什麼不用 Matrix 現成的那條
 
-⚠️ **不是** §5.2 的**媒體**串流（分塊 + Merkle + range）。那是檔案層，兩者不衝突、也不該
-被綁在一起做。這份文件只談文字流層級的事件語意。
+`m.replace` 每更新一次發一個完整的新事件進歷史；LLM 每吐幾個字就一個永久事件，歷史被殘影填滿。
+我們不與 Matrix 規格相容（核心設計 §1），所以要的是乾淨的流式語意。
 
-### 1.1 為什麼不值錢的那條路（現狀）不好
+## 2. 核心決定：分兩層
 
-Matrix 對「內容會變的訊息」只有一招：`m.replace` 關聯 —— 每更新一次發一個**完整的新事件**
-說「這個取代那個」。把 LLM 的 token 串流餵進去特別難看：
-
-- 每吐幾個字，就產生一個完整的、不可變的、要進歷史的新事件。
-- 歷史被反覆改寫；接收端要追一串 `relates_to` 才能收斂到最新版。
-- 中間每個殘影都永久留在 DAG 裡（不可變 + 節點不可消失）。
-
-我們已經決定不為此相容 Matrix 規格（核心文件 §1 非目標：不與 Matrix 規格相容）。
-所以要的是**乾淨的流式語意**，不是 `m.replace` 的模擬。
-
----
-
-## 2. 核心決定：分兩層，而不是一個新的事件型別
-
-整份設計的支點是這句話：
-
-> **串流中的分片不落盤、不進歷史；講完了才寫一個正式事件定案。**
-
-分兩層：
+> **分片不落盤、不進歷史；講完了才寫一個正式事件定案。**
 
 | 層 | 性質 | 存哪 | 誰看到 |
 |---|---|---|---|
-| **即時分片（stream chunks）** | ephemeral，帶 `stream_id` + 序號 | 記憶體（同 typing） | 只有當下在線的 client |
-| **定案事件（finalized event）** | 正式 timeline 事件 | RocksDB（既有事件路徑） | 所有人，含之後加入的 |
+| **分片（fragment）** | 短暫，帶 `stream_id` ＋ `seq` | 記憶體（同 typing） | 只有當下連著通道的 client |
+| **定案事件** | 正式 timeline 事件 | RocksDB（既有事件路徑） | 所有人，含之後加入的 |
 
-這跟核心文件 §5.3 完全一致，也跟現有 **typing** 的處理同構：
-在線者秒出、離線者/後加入者拿到的是**乾淨的正式事件**，歷史零污染。
+中途加入的 client 永遠收不到分片，等定案事件就好；歷史只有一個版本。
 
-> ⭐ 中間加入的 client **永遠不會**收到分片殘影。這對同步程序而言是**特性不是缺陷**：
-> 它不需要補齊任何碎片，等定案事件就好。歷史只有一個版本。
+## 3. 傳輸：WebSocket 二進位通道
 
----
+分片走 [wbf-wire-format.md](wbf-wire-format.md) 的通道，kind = `Stream`。**不走 sync**：sync 的模型是「有變化就 wake、wake 後重拉」，
+token 頻率（每 10–50 ms 一片）會把它打爆；一條長連線推分片，開銷是 32 bytes 的外框。
 
-## 3. 程式碼落點（對照 repo 結構，2026-09-01）
+**加密**：一片就是一個 pack。server 只讀明文標頭（`kind`、`subtype`、`id` = stream id、`seq`、`flags`）；
+**meta 與 data 都是密文**（`META_ENCRYPTED = 1`），server 原樣轉給同房間、連著通道的其他 client。
+它驗的是順序與存在，不是內容。一個欄位一個職權：meta 放這一片的語意（JSON），data 放本文本體。
 
-研究後，這個功能在現有程式碼裡的接縫是清楚的。typing service 是**現成的同構範例**。
+## 4. 訊框（kind = `Stream`）
 
-### 3.1 主體：`src/service/rooms/streaming/`（新增，仿 `typing/`）
+標頭：`id` = stream id（`Open` 時 0，server 在 `Ack` 的 meta 發），`seq` = 片序號（`Open` 是 0，`Fragment` 從 1 起遞增）。
+除了 `Open` 的請求 meta（server 要知道房間），其餘 meta 與 data 都是密文。
 
-`src/service/rooms/typing/mod.rs` 已經把這個形狀做過一遍，流式完全照搬再擴充：
+| subtype | 誰發 | meta | data |
+|---|---|---|---|
+| `Open` | 發送者 | **明文** `{ "room": "!…", "device": "…", "ack": bool }`（server 要查房間成員） | 無。server 回 `Ack`，meta `{ "id": <stream id> }` |
+| `Fragment` | 發送者 → server → 接收者 | 密文 JSON `{ "done": false }` —— 這一片的語意，有需要再加欄位 | 密文：到目前為止的**全文**（UTF-8） |
+| `Close` | 發送者 | 密文 `{ "event_id": "$…" }`（定案事件，§5） | 無。接收者收到就把該 stream 的顯示換成正式事件 |
+| `Abandon` | 發送者或 server | server 發的是明文 `{ "reason": "timeout" }`；發送者發的可密文 | 無 |
 
-| typing 現有 | 流式需要的擴充 |
-|---|---|
-| `RwLock<BTreeMap<RoomId, RoomTyping>>`（純記憶體） | `RwLock<BTreeMap<RoomId, BTreeMap<StreamId, Stream>>>`，Stream 帶 `seq`/`state`/`timeout` |
-| `update: u64` = `globals.next_count()`（全域序號） | 同 —— chunk 也算一次 update |
-| `typing_update_sender: broadcast`（喚醒 sync） | 同，多一個 stream sender，名稱區分 |
-| `snapshot_for_user(room, user, select)`（帶 predicate） | 同 —— `select(token)` 決定要不要重拉 |
-| `typings_maintain`（超時清理） | `streams_maintain`（超時 + 上限 + abandoned 清理） |
+`Fragment` 的 meta 與 data 各自 AEAD（`key_stream`，`nonce = base ‖ seq ‖ 段號`），發送者加密完**直接寫進 pack 的 slot**，接收者在拆包回來的切片上原地解；pack 本身不碰加密。
 
-關鍵參考：`typing::Service::typing_snapshot_for_user`（mod.rs L302-333）—— predicate 在
-同一個 lock 下評估 token、比對了才 clone user 清單，避免每次都整包複製。
+**順序**（[wbf-wire-format.md](wbf-wire-format.md) §4）：發送者 → server 這段，`Fragment` 是**有序類**，同一個 stream 的 `seq` 必須遞增，
+server 記 `next_seq`，錯了回 `Error(OutOfOrder)`。server → 接收者這段是**事件驅動**，接收者不守順序：收到就顯示、只接受比目前大的 `seq`，
+舊的丟掉（全量分片讓這件事安全）。`Open`、`Close`、`Abandon` 是無序類一問一答。
 
-### 3.2 sync 喚醒：`src/service/sync/watch.rs`
+- **`text` 是全量不是 delta**：接收者永遠只顯示最後一片，掉一片不會亂。代價是頻寬隨長度線性長，
+  對一則訊息的長度來說可忽略；真的長到在乎，那是檔案（§1）。
+- 不定長，能塞多少塞多少；外框有 `wbf_meta_max_bytes`、`wbf_data_max_bytes` 擋極端值。
 
-在 `watch` 函式裡，per-room 已經註冊了一堆 watcher（`pduid_pdu` / receipts / **typing
-broadcast**）。流式就**再多註冊一個 broadcast subscription**，跟 typing 那段
-（L138-154）完全同構：
+## 5. 送達語意：預設丟，選用 Ack
 
-- 註冊 `streaming_update_sender.subscribe()`，收到的是該 room 的 stream 有變。
-- 這讓 sync 的長輪詢在「有 stream chunk 進來」時被喚醒去重拉該 room。
+- **預設（`ack: false`，也就是標頭不帶 `WANT_ACK`）**：server 收到 `Fragment` 就轉發，不存、不重送。接收者掉了一片，下一片是全量、自然補上。
+  這跟 typing 一樣是「最新狀態」語意，不是「每一片都要到」。
+- **選用（`Open` 時 `ack: true`，之後每片帶 `WANT_ACK`）**：server 對每片回 `Ack`（標頭抄回同一組 `id`、`seq`，不用讀 meta）；發送者沒在 `T_ack`（client 端自訂，建議 1 s）內收到就重送。
+  server 端對接收者也一樣：接收者可以回 `Ack`，server 據此重送給沒收到的接收者（保留最後 N 片在記憶體，`N = wbf_stream_replay_depth`，預設 8）。
+  這是給「一片都不能掉」的場合（例如流的內容不是純顯示、接收端要逐片處理）。
+- **定案永遠可靠**：`Close` 帶 `event_id`，定案事件走既有 append 路徑進 RocksDB、進 sync。分片掉光了也沒關係，
+  正式事件一定到。這就是為什麼預設可以丟：可靠性放在定案，不放在分片。
 
-### 3.3 sync 注入：`src/api/client/sync/v3.rs`
+## 6. 退化路徑：沒有通道的 client
 
-`ephemeral.events` 目前由 read receipts + **`gather_typing_events`**（L1401）組成。
-流式就新增 `gather_stream_events`，跟 `gather_typing_events` 同樣的 `since` 過濾邏輯，
-把該 room 目前 in-flight 的 stream chunks 包成 ephemeral 事件 append 進去
-（`JoinAggregates.typing_events` → 加一個平行欄位）。
+沒連 WebSocket 的 client（舊 client、或還沒實作通道的）**只會**在 sync 裡看到定案事件，分片一片都看不到。
+這是設計上接受的：它們少的只是「看著它長出來」的體驗，內容一個字不少。
 
-### 3.4 定案：`src/service/rooms/timeline/append.rs`
+第一版提的「分片走 sync ephemeral」**不做**：它的價值是零新傳輸，但通道為了分塊上傳反正要做，沒理由再養一條。
 
-定案時，組一個正式事件走既有 append 路徑（`append_incoming` / append），內容 = 組好的完整
-字串 + 指向 `stream_id` 的關聯欄位。落地後被 `pduid_pdu` watcher 撈到，自然進 timeline、
-推進 `next_batch`。
+## 7. 程式碼落點
 
-### 3.5 不需要動的
+| 東西 | 落點 | 參考 |
+|---|---|---|
+| 通道與外框 | `src/api/client/wbf/ws.rs`，axum `ws` feature（目前沒開） | [wbf-wire-format.md](wbf-wire-format.md) §5 |
+| stream 狀態（記憶體） | `src/service/rooms/streaming/`（新增，仿 `typing/`） | `typing/mod.rs` 的 `RwLock<BTreeMap<RoomId, …>>`、超時清理 |
+| 轉發 | streaming service 對每個房間維護「連著通道的 client」清單；`Fragment` 進來就對清單裡除發送者外的每個 sender 推 | 需要一張 `room → Vec<connection>` 表，連線斷就移除 |
+| 定案 | `src/service/rooms/timeline/append.rs` 既有路徑，內容 = 最後一片的全文，欄位帶 `stream_id` | 落地後被 `pduid_pdu` watcher 撈到，自然進 sync |
+| 誰有資格收 | 房間成員判斷走既有的 `state_cache.is_joined` | 加入通道時綁定 user，`Open` 時查房間成員 |
 
-- **不新增 column family**（`src/database/maps.rs`）—— 分片永不落盤。定案事件走既有
-  事件型別與欄位。
-- **media/storage**（§5.2 的活）不碰。
-- 非聯邦（Phase 1），**沒有 federation EDU 這條**要處理 —— 好消息，減掉一大塊。
+**不新增 column family**：分片永不落盤。
 
----
-
-## 4. 資料模型草案
+## 8. 資料模型
 
 ```text
 Stream {
-    stream_id: 全域唯一（server 發，或 sender 隨機＋server 背書）
-    room_id
-    sender:    UserId
-    device:    DeviceId      // 同使用者多裝置分開，避免兩裝置各發一半
-    seq:       u64           // 起 0，每 chunk +1
-    state:     open | closed | abandoned
-    created_at / last_chunk_at
-    length:    u64           // 累積位元組（僅供計量/上限，非內容）
+    id:         u64（server 發，連線內唯一即可；跨連線不需要）
+    room_id, sender: UserId, device: DeviceId
+    seq:        u64（起 0，每片 +1；接收者只接受遞增）
+    ack:        bool
+    state:      Open | Closed | Abandoned
+    created_at / last_fragment_at
+    recent:     VecDeque<Fragment>（只在 ack=true 時保留，長度 ≤ wbf_stream_replay_depth）
 }
-
-Chunk { stream_id, seq, data }   // delta 或全量補；見 §7 待驗 4
 ```
 
-事件型別草案（見 §7 待驗 3 定案）：
+上限（config）：`wbf_stream_timeout`（預設 30 s 沒新片就 Abandon）、`wbf_stream_max_per_room`（預設 16）、
+`wbf_stream_max_fragment_bytes`（預設 64 KiB，同時受 pack 的 `wbf_data_max_bytes` 管）。全部記憶體、全部有上限、全部有超時 —— 呼應核心設計 §1 的「容量有界」。
 
-- **ephemeral**：`m.stream_chunk`（room-scoped ephemeral，帶 stream_id + seq + data）
-- **timeline**：`m.room.message` 帶 `stream_id` 關聯（定案事件），或自訂型別
+## 9. 必須守住的語意（驗收條件）
 
----
+1. **後加入者零殘影**：只看到定案事件。
+2. **歷史單一版本**：定案前事件層沒有半成品。
+3. **容量有界**：分片全記憶體、有上限、有超時。
+4. **不污染 `next_batch`**：分片不走 sync，自然不推進 timeline token；只有定案事件推進。
+5. **E2EE 下 server 不碰明文**：server 只看 pack 的明文標頭，meta 與 data 原樣轉發。
+6. **通道斷了不丟定案**：發送者重連後仍能 `Close`（stream 還在 `wbf_stream_timeout` 內）或重發定案事件。
 
-## 5. 傳輸選擇：走 sync 還是走專屬即時通道
+## 10. 開放問題
 
-這是本設計**最大的取捨**。分片要送到在線 client，有兩條路。
+1. **stream 的金鑰**（核心設計 §7 待驗 4）：一個 stream 一把短期金鑰（`Open` 時透過既有的 to-device 金鑰分發送給房間成員），
+   還是沿用該房間當下的 Megolm session。建議**沿用 Megolm session**：分片本來就是「這則訊息的中間狀態」，
+   跟定案事件同一把，接收者不用多一次交換。待驗的是 Megolm 對高頻小訊息的 ratchet 成本。
+2. **同房間多 stream 交錯**：per-stream `seq` 各自遞增，跨 stream 不保證全序，client 依 `id` 分流。需確認接受。
+3. **跨裝置**：同一使用者兩台裝置各自是獨立的接收者；發送者只能是一台。不做跨裝置續發。
+4. **串流中撤回**：`Abandon` 就是撤回，不定案；已定案走既有 redact。不做部分編輯。
+5. **分片頻率**：client 端決定（建議每 50–100 ms 或每 N 個 token 合併一片），server 不限制頻率、只限制大小與並行數。
 
-### 選項 A：分片走 sync ephemeral（全複用，可先做）
+## 11. 這份文件的查證範圍
 
-分片當作 ephemeral room 事件，跟著既有 sync 長輪詢送。優點是**零新傳輸**——事件型別、
-認證、重連語意全部白拿。
+**在程式碼裡讀過（2026-09-01，`main` == 上游 v1.9.0-91；2026-09-03 再確認）**
 
-**代價**：sync 的模型是「有變化就 wake，wake 後把該 room 的這批狀態重拉一次」。分片若以
-**LLM token 頻率**（每 10–50 ms 一片）進來，會在短時間內觸發大量 wake + 重拉，sync 負荷
-和用戶端解碼都難看。
-
-**適用**：**粗粒度串流** —— 一段訊息分 3–5 片、或分片按 ~100–250ms 批合成包。
-
-### 選項 B：分片走專屬即時通道（SSE / push）
-
-新增一條 SSE（或等價的長連線 push）給 in-room 即時變更，分片只在那上面推；sync 只管定案
-事件。token 級頻率可行，client 不必每次全量重拉。
-
-**代價**：新傳輸、新認證/重連語意、要處理「連線斷了沒收到中間分片」的補償。
-
-### 建議
-
-> **先用 A 定模型，token 級壓測後再決定要不要 B。** 兩者的**事件型別共用**，換傳輸不動
-> `stream_id` + 序號 + 定案事件這套模型。這符合核心文件 §6「先繞過、不是先取代」——
-> A 的價值是先把正確的語意焊死，而不是押注在傳輸層。
-
----
-
-## 6. 必須守住的語意（做成驗收條件）
-
-1. **後加入者零殘影**：新 sync 只看到定案事件，永遠收不到分片。
-2. **歷史單一版本**：定案前事件層沒有半成品；定案後只有一個正式事件。
-3. **容量有界**：分片全記憶體、有上限、有超時（呼應核心 §1/§4）。
-4. **不污染 `next_batch`**：分片只算 ephemeral update，**不得**推進 timeline 的
-   `next_batch`；只有定案事件推進。需驗證現有 `next_batch` 是否只跟 timeline PDU 走
-   （typing 正是如此——ephemeral 不推 timeline token；若是則沿用，不需改）。
-5. **E2EE 下 server 不碰明文**：server 驗證的是密文分片的**順序與存在**，不是內容語意。
-
----
-
-## 7. 開放問題與待驗（對齊核心文件 §7 的風格）
-
-1. **分片頻率 / 批大小**。100ms? 250ms? —— 在「在線顯延遲」與「sync 負荷」之間取捨。
-   這是選 A 或 B 的**實測依據**。
-2. **同 room 多使用者並行串流**。多個 stream 交錯時，per-stream 序號各自唯一，跨 stream
-   不保證全序，client 依 stream_id 分流。需確認這語意可接受。
-3. **事件型別命名**。用現成 `m.room.message` + 關聯欄位，還是自訂型別？牽涉既有 client
-   對陌生內容的退化行為（核心文件 §6 Phase 0 的 `body` 純文字連結退化策略可參考）。
-4. **分片內容是全量還是 delta**。全量簡單、免組裝；delta 省頻寬但要處理亂序/遺失。初版
-   建議全量（client 直接顯示最近一片），壓測再決定。
-5. **E2EE 金鑰安排**（= 核心文件 §7 待驗 4）。一個 stream 一把短期 session 金鑰，還是沿用
-   逐 event 金鑰？建議前者，但需先解決一次 `m.room.key_request` 交換成本。
-6. **resource 上限實值**：每 room 並行 stream 數、每 stream 分片數/bytes、總記憶體臨界。
-7. **跨裝置串流狀態同步**。目前設計**不同步**（device 分 stream），簡化；要不要跨裝置續看
-   是 client 端決定。
-8. **串流中可否部分撤回/編輯**。初版**不做**，定案即定案；要編輯走既有編輯語意。
-
----
-
-## 8. 這份文件的查證範圍（誠實標註，呼應核心文件 §8）
-
-**實際在程式碼裡讀過（2026-09-01，`main` == 上游 v1.9.0-91）**
-
-- `src/service/rooms/typing/mod.rs`：ephemeral 在記憶體 + `next_count` + broadcast +
-  `snapshot_for_user` predicate 的完整範例（L302-333）。
-- `src/service/sync/watch.rs`：per-room watcher 註冊 + typing broadcast subscription
-  （L138-154）——流式的落地處。
-- `src/api/client/sync/v3.rs`：`ephemeral.events` 組成（receipts + `gather_typing_events`
-  L1401）與 `JoinAggregates` 結構（L1363-1373）。
-- `src/service/rooms/timeline/append.rs`：定案事件的 append 路徑入口。
-- `src/database/maps.rs` 目錄規模與 `src/service/storage/` 的 provider 抽象（repo-structure.md）。
+- `src/service/rooms/typing/mod.rs`：記憶體狀態 ＋ 超時清理的形狀，流式照搬。
+- `src/service/sync/watch.rs`、`src/api/client/sync/v3.rs`：第一版曾打算掛在這裡；第二版不走 sync，只有定案事件經過它。
+- `src/service/rooms/timeline/append.rs`：定案事件的入口。
+- `src/router/`、`src/api/`：**沒有任何 WebSocket 或 SSE**，axum 的 `ws` feature 沒開；通道要從零加。
 
 **純粹是判斷，不是事實**
 
-- 「sync 在 LLM token 頻率下會是負擔」—— 理由是 sync 的 wake-and-repull 模型，這需要
-  實測（待驗 1）佐證。
-- 「選 A 用 `stream_id` + 序號 + 定案事件就夠把語意焊死」—— 這是設計假設，等第一份
-  跨端實作驗證。
+- 「sync 在 token 頻率下會是負擔」—— 依 wake-and-repull 模型推的，沒實測；但第二版不靠這個判斷，通道反正要做。
+- 「全量分片的頻寬可忽略」—— 對一則訊息的長度而言；要是有人拿它傳長文，那是用錯工具。

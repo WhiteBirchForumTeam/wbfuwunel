@@ -61,7 +61,9 @@ fork 專屬的文件都在 [`docs/design/`](docs/design/)。它們刻意不進�
 | Windows 建置與實跑驗證 | [docs/design/windows-build.md](docs/design/windows-build.md) |
 | 媒體引用計數（上半：索引，已被下一筆取代） | [docs/design/media-refcount.md](docs/design/media-refcount.md) |
 | 媒體的真正刪除：精確計數、哨兵、立即清理、migrate | [docs/design/media-gc.md](docs/design/media-gc.md) |
-| 流式訊息（文字 token 串流，草案） | [docs/design/streaming-messages.md](docs/design/streaming-messages.md) |
+| 分塊上傳、續傳、range 下載（提案，以塊加密、CRC、先 HTTP 後 WebSocket） | [docs/design/chunked-upload.md](docs/design/chunked-upload.md) |
+| 流式訊息（文字 token 串流，走 WebSocket 二進位通道，草案） | [docs/design/streaming-messages.md](docs/design/streaming-messages.md) |
+| WebSocket 通道的二進位封包外框（兩者共用） | [docs/design/wbf-wire-format.md](docs/design/wbf-wire-format.md) |
 
 上游的使用文件（[`docs/`](docs/) 其餘部分：設定、部署、維護）大體仍適用，因為程式碼的骨架還是
 上游的。但凡 `CHANGELOG-fork.md` 寫了行為有變的地方，以它為準。
