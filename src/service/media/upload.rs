@@ -119,6 +119,11 @@ pub async fn upload_create(&self, user: &UserId, request: UploadRequest) -> Uplo
 	if config.media_upload_max_len > 0 && request.total_len > config.media_upload_max_len {
 		return Err(UploadError::TooLarge("total_len exceeds media_upload_max_len".into()));
 	}
+	if is_last_chunk_all_tag(request.total_len, wire_chunk_size) {
+		return Err(UploadError::Conflict(format!(
+			"total_len leaves a last chunk of {CHUNK_TAG_LEN} bytes or fewer: no room for plaintext under the tag"
+		)));
+	}
 	let chunk_count = request.total_len.div_ceil(u64::from(wire_chunk_size));
 	let chunk_count = u32::try_from(chunk_count).map_err(|_| UploadError::TooLarge("too many chunks".into()))?;
 
@@ -166,6 +171,10 @@ pub async fn upload_create(&self, user: &UserId, request: UploadRequest) -> Uplo
 /// Chunks are ordered: `index` must be the first missing one. An index
 /// already received is accepted again without rewriting (a lost ack); an
 /// index beyond the first missing one is out of order.
+///
+/// A chunk shorter than its slot ends the upload at that chunk: `total_len`
+/// was a ceiling and this is where the stream really ended. It must still
+/// carry more than the tag.
 #[implement(super::Service)]
 pub async fn upload_chunk(&self, user: &UserId, upload_id: u64, index: u32, chunk: &[u8]) -> UploadResult<u32> {
 	let mut upload = self.owned_upload(user, upload_id).await?;
@@ -174,15 +183,13 @@ pub async fn upload_chunk(&self, user: &UserId, upload_id: u64, index: u32, chun
 		return Err(UploadError::Conflict(format!("chunk index {index} is past the last chunk {}", upload.chunk_count - 1)));
 	}
 
+	let len = chunk.len() as u64;
 	let expected_len = upload.chunk_len(index);
-	if chunk.len() as u64 != expected_len {
-		return Err(UploadError::Conflict(format!(
-			"chunk {index} must be {expected_len} bytes, got {}",
-			chunk.len()
-		)));
-	}
 
 	if upload.has_chunk(index) {
+		if len != expected_len {
+			return Err(UploadError::Conflict(format!("chunk {index} must be {expected_len} bytes, got {len}")));
+		}
 		debug!(upload_id, index, "Chunk already received; acknowledging again.");
 		return Ok(upload.received_count);
 	}
@@ -190,6 +197,23 @@ pub async fn upload_chunk(&self, user: &UserId, upload_id: u64, index: u32, chun
 	let expected = upload.next_missing().unwrap_or(upload.chunk_count);
 	if index != expected {
 		return Err(UploadError::OutOfOrder { expected });
+	}
+
+	if len > expected_len {
+		return Err(UploadError::Conflict(format!("chunk {index} must be at most {expected_len} bytes, got {len}")));
+	}
+	if len < expected_len {
+		if len <= u64::from(CHUNK_TAG_LEN) {
+			return Err(UploadError::Conflict(format!(
+				"a closing chunk must carry more than the {CHUNK_TAG_LEN}-byte tag, got {len}"
+			)));
+		}
+		upload.total_len = upload.chunk_offset(index).saturating_add(len);
+		upload.chunk_count = index.saturating_add(1);
+		upload
+			.received
+			.truncate((upload.chunk_count as usize).div_ceil(8));
+		debug!(upload_id, index, total_len = upload.total_len, "Short chunk closed the upload early.");
 	}
 
 	let path = self.staging_path(upload_id);
@@ -219,9 +243,10 @@ pub async fn upload_status(&self, user: &UserId, upload_id: u64) -> UploadResult
 /// Turns a complete upload into media: the staging file becomes one object,
 /// the same rows `create()` writes are written, the upload row goes.
 ///
-/// `total_len` is the true size when the client declared a ceiling; it must
-/// not exceed the ceiling and must leave every chunk before the last one
-/// full.
+/// `total_len` is the true size when the client declared a ceiling. It may
+/// only end where a received chunk ends, dropping whole chunks sent past it:
+/// a shorter last chunk is declared by sending it short, not here, because
+/// the bytes on disk have to be the object.
 #[implement(super::Service)]
 pub async fn upload_seal(&self, user: &UserId, upload_id: u64, total_len: Option<u64>) -> UploadResult<OwnedMxcUri> {
 	let mut upload = self.owned_upload(user, upload_id).await?;
@@ -230,14 +255,24 @@ pub async fn upload_seal(&self, user: &UserId, upload_id: u64, total_len: Option
 		if true_len > upload.total_len {
 			return Err(UploadError::Conflict("total_len exceeds the declared ceiling".into()));
 		}
-		let true_count = true_len.div_ceil(u64::from(upload.wire_chunk_size));
-		if true_count != u64::from(upload.chunk_count) {
-			// A shorter true length that drops whole chunks is a different upload.
-			if true_count > u64::from(upload.received_count) {
-				return Err(UploadError::Conflict("total_len does not match the chunks received".into()));
-			}
-			upload.chunk_count = u32::try_from(true_count).map_err(|_| UploadError::Conflict("too many chunks".into()))?;
+		if true_len == 0 || is_last_chunk_all_tag(true_len, upload.wire_chunk_size) {
+			return Err(UploadError::Conflict("total_len leaves no room for plaintext in the last chunk".into()));
 		}
+		let true_count = true_len.div_ceil(u64::from(upload.wire_chunk_size));
+		let true_count = u32::try_from(true_count).map_err(|_| UploadError::Conflict("too many chunks".into()))?;
+		if true_count > upload.received_count {
+			return Err(UploadError::Conflict("total_len does not match the chunks received".into()));
+		}
+		let last = true_count.saturating_sub(1);
+		let stored_last_len = upload.chunk_len(last);
+		let true_last_len = true_len.saturating_sub(upload.chunk_offset(last));
+		if stored_last_len != true_last_len {
+			return Err(UploadError::Conflict(format!(
+				"total_len ends chunk {last} at {true_last_len} bytes but {stored_last_len} were received; send a shorter last \
+				 chunk instead of declaring it at seal"
+			)));
+		}
+		upload.chunk_count = true_count;
 		upload.total_len = true_len;
 	}
 
@@ -369,7 +404,10 @@ async fn store_staging_file(&self, key: &[u8], path: &PathBuf, len: u64) -> Resu
 			continue;
 		}
 
-		let file = fs::File::open(path).await?;
+		// The staging file may run past `len`: the seal can drop whole chunks the
+		// client sent past the true end, and the provider stores every byte it is
+		// given.
+		let file = fs::File::open(path).await?.take(len);
 		let chunks = stream::try_unfold(file, async |mut file| {
 			let mut buf = vec![0_u8; 1024 * 1024];
 			let read = file.read(&mut buf).await?;
@@ -395,8 +433,16 @@ async fn store_staging_file(&self, key: &[u8], path: &PathBuf, len: u64) -> Resu
 	Ok(())
 }
 
-/// A fresh upload id: random, non-zero, and not in use. Zero means "no id"
-/// on the wire.
+/// Whether `total_len` ends in a chunk of `CHUNK_TAG_LEN` bytes or fewer: a
+/// last chunk that is all tag and no plaintext, which no client can produce.
+fn is_last_chunk_all_tag(total_len: u64, wire_chunk_size: u32) -> bool {
+	let tail = total_len % u64::from(wire_chunk_size);
+	tail != 0 && tail <= u64::from(CHUNK_TAG_LEN)
+}
+
+/// A fresh upload id: random and non-zero. Zero means "no id" on the wire.
+/// Collisions are not checked: 64 random bits make one negligible, and its
+/// cost would be one owner's in-progress row.
 fn mint_upload_id() -> u64 {
 	loop {
 		let hex = utils::rand::string_from(b"0123456789abcdef", 16);
@@ -516,5 +562,16 @@ mod tests {
 		assert!(upload.is_complete());
 		assert_eq!(upload.next_missing(), None);
 		assert_eq!(upload.runs(), (vec![[0, 2]], vec![]));
+	}
+
+	#[test]
+	fn a_tail_of_tag_or_less_is_all_tag() {
+		let wire = 64 + super::CHUNK_TAG_LEN;
+
+		assert!(!super::is_last_chunk_all_tag(u64::from(wire), wire), "whole chunks only");
+		assert!(!super::is_last_chunk_all_tag(u64::from(wire) + 17, wire), "one plaintext byte under the tag");
+		assert!(super::is_last_chunk_all_tag(u64::from(wire) + 16, wire), "tag alone");
+		assert!(super::is_last_chunk_all_tag(u64::from(wire) + 1, wire));
+		assert!(super::is_last_chunk_all_tag(5, wire));
 	}
 }

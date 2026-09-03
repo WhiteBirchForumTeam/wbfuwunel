@@ -374,7 +374,12 @@ pub fn decode(bytes: &mut [u8]) -> Result<PackView<'_>, PackError> {
 	let id = u64::from_be_bytes(bytes[4..12].try_into().expect("8 bytes"));
 	let seq = u32::from_be_bytes(bytes[12..16].try_into().expect("4 bytes"));
 
+	// Each length field is capped by `len` before it is added to anything, so
+	// the offsets below cannot overflow a 32-bit usize on a hostile pack.
 	let meta_len = read_u32(bytes, HEADER_LEN) as usize;
+	if meta_len > len {
+		return Err(PackError::Truncated { needed: meta_len.saturating_add(OVERHEAD), len });
+	}
 	let meta_start = HEADER_LEN + 4;
 	let meta_end = meta_start + meta_len;
 	let data_len_at = meta_end + 4;
@@ -389,6 +394,9 @@ pub fn decode(bytes: &mut [u8]) -> Result<PackView<'_>, PackError> {
 	}
 
 	let data_len = read_u32(bytes, data_len_at) as usize;
+	if data_len > len {
+		return Err(PackError::Truncated { needed: data_len.saturating_add(OVERHEAD), len });
+	}
 	let data_start = data_len_at + 4;
 	let data_end = data_start + data_len;
 	let total = data_end + 4;

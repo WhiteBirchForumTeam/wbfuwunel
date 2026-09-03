@@ -45,7 +45,8 @@ seek 靠 provider 的 **range get**：`object_store` 有 `get_range`，`src/serv
 - client 在 `Create` 宣告 `chunk_size`（任一規格，或範圍內任意 2 的冪）與 `total_len`；沒宣告就用 server 的 `media_chunk_size_default`（small，64 KiB）。
 - 之後 `chunk_size` **不能改**。最後一塊可以短：120 KB 用 64 KiB 就是 64 ＋ 56。
 - server 檢查：`media_chunk_size_min ≤ chunk_size ≤ media_chunk_size_max`（預設 16 KiB 到 **16 MiB**），且 `chunk_size + 16 ≤ wbf_data_max_bytes`。
-- 塊數 = `ceil(total_len / chunk_size)`。`total_len` 若不知道（串流產生的檔）可以先給上限，seal 時給真值（§9 問維護者接不接受）。
+- 塊數 = `ceil(total_len / wire_chunk_size)`（`total_len` 是密文總長，§2.3）。`total_len` 除以 `wire_chunk_size` 的餘數不能落在 1..16：那樣的最後一塊只剩標籤、塞不下任何明文，client 做不出來，`Create` 直接 `Error(Conflict)`。
+- `total_len` 若不知道（串流產生的檔）可以先給**上限**：塊照上限的幾何送，串流結束時**把最後一塊短送**（長度小於它的格子、大於 16），server 就把 `total_len` 與塊數收在那一塊，之後 seal 不必再給。seal 的 `total_len` 只能剛好落在**已收塊的尾端**（等於已收的長度，或整塊的倍數，用來丟掉多送過頭的整塊）；落在一塊中間就 `Error(Conflict)`，因為磁碟上那一塊是照舊長度收的，物件不能帶尾巴。
 - **一個塊正好是一個 pack 的 data 段**：client 把第 i 塊明文加密後直接寫進 pack 的 `data_slot`（[wbf-wire-format.md](wbf-wire-format.md) §5），
   沒有第二次加密、沒有複製。data 的長度就是 `chunk_size + 16`（AEAD 標籤），最後一塊是 `餘數 + 16`。
 
@@ -74,7 +75,7 @@ WebSocket 上是一框一 pack；HTTP 上是 `POST /_wbf/v1/pack` 一次一 pack
 
 | CF | 鍵 | 值 | 說明 |
 |---|---|---|---|
-| `mediaid_upload` | `upload_id`（u64 BE） | `Cbor(Upload)` | 進行中的上傳：`mxc`、`owner`、`chunk_size`、`wire_chunk_size`、`total_len`（上限或真值）、`chunk_count`、`received`（bitmap）、`content_type`、`content_disposition`、`created_at`、`last_chunk_at`、`state`（`Uploading` / `Sealing`） |
+| `mediaid_upload` | `upload_id`（u64 BE） | `Cbor(Upload)` | 進行中的上傳：`mxc`、`owner`、`chunk_size`、`wire_chunk_size`、`total_len`（上限或真值）、`chunk_count`、`received`（bitmap）、`content_type`、`filename`、`created_at`、`last_chunk_at`。沒有 `state` 欄：兩個 seal 撞在一起靠冪等收尾（計數的 `Init` 對既有列不動、物件與媒體列覆寫、第二次刪列刪檔容忍不存在），不靠狀態機 |
 
 鍵是 `upload_id` 而不是 mxc，因為 pack 的標頭帶的是 `id`（u64），server 一個點讀就找到，不用解 meta。
 `upload_id` 由 server 在 `Create` 時隨機發（64 bit），mxc 同時建好。bitmap：10 GB／64 KiB = 16 萬位 = 20 KB，每收一塊改寫一次；要更省再改成一塊一列。
@@ -92,9 +93,9 @@ TTL 設 `media_upload_ttl × 2` 當兜底，真正的清理是 §6 的 sweeper�
 | subtype | 請求 meta | 請求 data | 回應（`Ack` 的 meta） |
 |---|---|---|---|
 | `0x01 Create` | `{ "total_len": …, "chunk_size"?: …, "content_type"?: "…", "filename"?: "…" }` | 無 | `{ "id": <upload_id>, "mxc": "mxc://…", "chunk_size": …, "chunk_count": …, "expires_at": … }` |
-| `0x02 Chunk` | 無（`id`、`seq` 在標頭就夠） | 第 `seq` 塊的 bytes（`wire_chunk_size`，最後一塊可短） | `{ "received": <已到塊數> }`。`data_crc` 不合 → `Error(Corrupt)`；`seq ≥ chunk_count` 或長度不對 → `Error(Conflict)`；重送同塊 → 覆寫同一偏移，冪等 |
+| `0x02 Chunk` | 無（`id`、`seq` 在標頭就夠） | 第 `seq` 塊的 bytes（`wire_chunk_size`，最後一塊可短） | `{ "received": <已到塊數> }`。`data_crc` 不合 → `Error(Corrupt)`；`seq ≥ chunk_count`、長度超過格子、或短塊 ≤ 16 → `Error(Conflict)`；短於格子（且 > 16）→ 上傳在此塊**結束**，`total_len`／`chunk_count` 縮到這裡（§2.2 串流）；重送同塊 → 不重寫、再 Ack 一次，冪等 |
 | `0x03 Status` | 無 | 無 | `{ "received": [[0,41],[43,43]], "missing": [[42,42],[44,99]] }` 區間清單 |
-| `0x04 Seal` | `{ "total_len"?: <真值> }` | 無 | `{ "mxc": "…" }`。缺塊 → `Error(Conflict)` 帶 `missing` |
+| `0x04 Seal` | `{ "total_len"?: <真值> }`（只能落在已收塊的尾端，§2.2） | 無 | `{ "mxc": "…" }`。缺塊 → `Error(Conflict)` 帶 `missing`；真值落在一塊中間 → `Error(Conflict)` |
 | `0x05 Abort` | 無 | 無 | `{ "ok": true }` |
 
 `Chunk` 是**有序類**（[wbf-wire-format.md](wbf-wire-format.md) §4）：同一個 `id` 之內 `seq` 必須 0, 1, 2, … 遞增，server 記 `next_seq`；來的不是 `next_seq`
@@ -109,7 +110,7 @@ TTL 設 `media_upload_ttl × 2` 當兜底，真正的清理是 §6 的 sweeper�
 
 | subtype | 請求 meta | 回應 |
 |---|---|---|
-| `0x01 Info` | `{ "mxc": "…" }` | `Ack` meta：`{ "total_len": …, "content_type": "…", "chunk_size"?: … }`（分塊媒體 seal 時記下的塊大小，給 client 算塊邊界） |
+| `0x01 Info` | `{ "mxc": "…" }` | `Ack` meta：`{ "total_len": …, "content_type": "…", "chunk_size_large": … }`（`chunk_size_large` 是 server 的 `media_chunk_size_large`，只是建議 client 用的 `Read` 大小；上傳時的塊大小 seal 後**不保存** —— 塊邊界屬於 client，記在 `wbf.chunked` 事件裡（§7）） |
 | `0x02 Read` | `{ "mxc": "…", "pos"?: …, "len"?: … }` | `Ack` meta：`{ "pos": …, "len": <實際讀出>, "total_len": … }`；**data = 讀出的 bytes**。`len` 沒給用 `media_download_default_len`（預設 1 MiB），`pos` 沒給 0。維護者定的語意：server 告訴 client **這一塊在哪、多大**；client 下一次用 `pos + len` 接著要，下一塊理論上一樣大，只會在檔尾比較小，不會更大 |
 
 client 想解第 i 塊：`pos = i × wire_chunk_size`、`len = wire_chunk_size`。墓碑一樣擋在 `search_file_metadata`，已刪媒體回 `Error(NotFound)`；

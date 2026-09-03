@@ -61,7 +61,7 @@ pub(crate) async fn pack_route(
 	let user = match authenticate(&services, &headers).await {
 		| Ok(user) => user,
 		| Err(error) => {
-			let reply = error_pack(Kind::Control, 0, 0, "Unauthorized", &error.to_string());
+			let reply = error_pack(0, 0, "Unauthorized", &error.to_string());
 			return Ok(pack_response(StatusCode::UNAUTHORIZED, reply));
 		},
 	};
@@ -77,7 +77,7 @@ pub(crate) async fn pack_route(
 				| PackError::DataCrc { .. } => header_id_seq(&body),
 				| _ => (0, 0),
 			};
-			error_pack(Kind::Control, id, seq, pack_error_code(error), &error.to_string())
+			error_pack(id, seq, pack_error_code(error), &error.to_string())
 		},
 	};
 
@@ -122,7 +122,7 @@ pub(crate) async fn handle_pack(services: &Services, user: &UserId, view: PackVi
 	let limits_ok = view.meta.len() <= services.config.wbf_meta_max_bytes
 		&& view.data.len() <= services.config.wbf_data_max_bytes;
 	if !limits_ok {
-		return error_pack(header.kind, header.id, header.seq, "TooLarge", "meta or data exceeds the configured limit");
+		return error_pack(header.id, header.seq, "TooLarge", "meta or data exceeds the configured limit");
 	}
 
 	let result = match (header.kind, header.subtype) {
@@ -140,7 +140,7 @@ pub(crate) async fn handle_pack(services: &Services, user: &UserId, view: PackVi
 
 	match result {
 		| Ok(reply) => reply,
-		| Err(reject) => reject.into_pack(header.kind, header.id, header.seq),
+		| Err(reject) => reject.into_pack(header.id, header.seq),
 	}
 }
 
@@ -156,7 +156,7 @@ impl Reject {
 		Self { code, message: message.into(), extra: Value::Null }
 	}
 
-	fn into_pack(self, kind: Kind, id: u64, seq: u32) -> Vec<u8> {
+	fn into_pack(self, id: u64, seq: u32) -> Vec<u8> {
 		let mut meta = json!({ "code": self.code, "message": self.message });
 		if let (Value::Object(target), Value::Object(extra)) = (&mut meta, self.extra) {
 			target.extend(extra);
@@ -165,7 +165,7 @@ impl Reject {
 		PackBuilder::new(Kind::Control, control::ERROR, Flags::IS_RESPONSE, id, seq)
 			.json_meta(&meta)
 			.map(PackBuilder::finish)
-			.unwrap_or_else(|_| error_pack(kind, id, seq, "Internal", "could not encode the error"))
+			.unwrap_or_else(|_| error_pack(id, seq, "Internal", "could not encode the error"))
 	}
 }
 
@@ -219,7 +219,6 @@ async fn handle_upload_create(services: &Services, user: &UserId, view: &PackVie
 	let created = services.media.upload_create(user, request).await?;
 
 	Ok(ack(
-		Kind::Upload,
 		created.upload_id,
 		view.header.seq,
 		json!({
@@ -239,14 +238,13 @@ async fn handle_upload_chunk(services: &Services, user: &UserId, view: &PackView
 		.upload_chunk(user, view.header.id, view.header.seq, view.data)
 		.await?;
 
-	Ok(ack(Kind::Upload, view.header.id, view.header.seq, json!({ "received": received }), Vec::new()))
+	Ok(ack(view.header.id, view.header.seq, json!({ "received": received }), Vec::new()))
 }
 
 async fn handle_upload_status(services: &Services, user: &UserId, view: &PackView<'_>) -> std::result::Result<Vec<u8>, Reject> {
 	let status = services.media.upload_status(user, view.header.id).await?;
 
 	Ok(ack(
-		Kind::Upload,
 		view.header.id,
 		view.header.seq,
 		json!({
@@ -266,13 +264,13 @@ async fn handle_upload_seal(services: &Services, user: &UserId, view: &PackView<
 		.upload_seal(user, view.header.id, total_len)
 		.await?;
 
-	Ok(ack(Kind::Upload, view.header.id, view.header.seq, json!({ "mxc": mxc }), Vec::new()))
+	Ok(ack(view.header.id, view.header.seq, json!({ "mxc": mxc }), Vec::new()))
 }
 
 async fn handle_upload_abort(services: &Services, user: &UserId, view: &PackView<'_>) -> std::result::Result<Vec<u8>, Reject> {
 	services.media.upload_abort(user, view.header.id).await?;
 
-	Ok(ack(Kind::Upload, view.header.id, view.header.seq, json!({ "ok": true }), Vec::new()))
+	Ok(ack(view.header.id, view.header.seq, json!({ "ok": true }), Vec::new()))
 }
 
 async fn handle_download_info(services: &Services, view: &PackView<'_>) -> std::result::Result<Vec<u8>, Reject> {
@@ -281,7 +279,6 @@ async fn handle_download_info(services: &Services, view: &PackView<'_>) -> std::
 	let info = services.media.media_info(&mxc.as_str().try_into().map_err(|_| Reject::code("Conflict", "invalid mxc"))?).await?;
 
 	Ok(ack(
-		Kind::Download,
 		0,
 		view.header.seq,
 		json!({
@@ -306,7 +303,6 @@ async fn handle_download_read(services: &Services, view: &PackView<'_>) -> std::
 	let read = services.media.read_range(&mxc, pos, len).await?;
 
 	Ok(ack(
-		Kind::Download,
 		0,
 		view.header.seq,
 		json!({ "pos": read.pos, "len": read.bytes.len(), "total_len": read.total_len }),
@@ -326,19 +322,19 @@ fn pong(view: &PackView<'_>) -> Vec<u8> {
 	PackBuilder::new(Kind::Control, control::PONG, Flags::IS_RESPONSE, view.header.id, view.header.seq)
 		.meta(view.meta)
 		.map(PackBuilder::finish)
-		.unwrap_or_else(|_| error_pack(Kind::Control, view.header.id, view.header.seq, "Internal", "could not encode pong"))
+		.unwrap_or_else(|_| error_pack(view.header.id, view.header.seq, "Internal", "could not encode pong"))
 }
 
 /// An `Ack` answering `(id, seq)` with `meta` and, for reads, `data`.
-fn ack(_for_kind: Kind, id: u64, seq: u32, meta: Value, data: Vec<u8>) -> Vec<u8> {
+fn ack(id: u64, seq: u32, meta: Value, data: Vec<u8>) -> Vec<u8> {
 	PackBuilder::new(Kind::Control, control::ACK, Flags::IS_RESPONSE, id, seq)
 		.json_meta(&meta)
 		.and_then(|builder| builder.data(&data))
 		.map(PackBuilder::finish)
-		.unwrap_or_else(|_| error_pack(Kind::Control, id, seq, "Internal", "could not encode the reply"))
+		.unwrap_or_else(|_| error_pack(id, seq, "Internal", "could not encode the reply"))
 }
 
-fn error_pack(_for_kind: Kind, id: u64, seq: u32, code: &str, message: &str) -> Vec<u8> {
+fn error_pack(id: u64, seq: u32, code: &str, message: &str) -> Vec<u8> {
 	PackBuilder::new(Kind::Control, control::ERROR, Flags::IS_RESPONSE, id, seq)
 		.json_meta(&json!({ "code": code, "message": message }))
 		.map(PackBuilder::finish)
@@ -378,7 +374,7 @@ mod tests {
 
 	#[test]
 	fn a_reject_becomes_an_error_pack_answering_the_request() {
-		let mut pack = Reject::code("NotFound", "no such upload").into_pack(Kind::Upload, 42, 7);
+		let mut pack = Reject::code("NotFound", "no such upload").into_pack(42, 7);
 		let view = decode(&mut pack).expect("error pack decodes");
 
 		assert_eq!(view.header.kind, Kind::Control);
@@ -392,7 +388,7 @@ mod tests {
 	#[test]
 	fn out_of_order_carries_the_expected_seq() {
 		let reject: Reject = tuwunel_service::media::UploadError::OutOfOrder { expected: 12 }.into();
-		let mut pack = reject.into_pack(Kind::Upload, 1, 30);
+		let mut pack = reject.into_pack(1, 30);
 		let view = decode(&mut pack).expect("decodes");
 
 		assert_eq!(view.meta_json().expect("json")["expected_seq"], 12);

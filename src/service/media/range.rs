@@ -42,6 +42,10 @@ pub async fn media_info(&self, mxc: &Mxc<'_>) -> Result<MediaInfo> {
 		.await
 		.ok_or_else(|| err!(Request(NotFound("Media object not found on any provider."))))?;
 
+	// The stored type is an empty string when the uploader gave none; say
+	// "none" rather than hand the client a placeholder.
+	let content_type = content_type.filter(|content_type| !content_type.is_empty());
+
 	Ok(MediaInfo { total_len: object.size, content_type })
 }
 
