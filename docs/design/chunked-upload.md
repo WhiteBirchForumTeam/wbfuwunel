@@ -61,12 +61,12 @@ client 端：`key` 每個檔案一把；`nonce_i = base ‖ i`；`ct_i = AEAD(ke
 ### 2.4 所有互動都是 pack
 
 上傳的建立、送塊、查狀態、封存、放棄，下載的查詢與讀取，**每一個都是一個 pack 進、一個 pack 出**。
-WebSocket 上是一框一 pack；HTTP 上是 `POST /_tuwunel/wbf/v1/pack` 一次一 pack。server 端一個入口函式 `handle_pack(user, Pack) -> Pack`，
+WebSocket 上是一框一 pack；HTTP 上是 `POST /_wbf/v1/pack` 一次一 pack。server 端一個入口函式 `handle_pack(user, Pack) -> Pack`，
 兩種送法都呼叫它，所以**沒有兩套語意**。
 
-### 2.5 照上游的自訂端點前綴
+### 2.5 自己的前綴
 
-`/_tuwunel/wbf/v1/ws` 與 `/_tuwunel/wbf/v1/pack`（上游自訂端點都在 `/_tuwunel/` 下；維護者定：盡量與上游接得上）。既有的 `/_matrix/media/v3/upload` 與 `/_matrix/client/v1/media/download` **不動**：小檔照舊，舊 client 也能整份下載分塊媒體（它就是一個普通物件）。
+`/_wbf/v1/ws` 與 `/_wbf/v1/pack`（維護者 2026-09-03 定：照 `/_名字/版本/功能` 的慣例；端點本身就跟上游切開了，不借 `/_tuwunel/`）。既有的 `/_matrix/media/v3/upload` 與 `/_matrix/client/v1/media/download` **不動**：小檔照舊，舊 client 也能整份下載分塊媒體（它就是一個普通物件）。
 
 ## 3. 資料
 
@@ -155,7 +155,7 @@ client 想解第 i 塊：`pos = i × wire_chunk_size`、`len = wire_chunk_size`�
 2. **AEAD**：維護者要求「選一個效能好的」—— 選 **ChaCha20-Poly1305**：沒有 AES 硬體加速的手機上它快得多，有加速的桌機上兩者都遠快於網路；
    事件裡仍標 `cipher`，之後要加 GCM 不用改格式。server 不碰加密，這條只影響 client。
 3. **`total_len` 可先給上限**：維護者沒反對，照§2.2 做（seal 時給真值，真值 ≤ 上限）。
-4. **命名**：照上游慣例 `/_tuwunel/wbf/v1/…`（§2.5）。
+4. **命名**：`/_wbf/v1/…`（§2.5）。
 5. **舊的整檔上傳不設上限**，之後再說。
 6. **分塊媒體不做縮圖**：都加密了，縮不了。
 7. **預告**：未來所有 HTTP 請求都會遷到 WS，kind 的分配見 [wbf-wire-format.md](wbf-wire-format.md) §3.3。

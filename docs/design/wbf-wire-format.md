@@ -154,13 +154,13 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 
 ### 6.1 WebSocket（主要）
 
-`GET /_tuwunel/wbf/v1/ws`（照上游自訂端點的 `/_tuwunel/` 前綴，維護者 2026-09-03 定的：盡量與上游接得上），`Authorization: Bearer <access token>`，Upgrade，只接受 TLS。每個 binary message = 一個 pack。
+`GET /_wbf/v1/ws`（維護者 2026-09-03 定：自己的前綴，照 `/_名字/版本/功能` 的慣例；端點本身就跟上游切開了，不用借 `/_tuwunel/`），`Authorization: Bearer <access token>`，Upgrade，只接受 TLS。每個 binary message = 一個 pack。
 一條連線同時跑很多 upload 與 stream，靠 `id` 分流；斷線後上傳進度在 DB（重連續傳）、流進入 abandoned 計時。
 伺服器：axum `ws` feature（目前**沒開**），落點 `src/api/client/wbf/ws.rs`。
 
 ### 6.2 HTTP（選用，測試與腳本用）
 
-`POST /_tuwunel/wbf/v1/pack`，`Content-Type: application/octet-stream`，**body 是一個 pack，回應 body 也是一個 pack**。
+`POST /_wbf/v1/pack`，`Content-Type: application/octet-stream`，**body 是一個 pack，回應 body 也是一個 pack**。
 一個請求一個 pack；`id` 由 server 在 `Upload/Create` 的回應裡發，之後帶著它。它存在的理由是 curl 就能測；效能不是它的目標。
 `Stream` kind 走 HTTP 沒意義（沒人連著收），回 `Error(Conflict)`。
 

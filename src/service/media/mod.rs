@@ -1,9 +1,11 @@
 mod data;
 pub(super) mod migrations;
 mod preview;
+mod range;
 mod remote;
 mod tests;
 mod thumbnail;
+mod upload;
 #[cfg(feature = "media_thumbnail")]
 mod video;
 use std::{
@@ -42,9 +44,11 @@ use url::Url;
 use self::video::{FAILURES, Failures, sweep_staging_dir};
 use self::{data::Data, preview::Agent, remote::Fetch};
 pub use self::{
-	data::{Metadata, Tombstone, TombstoneReason},
+	data::{Metadata, Tombstone, TombstoneReason, Upload},
 	preview::UrlPreviewData,
+	range::{MediaInfo, RangeRead},
 	thumbnail::Dim,
+	upload::{UploadCreated, UploadError, UploadRequest, UploadStatus},
 };
 use crate::storage::Provider;
 
@@ -136,6 +140,18 @@ impl crate::Service for Service {
 		sweep_staging_dir(&args.server.config);
 
 		Ok(service)
+	}
+
+	/// Sweeps abandoned chunked uploads: once at start, then hourly.
+	async fn worker(self: Arc<Self>) -> Result {
+		loop {
+			self.sweep_uploads().await;
+
+			tokio::select! {
+				() = tokio::time::sleep(Duration::from_hours(1)) => {},
+				() = self.services.server.until_shutdown() => return Ok(()),
+			};
+		}
 	}
 
 	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }

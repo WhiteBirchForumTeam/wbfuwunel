@@ -27,7 +27,107 @@ pub(crate) struct Data {
 	mediaid_user: Arc<Map>,
 	mxc_refcount: Arc<Map>,
 	mxc_tombstone: Arc<Map>,
+	mediaid_upload: Arc<Map>,
 	url_preview: Arc<Map>,
+}
+
+/// One chunked upload in progress, keyed by its upload id.
+///
+/// `received` is a bitmap with one bit per chunk. `total_len` is the size the
+/// client declared: a ceiling until the seal, the truth after it.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Upload {
+	pub mxc: OwnedMxcUri,
+	pub owner: OwnedUserId,
+	/// Plaintext chunk size the client chose.
+	pub chunk_size: u32,
+	/// Bytes one chunk occupies on the wire and in storage: `chunk_size` plus
+	/// the client's authentication tag.
+	pub wire_chunk_size: u32,
+	/// Declared total of the ciphertext object.
+	pub total_len: u64,
+	pub chunk_count: u32,
+	#[serde(with = "serde_bytes")]
+	pub received: Vec<u8>,
+	pub received_count: u32,
+	pub content_type: Option<String>,
+	pub filename: Option<String>,
+	pub created_at_secs: u64,
+	pub last_chunk_at_secs: u64,
+}
+
+impl Upload {
+	/// Whether chunk `index` has arrived.
+	#[must_use]
+	pub fn has_chunk(&self, index: u32) -> bool {
+		let byte = (index / 8) as usize;
+		self.received
+			.get(byte)
+			.is_some_and(|bits| bits & (1 << (index % 8)) != 0)
+	}
+
+	/// Marks chunk `index` arrived. Returns whether it was new.
+	pub fn mark_chunk(&mut self, index: u32) -> bool {
+		let byte = (index / 8) as usize;
+		if byte >= self.received.len() {
+			self.received.resize(byte + 1, 0);
+		}
+		let mask = 1 << (index % 8);
+		let was_new = self.received[byte] & mask == 0;
+		self.received[byte] |= mask;
+		if was_new {
+			self.received_count = self.received_count.saturating_add(1);
+		}
+
+		was_new
+	}
+
+	/// The lowest chunk index not yet received, or `None` when complete.
+	#[must_use]
+	pub fn next_missing(&self) -> Option<u32> {
+		(0..self.chunk_count).find(|&index| !self.has_chunk(index))
+	}
+
+	/// Whether every chunk has arrived.
+	#[must_use]
+	pub fn is_complete(&self) -> bool { self.received_count >= self.chunk_count }
+
+	/// Received and missing chunk indexes as inclusive `[start, end]` runs.
+	#[must_use]
+	pub fn runs(&self) -> (Vec<[u32; 2]>, Vec<[u32; 2]>) {
+		let mut received = Vec::new();
+		let mut missing = Vec::new();
+		let mut index = 0;
+		while index < self.chunk_count {
+			let present = self.has_chunk(index);
+			let start = index;
+			while index < self.chunk_count && self.has_chunk(index) == present {
+				index += 1;
+			}
+			let run = [start, index - 1];
+			if present {
+				received.push(run);
+			} else {
+				missing.push(run);
+			}
+		}
+
+		(received, missing)
+	}
+
+	/// Bytes chunk `index` occupies: the wire chunk size, or what remains of
+	/// `total_len` for the last one.
+	#[must_use]
+	pub fn chunk_len(&self, index: u32) -> u64 {
+		let offset = self.chunk_offset(index);
+		self.total_len
+			.saturating_sub(offset)
+			.min(u64::from(self.wire_chunk_size))
+	}
+
+	/// Byte offset of chunk `index` in the staging file and the final object.
+	#[must_use]
+	pub fn chunk_offset(&self, index: u32) -> u64 { u64::from(index) * u64::from(self.wire_chunk_size) }
 }
 
 /// Why media was removed. Stored in the tombstone so an operator reading it
@@ -113,8 +213,35 @@ impl Data {
 			mediaid_user: db["mediaid_user"].clone(),
 			mxc_refcount: db["mxc_refcount"].clone(),
 			mxc_tombstone: db["mxc_tombstone"].clone(),
+			mediaid_upload: db["mediaid_upload"].clone(),
 			url_preview: db["url_preview"].clone(),
 		}
+	}
+
+	/// Reads the upload with `upload_id`, if any.
+	pub(super) async fn find_upload(&self, upload_id: u64) -> Option<Upload> {
+		self.mediaid_upload
+			.qry(&upload_id)
+			.await
+			.deserialized::<Cbor<Upload>>()
+			.map(|Cbor(upload)| upload)
+			.ok()
+	}
+
+	/// Writes the upload with `upload_id`, replacing what was there.
+	pub(super) fn put_upload(&self, upload_id: u64, upload: &Upload) {
+		self.mediaid_upload.put(upload_id, Cbor(upload));
+	}
+
+	/// Removes the upload row with `upload_id`.
+	pub(super) fn del_upload(&self, upload_id: u64) { self.mediaid_upload.del(upload_id); }
+
+	/// Every upload in progress, with its id.
+	pub(super) fn list_uploads(&self) -> impl Stream<Item = (u64, Upload)> + Send + '_ {
+		self.mediaid_upload
+			.stream::<u64, Cbor<Upload>>()
+			.ignore_err()
+			.map(|(id, Cbor(upload))| (id, upload))
 	}
 
 	/// Reads the tombstone left when `mxc` was removed, if any.

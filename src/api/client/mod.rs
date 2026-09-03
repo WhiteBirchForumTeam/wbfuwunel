@@ -1,6 +1,7 @@
 pub(super) mod account;
 pub(super) mod account_data;
 pub(super) mod admin;
+pub(super) mod wbf;
 pub(super) mod alias;
 pub(super) mod appservice;
 pub(super) mod backup;
@@ -51,6 +52,7 @@ mod utils;
 pub(super) use account::*;
 pub(super) use account_data::*;
 pub(super) use admin::*;
+pub(super) use wbf::*;
 pub(super) use alias::*;
 pub(super) use appservice::*;
 pub(super) use backup::*;

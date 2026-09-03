@@ -253,6 +253,15 @@ pub(super) static MAPS: &[Descriptor] = &[
 		..descriptor::RANDOM_SMALL
 	},
 	Descriptor {
+		name: "mediaid_upload",
+		// Chunked uploads in progress: upload id (u64) -> Cbor(Upload). The
+		// TTL is a backstop twice the abandonment window; the sweeper is
+		// what actually cleans up, and the row goes when the upload seals.
+		ttl: 60 * 60 * 24 * 2,
+		key_size_hint: Some(8),
+		..descriptor::RANDOM_SMALL
+	},
+	Descriptor {
 		name: "oauthid_session",
 		..descriptor::RANDOM_SMALL
 	},
