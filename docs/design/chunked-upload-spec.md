@@ -14,14 +14,21 @@ client 把檔案切成**明文固定大小**的塊，每塊自己加密，一塊
 
 ## 1. 傳輸
 
-| | A 支（現在） | B 支（之後） |
+| | WebSocket（主要） | HTTP（測試與腳本） |
 |---|---|---|
-| 端點 | `POST /_wbf/v1/pack` | `GET /_wbf/v1/ws`（WebSocket） |
-| 認證 | `Authorization: Bearer <access_token>` | 同（握手時） |
-| request | body = **一個 pack**，`Content-Type: application/octet-stream` | 一個 binary frame = 一個 pack |
-| response | body = **一個 pack**；HTTP 一律 200（沒 token 是 401，body 仍是 pack） | 一個 binary frame = 一個 pack |
+| 端點 | `GET /_wbf/v1/ws`，Upgrade | `POST /_wbf/v1/pack` |
+| 認證 | `Authorization: Bearer <access_token>` 在升級請求上；錯了回 401，body 是 Error pack，不升級 | 同 |
+| request | 一個 binary message = **一個 pack** | body = **一個 pack**，`Content-Type: application/octet-stream` |
+| response | 一個 binary message = 一個 pack，**依請求到達的順序**送回 | body = 一個 pack；HTTP 一律 200（沒 token 是 401，body 仍是 pack） |
+| 連發 | 可以：送幾個都行、不等回應，回應依序回來（同一個 `id` 的 `Chunk` 自己要送對順序） | 一請求一包 |
+| 限制 | 字串 frame 回 `Error(Corrupt)`；單個 message 超過 `wbf_meta_max_bytes + wbf_data_max_bytes + 外框`（預設約 16.06 MiB）連線被關 | 同樣的 pack 上限 |
 
 沒有 JSON 外框、沒有 base64、沒有 multipart。多個上傳可以在同一條連線交錯，靠 pack 標頭的 `id` 分流。
+同一個上傳可以一半走 HTTP、一半走 WebSocket：進度在 server 的 DB，不在連線上。
+
+連上 WebSocket 後建議先送一個 `Hello`（kind `0x01` Control、subtype `0x01`，meta JSON `{ "protocol": 1, "client": "…", "features": [] }`），
+server 回 Ack meta `{ "protocol": 1, "server": "<server name>", "features": ["upload", "download"], "chunk_size_default": 65536, "chunk_size_large": 1048576, "data_max_bytes": 16781312 }`。
+`Ping`（subtype `0x04`，meta 任意）回 `Pong`（subtype `0x05`）把 meta 原樣還回。
 
 ## 2. pack
 

@@ -73,6 +73,7 @@ features = [
 	"matched-path",
 	"tokio",
 	"tracing",
+	"ws",
 ]
 
 [workspace.dependencies.axum-extra]

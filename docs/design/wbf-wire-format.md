@@ -157,7 +157,7 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 
 `GET /_wbf/v1/ws`（維護者 2026-09-03 定：自己的前綴，照 `/_名字/版本/功能` 的慣例；端點本身就跟上游切開了，不用借 `/_tuwunel/`），`Authorization: Bearer <access token>`，Upgrade，只接受 TLS。每個 binary message = 一個 pack。
 一條連線同時跑很多 upload 與 stream，靠 `id` 分流；斷線後上傳進度在 DB（重連續傳）、流進入 abandoned 計時。
-伺服器：axum `ws` feature（目前**沒開**），落點 `src/api/client/wbf/ws.rs`。
+伺服器：axum `ws` feature，落點 `src/api/client/wbf/ws.rs`（B 支）。升級時驗 Bearer（錯了回 401，body 仍是 Error pack）；之後每個 binary message 一個 pack，依到達順序一個一個處理、回應依同一順序送回（client 可以連發不等 Ack）；字串 frame 回 `Error(Corrupt)`；到達的 pack 超過 `wbf_meta_max_bytes + wbf_data_max_bytes + 外框` 由 WebSocket 層拒收。連線上一張 `id → 下一塊` 的小表：明顯跳號的 `Chunk` 不碰 DB 直接回 `OutOfOrder`，Ack 過的塊推進它，Seal／Abort 忘掉它；DB 列仍是真相，重連從 `Status` 接。「只接受 TLS」由前置代理保證，server 本身不檢查。
 
 ### 6.2 HTTP（選用，測試與腳本用）
 
