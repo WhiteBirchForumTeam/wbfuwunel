@@ -100,6 +100,11 @@ default-features = false
 [workspace.dependencies.bytes]
 version = "1.11"
 
+# CRC-32C for the wbf pack frame: hardware instruction on x86 (SSE4.2) and
+# aarch64, software fallback elsewhere. Not zlib's CRC-32, which has neither.
+[workspace.dependencies.crc32c]
+version = "0.6"
+
 [workspace.dependencies.bytesize]
 version = "2.3"
 default-features = false

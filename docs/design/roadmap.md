@@ -33,10 +33,11 @@ TTL 兜底改成「不確定就持有」加 `migrate-references` 重算。
 
 ## 2. 下一步（順序已定）
 
-### 2.1 📄 媒體層：分塊上傳、續傳、range 下載
+### 2.1 🔧 媒體層：分塊上傳、續傳、range 下載
 
-核心設計 §5.2 的主體，也是 fork 的第一個「使用者看得到」的功能。**提案在 [chunked-upload.md](chunked-upload.md)**，
-§9 列了要維護者定的五件事，定了就開分支（分 A、B 兩支）。
+核心設計 §5.2 的主體，也是 fork 的第一個「使用者看得到」的功能。提案 [chunked-upload.md](chunked-upload.md) 維護者 2026-09-03
+同意（PR #15），A 支（pack、上傳、下載、sweeper）在 `media/chunked-upload-a` 實作中；B 支是 WebSocket 通道。
+pack 格式與 kind 分配在 [wbf-wire-format.md](wbf-wire-format.md)，**未來所有 HTTP 請求都會遷到這條通道**。
 
 - **範圍**：固定大小分塊、`upload_id` + `chunk_index`、查詢缺塊、收尾比對 Merkle root；下載按塊或 byte range，每塊附 Merkle 證明。
 - **前提**：核心設計 §7 待驗 3（塊大小）要先量；§7 待驗 1（要不要 DAG）**不擋這一步** —— 媒體層不依賴事件層的形狀。

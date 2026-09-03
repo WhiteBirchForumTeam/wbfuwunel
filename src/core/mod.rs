@@ -17,6 +17,7 @@ pub mod metrics;
 pub mod mods;
 pub mod server;
 pub mod utils;
+pub mod wbf;
 
 pub use ::arrayvec;
 pub use ::either;

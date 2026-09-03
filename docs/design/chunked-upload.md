@@ -1,6 +1,7 @@
 # 分塊上傳、續傳、range 下載（提案，第三版）
 
-> **狀態：草案，等維護者同意。** 這是 [roadmap.md](roadmap.md) §2.1，核心設計
+> **狀態：維護者 2026-09-03 同意（PR #15），實作中（分支 `media/chunked-upload-a`）。** §9 的答案已寫回各節。
+> 這是 [roadmap.md](roadmap.md) §2.1，核心設計
 > [why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md) §5.2 的 server 端。
 > 第三版依維護者 2026-09-03 的指示：**以 WebSocket 通道為主，所有請求與回應都是同一種二進位 pack
 > （[wbf-wire-format.md](wbf-wire-format.md)）；HTTP 只是「把一個 pack 用 POST 送一次」的選用測試路徑，
@@ -60,12 +61,12 @@ client 端：`key` 每個檔案一把；`nonce_i = base ‖ i`；`ct_i = AEAD(ke
 ### 2.4 所有互動都是 pack
 
 上傳的建立、送塊、查狀態、封存、放棄，下載的查詢與讀取，**每一個都是一個 pack 進、一個 pack 出**。
-WebSocket 上是一框一 pack；HTTP 上是 `POST /_wbf/v1/pack` 一次一 pack。server 端一個入口函式 `handle_pack(user, Pack) -> Pack`，
+WebSocket 上是一框一 pack；HTTP 上是 `POST /_tuwunel/wbf/v1/pack` 一次一 pack。server 端一個入口函式 `handle_pack(user, Pack) -> Pack`，
 兩種送法都呼叫它，所以**沒有兩套語意**。
 
-### 2.5 自己的命名空間
+### 2.5 照上游的自訂端點前綴
 
-`/_wbf/v1/ws` 與 `/_wbf/v1/pack`。既有的 `/_matrix/media/v3/upload` 與 `/_matrix/client/v1/media/download` **不動**：小檔照舊，舊 client 也能整份下載分塊媒體（它就是一個普通物件）。
+`/_tuwunel/wbf/v1/ws` 與 `/_tuwunel/wbf/v1/pack`（上游自訂端點都在 `/_tuwunel/` 下；維護者定：盡量與上游接得上）。既有的 `/_matrix/media/v3/upload` 與 `/_matrix/client/v1/media/download` **不動**：小檔照舊，舊 client 也能整份下載分塊媒體（它就是一個普通物件）。
 
 ## 3. 資料
 
@@ -109,7 +110,7 @@ TTL 設 `media_upload_ttl × 2` 當兜底，真正的清理是 §6 的 sweeper�
 | subtype | 請求 meta | 回應 |
 |---|---|---|
 | `0x01 Info` | `{ "mxc": "…" }` | `Ack` meta：`{ "total_len": …, "content_type": "…", "chunk_size"?: … }`（分塊媒體 seal 時記下的塊大小，給 client 算塊邊界） |
-| `0x02 Read` | `{ "mxc": "…", "pos"?: …, "len"?: … }` | `Ack` meta：`{ "pos": …, "len": <實際> , "total_len": … }`；**data = 讀出的 bytes**。`len` 沒給用 `media_download_default_len`（預設 1 MiB），`pos` 沒給 0 |
+| `0x02 Read` | `{ "mxc": "…", "pos"?: …, "len"?: … }` | `Ack` meta：`{ "pos": …, "len": <實際讀出>, "total_len": … }`；**data = 讀出的 bytes**。`len` 沒給用 `media_download_default_len`（預設 1 MiB），`pos` 沒給 0。維護者定的語意：server 告訴 client **這一塊在哪、多大**；client 下一次用 `pos + len` 接著要，下一塊理論上一樣大，只會在檔尾比較小，不會更大 |
 
 client 想解第 i 塊：`pos = i × wire_chunk_size`、`len = wire_chunk_size`。墓碑一樣擋在 `search_file_metadata`，已刪媒體回 `Error(NotFound)`；
 標準的 `/_matrix/client/v1/media/download` 對分塊媒體照樣整份給，也照樣 410。
@@ -148,13 +149,16 @@ client 想解第 i 塊：`pos = i × wire_chunk_size`、`len = wire_chunk_size`�
 
 `max_pending_media_uploads`、`media_rc_create_*` 沿用。
 
-## 9. 需要維護者定的
+## 9. 維護者定的（2026-09-03）
 
-1. **small 規格選 64 KiB（我選的）、large 規格 4 MiB（我訂的）**，可以嗎？
-2. **AEAD 選 AES-256-GCM 還是 ChaCha20-Poly1305？** 可以兩者都支援、事件裡標 `cipher`。
-3. **`total_len` 可否先給上限、seal 再給真值**（為了串流產生的檔）？不接受就必填真值。
-4. **命名空間 `/_wbf/`** 這個字。
-5. **要不要給舊的整檔上傳設上限**把 client 推去分塊？我傾向現在不要。
+1. **塊大小**：範圍可以；small 64 KiB、large 4 MiB 照§2.2。client 的預設值另外量。
+2. **AEAD**：維護者要求「選一個效能好的」—— 選 **ChaCha20-Poly1305**：沒有 AES 硬體加速的手機上它快得多，有加速的桌機上兩者都遠快於網路；
+   事件裡仍標 `cipher`，之後要加 GCM 不用改格式。server 不碰加密，這條只影響 client。
+3. **`total_len` 可先給上限**：維護者沒反對，照§2.2 做（seal 時給真值，真值 ≤ 上限）。
+4. **命名**：照上游慣例 `/_tuwunel/wbf/v1/…`（§2.5）。
+5. **舊的整檔上傳不設上限**，之後再說。
+6. **分塊媒體不做縮圖**：都加密了，縮不了。
+7. **預告**：未來所有 HTTP 請求都會遷到 WS，kind 的分配見 [wbf-wire-format.md](wbf-wire-format.md) §3.3。
 
 ## 10. 分幾支
 
