@@ -39,7 +39,7 @@ TTL 兜底改成「不確定就持有」加 `migrate-references` 重算。
 同意（PR #15），A 支（pack、上傳、下載、sweeper）在 `media/chunked-upload-a` 實作中；B 支是 WebSocket 通道。
 pack 格式與 kind 分配在 [wbf-wire-format.md](wbf-wire-format.md)，**未來所有 HTTP 請求都會遷到這條通道**。
 
-- **範圍**：固定大小分塊、`upload_id` + `chunk_index`、查詢缺塊、收尾比對 Merkle root；下載按塊或 byte range，每塊附 Merkle 證明。
+- **範圍**（最終模型，見 [chunked-upload-spec.md](chunked-upload-spec.md)）：`Create` 一次宣告（16 byte `EncryptedFileInfo` ＋ client 加密的檔案描述）；塊嚴格有序、`seq` 即塊索引、server 不判斷密文長度只記位置；串流模式；單檔上限與截斷；下載按塊或明文位置一次整塊交回。完整性是 client 的 AEAD 標籤加 pack 的 CRC-32C，**沒有 Merkle**（早期草案的殘留，維護者 2026-09-03 改用 CRC）。
 - **前提**：核心設計 §7 待驗 3（塊大小）要先量；§7 待驗 1（要不要 DAG）**不擋這一步** —— 媒體層不依賴事件層的形狀。
 - **接縫**（見 [repo-structure.md](repo-structure.md)）：`src/api/client/media.rs` 新端點、`src/service/media/` 分塊與樹的邏輯、
   `src/database/maps.rs` 塊索引、`src/service/storage/` 既有的 object_store 抽象放 bytes。
@@ -50,7 +50,7 @@ pack 格式與 kind 分配在 [wbf-wire-format.md](wbf-wire-format.md)，**未�
 
 ### 2.2 🔲 串流播放（分塊之後自然得到）
 
-分塊 + range 做完，串流播放就是客戶端「請求對的塊」；server 端要補的只有 HTTP range 語意與 Merkle 證明的回傳格式。
+分塊做完，串流播放就是客戶端「用明文位置要對的塊」；server 端已經沒有要補的了，B 支的 WebSocket 只是把同一套 pack 換條線。
 不另開項目，併在 2.1 的驗收裡：**一個大於 1 GB 的檔案，中途 seek 不必下載前面的部分。**
 
 ### 2.3 📄 流式訊息（文字 token 串流）

@@ -274,10 +274,11 @@ pub(super) static MAPS: &[Descriptor] = &[
 	Descriptor {
 		name: "mxc_chunked",
 		// Sealed chunked media: mxc -> Cbor(ChunkedMedia): plaintext chunk
-		// size, chunk count and total wire length. Absent for whole-file
+		// size, chunk count, total wire length and the uploader's encrypted
+		// description (up to wbf_meta_max_bytes). Absent for whole-file
 		// uploads.
 		key_size_hint: Some(64),
-		val_size_hint: Some(24),
+		val_size_hint: Some(1024),
 		..descriptor::RANDOM_SMALL
 	},
 	Descriptor {

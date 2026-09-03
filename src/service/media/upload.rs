@@ -366,6 +366,11 @@ pub async fn upload_seal(
 		};
 		return Err(UploadError::Conflict(message));
 	}
+	if upload.received_count == 0 {
+		// Reachable only when the very first chunk crossed the size limit:
+		// an empty object is not a file, truncated or not.
+		return Err(UploadError::Conflict("nothing was received; abort this upload instead".into()));
+	}
 
 	let path = self.staging_path(upload_id);
 	let mxc_parts = upload.mxc.parts().map_err(|e| UploadError::Conflict(format!("stored mxc is invalid: {e}")))?;
@@ -455,7 +460,13 @@ pub async fn sweep_uploads(&self) {
 }
 
 /// Whether nothing is known under `upload_id` or its `mxc`: no upload in
-/// progress, no media, no tombstone. Anything unreadable counts as taken.
+/// progress, no media, no tombstone.
+///
+/// The media lookup is fail closed: only a definite "not found" counts as
+/// free, any other error counts as taken. The upload and tombstone lookups
+/// return `Option` and cannot tell an absent row from an unreadable one;
+/// with 64 random bits behind the id, that gap needs a collision and a
+/// database error at the same moment to matter.
 #[implement(super::Service)]
 async fn is_upload_id_free(&self, upload_id: u64, mxc: &OwnedMxcUri) -> bool {
 	if self.db.find_upload(upload_id).await.is_some() {
@@ -468,10 +479,14 @@ async fn is_upload_id_free(&self, upload_id: u64, mxc: &OwnedMxcUri) -> bool {
 		return false;
 	}
 
-	self.db
+	match self
+		.db
 		.search_file_metadata(&mxc, &Dim::default())
 		.await
-		.is_err()
+	{
+		| Err(error) => error.status_code() == http::StatusCode::NOT_FOUND,
+		| Ok(_) => false,
+	}
 }
 
 /// The upload, if it exists and `user` owns it. Both failures answer the

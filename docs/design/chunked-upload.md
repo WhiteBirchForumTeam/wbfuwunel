@@ -187,7 +187,7 @@ TTL 設 `media_upload_ttl × 2` 當兜底，真正的清理是 §6 的 sweeper�
 
 | 支 | 內容 | 驗收 |
 |---|---|---|
-| A | `core/wbf/pack.rs`（Pack 型別、encode／decode、單元測試）；`mediaid_upload` CF；暫存檔；`handle_pack` 的 `Upload` 與 `Download` 兩個 kind；`POST /_wbf/v1/pack`；sweeper；provider `get_range` | e2e（用 HTTP 送 pack，curl 或腳本就行）：三塊上傳、故意漏一塊、`Status` 看到缺、補上、`Seal`；seal 後標準 download 拿到跟送上去一樣的 bytes；`refcount` 是 0；redact 後收集器刪掉；未完成上傳過期被清；`Read` 的 `pos/len` 區段與原 bytes 一致；壞 CRC 被拒且說是 data |
+| A | `core/wbf/pack.rs` 與 `file_info.rs`（Pack、`EncryptedFileInfo`、單元測試）；`mediaid_upload`／`mxc_chunk`／`mxc_chunked` CF；暫存檔；`handle_pack` 的 `Upload` 與 `Download` 兩個 kind；`POST /_wbf/v1/pack`；sweeper；provider `get_range` | **以 [chunked-upload-spec.md](chunked-upload-spec.md) 為準**，e2e（HTTP 送 pack 的腳本）覆蓋：Create 的各種拒絕；有序上傳、跳號回 `OutOfOrder`、重送冪等、壞 CRC 被拒且說是 data；`IS_LAST`；seal 後標準 download 與原 bytes 逐 byte 相同；`Info` 回加密描述；`Read` 按塊與按明文位置整塊交回；變長塊；截斷；串流模式；abort；過期被 sweeper 清；`refcount` 是 0 |
 | B | WebSocket 通道（`/_wbf/v1/ws`、Hello、Ping、連線內多 id 分流），同一個 `handle_pack` 接上 | e2e：同一上傳 HTTP 送前半、WS 送後半、seal 成功；WANT_ACK 逐塊確認 |
 
 A 先，因為它把 pack 與儲存定下來；B 與流式訊息共用通道。
