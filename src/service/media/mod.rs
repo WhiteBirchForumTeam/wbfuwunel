@@ -44,11 +44,11 @@ use url::Url;
 use self::video::{FAILURES, Failures, sweep_staging_dir};
 use self::{data::Data, preview::Agent, remote::Fetch};
 pub use self::{
-	data::{Metadata, Tombstone, TombstoneReason, Upload},
+	data::{ChunkedMedia, Metadata, Tombstone, TombstoneReason, Upload},
 	preview::UrlPreviewData,
-	range::{MediaInfo, RangeRead},
+	range::{ChunkRead, MediaInfo, RangeRead},
 	thumbnail::Dim,
-	upload::{UploadCreated, UploadError, UploadRequest, UploadStatus},
+	upload::{ChunkStored, UploadCreated, UploadError, UploadRequest, UploadStatus},
 };
 use crate::storage::Provider;
 

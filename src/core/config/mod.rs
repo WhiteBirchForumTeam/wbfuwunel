@@ -3498,7 +3498,8 @@ pub struct Config {
 
 	/// Chunk size a chunked upload uses when the client does not choose one,
 	/// in bytes. The client encrypts each chunk on its own, so this is the
-	/// plaintext size; 16 bytes of authentication tag ride on top on the wire.
+	/// plaintext size; what the encryption adds rides on top on the wire, up
+	/// to `media_chunk_overhead_max`.
 	///
 	/// default: 65536
 	#[serde(default = "default_media_chunk_size_default")]
@@ -3507,22 +3508,32 @@ pub struct Config {
 	/// Chunk size the server suggests for large files, in bytes. Reported to
 	/// clients; not enforced.
 	///
-	/// default: 4194304
+	/// default: 1048576
 	#[serde(default = "default_media_chunk_size_large")]
 	pub media_chunk_size_large: usize,
 
-	/// Smallest chunk size a client may choose, in bytes.
+	/// Smallest chunk size a client may choose, in bytes. Within the range the
+	/// uploader decides; the server only records what it chose.
 	///
-	/// default: 16384
+	/// default: 4096
 	#[serde(default = "default_media_chunk_size_min")]
 	pub media_chunk_size_min: usize,
 
 	/// Largest chunk size a client may choose, in bytes. Also bounded by
-	/// `wbf_data_max_bytes` less the authentication tag.
+	/// `wbf_data_max_bytes` less `media_chunk_overhead_max`.
 	///
 	/// default: 16777216
 	#[serde(default = "default_media_chunk_size_max")]
 	pub media_chunk_size_max: usize,
+
+	/// How many bytes a chunk on the wire may exceed the upload's declared
+	/// chunk size by: room for the client's authentication tag, nonce and
+	/// framing. A chunk larger than `chunk_size` plus this is refused, so a
+	/// client cannot grow its chunks after declaring them.
+	///
+	/// default: 4096
+	#[serde(default = "default_media_chunk_overhead_max")]
+	pub media_chunk_overhead_max: usize,
 
 	/// How long a chunked upload may go without a new chunk before it counts
 	/// as abandoned and is swept, in seconds. Measured from the last chunk,
@@ -3553,9 +3564,9 @@ pub struct Config {
 	pub wbf_meta_max_bytes: usize,
 
 	/// Largest data section a wbf pack may carry, in bytes. Must hold a
-	/// chunk of `media_chunk_size_max` plus its 16-byte tag.
+	/// chunk of `media_chunk_size_max` plus `media_chunk_overhead_max`.
 	///
-	/// default: 16777232
+	/// default: 16781312
 	#[serde(default = "default_wbf_data_max_bytes")]
 	pub wbf_data_max_bytes: usize,
 
@@ -5766,11 +5777,13 @@ fn default_media_gc_migrate_skip_recent_seconds() -> u64 { 600 }
 
 fn default_media_chunk_size_default() -> usize { 64 * 1024 }
 
-fn default_media_chunk_size_large() -> usize { 4 * 1024 * 1024 }
+fn default_media_chunk_size_large() -> usize { 1024 * 1024 }
 
-fn default_media_chunk_size_min() -> usize { 16 * 1024 }
+fn default_media_chunk_size_min() -> usize { 4 * 1024 }
 
 fn default_media_chunk_size_max() -> usize { 16 * 1024 * 1024 }
+
+fn default_media_chunk_overhead_max() -> usize { 4096 }
 
 fn default_media_upload_ttl() -> u64 { 86400 }
 
@@ -5778,7 +5791,7 @@ fn default_media_download_default_len() -> usize { 1024 * 1024 }
 
 fn default_wbf_meta_max_bytes() -> usize { 64 * 1024 }
 
-fn default_wbf_data_max_bytes() -> usize { 16 * 1024 * 1024 + 16 }
+fn default_wbf_data_max_bytes() -> usize { 16 * 1024 * 1024 + 4096 }
 
 fn default_media_storage_providers() -> BTreeSet<String> { ["media".to_owned()].into() }
 

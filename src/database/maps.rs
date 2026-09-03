@@ -262,6 +262,16 @@ pub(super) static MAPS: &[Descriptor] = &[
 		..descriptor::RANDOM_SMALL
 	},
 	Descriptor {
+		name: "mxc_chunked",
+		// Sealed chunked media: mxc -> Cbor(ChunkedMedia): the wire chunk
+		// length and count a downloader needs to hand chunks back exactly as
+		// they were uploaded (chunk i is at i * wire_chunk_size). Absent for
+		// whole-file uploads.
+		key_size_hint: Some(64),
+		val_size_hint: Some(24),
+		..descriptor::RANDOM_SMALL
+	},
+	Descriptor {
 		name: "oauthid_session",
 		..descriptor::RANDOM_SMALL
 	},

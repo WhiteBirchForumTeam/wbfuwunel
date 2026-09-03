@@ -205,9 +205,6 @@ impl From<PackError> for Reject {
 async fn handle_upload_create(services: &Services, user: &UserId, view: &PackView<'_>) -> std::result::Result<Vec<u8>, Reject> {
 	let meta = view.meta_json()?;
 	let request = UploadRequest {
-		total_len: meta["total_len"]
-			.as_u64()
-			.ok_or_else(|| Reject::code("Conflict", "total_len is required"))?,
 		chunk_size: meta["chunk_size"]
 			.as_u64()
 			.map(|size| u32::try_from(size).map_err(|_| Reject::code("Conflict", "chunk_size too large")))
@@ -225,7 +222,7 @@ async fn handle_upload_create(services: &Services, user: &UserId, view: &PackVie
 			"id": created.upload_id,
 			"mxc": created.mxc,
 			"chunk_size": created.chunk_size,
-			"chunk_count": created.chunk_count,
+			"chunk_max_bytes": created.chunk_max_bytes,
 			"expires_at": created.expires_at_secs,
 		}),
 		Vec::new(),
@@ -233,12 +230,21 @@ async fn handle_upload_create(services: &Services, user: &UserId, view: &PackVie
 }
 
 async fn handle_upload_chunk(services: &Services, user: &UserId, view: &PackView<'_>) -> std::result::Result<Vec<u8>, Reject> {
-	let received = services
+	let stored = services
 		.media
-		.upload_chunk(user, view.header.id, view.header.seq, view.data)
+		.upload_chunk(user, view.header.id, view.header.seq, view.data, view.header.flags.is_last())
 		.await?;
 
-	Ok(ack(view.header.id, view.header.seq, json!({ "received": received }), Vec::new()))
+	Ok(ack(
+		view.header.id,
+		view.header.seq,
+		json!({
+			"received": stored.received_count,
+			"total_len": stored.total_len,
+			"finished": stored.finished,
+		}),
+		Vec::new(),
+	))
 }
 
 async fn handle_upload_status(services: &Services, user: &UserId, view: &PackView<'_>) -> std::result::Result<Vec<u8>, Reject> {
@@ -248,20 +254,19 @@ async fn handle_upload_status(services: &Services, user: &UserId, view: &PackVie
 		view.header.id,
 		view.header.seq,
 		json!({
-			"received": status.received,
-			"missing": status.missing,
-			"received_count": status.received_count,
-			"chunk_count": status.chunk_count,
+			"received": status.received_count,
+			"total_len": status.total_len,
+			"finished": status.finished,
+			"chunk_size": status.chunk_size,
 		}),
 		Vec::new(),
 	))
 }
 
 async fn handle_upload_seal(services: &Services, user: &UserId, view: &PackView<'_>) -> std::result::Result<Vec<u8>, Reject> {
-	let total_len = if view.meta.is_empty() { None } else { view.meta_json()?["total_len"].as_u64() };
 	let mxc = services
 		.media
-		.upload_seal(user, view.header.id, total_len)
+		.upload_seal(user, view.header.id)
 		.await?;
 
 	Ok(ack(view.header.id, view.header.seq, json!({ "mxc": mxc }), Vec::new()))
@@ -284,22 +289,58 @@ async fn handle_download_info(services: &Services, view: &PackView<'_>) -> std::
 		json!({
 			"total_len": info.total_len,
 			"content_type": info.content_type,
+			"chunk_size": info.chunked.map(|chunked| chunked.chunk_size),
+			"wire_chunk_size": info.chunked.map(|chunked| chunked.wire_chunk_size),
+			"chunk_count": info.chunked.map(|chunked| chunked.chunk_count),
+			"read_len": services.config.media_download_default_len,
 			"chunk_size_large": services.config.media_chunk_size_large,
 		}),
 		Vec::new(),
 	))
 }
 
+/// Chunked media comes back one whole chunk at a time, exactly as uploaded:
+/// by `chunk` index, or by `pos`, which picks the chunk containing that
+/// position. Whole-file media is read by `pos` and `len`.
 async fn handle_download_read(services: &Services, view: &PackView<'_>) -> std::result::Result<Vec<u8>, Reject> {
 	let meta = view.meta_json()?;
 	let mxc = mxc_from_meta(&meta)?;
+	let mxc: Mxc<'_> = mxc.as_str().try_into().map_err(|_| Reject::code("Conflict", "invalid mxc"))?;
 	let pos = meta["pos"].as_u64().unwrap_or(0);
+
+	if let Some(chunked) = services.media.chunked_shape(&mxc).await {
+		let index = match meta["chunk"].as_u64() {
+			| Some(index) => u32::try_from(index).map_err(|_| Reject::code("Conflict", "chunk index too large"))?,
+			| None => {
+				if pos >= chunked.total_len {
+					return Err(Reject::code("Conflict", "position is past the end of the media"));
+				}
+				u32::try_from(pos / u64::from(chunked.wire_chunk_size.max(1)))
+					.map_err(|_| Reject::code("Conflict", "position too large"))?
+			},
+		};
+		let read = services.media.read_chunk(&mxc, index).await?;
+
+		return Ok(ack(
+			0,
+			view.header.seq,
+			json!({
+				"chunk": read.index,
+				"pos": read.pos,
+				"len": read.bytes.len(),
+				"wire_chunk_size": read.wire_chunk_size,
+				"chunk_count": read.chunk_count,
+				"total_len": read.total_len,
+			}),
+			read.bytes.to_vec(),
+		));
+	}
+
 	let len = meta["len"]
 		.as_u64()
 		.unwrap_or(services.config.media_download_default_len as u64)
 		.min(services.config.wbf_data_max_bytes as u64);
 
-	let mxc: Mxc<'_> = mxc.as_str().try_into().map_err(|_| Reject::code("Conflict", "invalid mxc"))?;
 	let read = services.media.read_range(&mxc, pos, len).await?;
 
 	Ok(ack(

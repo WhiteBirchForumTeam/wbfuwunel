@@ -1,15 +1,23 @@
 //! Chunked upload: chunks are the transfer unit, not the storage unit.
 //!
-//! Each chunk lands at its offset in one sparse staging file; which chunks
-//! have arrived is a bitmap in `mediaid_upload`. The seal streams the staging
-//! file into the storage provider as a single object and writes the same
-//! rows `create()` writes, so a sealed upload is an ordinary media item to
-//! everything else: reads, thumbnails, deletion, reference counting.
+//! Chunks arrive in order and are appended to one staging file; the row in
+//! `mediaid_upload` says how many have arrived and how many bytes that is.
+//! The client marks the last chunk (`IS_LAST`), which is the only way the
+//! server learns the size. The seal streams the staging file into the storage
+//! provider as a single object and writes the same rows `create()` writes, so
+//! a sealed upload is an ordinary media item to everything else: reads,
+//! thumbnails, deletion, reference counting.
 //!
 //! The server never sees plaintext. A chunk on the wire is the client's
-//! ciphertext, tag included, and is written where it arrived from without a
-//! copy. Chunks must arrive in order within an upload; the WebSocket keeps
-//! order, so an out-of-order chunk is a client bug and is told so.
+//! ciphertext, and how long that is belongs to the client: the server caps it
+//! at the declared chunk size plus `media_chunk_overhead_max`, and trusts the
+//! pack's CRC for integrity. The decrypting client checks the exact size when
+//! it unwraps the chunk.
+//!
+//! The server cannot re-chunk ciphertext, so a download must hand back each
+//! chunk exactly as it arrived. Nothing is recorded per chunk for that: chunk
+//! 0 sets the wire chunk length, every chunk but the last must match it, and
+//! chunk `i` is then simply the bytes at `i * wire_chunk_size`.
 
 use std::{
 	io::{self, ErrorKind},
@@ -29,17 +37,12 @@ use tuwunel_core::{
 	warn,
 };
 
-use super::{Dim, MXC_LENGTH, Upload};
-
-/// The authentication tag an AEAD adds to each chunk on the wire.
-pub(super) const CHUNK_TAG_LEN: u32 = 16;
+use super::{ChunkedMedia, Dim, MXC_LENGTH, Upload};
 
 /// What a client asks for when it starts an upload.
 #[derive(Debug)]
 pub struct UploadRequest {
-	/// Declared ciphertext total; a ceiling until the seal.
-	pub total_len: u64,
-	/// Plaintext chunk size; `None` takes the server default.
+	/// Plaintext chunk size; `None` takes the server default. Fixed once set.
 	pub chunk_size: Option<u32>,
 	pub content_type: Option<String>,
 	pub filename: Option<String>,
@@ -51,17 +54,26 @@ pub struct UploadCreated {
 	pub upload_id: u64,
 	pub mxc: OwnedMxcUri,
 	pub chunk_size: u32,
-	pub chunk_count: u32,
+	/// Largest chunk the server will accept on the wire for this upload.
+	pub chunk_max_bytes: u32,
 	pub expires_at_secs: u64,
 }
 
-/// Which chunks are in and which are missing, as inclusive runs.
-#[derive(Debug)]
+/// Where an upload stands: the next chunk expected is `received_count`.
+#[derive(Clone, Copy, Debug)]
 pub struct UploadStatus {
-	pub received: Vec<[u32; 2]>,
-	pub missing: Vec<[u32; 2]>,
 	pub received_count: u32,
-	pub chunk_count: u32,
+	pub total_len: u64,
+	pub finished: bool,
+	pub chunk_size: u32,
+}
+
+/// What a stored chunk changed: how many are in and how many bytes.
+#[derive(Clone, Copy, Debug)]
+pub struct ChunkStored {
+	pub received_count: u32,
+	pub total_len: u64,
+	pub finished: bool,
 }
 
 /// Why an upload operation was refused. Maps onto pack error codes.
@@ -69,7 +81,8 @@ pub struct UploadStatus {
 pub enum UploadError {
 	/// No such upload, or not this user's; not distinguished, on purpose.
 	NotFound,
-	/// The request contradicts the upload: a bad size, a chunk past the end.
+	/// The request contradicts the upload: a chunk after the last, a seal
+	/// before it.
 	Conflict(String),
 	/// A chunk arrived out of order; the client should resume from here.
 	OutOfOrder { expected: u32 },
@@ -89,8 +102,8 @@ impl From<io::Error> for UploadError {
 
 type UploadResult<T> = std::result::Result<T, UploadError>;
 
-/// Starts an upload: picks and checks the chunk size, mints the mxc and the
-/// upload id, writes the row. No file is touched until the first chunk.
+/// Starts an upload: checks the chunk size, mints the mxc and the upload id,
+/// writes the row. No file is touched until the first chunk.
 #[implement(super::Service)]
 pub async fn upload_create(&self, user: &UserId, request: UploadRequest) -> UploadResult<UploadCreated> {
 	let config = &self.services.config;
@@ -104,28 +117,13 @@ pub async fn upload_create(&self, user: &UserId, request: UploadRequest) -> Uplo
 			config.media_chunk_size_min, config.media_chunk_size_max
 		)));
 	}
-	if !chunk_size.is_power_of_two() {
-		return Err(UploadError::Conflict("chunk_size must be a power of two".into()));
+	let chunk_max_bytes = chunk_size.saturating_add(config.media_chunk_overhead_max);
+	if chunk_max_bytes > config.wbf_data_max_bytes {
+		return Err(UploadError::Conflict("chunk_size plus overhead exceeds wbf_data_max_bytes".into()));
 	}
 	let chunk_size = u32::try_from(chunk_size).map_err(|_| UploadError::Conflict("chunk_size too large".into()))?;
-	let wire_chunk_size = chunk_size.saturating_add(CHUNK_TAG_LEN);
-	if wire_chunk_size as usize > config.wbf_data_max_bytes {
-		return Err(UploadError::Conflict("chunk_size plus tag exceeds wbf_data_max_bytes".into()));
-	}
-
-	if request.total_len == 0 {
-		return Err(UploadError::Conflict("total_len must be positive".into()));
-	}
-	if config.media_upload_max_len > 0 && request.total_len > config.media_upload_max_len {
-		return Err(UploadError::TooLarge("total_len exceeds media_upload_max_len".into()));
-	}
-	if is_last_chunk_all_tag(request.total_len, wire_chunk_size) {
-		return Err(UploadError::Conflict(format!(
-			"total_len leaves a last chunk of {CHUNK_TAG_LEN} bytes or fewer: no room for plaintext under the tag"
-		)));
-	}
-	let chunk_count = request.total_len.div_ceil(u64::from(wire_chunk_size));
-	let chunk_count = u32::try_from(chunk_count).map_err(|_| UploadError::TooLarge("too many chunks".into()))?;
+	let chunk_max_bytes =
+		u32::try_from(chunk_max_bytes).map_err(|_| UploadError::Conflict("chunk_size too large".into()))?;
 
 	// One quota with pending uploads: both are media promised but not yet
 	// delivered.
@@ -144,11 +142,10 @@ pub async fn upload_create(&self, user: &UserId, request: UploadRequest) -> Uplo
 		mxc: mxc.clone(),
 		owner: user.to_owned(),
 		chunk_size,
-		wire_chunk_size,
-		total_len: request.total_len,
-		chunk_count,
-		received: vec![0; (chunk_count as usize).div_ceil(8)],
+		wire_chunk_size: 0,
+		total_len: 0,
 		received_count: 0,
+		finished: false,
 		content_type: request.content_type,
 		filename: request.filename,
 		created_at_secs: now_secs,
@@ -160,125 +157,115 @@ pub async fn upload_create(&self, user: &UserId, request: UploadRequest) -> Uplo
 		upload_id,
 		mxc,
 		chunk_size,
-		chunk_count,
+		chunk_max_bytes,
 		expires_at_secs: now_secs.saturating_add(config.media_upload_ttl),
 	})
 }
 
-/// Stores chunk `index` of upload `upload_id`. Returns how many chunks are
-/// in after it.
+/// Appends chunk `index` of upload `upload_id`; `is_last` marks the end of
+/// the upload.
 ///
-/// Chunks are ordered: `index` must be the first missing one. An index
-/// already received is accepted again without rewriting (a lost ack); an
-/// index beyond the first missing one is out of order.
+/// Chunks are ordered: `index` must be `received_count`. A lower index was
+/// already received and is acknowledged again without rewriting (a lost
+/// ack); a higher one is out of order and told what was expected.
 ///
-/// A chunk shorter than its slot ends the upload at that chunk: `total_len`
-/// was a ceiling and this is where the stream really ended. It must still
-/// carry more than the tag.
+/// Chunk 0 sets the wire chunk length; every later chunk must match it,
+/// except the last, which may be shorter. That keeps chunk `i` at
+/// `i * wire_chunk_size` so a download can find it without a table.
 #[implement(super::Service)]
-pub async fn upload_chunk(&self, user: &UserId, upload_id: u64, index: u32, chunk: &[u8]) -> UploadResult<u32> {
+pub async fn upload_chunk(
+	&self,
+	user: &UserId,
+	upload_id: u64,
+	index: u32,
+	chunk: &[u8],
+	is_last: bool,
+) -> UploadResult<ChunkStored> {
+	let config = &self.services.config;
 	let mut upload = self.owned_upload(user, upload_id).await?;
 
-	if index >= upload.chunk_count {
-		return Err(UploadError::Conflict(format!("chunk index {index} is past the last chunk {}", upload.chunk_count - 1)));
-	}
-
-	let len = chunk.len() as u64;
-	let expected_len = upload.chunk_len(index);
-
-	if upload.has_chunk(index) {
-		if len != expected_len {
-			return Err(UploadError::Conflict(format!("chunk {index} must be {expected_len} bytes, got {len}")));
-		}
+	if index < upload.received_count {
 		debug!(upload_id, index, "Chunk already received; acknowledging again.");
-		return Ok(upload.received_count);
+		return Ok(stored(&upload));
+	}
+	if index > upload.received_count {
+		return Err(UploadError::OutOfOrder { expected: upload.received_count });
+	}
+	if upload.finished {
+		return Err(UploadError::Conflict(format!(
+			"upload finished at chunk {}; nothing may follow",
+			upload.received_count.saturating_sub(1)
+		)));
 	}
 
-	let expected = upload.next_missing().unwrap_or(upload.chunk_count);
-	if index != expected {
-		return Err(UploadError::OutOfOrder { expected });
+	if chunk.is_empty() {
+		return Err(UploadError::Conflict("a chunk carries at least one byte".into()));
+	}
+	let chunk_max_bytes = (upload.chunk_size as usize).saturating_add(config.media_chunk_overhead_max);
+	if chunk.len() > chunk_max_bytes {
+		return Err(UploadError::TooLarge(format!(
+			"chunk {index} is {} bytes; this upload's chunks are at most {chunk_max_bytes}",
+			chunk.len()
+		)));
+	}
+	let len = u32::try_from(chunk.len()).map_err(|_| UploadError::TooLarge("chunk too large".into()))?;
+	let wire_chunk_size = if index == 0 { len } else { upload.wire_chunk_size };
+	if !is_last && len != wire_chunk_size {
+		return Err(UploadError::Conflict(format!(
+			"chunk {index} is {len} bytes but chunk 0 was {wire_chunk_size}; only the last chunk may differ"
+		)));
+	}
+	if is_last && len > wire_chunk_size {
+		return Err(UploadError::Conflict(format!(
+			"last chunk {index} is {len} bytes, longer than the {wire_chunk_size} of the chunks before it"
+		)));
+	}
+	let total_len = upload.total_len.saturating_add(u64::from(len));
+	if config.media_upload_max_len > 0 && total_len > config.media_upload_max_len {
+		return Err(UploadError::TooLarge("upload exceeds media_upload_max_len".into()));
 	}
 
-	if len > expected_len {
-		return Err(UploadError::Conflict(format!("chunk {index} must be at most {expected_len} bytes, got {len}")));
-	}
-	if len < expected_len {
-		if len <= u64::from(CHUNK_TAG_LEN) {
-			return Err(UploadError::Conflict(format!(
-				"a closing chunk must carry more than the {CHUNK_TAG_LEN}-byte tag, got {len}"
-			)));
-		}
-		upload.total_len = upload.chunk_offset(index).saturating_add(len);
-		upload.chunk_count = index.saturating_add(1);
-		upload
-			.received
-			.truncate((upload.chunk_count as usize).div_ceil(8));
-		debug!(upload_id, index, total_len = upload.total_len, "Short chunk closed the upload early.");
-	}
-
+	// The file is written before the row: if the server dies between them,
+	// the row still says this chunk is missing and the resend lands on the
+	// same offset.
 	let path = self.staging_path(upload_id);
-	write_at(&path, upload.chunk_offset(index), chunk).await?;
+	write_at(&path, upload.total_len, chunk).await?;
 
-	upload.mark_chunk(index);
+	upload.wire_chunk_size = wire_chunk_size;
+	upload.total_len = total_len;
+	upload.received_count = index.saturating_add(1);
+	upload.finished = is_last;
 	upload.last_chunk_at_secs = now().as_secs();
 	self.db.put_upload(upload_id, &upload);
 
-	Ok(upload.received_count)
+	Ok(stored(&upload))
 }
 
-/// Reports which chunks are in.
+/// Reports where an upload stands, so a client can resume from
+/// `received_count`.
 #[implement(super::Service)]
 pub async fn upload_status(&self, user: &UserId, upload_id: u64) -> UploadResult<UploadStatus> {
 	let upload = self.owned_upload(user, upload_id).await?;
-	let (received, missing) = upload.runs();
 
 	Ok(UploadStatus {
-		received,
-		missing,
 		received_count: upload.received_count,
-		chunk_count: upload.chunk_count,
+		total_len: upload.total_len,
+		finished: upload.finished,
+		chunk_size: upload.chunk_size,
 	})
 }
 
-/// Turns a complete upload into media: the staging file becomes one object,
+/// Turns a finished upload into media: the staging file becomes one object,
 /// the same rows `create()` writes are written, the upload row goes.
-///
-/// `total_len` is the true size when the client declared a ceiling. It may
-/// only end where a received chunk ends, dropping whole chunks sent past it:
-/// a shorter last chunk is declared by sending it short, not here, because
-/// the bytes on disk have to be the object.
 #[implement(super::Service)]
-pub async fn upload_seal(&self, user: &UserId, upload_id: u64, total_len: Option<u64>) -> UploadResult<OwnedMxcUri> {
-	let mut upload = self.owned_upload(user, upload_id).await?;
+pub async fn upload_seal(&self, user: &UserId, upload_id: u64) -> UploadResult<OwnedMxcUri> {
+	let upload = self.owned_upload(user, upload_id).await?;
 
-	if let Some(true_len) = total_len {
-		if true_len > upload.total_len {
-			return Err(UploadError::Conflict("total_len exceeds the declared ceiling".into()));
-		}
-		if true_len == 0 || is_last_chunk_all_tag(true_len, upload.wire_chunk_size) {
-			return Err(UploadError::Conflict("total_len leaves no room for plaintext in the last chunk".into()));
-		}
-		let true_count = true_len.div_ceil(u64::from(upload.wire_chunk_size));
-		let true_count = u32::try_from(true_count).map_err(|_| UploadError::Conflict("too many chunks".into()))?;
-		if true_count > upload.received_count {
-			return Err(UploadError::Conflict("total_len does not match the chunks received".into()));
-		}
-		let last = true_count.saturating_sub(1);
-		let stored_last_len = upload.chunk_len(last);
-		let true_last_len = true_len.saturating_sub(upload.chunk_offset(last));
-		if stored_last_len != true_last_len {
-			return Err(UploadError::Conflict(format!(
-				"total_len ends chunk {last} at {true_last_len} bytes but {stored_last_len} were received; send a shorter last \
-				 chunk instead of declaring it at seal"
-			)));
-		}
-		upload.chunk_count = true_count;
-		upload.total_len = true_len;
-	}
-
-	if let Some(first_missing) = upload.next_missing() {
-		let (_, missing) = upload.runs();
-		return Err(UploadError::Conflict(format!("chunks missing from {first_missing}: {missing:?}")));
+	if !upload.finished {
+		return Err(UploadError::Conflict(format!(
+			"upload not finished: {} chunks, {} bytes, last chunk not yet sent",
+			upload.received_count, upload.total_len
+		)));
 	}
 
 	let path = self.staging_path(upload_id);
@@ -299,12 +286,20 @@ pub async fn upload_seal(&self, user: &UserId, upload_id: u64, total_len: Option
 
 	self.store_staging_file(&key, &path, upload.total_len).await?;
 
+	// The shape a downloader needs to find chunk `i` at `i * wire_chunk_size`.
+	self.db.put_chunked_media(&mxc_parts, ChunkedMedia {
+		chunk_size: upload.chunk_size,
+		wire_chunk_size: upload.wire_chunk_size,
+		chunk_count: upload.received_count,
+		total_len: upload.total_len,
+	});
+
 	self.db.del_upload(upload_id);
 	if let Err(e) = fs::remove_file(&path).await {
 		warn!(?path, ?e, "Sealed upload's staging file could not be removed.");
 	}
 
-	info!(%upload.mxc, upload_id, total_len = upload.total_len, chunks = upload.chunk_count, "Sealed chunked upload.");
+	info!(%upload.mxc, upload_id, total_len = upload.total_len, chunks = upload.received_count, "Sealed chunked upload.");
 
 	Ok(upload.mxc)
 }
@@ -391,8 +386,9 @@ fn staging_dir(&self) -> PathBuf { self.get_media_dir().join("staging") }
 #[implement(super::Service)]
 fn staging_path(&self, upload_id: u64) -> PathBuf { self.staging_dir().join(format!("{upload_id:016x}")) }
 
-/// Streams the staging file into every configured provider as one object
-/// named for `key`, the way `create_media_file` stores a whole upload.
+/// Streams the first `len` bytes of the staging file into every configured
+/// provider as one object named for `key`, the way `create_media_file`
+/// stores a whole upload.
 #[implement(super::Service)]
 async fn store_staging_file(&self, key: &[u8], path: &PathBuf, len: u64) -> Result {
 	let name = self.get_media_name_sha256(key);
@@ -404,9 +400,7 @@ async fn store_staging_file(&self, key: &[u8], path: &PathBuf, len: u64) -> Resu
 			continue;
 		}
 
-		// The staging file may run past `len`: the seal can drop whole chunks the
-		// client sent past the true end, and the provider stores every byte it is
-		// given.
+		// `len` is the row's truth; the file is capped to it rather than trusted.
 		let file = fs::File::open(path).await?.take(len);
 		let chunks = stream::try_unfold(file, async |mut file| {
 			let mut buf = vec![0_u8; 1024 * 1024];
@@ -433,11 +427,12 @@ async fn store_staging_file(&self, key: &[u8], path: &PathBuf, len: u64) -> Resu
 	Ok(())
 }
 
-/// Whether `total_len` ends in a chunk of `CHUNK_TAG_LEN` bytes or fewer: a
-/// last chunk that is all tag and no plaintext, which no client can produce.
-fn is_last_chunk_all_tag(total_len: u64, wire_chunk_size: u32) -> bool {
-	let tail = total_len % u64::from(wire_chunk_size);
-	tail != 0 && tail <= u64::from(CHUNK_TAG_LEN)
+fn stored(upload: &Upload) -> ChunkStored {
+	ChunkStored {
+		received_count: upload.received_count,
+		total_len: upload.total_len,
+		finished: upload.finished,
+	}
 }
 
 /// A fresh upload id: random and non-zero. Zero means "no id" on the wire.
@@ -454,7 +449,8 @@ fn mint_upload_id() -> u64 {
 }
 
 /// Writes `bytes` at `offset`, creating the file and its directory if
-/// needed. The file is sparse where nothing has been written yet.
+/// needed. Positioned rather than appended so a resend after a crash lands
+/// where the row says, not after whatever the crash left behind.
 async fn write_at(path: &PathBuf, offset: u64, bytes: &[u8]) -> io::Result<()> {
 	if let Some(parent) = path.parent() {
 		fs::create_dir_all(parent).await?;
@@ -495,83 +491,4 @@ fn positioned_write(file: &std::fs::File, offset: u64, bytes: &[u8]) -> io::Resu
 	}
 
 	Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-	use ruma::{OwnedMxcUri, user_id};
-
-	use super::super::Upload;
-
-	fn upload(chunk_count: u32, wire_chunk_size: u32, total_len: u64) -> Upload {
-		Upload {
-			mxc: OwnedMxcUri::from("mxc://localhost/abc"),
-			owner: user_id!("@a:localhost").to_owned(),
-			chunk_size: wire_chunk_size - 16,
-			wire_chunk_size,
-			total_len,
-			chunk_count,
-			received: vec![0; (chunk_count as usize).div_ceil(8)],
-			received_count: 0,
-			content_type: None,
-			filename: None,
-			created_at_secs: 0,
-			last_chunk_at_secs: 0,
-		}
-	}
-
-	#[test]
-	fn bitmap_tracks_chunks_and_reports_runs() {
-		let mut upload = upload(100, 80, 100 * 80);
-		assert_eq!(upload.next_missing(), Some(0));
-
-		for index in 0..42 {
-			assert!(upload.mark_chunk(index));
-		}
-		assert!(upload.mark_chunk(43));
-		assert!(!upload.mark_chunk(43), "second mark is not new");
-
-		assert_eq!(upload.received_count, 43);
-		assert_eq!(upload.next_missing(), Some(42));
-		assert!(!upload.is_complete());
-
-		let (received, missing) = upload.runs();
-		assert_eq!(received, vec![[0, 41], [43, 43]]);
-		assert_eq!(missing, vec![[42, 42], [44, 99]]);
-	}
-
-	#[test]
-	fn the_last_chunk_is_shorter_when_the_total_says_so() {
-		// 120 KB of ciphertext in wire chunks of 64 KiB + 16: two chunks.
-		let wire = 64 * 1024 + 16;
-		let total = 120 * 1000;
-		let upload = upload(2, wire, total);
-
-		assert_eq!(upload.chunk_len(0), u64::from(wire));
-		assert_eq!(upload.chunk_len(1), total - u64::from(wire));
-		assert_eq!(upload.chunk_offset(1), u64::from(wire));
-	}
-
-	#[test]
-	fn a_complete_bitmap_has_no_missing_run() {
-		let mut upload = upload(3, 32, 96);
-		for index in 0..3 {
-			upload.mark_chunk(index);
-		}
-
-		assert!(upload.is_complete());
-		assert_eq!(upload.next_missing(), None);
-		assert_eq!(upload.runs(), (vec![[0, 2]], vec![]));
-	}
-
-	#[test]
-	fn a_tail_of_tag_or_less_is_all_tag() {
-		let wire = 64 + super::CHUNK_TAG_LEN;
-
-		assert!(!super::is_last_chunk_all_tag(u64::from(wire), wire), "whole chunks only");
-		assert!(!super::is_last_chunk_all_tag(u64::from(wire) + 17, wire), "one plaintext byte under the tag");
-		assert!(super::is_last_chunk_all_tag(u64::from(wire) + 16, wire), "tag alone");
-		assert!(super::is_last_chunk_all_tag(u64::from(wire) + 1, wire));
-		assert!(super::is_last_chunk_all_tag(5, wire));
-	}
 }

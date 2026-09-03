@@ -126,7 +126,10 @@ impl Flags {
 	pub const WANT_ACK: Self = Self(0b0000_0010);
 	/// This pack answers the request with the same `id` and `seq`.
 	pub const IS_RESPONSE: Self = Self(0b0000_0100);
-	const KNOWN: u8 = 0b0000_0111;
+	/// The last pack of its ordered sequence: the final chunk of an upload,
+	/// the final fragment of a stream.
+	pub const IS_LAST: Self = Self(0b0000_1000);
+	const KNOWN: u8 = 0b0000_1111;
 
 	/// Whether every bit of `other` is set.
 	#[must_use]
@@ -147,6 +150,10 @@ impl Flags {
 	/// Whether `IS_RESPONSE` is set.
 	#[must_use]
 	pub const fn is_response(self) -> bool { self.contains(Self::IS_RESPONSE) }
+
+	/// Whether `IS_LAST` is set.
+	#[must_use]
+	pub const fn is_last(self) -> bool { self.contains(Self::IS_LAST) }
 
 	const fn has_reserved_bits(self) -> bool { self.0 & !Self::KNOWN != 0 }
 }

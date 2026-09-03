@@ -30,6 +30,7 @@ offset  size  欄位          說明
 3       1     flags         bit0 META_ENCRYPTED：meta 是密文，別當 JSON 讀
                             bit1 WANT_ACK：發送者要求對這個 pack 回 Ack
                             bit2 IS_RESPONSE：這是對 (id, seq) 那個請求的回應
+                            bit3 IS_LAST：這個有序序列的最後一個（上傳的最後一塊、流的最後一片）
                             其餘保留，必須為 0
 4       8     id            會話／物件識別（u64）：上傳的 upload id、流的 stream id；0 = 無
 12      4     seq           序號（u32）；語意依 kind 的順序類別（§4）

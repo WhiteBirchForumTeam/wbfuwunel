@@ -3056,23 +3056,32 @@
 
 # Chunk size a chunked upload uses when the client does not choose one,
 # in bytes. The client encrypts each chunk on its own, so this is the
-# plaintext size; 16 bytes of authentication tag ride on top on the wire.
+# plaintext size; what the encryption adds rides on top on the wire, up
+# to `media_chunk_overhead_max`.
 #
 #media_chunk_size_default = 65536
 
 # Chunk size the server suggests for large files, in bytes. Reported to
 # clients; not enforced.
 #
-#media_chunk_size_large = 4194304
+#media_chunk_size_large = 1048576
 
-# Smallest chunk size a client may choose, in bytes.
+# Smallest chunk size a client may choose, in bytes. Within the range the
+# uploader decides; the server only records what it chose.
 #
-#media_chunk_size_min = 16384
+#media_chunk_size_min = 4096
 
 # Largest chunk size a client may choose, in bytes. Also bounded by
-# `wbf_data_max_bytes` less the authentication tag.
+# `wbf_data_max_bytes` less `media_chunk_overhead_max`.
 #
 #media_chunk_size_max = 16777216
+
+# How many bytes a chunk on the wire may exceed the upload's declared
+# chunk size by: room for the client's authentication tag, nonce and
+# framing. A chunk larger than `chunk_size` plus this is refused, so a
+# client cannot grow its chunks after declaring them.
+#
+#media_chunk_overhead_max = 4096
 
 # How long a chunked upload may go without a new chunk before it counts
 # as abandoned and is swept, in seconds. Measured from the last chunk,
@@ -3095,9 +3104,9 @@
 #wbf_meta_max_bytes = 65536
 
 # Largest data section a wbf pack may carry, in bytes. Must hold a
-# chunk of `media_chunk_size_max` plus its 16-byte tag.
+# chunk of `media_chunk_size_max` plus `media_chunk_overhead_max`.
 #
-#wbf_data_max_bytes = 16777232
+#wbf_data_max_bytes = 16781312
 
 # Allows users with `redact` power level to request unredacted events with
 # MSC2815.

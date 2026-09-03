@@ -8,13 +8,27 @@ use tuwunel_core::{
 	utils::{result::LogDebugErr, stream::IterStream},
 };
 
-use super::{Dim, Metadata};
+use super::{ChunkedMedia, Dim, Metadata};
 
 /// What a client needs to plan reads of one media item.
 #[derive(Debug)]
 pub struct MediaInfo {
 	pub total_len: u64,
 	pub content_type: Option<String>,
+	/// The chunk shape when the media was uploaded in chunks; `None` for a
+	/// whole-file upload, which is read by position instead.
+	pub chunked: Option<ChunkedMedia>,
+}
+
+/// One chunk of chunked media, exactly as it was uploaded.
+#[derive(Debug)]
+pub struct ChunkRead {
+	pub index: u32,
+	pub pos: u64,
+	pub bytes: Bytes,
+	pub wire_chunk_size: u32,
+	pub chunk_count: u32,
+	pub total_len: u64,
 }
 
 /// One ranged read: where it started, what came back, and how big the whole
@@ -45,8 +59,63 @@ pub async fn media_info(&self, mxc: &Mxc<'_>) -> Result<MediaInfo> {
 	// The stored type is an empty string when the uploader gave none; say
 	// "none" rather than hand the client a placeholder.
 	let content_type = content_type.filter(|content_type| !content_type.is_empty());
+	let chunked = self.db.find_chunked_media(mxc).await;
 
-	Ok(MediaInfo { total_len: object.size, content_type })
+	Ok(MediaInfo { total_len: object.size, content_type, chunked })
+}
+
+/// The chunk shape of `mxc` if it was uploaded in chunks; `None` for a
+/// whole-file upload. One point read; no object access.
+#[implement(super::Service)]
+pub async fn chunked_shape(&self, mxc: &Mxc<'_>) -> Option<ChunkedMedia> {
+	self.db.find_chunked_media(mxc).await
+}
+
+/// Reads chunk `index` of chunked `mxc`: the bytes that chunk arrived as,
+/// no more and no less, because only the uploader's key can make sense of
+/// them and it did so per chunk. Chunk `i` is at `i * wire_chunk_size`; the
+/// upload enforced that every chunk but the last has that length.
+#[implement(super::Service)]
+pub async fn read_chunk(&self, mxc: &Mxc<'_>, index: u32) -> Result<ChunkRead> {
+	let Metadata { key, .. } = self
+		.db
+		.search_file_metadata(mxc, &Dim::default())
+		.await?;
+
+	let Some(chunked) = self.db.find_chunked_media(mxc).await else {
+		return Err!(Request(InvalidParam("Not chunked media; read it by position.")));
+	};
+	if index >= chunked.chunk_count {
+		return Err!(Request(InvalidParam("Chunk index {index} is past the last chunk {}.", chunked.chunk_count.saturating_sub(1))));
+	}
+
+	let path = self.get_media_name_sha256(&key);
+	let pos = chunked.chunk_offset(index);
+	let end = pos.saturating_add(chunked.chunk_len(index));
+	let reads = self
+		.storage_providers()
+		.stream()
+		.filter_map(async |provider| {
+			provider
+				.get_range(path.as_str(), pos..end)
+				.await
+				.log_debug_err()
+				.ok()
+		});
+
+	pin_mut!(reads);
+	let Some(bytes) = reads.next().await else {
+		return Err!(Request(NotFound("Media chunk not readable from any provider.")));
+	};
+
+	Ok(ChunkRead {
+		index,
+		pos,
+		bytes,
+		wire_chunk_size: chunked.wire_chunk_size,
+		chunk_count: chunked.chunk_count,
+		total_len: chunked.total_len,
+	})
 }
 
 /// Reads `len` bytes of `mxc` from `pos`, clamped to the object's end.
