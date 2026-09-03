@@ -254,7 +254,7 @@ async fn handle_upload_chunk(services: &Services, user: &UserId, view: &PackView
 		view.header.seq,
 		json!({
 			"received": stored.received_count,
-			"chunk_count": stored.chunk_count,
+			"chunk_count": known(stored.chunk_count),
 			"total_len": stored.total_len,
 			"finished": stored.finished,
 			"truncated": stored.truncated,
@@ -271,21 +271,24 @@ async fn handle_upload_status(services: &Services, user: &UserId, view: &PackVie
 		view.header.seq,
 		json!({
 			"received": status.received_count,
-			"chunk_count": status.chunk_count,
+			"chunk_count": known(status.chunk_count),
 			"total_len": status.total_len,
 			"finished": status.finished,
 			"truncated": status.truncated,
 			"chunk_size": status.chunk_size,
-			"file_size": status.file_size,
+			"file_size": known(status.file_size),
 		}),
 		Vec::new(),
 	))
 }
 
 async fn handle_upload_seal(services: &Services, user: &UserId, view: &PackView<'_>) -> std::result::Result<Vec<u8>, Reject> {
+	// A new encrypted description may ride along: a stream learns its size
+	// only at the end.
+	let new_meta = (!view.data.is_empty()).then(|| view.data.to_vec());
 	let mxc = services
 		.media
-		.upload_seal(user, view.header.id)
+		.upload_seal(user, view.header.id, new_meta)
 		.await?;
 
 	Ok(ack(view.header.id, view.header.seq, json!({ "mxc": mxc }), Vec::new()))
@@ -308,7 +311,7 @@ async fn handle_download_info(services: &Services, view: &PackView<'_>) -> std::
 		json!({
 			"total_len": info.total_len,
 			"content_type": info.content_type,
-			"file_size": info.chunked.as_ref().map(|chunked| chunked.file_size),
+			"file_size": info.chunked.as_ref().and_then(|chunked| known(chunked.file_size)),
 			"chunk_size": info.chunked.as_ref().map(|chunked| chunked.chunk_size),
 			"chunk_count": info.chunked.as_ref().map(|chunked| chunked.chunk_count),
 			"truncated": info.chunked.as_ref().map(|chunked| chunked.truncated),
@@ -367,6 +370,10 @@ async fn handle_download_read(services: &Services, view: &PackView<'_>) -> std::
 		read.bytes.to_vec(),
 	))
 }
+
+/// A declared size or count, or `None` when the client declared none (a
+/// stream): `0` is the sentinel on the wire, `null` in the answer.
+fn known<T: Into<u64> + Copy>(value: T) -> Option<T> { (value.into() != 0).then_some(value) }
 
 fn mxc_from_meta(meta: &Value) -> std::result::Result<String, Reject> {
 	meta["mxc"]

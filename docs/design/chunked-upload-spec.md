@@ -59,6 +59,8 @@ Ack 的 meta 是 JSON（各訊息定義）；Error 的 meta 是 JSON `{ "code": 
 | 8 | 4 | `chunk_size` | **明文**塊大小，byte；`0` = 用 server 預設（64 KiB） |
 | 12 | 4 | `chunk_count` | 總塊數，**必須等於 `ceil(file_size / chunk_size)`** |
 
+**串流模式**（邊生成邊傳、大小未知）：`file_size = 0` **且** `chunk_count = 0`。之後沒有宣告的結尾，**最後一塊帶 `IS_LAST` 才結束**；塊數上限仍由單檔上限推出。只有一個是 0 → `Conflict`。
+
 **data = client 加密後的檔案描述**（可空）。server 不讀、不解、不驗，原樣存，`Info` 時原樣回。上限 64 KiB。
 
 server 檢查（任一不過就 `Error`，一個 byte 都還沒收）：
@@ -66,7 +68,7 @@ server 檢查（任一不過就 `Error`，一個 byte 都還沒收）：
 | 條件 | code |
 |---|---|
 | `meta_len ≠ 16` | `Conflict` |
-| `file_size = 0` | `Conflict` |
+| `file_size = 0` 而 `chunk_count ≠ 0`（反之亦然） | `Conflict` |
 | `file_size > media_upload_max_len`（預設 10 GiB） | `TooLarge` |
 | `chunk_size` 不在 `[4 KiB, 16 MiB]` | `Conflict` |
 | `chunk_count ≠ ceil(file_size / chunk_size)` | `Conflict` |
@@ -88,7 +90,7 @@ Ack meta：
 ### 3.2 `Chunk`（subtype `0x02`，id = 上傳 id，**seq = 塊索引**）
 
 meta 空。**data = 第 `seq` 塊的密文**，多長 client 自己定，每塊可以不同；server 只要求 `1 ≤ data_len ≤ chunk_max_bytes`。
-最後一塊（`seq = chunk_count − 1`）可以帶 `IS_LAST`；帶在別塊上會被拒。
+最後一塊（`seq = chunk_count − 1`）可以帶 `IS_LAST`；帶在別塊上會被拒。**串流模式**下 `IS_LAST` 是必要的：帶在哪一塊，上傳就在那一塊結束。
 
 順序：同一個 `id` 之內 `seq` 必須 0, 1, 2, … 依序到。可以連續送不等回應（滑動窗口 client 自訂）。
 
@@ -102,7 +104,7 @@ meta 空。**data = 第 `seq` 塊的密文**，多長 client 自己定，每塊�
 | `data_crc` 不對 | `Error` `Corrupt`（標頭仍抄回 `id`/`seq`，可直接重送） |
 | 累計 bytes 會超過 `media_upload_max_len` | **這塊不收**，上傳強制結束：`Error` `Truncated`，帶 `received`、`total_len`、`finished: true`、`truncated: true`；之後仍可 `Seal`，媒體帶 `truncated` 標記 |
 
-收到第 `chunk_count − 1` 塊，`finished` 變 `true`。
+收到第 `chunk_count − 1` 塊（串流：收到帶 `IS_LAST` 的塊），`finished` 變 `true`。回應裡 `chunk_count` 在串流模式為 `null`。
 
 ### 3.3 `Status`（subtype `0x03`）
 
@@ -117,7 +119,7 @@ meta、data 皆空。Ack meta：
 
 ### 3.4 `Seal`（subtype `0x04`）
 
-meta、data 皆空。要 `finished`（含 `truncated`）。Ack meta `{ "mxc": "mxc://…" }`。
+meta 空。**data 可選**：非空就拿它取代 `Create` 時的加密描述（串流到結尾才知道大小、雜湊），上限 64 KiB。要 `finished`（含 `truncated`）。Ack meta `{ "mxc": "mxc://…" }`。
 seal 後這個上傳 id 就不存在了（`Status` 回 `NotFound`），媒體以 mxc 存取。
 
 ### 3.5 `Abort`（subtype `0x05`）
@@ -128,12 +130,12 @@ meta、data 皆空。刪掉進行中的一切。Ack meta `{ "ok": true }`。
 ### 3.6 完整流程
 
 ```
-Create(EncryptedFileInfo, 加密描述)  → Ack{id, mxc}
+Create(EncryptedFileInfo, 加密描述)  → Ack{id, mxc}          // 串流：file_size=0, chunk_count=0
 Chunk(id, seq=0, ct_0)               → Ack{received:1}
 Chunk(id, seq=1, ct_1)               → Ack{received:2}
 …
 Chunk(id, seq=c-1, ct_{c-1}, IS_LAST) → Ack{received:c, finished:true}
-Seal(id)                             → Ack{mxc}
+Seal(id[, 新的加密描述])            → Ack{mxc}
 把 mxc 與解密所需資料放進房間的加密事件
 ```
 
@@ -144,7 +146,7 @@ Seal(id)                             → Ack{mxc}
 meta：`{ "mxc": "mxc://…" }`。Ack：
 
 - meta：`{ "total_len", "file_size", "chunk_size", "chunk_count", "truncated", "content_type", "read_len", "chunk_size_large" }`
-  - `file_size`／`chunk_size`／`chunk_count`／`truncated`：分塊媒體才有，整檔媒體（舊上傳）為 `null`
+  - `file_size`／`chunk_size`／`chunk_count`／`truncated`：分塊媒體才有，整檔媒體（舊上傳）為 `null`；串流上傳的 `file_size` 也是 `null`（server 不知道，真值在加密描述裡），`chunk_count` 是實際收到的塊數
   - `total_len`：物件在 server 上的總長（分塊媒體 = 所有密文塊加總）
   - `content_type`：整檔媒體才有；分塊媒體為 `null`（server 不知道）
 - **data = `Create` 時那份加密描述**，原樣（整檔媒體為空）

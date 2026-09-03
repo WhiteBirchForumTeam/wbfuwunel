@@ -48,6 +48,7 @@ client 預設只有這兩個數字，64 KiB 是預設。但那是 client 的選�
 - client 在 `Create` **一次宣告完**，用一個型別 `EncryptedFileInfo`（`core/wbf/file_info.rs`，server 與 Rust SDK 共用）：`file_size`（u64，明文總長）、`chunk_size`（u32，**明文**塊的精確大小；0 = 用 server 的 `media_chunk_size_default`，64 KiB）、`chunk_count`（u32，總塊數，必須等於 `ceil(file_size / chunk_size)`，不等就 `Error(Conflict)`）。它的線上形式是**固定 16 byte**（big-endian，依序 8+4+4），直接放 `Create` 的 meta 段，不是 JSON；長度不是 16 就拒。之後每一塊只帶 `id` 與 `seq`，不再復述任何數字。**之後不能改**。
 - `Create` 的 **data 段放 client 加密後的檔案描述**（檔名、MIME、金鑰材料、雜湊……client 自己定）。server 原樣存、原樣還（`Info` 的 data），不讀也讀不懂；上限 `wbf_meta_max_bytes`。**不是不傳，是加密傳**。
 - 上傳在第 `chunk_count − 1` 塊到達時完成。`IS_LAST` 旗標只是一致性訊號：帶在不是最後一塊的塊上 → `Error(Conflict)`。
+- **串流模式**（邊生成邊傳）：`file_size = 0` 且 `chunk_count = 0` 當哨兵，表示大小未定。這時沒有宣告的結尾，**最後一塊帶 `IS_LAST` 才結束**（維護者最早說的「最後一小塊帶終止訊號」）；塊數上限仍由單檔上限推出。seal 時 `chunk_count` 寫實際收到的塊數，`file_size` 保持 0（server 不知道最後一塊的明文多長），`Info` 回 `null`，真值在 client 的加密描述裡。為此 `Seal` 的 data 可以帶一份**新的加密描述**取代 `Create` 時那份。兩種模式同一個型別、同一套訊息。
 - **server 不檢查塊的長度是否「對」**。data 段是 client 封裝（加密、標籤、nonce、框架）之後的密文，封裝後多大是 client 的事；精確的 64 KiB 在**解封裝**那端檢查，解密出來不是 64 KiB 就是那一塊壞了。server 對「完整」的定義只有兩樣：`data_crc` 對、序列沒漏。
 - **封裝後每一塊多長都可以不同**，server 不記住任何「應該多長」、不拿前一塊檢查後一塊；它只**記錄**每一塊落在哪、多長（`mxc_chunk`，§3.1）。server 知道的是明文塊大小（宣告的），而最後一塊的明文允許比它小。
 - server 檢查的是**上限**（防攻擊，不是定義）：`media_chunk_size_min ≤ chunk_size ≤ media_chunk_size_max`（預設 **4 KiB** 到 **16 MiB**）；每一塊 `data_len ≤ chunk_size + media_chunk_overhead_max`（預設冗餘 4 KiB，蓋標籤與封裝），超過就 `Error(TooLarge)`，所以 client 宣告了塊大小就不能中途把塊變大；`chunk_size + media_chunk_overhead_max ≤ wbf_data_max_bytes`（單包硬上限，meta 與 data 各一個，不讓任何一段無限長）。空塊拒收。
@@ -101,10 +102,10 @@ TTL 設 `media_upload_ttl × 2` 當兜底，真正的清理是 §6 的 sweeper�
 
 | subtype | 請求 meta | 請求 data | 回應（`Ack` 的 meta） |
 |---|---|---|---|
-| `0x01 Create` | **`EncryptedFileInfo` 16 byte 二進位**：`file_size` u64 ‖ `chunk_size` u32（0 = 預設）‖ `chunk_count` u32，big-endian | **client 加密的檔案描述**（可空） | `{ "id": <upload_id>, "mxc": "mxc://…/<hex(id)>", "chunk_size": …, "chunk_max_bytes": …, "expires_at": … }`（`id` 與 `mxc` 是同一個值；`chunk_max_bytes` = `chunk_size + media_chunk_overhead_max`）。`chunk_count ≠ ceil(file_size / chunk_size)` → `Error(Conflict)`；`file_size > media_upload_max_len` → `Error(TooLarge)` |
-| `0x02 Chunk` | 無（`id`、`seq` 在標頭就夠） | 第 `seq` 塊的 bytes，長度由 client 定，每塊可以不同；最後一塊可帶 `IS_LAST` | `{ "received": <已到塊數>, "chunk_count": …, "total_len": <累計 bytes>, "finished": bool, "truncated": bool }`。收到第 `chunk_count − 1` 塊就 `finished`。`data_crc` 不合 → `Error(Corrupt)`；`data_len > chunk_max_bytes` → `Error(TooLarge)`；空塊、`seq ≥ chunk_count`、完成後還有塊、`IS_LAST` 帶在不是最後一塊上 → `Error(Conflict)`；會超過單檔上限或塊數上限 → 這塊不收、上傳強制結束、`Error(Truncated)` 帶 `received`、`total_len`、`truncated: true`（§6）；`seq < received_count`（重送）→ 不重寫、再 Ack 一次，冪等 |
+| `0x01 Create` | **`EncryptedFileInfo` 16 byte 二進位**：`file_size` u64 ‖ `chunk_size` u32（0 = 預設）‖ `chunk_count` u32，big-endian | **client 加密的檔案描述**（可空） | `{ "id": <upload_id>, "mxc": "mxc://…/<hex(id)>", "chunk_size": …, "chunk_max_bytes": …, "expires_at": … }`（`id` 與 `mxc` 是同一個值；`chunk_max_bytes` = `chunk_size + media_chunk_overhead_max`）。`chunk_count ≠ ceil(file_size / chunk_size)` → `Error(Conflict)`；`file_size > media_upload_max_len` → `Error(TooLarge)`。`file_size = 0` 且 `chunk_count = 0` = 串流模式（§2.2），只有一個是 0 → `Error(Conflict)` |
+| `0x02 Chunk` | 無（`id`、`seq` 在標頭就夠） | 第 `seq` 塊的 bytes，長度由 client 定，每塊可以不同；最後一塊可帶 `IS_LAST` | `{ "received": <已到塊數>, "chunk_count": …, "total_len": <累計 bytes>, "finished": bool, "truncated": bool }`。收到第 `chunk_count − 1` 塊就 `finished`（串流：收到帶 `IS_LAST` 的塊；回應的 `chunk_count` 為 `null`）。`data_crc` 不合 → `Error(Corrupt)`；`data_len > chunk_max_bytes` → `Error(TooLarge)`；空塊、`seq ≥ chunk_count`、完成後還有塊、`IS_LAST` 帶在不是最後一塊上 → `Error(Conflict)`；會超過單檔上限或塊數上限 → 這塊不收、上傳強制結束、`Error(Truncated)` 帶 `received`、`total_len`、`truncated: true`（§6）；`seq < received_count`（重送）→ 不重寫、再 Ack 一次，冪等 |
 | `0x03 Status` | 無 | 無 | `{ "received": <已到塊數>, "chunk_count": …, "total_len": …, "finished": bool, "truncated": bool, "chunk_size": …, "file_size": … }`；續傳從 `seq = received` 接著送 |
-| `0x04 Seal` | 無 | 無 | `{ "mxc": "…" }`。還沒收齊 `chunk_count` 塊 → `Error(Conflict)` 帶目前塊數與 bytes |
+| `0x04 Seal` | 無 | **可選**：新的加密描述，取代 `Create` 時那份 | `{ "mxc": "…" }`。還沒完成 → `Error(Conflict)` 帶目前塊數與 bytes |
 | `0x05 Abort` | 無 | 無 | `{ "ok": true }`。取消：列、已記的塊位置、暫存檔一起刪。沒叫 Abort 也不會卡住：`media_upload_ttl` 到了 sweeper 清（§6） |
 
 `Chunk` 是**有序類**（[wbf-wire-format.md](wbf-wire-format.md) §4）：同一個 `id` 之內 `seq` 必須 0, 1, 2, … 遞增，server 記 `next_seq`；來的不是 `next_seq`
@@ -179,7 +180,8 @@ TTL 設 `media_upload_ttl × 2` 當兜底，真正的清理是 §6 的 sweeper�
 7. **下載交回去的必須是上傳時的那一塊**（2026-09-03）：server 解不了密、不能重新切塊。維護者明講：**封裝後每塊多長會浮動，server 不能記住第一塊多長拿來檢查後面的，server 從不檢查，檢查是 client 解碼的事**；server 知道的只有明文塊大小，最後一塊的明文可以比它小。所以邊界不是算的，是每塊收到時**記錄**下來的（`mxc_chunk`，記錄不是檢查）；seal 存 `chunk_size`、`chunk_count`、`total_len`。client 用**明文位置** `pos` 要，server 算 `pos / chunk_size` 找到那塊，回起點、這塊長度、明文塊大小、總塊數。（中間曾有一版「第 0 塊定長度、後面每塊一樣長、邊界用乘的」，維護者否決：那是 server 在檢查它不該懂的東西。）最小塊 4 KiB、最大 16 MiB，範圍內上傳者決定；client 預設只有 64 KiB（預設）與 1 MiB。
 8. **與舊 client 的相容**（2026-09-03）：分塊媒體是逐塊 AEAD 的密文串起來，舊 client 走標準下載拿得到、解不開，這是接受的。**只有單塊**可能相容，而且條件是 client 對那一塊用 Matrix 標準附件加密（AES-256-CTR + SHA-256）並在事件帶標準 `file` 欄；server 不用為此做任何事。`max_pending_media_uploads` 維持上游預設 5，維護者說媒體之後可能自己重做。
 9. **單檔上限是唯一的額度**（2026-09-03）：預設 10 GiB，塊數上限由它推出（`ceil(上限 / chunk_size)`）。超過就強制終止、截斷，不完整的檔帶著警告狀態發出（`truncated`），狀態存在上傳列與 seal 後的 `mxc_chunked` 列。這是額度不是檢查，不違反第 7 條。
-10. **預告**：未來所有 HTTP 請求都會遷到 WS，kind 的分配見 [wbf-wire-format.md](wbf-wire-format.md) §3.3。
+10. **串流模式**（2026-09-03，維護者指出漏了）：`file_size = 0` 且 `chunk_count = 0` 當哨兵，`IS_LAST` 結束，`Seal` 可帶新的加密描述（§2.2）。
+11. **預告**：未來所有 HTTP 請求都會遷到 WS，kind 的分配見 [wbf-wire-format.md](wbf-wire-format.md) §3.3。
 
 ## 10. 分幾支
 

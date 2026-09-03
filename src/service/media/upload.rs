@@ -122,8 +122,11 @@ type UploadResult<T> = std::result::Result<T, UploadError>;
 pub async fn upload_create(&self, user: &UserId, request: UploadRequest) -> UploadResult<UploadCreated> {
 	let config = &self.services.config;
 
-	if request.file_size == 0 {
-		return Err(UploadError::Conflict("file_size must be positive".into()));
+	// file_size 0 and chunk_count 0 together mean a stream: the client does
+	// not know the size yet and will mark the last chunk with IS_LAST.
+	let is_stream = request.file_size == 0 && request.chunk_count == 0;
+	if !is_stream && request.file_size == 0 {
+		return Err(UploadError::Conflict("file_size must be positive (0 only with chunk_count 0, a stream)".into()));
 	}
 	if config.media_upload_max_len > 0 && request.file_size > config.media_upload_max_len {
 		return Err(UploadError::TooLarge("file_size exceeds media_upload_max_len".into()));
@@ -157,7 +160,7 @@ pub async fn upload_create(&self, user: &UserId, request: UploadRequest) -> Uplo
 	// be what the declared sizes give, or the client's picture of its own file
 	// is wrong before a byte is sent.
 	let expected_count = request.file_size.div_ceil(u64::from(chunk_size));
-	if u64::from(request.chunk_count) != expected_count {
+	if !is_stream && u64::from(request.chunk_count) != expected_count {
 		return Err(UploadError::Conflict(format!(
 			"chunk_count {} does not match file_size {} in chunks of {chunk_size}: expected {expected_count}",
 			request.chunk_count, request.file_size
@@ -215,7 +218,8 @@ pub async fn upload_create(&self, user: &UserId, request: UploadRequest) -> Uplo
 
 /// Appends chunk `index` of upload `upload_id`. The upload is finished when
 /// chunk `chunk_count - 1` is in; `is_last` (the `IS_LAST` flag) may mark
-/// that chunk and must not mark any other.
+/// that chunk and must not mark any other. A stream (`chunk_count` 0) has
+/// no declared end: `is_last` is what finishes it.
 ///
 /// Chunks are ordered: `index` must be `received_count`. A lower index was
 /// already received and is acknowledged again without rewriting (a lost
@@ -248,19 +252,25 @@ pub async fn upload_chunk(
 			upload.received_count.saturating_sub(1)
 		)));
 	}
-	if index >= upload.chunk_count {
-		return Err(UploadError::Conflict(format!(
-			"chunk {index} is past the declared last chunk {}",
-			upload.chunk_count.saturating_sub(1)
-		)));
-	}
-	let is_final_index = index.saturating_add(1) == upload.chunk_count;
-	if is_last && !is_final_index {
-		return Err(UploadError::Conflict(format!(
-			"chunk {index} carries IS_LAST but the declared last chunk is {}",
-			upload.chunk_count.saturating_sub(1)
-		)));
-	}
+	let is_stream = upload.chunk_count == 0;
+	let finishes = if is_stream {
+		is_last
+	} else {
+		if index >= upload.chunk_count {
+			return Err(UploadError::Conflict(format!(
+				"chunk {index} is past the declared last chunk {}",
+				upload.chunk_count.saturating_sub(1)
+			)));
+		}
+		let is_final_index = index.saturating_add(1) == upload.chunk_count;
+		if is_last && !is_final_index {
+			return Err(UploadError::Conflict(format!(
+				"chunk {index} carries IS_LAST but the declared last chunk is {}",
+				upload.chunk_count.saturating_sub(1)
+			)));
+		}
+		is_final_index
+	};
 
 	if chunk.is_empty() {
 		return Err(UploadError::Conflict("a chunk carries at least one byte".into()));
@@ -298,7 +308,7 @@ pub async fn upload_chunk(
 
 	upload.total_len = total_len;
 	upload.received_count = received_count;
-	upload.finished = is_final_index;
+	upload.finished = finishes;
 	upload.last_chunk_at_secs = now().as_secs();
 	self.db.put_upload(upload_id, &upload);
 
@@ -324,15 +334,37 @@ pub async fn upload_status(&self, user: &UserId, upload_id: u64) -> UploadResult
 
 /// Turns a finished upload into media: the staging file becomes one object,
 /// the same rows `create()` writes are written, the upload row goes.
+///
+/// `new_meta` replaces the encrypted description declared at `Create`: a
+/// stream only knows its size at the end.
 #[implement(super::Service)]
-pub async fn upload_seal(&self, user: &UserId, upload_id: u64) -> UploadResult<OwnedMxcUri> {
-	let upload = self.owned_upload(user, upload_id).await?;
+pub async fn upload_seal(
+	&self,
+	user: &UserId,
+	upload_id: u64,
+	new_meta: Option<Vec<u8>>,
+) -> UploadResult<OwnedMxcUri> {
+	let mut upload = self.owned_upload(user, upload_id).await?;
+	if let Some(meta) = new_meta {
+		if meta.len() > self.services.config.wbf_meta_max_bytes {
+			return Err(UploadError::TooLarge("the encrypted description is too large".into()));
+		}
+		upload.meta = meta;
+	}
 
 	if !upload.finished {
-		return Err(UploadError::Conflict(format!(
-			"upload not finished: {} of {} chunks, {} bytes",
-			upload.received_count, upload.chunk_count, upload.total_len
-		)));
+		let message = if upload.chunk_count == 0 {
+			format!(
+				"stream not ended: {} chunks, {} bytes, no chunk carried IS_LAST yet",
+				upload.received_count, upload.total_len
+			)
+		} else {
+			format!(
+				"upload not finished: {} of {} chunks, {} bytes",
+				upload.received_count, upload.chunk_count, upload.total_len
+			)
+		};
+		return Err(UploadError::Conflict(message));
 	}
 
 	let path = self.staging_path(upload_id);
