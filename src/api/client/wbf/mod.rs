@@ -1,7 +1,8 @@
 //! The wbf pack endpoints: one pack in, one pack out.
 //!
 //! `POST /_wbf/v1/pack` is the HTTP transport, one pack per request.
-//! The WebSocket channel calls the same `handle_pack`, so there is one set of
+//! `GET /_wbf/v1/ws` (`ws.rs`) is the WebSocket channel, one pack per binary
+//! message; it calls the same `handle_pack`, so there is one set of
 //! semantics. Neither transport looks inside `data`; the only meta the server
 //! reads is the plaintext meta of kinds it has to act on.
 
@@ -25,8 +26,13 @@ use tuwunel_service::{
 	media::{UploadError, UploadRequest},
 };
 
+mod ws;
+
+pub(crate) use self::ws::ws_route;
+
 /// `Control` subtypes.
 mod control {
+	pub(super) const HELLO: u8 = 0x01;
 	pub(super) const ACK: u8 = 0x02;
 	pub(super) const ERROR: u8 = 0x03;
 	pub(super) const PING: u8 = 0x04;
@@ -126,6 +132,7 @@ pub(crate) async fn handle_pack(services: &Services, user: &UserId, view: PackVi
 	}
 
 	let result = match (header.kind, header.subtype) {
+		| (Kind::Control, control::HELLO) => Ok(hello(services, &view)),
 		| (Kind::Control, control::PING) => Ok(pong(&view)),
 		| (Kind::Upload, upload::CREATE) => handle_upload_create(services, user, &view).await,
 		| (Kind::Upload, upload::CHUNK) => handle_upload_chunk(services, user, &view).await,
@@ -380,6 +387,24 @@ fn mxc_from_meta(meta: &Value) -> std::result::Result<String, Reject> {
 		.as_str()
 		.map(ToOwned::to_owned)
 		.ok_or_else(|| Reject::code("Conflict", "mxc is required"))
+}
+
+/// The answer to `Hello`: what this server speaks. The client's own meta
+/// (its name, its feature list) is not read; nothing here depends on it yet.
+fn hello(services: &Services, view: &PackView<'_>) -> Vec<u8> {
+	ack(
+		view.header.id,
+		view.header.seq,
+		json!({
+			"protocol": 1,
+			"server": services.globals.server_name(),
+			"features": ["upload", "download"],
+			"chunk_size_default": services.config.media_chunk_size_default,
+			"chunk_size_large": services.config.media_chunk_size_large,
+			"data_max_bytes": services.config.wbf_data_max_bytes,
+		}),
+		Vec::new(),
+	)
 }
 
 /// A `Pong` echoing the ping's meta (its nonce) back.

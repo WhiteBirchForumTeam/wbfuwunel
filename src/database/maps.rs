@@ -262,6 +262,17 @@ pub(super) static MAPS: &[Descriptor] = &[
 		..descriptor::RANDOM_SMALL
 	},
 	Descriptor {
+		name: "mediaid_upload_progress",
+		// Where each chunked upload stands: upload id (u64) ->
+		// Cbor(UploadProgress), a few dozen bytes rewritten with every chunk
+		// (the declaration with its encrypted description stays put in
+		// mediaid_upload). Same TTL backstop; goes with the declaration.
+		ttl: 60 * 60 * 24 * 2,
+		key_size_hint: Some(8),
+		val_size_hint: Some(32),
+		..descriptor::RANDOM_SMALL
+	},
+	Descriptor {
 		name: "mxc_chunk",
 		// Where each chunk of chunked media sits: (mxc, index) ->
 		// Cbor(ChunkSpan). The server records each chunk's wire length as it

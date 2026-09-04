@@ -28,17 +28,17 @@ pub(crate) struct Data {
 	mxc_refcount: Arc<Map>,
 	mxc_tombstone: Arc<Map>,
 	mediaid_upload: Arc<Map>,
+	mediaid_upload_progress: Arc<Map>,
 	mxc_chunk: Arc<Map>,
 	mxc_chunked: Arc<Map>,
 	url_preview: Arc<Map>,
 }
 
-/// One chunked upload in progress, keyed by its upload id.
-///
-/// Chunks arrive in order and are appended, so what has arrived is a count
-/// and a byte total: chunk `received_count` is the next one expected and
-/// `total_len` is where it will land. The client says which chunk is the
-/// last; until then the upload has no known size.
+/// The declaration of a chunked upload, keyed by its upload id. Written
+/// once at `Create` and never rewritten: what the client said the file is.
+/// Where the upload stands is `UploadProgress`, a separate small row that
+/// changes with every chunk, so the encrypted description is not copied
+/// around each time.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Upload {
 	pub mxc: OwnedMxcUri,
@@ -55,17 +55,25 @@ pub struct Upload {
 	/// The client's encrypted description of the file, stored as it came.
 	#[serde(with = "serde_bytes")]
 	pub meta: Vec<u8>,
+	pub created_at_secs: u64,
+}
+
+/// Where a chunked upload stands. Chunks arrive in order and are appended,
+/// so this is a count and a byte total: chunk `received_count` is the next
+/// one expected and `total_len` is where it will land. Rewritten with every
+/// chunk, in the same transaction as the chunk's position.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+pub struct UploadProgress {
+	/// Chunks received so far: the next chunk's index.
+	pub received_count: u32,
 	/// Bytes received so far: the staging file's length and the next chunk's
 	/// offset.
 	pub total_len: u64,
-	/// Chunks received so far: the next chunk's index.
-	pub received_count: u32,
 	/// Whether the last chunk has arrived. Only a finished upload seals.
 	pub finished: bool,
 	/// Whether the server ended the upload itself because the next chunk
 	/// would have crossed `media_upload_max_len`: finished, but not whole.
 	pub truncated: bool,
-	pub created_at_secs: u64,
 	pub last_chunk_at_secs: u64,
 }
 
@@ -183,6 +191,7 @@ impl Data {
 			mxc_refcount: db["mxc_refcount"].clone(),
 			mxc_tombstone: db["mxc_tombstone"].clone(),
 			mediaid_upload: db["mediaid_upload"].clone(),
+			mediaid_upload_progress: db["mediaid_upload_progress"].clone(),
 			mxc_chunk: db["mxc_chunk"].clone(),
 			mxc_chunked: db["mxc_chunked"].clone(),
 			url_preview: db["url_preview"].clone(),
@@ -199,13 +208,38 @@ impl Data {
 			.ok()
 	}
 
-	/// Writes the upload with `upload_id`, replacing what was there.
-	pub(super) fn put_upload(&self, upload_id: u64, upload: &Upload) {
-		self.mediaid_upload.put(upload_id, Cbor(upload));
+	/// Writes a new upload's declaration and its starting progress, in one
+	/// transaction.
+	pub(super) fn create_upload(&self, upload_id: u64, upload: &Upload, progress: &UploadProgress) {
+		let mut txn = self.db.txn();
+		txn.put(&self.mediaid_upload, upload_id, Cbor(upload));
+		txn.put(&self.mediaid_upload_progress, upload_id, Cbor(progress));
+		txn.execute();
 	}
 
-	/// Removes the upload row with `upload_id`.
-	pub(super) fn del_upload(&self, upload_id: u64) { self.mediaid_upload.del(upload_id); }
+	/// Rewrites only the progress row of `upload_id`.
+	pub(super) fn put_progress(&self, upload_id: u64, progress: &UploadProgress) {
+		self.mediaid_upload_progress
+			.put(upload_id, Cbor(progress));
+	}
+
+	/// Reads the progress row of `upload_id`, if any.
+	pub(super) async fn find_progress(&self, upload_id: u64) -> Option<UploadProgress> {
+		self.mediaid_upload_progress
+			.qry(&upload_id)
+			.await
+			.deserialized::<Cbor<UploadProgress>>()
+			.map(|Cbor(progress)| progress)
+			.ok()
+	}
+
+	/// Removes the declaration and progress rows of `upload_id` together.
+	pub(super) fn del_upload(&self, upload_id: u64) {
+		let mut txn = self.db.txn();
+		txn.del(&self.mediaid_upload, upload_id);
+		txn.del(&self.mediaid_upload_progress, upload_id);
+		txn.execute();
+	}
 
 	/// Every upload in progress, with its id.
 	pub(super) fn list_uploads(&self) -> impl Stream<Item = (u64, Upload)> + Send + '_ {
@@ -215,9 +249,32 @@ impl Data {
 			.map(|(id, Cbor(upload))| (id, upload))
 	}
 
-	/// Records where chunk `index` of `mxc` landed.
-	pub(super) fn put_chunk_span(&self, mxc: &Mxc<'_>, index: u32, span: ChunkSpan) {
-		self.mxc_chunk.put((mxc, index), Cbor(span));
+	/// Every upload's progress, with its id: what the sweeper walks.
+	pub(super) fn list_progress(&self) -> impl Stream<Item = (u64, UploadProgress)> + Send + '_ {
+		self.mediaid_upload_progress
+			.stream::<u64, Cbor<UploadProgress>>()
+			.ignore_err()
+			.map(|(id, Cbor(progress))| (id, progress))
+	}
+
+	/// Records chunk `index` of `mxc` and the progress that now counts it, in
+	/// one transaction: either both land or neither, so a crash between them
+	/// cannot leave a chunk the progress does not know about.
+	///
+	/// A failed write is fatal to the process (the engine treats it so), which
+	/// is what lets the caller advance its in-memory copy after this returns.
+	pub(super) fn put_chunk_and_progress(
+		&self,
+		mxc: &Mxc<'_>,
+		index: u32,
+		span: ChunkSpan,
+		upload_id: u64,
+		progress: &UploadProgress,
+	) {
+		let mut txn = self.db.txn();
+		txn.put(&self.mxc_chunk, (mxc, index), Cbor(span));
+		txn.put(&self.mediaid_upload_progress, upload_id, Cbor(progress));
+		txn.execute();
 	}
 
 	/// Where chunk `index` of `mxc` sits, if it arrived.

@@ -14,14 +14,21 @@ client 把檔案切成**明文固定大小**的塊，每塊自己加密，一塊
 
 ## 1. 傳輸
 
-| | A 支（現在） | B 支（之後） |
+| | WebSocket（主要） | HTTP（測試與腳本） |
 |---|---|---|
-| 端點 | `POST /_wbf/v1/pack` | `GET /_wbf/v1/ws`（WebSocket） |
-| 認證 | `Authorization: Bearer <access_token>` | 同（握手時） |
-| request | body = **一個 pack**，`Content-Type: application/octet-stream` | 一個 binary frame = 一個 pack |
-| response | body = **一個 pack**；HTTP 一律 200（沒 token 是 401，body 仍是 pack） | 一個 binary frame = 一個 pack |
+| 端點 | `GET /_wbf/v1/ws`，Upgrade | `POST /_wbf/v1/pack` |
+| 認證 | `Authorization: Bearer <access_token>` 在升級請求上；錯了回 401，body 是 Error pack，不升級 | 同 |
+| request | 一個 binary message = **一個 pack** | body = **一個 pack**，`Content-Type: application/octet-stream` |
+| response | 一個 binary message = 一個 pack，**依請求到達的順序**送回 | body = 一個 pack；HTTP 一律 200（沒 token 是 401，body 仍是 pack） |
+| 連發 | 可以：送幾個都行、不等回應，回應依序回來（同一個 `id` 的 `Chunk` 自己要送對順序） | 一請求一包 |
+| 限制 | 字串 frame 回 `Error(Corrupt)`；單個 message 超過 `wbf_meta_max_bytes + wbf_data_max_bytes + 外框`（預設約 16.06 MiB）連線被關；沉默超過 `wbf_ws_idle_timeout`（預設 300 秒）server 關連線，上傳進度不受影響，重連後從 `Status` 接 | 同樣的 pack 上限 |
 
 沒有 JSON 外框、沒有 base64、沒有 multipart。多個上傳可以在同一條連線交錯，靠 pack 標頭的 `id` 分流。
+同一個上傳可以一半走 HTTP、一半走 WebSocket：進度在 server 的 DB，不在連線上。
+
+連上 WebSocket 後建議先送一個 `Hello`（kind `0x01` Control、subtype `0x01`，meta JSON `{ "protocol": 1, "client": "…", "features": [] }`），
+server 回 Ack meta `{ "protocol": 1, "server": "<server name>", "features": ["upload", "download"], "chunk_size_default": 65536, "chunk_size_large": 1048576, "data_max_bytes": 16781312 }`。
+`Ping`（subtype `0x04`，meta 任意）回 `Pong`（subtype `0x05`）把 meta 原樣還回。
 
 ## 2. pack
 
@@ -220,6 +227,7 @@ Read(mxc, pos=p)     → Ack{chunk=i, pos=i×chunk_size, data=ct_i} → 解密�
 | `media_upload_ttl` | 86400 秒 | 最後一塊後多久沒動視為遺棄 |
 | `max_pending_media_uploads` | 5 | 每人同時進行中的上傳數 |
 | `wbf_meta_max_bytes` / `wbf_data_max_bytes` | 64 KiB / 16 MiB + 4 KiB | 單包硬上限 |
+| `wbf_ws_idle_timeout` | 300 秒 | WebSocket 連線沉默多久被關 |
 
 ## 9. 實際 bytes（由 e2e 的組包函式印出）
 
@@ -274,3 +282,22 @@ CRC-32C 自檢向量：`"123456789"` → `E3069283`。
 ## 10. 與舊 client
 
 分塊媒體是逐塊 AEAD 密文串起來，舊 client 走標準下載拿得到、解不開。只有**單塊**可能相容，條件是那一塊用 Matrix 標準附件加密（AES-256-CTR + SHA-256）並在事件帶標準 `file` 欄；server 不用為此做任何事。
+
+## 11. 測試向量：規格的可執行版本
+
+[`wbf-vectors.json`](wbf-vectors.json) 是這份規格的黃金向量，**由 server 的實作產生**（`src/core/wbf/vectors.rs`，
+`WBF_VECTORS_WRITE=1 cargo test -p tuwunel_core wbf::vectors::regenerate`），不手打。server 自己的單元測試每次都對著它跑；
+檔案過期就紅。
+
+client 的做法（任何語言）：把這個檔複製一份進自己的 repo，寫一組測試：
+
+- `packs[]`：每一筆 `bytes_hex` 要能解出 `kind`／`subtype`／`flags`／`id`／`seq`／`meta_hex`／`data_hex`，
+  而且用那些欄位重新編碼要得到一模一樣的 `bytes_hex`。
+- `rejected[]`：每一筆 `bytes_hex` 解碼必須失敗，錯誤類別對上 `error`
+  （`TooShort`、`UnsupportedVersion`、`UnknownKind`、`ReservedFlags`、`MetaCrc`、`DataCrc`、`Truncated`、`TrailingBytes`）。
+- `encrypted_file_info[]`：16 byte 來回。
+- `crc32c[]`：含標準向量 `"123456789"` → `3808858755`（`0xE3069283`）。
+
+規格改了，向量跟著重生；client 複製的那份沒跟上，client 的測試會紅 —— 漂移在編譯階段被抓到，不是上線才發現。
+這是維護者 2026-09-04 定的共用方式：**共用的是規格與向量，不是程式碼**；Rust client 要直接用 server 的 codec 也可以，
+但向量測試一樣要跑。

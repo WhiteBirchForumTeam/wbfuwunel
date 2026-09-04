@@ -3573,6 +3573,14 @@ pub struct Config {
 	#[serde(default = "default_wbf_data_max_bytes")]
 	pub wbf_data_max_bytes: usize,
 
+	/// How long a wbf WebSocket connection may stay silent before the server
+	/// closes it, in seconds. Uploads in progress are unaffected: their state
+	/// is in the database and a reconnecting client resumes from `Status`.
+	///
+	/// default: 300
+	#[serde(default = "default_wbf_ws_idle_timeout")]
+	pub wbf_ws_idle_timeout: u64,
+
 	/// Allows users with `redact` power level to request unredacted events with
 	/// MSC2815.
 	///
@@ -5797,6 +5805,8 @@ fn default_media_download_default_len() -> usize { 1024 * 1024 }
 fn default_wbf_meta_max_bytes() -> usize { 64 * 1024 }
 
 fn default_wbf_data_max_bytes() -> usize { 16 * 1024 * 1024 + 4096 }
+
+fn default_wbf_ws_idle_timeout() -> u64 { 300 }
 
 fn default_media_storage_providers() -> BTreeSet<String> { ["media".to_owned()].into() }
 

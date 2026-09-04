@@ -42,9 +42,9 @@ use url::Url;
 
 #[cfg(feature = "media_thumbnail")]
 use self::video::{FAILURES, Failures, sweep_staging_dir};
-use self::{data::Data, preview::Agent, remote::Fetch};
+use self::{data::Data, preview::Agent, remote::Fetch, upload::UploadHot};
 pub use self::{
-	data::{ChunkSpan, ChunkedMedia, Metadata, Tombstone, TombstoneReason, Upload},
+	data::{ChunkSpan, ChunkedMedia, Metadata, Tombstone, TombstoneReason, Upload, UploadProgress},
 	preview::UrlPreviewData,
 	range::{ChunkRead, MediaInfo, RangeRead},
 	thumbnail::Dim,
@@ -94,6 +94,16 @@ pub struct Service {
 	services: Arc<crate::services::OnceServices>,
 	url_preview_mutex: MutexMap<String, ()>,
 	federation_mutex: MutexMap<String, ()>,
+	/// One lock per upload in progress: chunks, seal and abort of the same
+	/// upload run one at a time.
+	upload_locks: MutexMap<u64, ()>,
+	/// Uploads in progress, in memory: the progress and the few numbers a
+	/// chunk is checked against, not the declaration's encrypted description.
+	/// Read here instead of the database on every chunk; written only after
+	/// the database transaction that carries the same change has executed, so
+	/// it never runs ahead of the rows. The rows stay the truth: an id not in
+	/// here is loaded from them on first use.
+	uploads_hot: Mutex<HashMap<u64, UploadHot>>,
 	mxc_state: MXCState,
 	#[cfg(feature = "media_thumbnail")]
 	video_thumbnail_slots: Semaphore,
@@ -121,6 +131,8 @@ impl crate::Service for Service {
 			services: args.services.clone(),
 			url_preview_mutex: MutexMap::new(),
 			federation_mutex: MutexMap::new(),
+			upload_locks: MutexMap::new(),
+			uploads_hot: Mutex::new(HashMap::new()),
 			mxc_state: MXCState {
 				notifiers: Mutex::new(HashMap::new()),
 				ratelimiter: Mutex::new(HashMap::new()),
