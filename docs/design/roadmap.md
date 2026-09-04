@@ -24,6 +24,7 @@
 | 媒體引用計數（精確計數、merge operator、哨兵） | ✅ PR #7 | [media-gc.md](media-gc.md) §2、§4 |
 | 媒體的真正刪除：收集器、墓碑 410、`migrate-references` | ✅ PR #10 | [media-gc.md](media-gc.md) §3、§5、§6 |
 | 每個 mxc 一鎖，關掉收集器與同時 +1 的窗口 | ✅ PR #12 | [media-gc.md](media-gc.md) §3.3 |
+| 分塊上傳／下載 B 支：WebSocket 通道、上傳中間層（進度列＋記憶體＋每上傳一鎖）、規格黃金向量 | ✅ PR #18 | [wbf-wire-format.md](wbf-wire-format.md) §6.1、[chunked-upload.md](chunked-upload.md) §3.1、[wbf-vectors.json](wbf-vectors.json) |
 | 分塊上傳／下載 A 支：wbf pack、`EncryptedFileInfo`、有序上傳與續傳、串流模式、按塊下載、sweeper、`POST /_wbf/v1/pack` | ✅ PR #16 | [chunked-upload.md](chunked-upload.md)、[chunked-upload-spec.md](chunked-upload-spec.md)、[wbf-wire-format.md](wbf-wire-format.md) |
 
 這三支合起來就是核心設計 §5.4「刪除語意」的 server 端，**寬限期被維護者拿掉了**（立刻生效），
@@ -34,10 +35,10 @@ TTL 兜底改成「不確定就持有」加 `migrate-references` 重算。
 
 ## 2. 下一步（順序已定）
 
-### 2.1 🔧 媒體層：分塊上傳、續傳、按塊下載（A 支 ✅，B 支 🔲）
+### 2.1 ✅ 媒體層：分塊上傳、續傳、按塊下載（A 支 #16、B 支 #18 都已合併）
 
 核心設計 §5.2 的主體，也是 fork 的第一個「使用者看得到」的功能。提案 [chunked-upload.md](chunked-upload.md) 維護者 2026-09-03
-同意（PR #15）；**A 支（pack、上傳、下載、sweeper、HTTP 一包一請求）已合併（PR #16，2026-09-03）**；B 支是 WebSocket 通道（`/_wbf/v1/ws`、每連線的 `id → next_seq` 表、同一個 `handle_pack`），連同 benchmark 與邊上傳邊下載，是下一支。
+同意（PR #15）；**A 支（pack、上傳、下載、sweeper、HTTP 一包一請求）已合併（PR #16，2026-09-03）；B 支（WebSocket 通道 `/_wbf/v1/ws`、上傳中間層、規格黃金向量 `wbf-vectors.json`）已合併（PR #18，2026-09-04）**。server 端到這裡就算能用；下一步是 client（§4），server 側留的是主動推送（邊上傳邊下載）、發送拆 mpsc task、benchmark。
 pack 格式與 kind 分配在 [wbf-wire-format.md](wbf-wire-format.md)，**未來所有 HTTP 請求都會遷到這條通道**。
 
 - **範圍**（最終模型，見 [chunked-upload-spec.md](chunked-upload-spec.md)）：`Create` 一次宣告（16 byte `EncryptedFileInfo` ＋ client 加密的檔案描述）；塊嚴格有序、`seq` 即塊索引、server 不判斷密文長度只記位置；串流模式；單檔上限與截斷；下載按塊或明文位置一次整塊交回。完整性是 client 的 AEAD 標籤加 pack 的 CRC-32C，**沒有 Merkle**（早期草案的殘留，維護者 2026-09-03 改用 CRC）。
