@@ -184,7 +184,8 @@ TTL 設 `media_upload_ttl × 2` 當兜底，真正的清理是 §6 的 sweeper�
 8. **與舊 client 的相容**（2026-09-03）：分塊媒體是逐塊 AEAD 的密文串起來，舊 client 走標準下載拿得到、解不開，這是接受的。**只有單塊**可能相容，而且條件是 client 對那一塊用 Matrix 標準附件加密（AES-256-CTR + SHA-256）並在事件帶標準 `file` 欄；server 不用為此做任何事。`max_pending_media_uploads` 維持上游預設 5，維護者說媒體之後可能自己重做。
 9. **單檔上限是唯一的額度**（2026-09-03）：預設 10 GiB，塊數上限由它推出（`ceil(上限 / chunk_size)`）。超過就強制終止、截斷，不完整的檔帶著警告狀態發出（`truncated`），狀態存在上傳列與 seal 後的 `mxc_chunked` 列。這是額度不是檢查，不違反第 7 條。
 10. **串流模式**（2026-09-03，維護者指出漏了）：`file_size = 0` 且 `chunk_count = 0` 當哨兵，`IS_LAST` 結束，`Seal` 可帶新的加密描述（§2.2）。
-11. **預告**：未來所有 HTTP 請求都會遷到 WS，kind 的分配見 [wbf-wire-format.md](wbf-wire-format.md) §3.3。
+11. **client 怎麼共用協議**（2026-09-04）：維護者選「規格＋黃金向量」為主，不共用程式碼、不用 submodule、不寫編譯時拉檔的腳本（那是手工版的 git dependency，把耦合藏起來而不是減少）。向量檔 [wbf-vectors.json](wbf-vectors.json) 由 server 實作產生（`src/core/wbf/vectors.rs`），server 每次測試對著它跑，client 複製一份對著測，漂移在測試階段被抓到。Rust client 要直接用 `core/wbf` 的 codec 也可以（抽成小 crate 用 git dependency），但向量測試一樣要跑。matrix-rust-sdk 用自己的 fork 當 git dependency，不動它內部；自己協議的 client 邏輯另一個 crate。
+12. **預告**：未來所有 HTTP 請求都會遷到 WS，kind 的分配見 [wbf-wire-format.md](wbf-wire-format.md) §3.3。
 
 ## 10. 分幾支
 

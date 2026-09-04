@@ -282,3 +282,22 @@ CRC-32C 自檢向量：`"123456789"` → `E3069283`。
 ## 10. 與舊 client
 
 分塊媒體是逐塊 AEAD 密文串起來，舊 client 走標準下載拿得到、解不開。只有**單塊**可能相容，條件是那一塊用 Matrix 標準附件加密（AES-256-CTR + SHA-256）並在事件帶標準 `file` 欄；server 不用為此做任何事。
+
+## 11. 測試向量：規格的可執行版本
+
+[`wbf-vectors.json`](wbf-vectors.json) 是這份規格的黃金向量，**由 server 的實作產生**（`src/core/wbf/vectors.rs`，
+`WBF_VECTORS_WRITE=1 cargo test -p tuwunel_core wbf::vectors::regenerate`），不手打。server 自己的單元測試每次都對著它跑；
+檔案過期就紅。
+
+client 的做法（任何語言）：把這個檔複製一份進自己的 repo，寫一組測試：
+
+- `packs[]`：每一筆 `bytes_hex` 要能解出 `kind`／`subtype`／`flags`／`id`／`seq`／`meta_hex`／`data_hex`，
+  而且用那些欄位重新編碼要得到一模一樣的 `bytes_hex`。
+- `rejected[]`：每一筆 `bytes_hex` 解碼必須失敗，錯誤類別對上 `error`
+  （`TooShort`、`UnsupportedVersion`、`UnknownKind`、`ReservedFlags`、`MetaCrc`、`DataCrc`、`Truncated`、`TrailingBytes`）。
+- `encrypted_file_info[]`：16 byte 來回。
+- `crc32c[]`：含標準向量 `"123456789"` → `3808858755`（`0xE3069283`）。
+
+規格改了，向量跟著重生；client 複製的那份沒跟上，client 的測試會紅 —— 漂移在編譯階段被抓到，不是上線才發現。
+這是維護者 2026-09-04 定的共用方式：**共用的是規格與向量，不是程式碼**；Rust client 要直接用 server 的 codec 也可以，
+但向量測試一樣要跑。

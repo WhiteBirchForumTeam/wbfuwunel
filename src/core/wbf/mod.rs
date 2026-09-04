@@ -5,6 +5,8 @@
 
 pub mod file_info;
 pub mod pack;
+#[cfg(test)]
+mod vectors;
 
 pub use self::{
 	file_info::{ENCRYPTED_FILE_INFO_LEN, EncryptedFileInfo, FileInfoError},

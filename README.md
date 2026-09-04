@@ -63,6 +63,7 @@ fork 專屬的文件都在 [`docs/design/`](docs/design/)。它們刻意不進�
 | 媒體的真正刪除：精確計數、哨兵、立即清理、migrate | [docs/design/media-gc.md](docs/design/media-gc.md) |
 | 分塊上傳、續傳、range 下載（提案，以塊加密、CRC、先 HTTP 後 WebSocket） | [docs/design/chunked-upload.md](docs/design/chunked-upload.md) |
 | **分塊上傳／下載規格書**（給 client 開發者：byte 排法、每個訊息、錯誤碼、流程） | [docs/design/chunked-upload-spec.md](docs/design/chunked-upload-spec.md) |
+| 規格的黃金測試向量（server 實作產生，client 複製一份對著測；漂移在測試階段被抓到） | [docs/design/wbf-vectors.json](docs/design/wbf-vectors.json) |
 | 流式訊息（文字 token 串流，走 WebSocket 二進位通道，草案） | [docs/design/streaming-messages.md](docs/design/streaming-messages.md) |
 | WebSocket 通道的二進位封包外框（兩者共用） | [docs/design/wbf-wire-format.md](docs/design/wbf-wire-format.md) |
 
