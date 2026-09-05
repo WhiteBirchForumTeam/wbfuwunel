@@ -9,8 +9,9 @@ use crate::{extract_variant, is_equal_to, matrix::room_version};
 
 /// Converts a stored PDU object to its federation wire representation.
 ///
-/// Local transaction metadata and this server's own positions (`seq`,
-/// `global_offset`) are removed, and room-version rules select the fields and
+/// Local transaction metadata and this server's own positions
+/// (`unsigned["org.wbftw.wbfuwunel.r_seq"]` and `…g_seq`) are removed, and
+/// room-version rules select the fields and
 /// event-reference shape sent to peers. When rules are unavailable, the event
 /// ID is removed without rewriting event references.
 #[must_use]

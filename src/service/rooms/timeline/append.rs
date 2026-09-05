@@ -185,7 +185,7 @@ where
 	// The room's own sequence number, read and advanced under the insert lock
 	// and stored with the event below in one transaction; the global count
 	// rides along so every served copy carries both positions.
-	let mut seq_bounds = self.get_seq_bounds(pdu.room_id()).await;
+	let mut seq_bounds = self.get_seq_bounds(pdu.room_id()).await?;
 	set_json_positions(&mut pdu_json, Positions {
 		r_seq: seq_bounds.take_forward(),
 		g_seq: PduCount::Normal(*next_count).into_signed(),

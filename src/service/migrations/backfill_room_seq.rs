@@ -33,7 +33,9 @@ pub(super) async fn backfill_room_seq(services: &Services) -> Result {
 	warn!("Numbering every stored event with its per-room seq (one-time)");
 
 	// Keys only: the whole timeline's ids fit in memory long before its
-	// bodies would. Grouped by room, then ordered by count within the room.
+	// bodies would (a RawPduId is 16 or 24 bytes, so a million events is
+	// about 20 MB plus Vec overhead). Grouped by room, then ordered by count
+	// within the room.
 	let mut rooms: BTreeMap<[u8; 8], Vec<RawPduId>> = BTreeMap::new();
 	let keys = pduid_pdu.raw_keys().ignore_err();
 	futures::pin_mut!(keys);
@@ -46,7 +48,7 @@ pub(super) async fn backfill_room_seq(services: &Services) -> Result {
 	}
 
 	let mut numbered: usize = 0;
-	for (_, mut pdu_ids) in rooms {
+	for (shortroomid, mut pdu_ids) in rooms {
 		pdu_ids.sort_by_key(|pdu_id| pdu_id.pdu_count());
 
 		let mut bounds = SeqBounds::default();
@@ -88,7 +90,11 @@ pub(super) async fn backfill_room_seq(services: &Services) -> Result {
 			| Some(room_id) => services
 				.timeline
 				.set_seq_bounds(&room_id, bounds)?,
-			| None => warn!("A room's events carried no room_id; its counters start at zero"),
+			| None => warn!(
+				?shortroomid,
+				events = pdu_ids.len(),
+				"A room's events carried no room_id; its counters were not written and start at zero"
+			),
 		}
 	}
 

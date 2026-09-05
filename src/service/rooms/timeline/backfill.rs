@@ -396,7 +396,7 @@ pub async fn backfill_pdu(
 	// History from before the room's first known event is numbered downward
 	// from 0, under the same insert lock and in the same transaction as the
 	// event; the forward counter is untouched.
-	let mut seq_bounds = self.get_seq_bounds(room_id).await;
+	let mut seq_bounds = self.get_seq_bounds(room_id).await?;
 
 	// A pdu_id is not returned from handle_incoming_pdu() when accepting a new
 	// event on this codepath. The pdu_id is instead created here in ℤ−

@@ -78,7 +78,7 @@ offset  size  欄位          說明
 | `0x02 Stream` | `Open` `Fragment` `Close` `Abandon` | [streaming-messages.md](streaming-messages.md) §4 | 密文本體 |
 | `0x03 Upload` | `Create` `Chunk` `Status` `Seal` `Abort` | [chunked-upload.md](chunked-upload.md) §4 | 塊 bytes（`Chunk`） |
 | `0x04 Download` | `Info` `Read` | [chunked-upload.md](chunked-upload.md) §5 | 回應的 data 是讀出的 bytes |
-| `0x14 Event` | `0x01 Recent` | `{ "limit": 10000, "cg_seq": <g_seq>?, "before": <g_seq>? }`；回應 `{ "returned": n, "latest_g_seq": <g_seq>, "complete": bool, "next": <g_seq> | null }` | 回應的 data 是事件的 JSON 陣列（每則 `unsigned` 帶 `org.wbftw.wbfuwunel.r_seq` 與 `…g_seq`）\| null }` | 回應的 data 是事件的 JSON 陣列（含 `room_id`、`unsigned.org.wbftw.wbfuwunel.seq`），見 [room-seq-and-recent.md](room-seq-and-recent.md) §2 |
+| `0x14 Event` | `0x01 Recent` | `{ "limit": 10000, "cg_seq": <g_seq>?, "before": <g_seq>? }`；回應 `{ "returned": n, "latest_g_seq": <g_seq>, "complete": bool, "next": <g_seq> 或 null }` | 回應的 data 是事件的 JSON 陣列（含 `room_id`；每則 `unsigned` 帶 `org.wbftw.wbfuwunel.r_seq` 與 `…g_seq`），見 [room-seq-and-recent.md](room-seq-and-recent.md) §2 |
 | 其餘 | — | 拒收並回 `Error(UnknownKind)` | |
 
 ### 3.3 kind 的分配表（為之後把所有 HTTP 請求遷到 WS 預留）

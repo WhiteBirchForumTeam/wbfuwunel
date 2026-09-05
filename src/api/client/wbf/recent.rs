@@ -147,7 +147,7 @@ pub(super) async fn handle_event_recent(
 		heads.push(head);
 	}
 
-	let mut data = Vec::with_capacity(data_max.min(1 << 20));
+	let mut data = Vec::with_capacity(data_max.min(4 << 20));
 	data.push(b'[');
 	let mut returned: usize = 0;
 	let mut last_count: Option<PduCount> = None;
@@ -176,7 +176,9 @@ pub(super) async fn handle_event_recent(
 		};
 
 		// Refill this room before anything else, so the heap always ranks
-		// every room's newest unseen event.
+		// every room's newest unseen event. This happens before the filters on
+		// purpose: an event the filters drop still advances the cursor, so its
+		// room must already be represented by its next candidate.
 		if let Some(next) = next_item(&mut streams[room]).await {
 			heap.push(Head { count: next.0, room });
 			heads[room] = Some(next);

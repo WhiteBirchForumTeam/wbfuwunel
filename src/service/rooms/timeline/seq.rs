@@ -7,22 +7,26 @@
 //! read-then-write here safe without a merge operator.
 
 use ruma::RoomId;
-use tuwunel_core::{Result, implement, matrix::pdu::seq::SeqBounds, utils::result::LogErr};
+use tuwunel_core::{Result, err, implement, matrix::pdu::seq::SeqBounds, utils::result::NotFound};
 use tuwunel_database::Txn;
 
 /// Args:
 ///     room_id: example: !abc:localhost
 /// Return:
-///     SeqBounds  zeros for a room that has no counters yet (new room, or a
-///     database from before the migration numbered it).
+///     Result<SeqBounds>  zeros for a room that has no counters yet (a new
+///     room, or a database from before the migration numbered it); Err when
+///     the row exists but cannot be read or decoded. That case must not fall
+///     back to zeros: it would hand out r_seq 1 again in a room that already
+///     has one, so the append fails instead.
 #[implement(super::Service)]
-pub async fn get_seq_bounds(&self, room_id: &RoomId) -> SeqBounds {
-	match self.db.roomid_seqbounds.get(room_id).await {
-		| Ok(bytes) => SeqBounds::decode(&bytes)
-			.log_err()
-			.unwrap_or_default(),
-		| Err(_) => SeqBounds::default(),
+pub async fn get_seq_bounds(&self, room_id: &RoomId) -> Result<SeqBounds> {
+	let read = self.db.roomid_seqbounds.get(room_id).await;
+	if read.is_not_found() {
+		return Ok(SeqBounds::default());
 	}
+
+	let bytes = read.map_err(|error| err!(Database("reading seq bounds of {room_id}: {error}")))?;
+	SeqBounds::decode(&bytes).map_err(|error| err!(Database("seq bounds of {room_id} are corrupt: {error}")))
 }
 
 /// Queues the counters into `txn`, alongside the event they number.
