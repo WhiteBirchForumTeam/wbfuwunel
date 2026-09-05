@@ -1,18 +1,20 @@
-//! `Event/Recent`: the newest events across every room the user is joined
-//! to, in the order this server received them, newest first.
+//! `Event/Recent`: the events newer than the client's watermark across every
+//! room the user is joined to, newest first, in the order this server
+//! received them.
 //!
 //! There is no global index of events; there does not need to be one. The
 //! global count every event carries is comparable across rooms, so one
-//! reverse stream per joined room merged by count is the global order. The
-//! cursor is the count of the last event returned, in the same string form as
-//! a `/messages` token; the client passes it back as `before` and never reads
-//! it. See `docs/design/room-seq-and-recent.md` §2.
+//! reverse stream per joined room merged by count is the global order. That
+//! count is the `g_seq` each served event already carries in its
+//! `unsigned`; the request's `after` and `before` and the reply's `next` and
+//! `latest_g_seq` are the same number. See
+//! `docs/design/room-seq-and-recent.md` §2.
 
-use std::{cmp::Ordering, collections::BinaryHeap, pin::Pin, str::FromStr};
+use std::{cmp::Ordering, collections::BinaryHeap, pin::Pin};
 
 use futures::{Stream, StreamExt};
 use ruma::{OwnedRoomId, UserId, events::AnyTimelineEvent, serde::Raw};
-use serde_json::json;
+use serde_json::{Value, json};
 use tuwunel_core::{
 	Result, debug_warn,
 	matrix::{event::Event, pdu::PduCount},
@@ -23,18 +25,23 @@ use tuwunel_service::{Services, rooms::timeline::PdusIterItem};
 use super::{Reject, ack};
 use crate::client::message::{ignored_filter, visibility_filter};
 
-/// How the request names its page.
+/// What the client asks for.
 struct RecentRequest {
+	/// Most events in the reply; clamped to `wbf_recent_max_limit`.
 	limit: usize,
+	/// Only events after this g_seq: the client's watermark.
+	after: Option<PduCount>,
+	/// Only events older than this g_seq (a `next` from a reply).
 	before: Option<PduCount>,
 }
 
 impl RecentRequest {
 	/// Args:
-	///     view: the request pack, meta example: `{"limit":100,"before":"4711"}`
+	///     view: the request pack, meta example: `{"limit":100,"after":4711}`
 	///     max_limit: `wbf_recent_max_limit`, example: 10000
 	/// Return:
-	///     Result<RecentRequest, Reject>  Conflict when `before` is not a count.
+	///     Result<RecentRequest, Reject>  Conflict when a position is not an
+	///     integer.
 	fn parse(view: &PackView<'_>, max_limit: usize) -> std::result::Result<Self, Reject> {
 		let meta = if view.meta.is_empty() { json!({}) } else { view.meta_json()? };
 
@@ -43,15 +50,29 @@ impl RecentRequest {
 			.and_then(|limit| usize::try_from(limit).ok())
 			.map_or(max_limit, |limit| limit.min(max_limit));
 
-		let before = match &meta["before"] {
-			| serde_json::Value::Null => None,
-			| serde_json::Value::String(token) => Some(
-				PduCount::from_str(token).map_err(|_| Reject::code("Conflict", "`before` is not a cursor this server issued"))?,
-			),
-			| _ => return Err(Reject::code("Conflict", "`before` must be a string cursor")),
-		};
+		Ok(Self {
+			limit,
+			after: g_seq_field(&meta, "after")?,
+			before: g_seq_field(&meta, "before")?,
+		})
+	}
+}
 
-		Ok(Self { limit, before })
+/// Args:
+///     meta: the request meta, example: `{"after":4711}`
+///     name: example: "after"
+/// Return:
+///     Result<Option<PduCount>, Reject>  None when absent or null; Conflict
+///     when present but not an integer.
+fn g_seq_field(meta: &Value, name: &str) -> std::result::Result<Option<PduCount>, Reject> {
+	match &meta[name] {
+		| Value::Null => Ok(None),
+		| Value::Number(number) => number
+			.as_i64()
+			.map(PduCount::from_signed)
+			.map(Some)
+			.ok_or_else(|| Reject::code("Conflict", format!("`{name}` is not a g_seq this server issued"))),
+		| _ => Err(Reject::code("Conflict", format!("`{name}` must be an integer g_seq"))),
 	}
 }
 
@@ -74,6 +95,16 @@ impl Ord for Head {
 	fn cmp(&self, other: &Self) -> Ordering { self.count.cmp(&other.count) }
 }
 
+/// Why the page ended.
+#[derive(PartialEq, Eq)]
+enum Stop {
+	/// Every event newer than `after` (or every event at all) was considered.
+	Complete,
+	/// `limit` or the pack's byte budget ended the page with newer-than-`after`
+	/// events still unread; `next` points at them.
+	More,
+}
+
 pub(super) async fn handle_event_recent(
 	services: &Services,
 	user: &UserId,
@@ -82,6 +113,10 @@ pub(super) async fn handle_event_recent(
 	let request = RecentRequest::parse(view, services.config.wbf_recent_max_limit)?;
 	let data_max = services.config.wbf_data_max_bytes;
 
+	// Read before the merge, so a client that stores it never misses an event
+	// appended while this reply was being built: it will be newer than this.
+	let latest_g_seq = PduCount::Normal(services.globals.current_count()).into_signed();
+
 	let rooms: Vec<OwnedRoomId> = services
 		.state_cache
 		.rooms_joined(user)
@@ -89,7 +124,7 @@ pub(super) async fn handle_event_recent(
 		.collect()
 		.await;
 
-	// One reverse stream per room, each already past the cursor. The heads
+	// One reverse stream per room, each already past `before`. The heads
 	// hold the event the heap is ranking; the streams wait behind them.
 	let mut streams: Vec<RoomStream<'_>> = rooms
 		.iter()
@@ -97,7 +132,8 @@ pub(super) async fn handle_event_recent(
 			let stream = services
 				.timeline
 				.pdus_rev(Some(user), room_id, request.before);
-			Box::pin(stream) as RoomStream<'_>
+			let boxed: RoomStream<'_> = Box::pin(stream);
+			boxed
 		})
 		.collect();
 	let mut heads: Vec<Option<PdusIterItem>> = Vec::with_capacity(streams.len());
@@ -114,11 +150,26 @@ pub(super) async fn handle_event_recent(
 	data.push(b'[');
 	let mut returned: usize = 0;
 	let mut last_count: Option<PduCount> = None;
+	let mut stop = Stop::Complete;
 
-	while returned < request.limit {
-		let Some(Head { room, .. }) = heap.pop() else {
+	loop {
+		if returned >= request.limit {
+			// The page is full; anything still on the heap that is newer than
+			// `after` is unread.
+			stop = match heap.peek() {
+				| Some(head) if is_newer_than_after(head.count, request.after) => Stop::More,
+				| _ => Stop::Complete,
+			};
+			break;
+		}
+		let Some(Head { count, room }) = heap.pop() else {
 			break;
 		};
+		if !is_newer_than_after(count, request.after) {
+			// The heap is descending: everything left is at or below the
+			// watermark, which the client already has.
+			break;
+		}
 		let Some(item) = heads[room].take() else {
 			break;
 		};
@@ -130,7 +181,6 @@ pub(super) async fn handle_event_recent(
 			heads[room] = Some(next);
 		}
 
-		let count = item.0;
 		let Some(item) = ignored_filter(services, item, user).await else {
 			last_count = Some(count);
 			continue;
@@ -151,10 +201,9 @@ pub(super) async fn handle_event_recent(
 				last_count = Some(count);
 				continue;
 			}
-			// Put the event back conceptually: the cursor stays at the last
-			// event that was returned, so this one leads the next page.
-			heap.clear();
-			heap.push(Head { count, room: usize::MAX });
+			// This event leads the next page: the cursor stays at the last
+			// event returned, which is older than nothing on this page.
+			stop = Stop::More;
 			break;
 		}
 
@@ -167,15 +216,26 @@ pub(super) async fn handle_event_recent(
 	}
 	data.push(b']');
 
-	// More remains when any room still has a candidate; then the cursor is
-	// the last event this page covered. Exhausted rooms end the pagination.
-	let next = (!heap.is_empty())
+	let next = (stop == Stop::More)
 		.then_some(last_count)
 		.flatten()
-		.map(|count| count.to_string());
+		.map(PduCount::into_signed);
 
-	Ok(ack(view.header.id, view.header.seq, json!({ "count": returned, "next": next }), data))
+	Ok(ack(
+		view.header.id,
+		view.header.seq,
+		json!({
+			"returned": returned,
+			"latest_g_seq": latest_g_seq,
+			"complete": stop == Stop::Complete,
+			"next": next,
+		}),
+		data,
+	))
 }
+
+/// Whether an event at `count` is one the client does not have yet.
+fn is_newer_than_after(count: PduCount, after: Option<PduCount>) -> bool { after.is_none_or(|after| count > after) }
 
 /// The room's next event, skipping rows that fail to decode.
 async fn next_item(stream: &mut RoomStream<'_>) -> Option<PdusIterItem> {

@@ -18,7 +18,7 @@ use tuwunel_core::{
 		event::Event,
 		pdu::{
 			PduCount, PduEvent, PduId, RawPduId,
-			seq::{SeqBounds, set_json_seq},
+			seq::{Positions, SeqBounds, set_json_positions},
 		},
 		room_version,
 	},
@@ -183,9 +183,13 @@ where
 	let next_count = self.services.globals.next_count();
 
 	// The room's own sequence number, read and advanced under the insert lock
-	// and stored with the event below in one transaction.
+	// and stored with the event below in one transaction; the global count
+	// rides along so every served copy carries both positions.
 	let mut seq_bounds = self.get_seq_bounds(pdu.room_id()).await;
-	set_json_seq(&mut pdu_json, seq_bounds.take_forward());
+	set_json_positions(&mut pdu_json, Positions {
+		r_seq: seq_bounds.take_forward(),
+		g_seq: PduCount::Normal(*next_count).into_signed(),
+	});
 
 	// Mark as read first so the sending client doesn't get a notification even if
 	// appending fails. Route through the dispatcher so per-thread counts are

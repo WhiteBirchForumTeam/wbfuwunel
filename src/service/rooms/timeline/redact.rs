@@ -6,7 +6,7 @@ use tuwunel_core::{
 	Result, err, implement,
 	matrix::{
 		event::Event,
-		pdu::seq::{get_json_seq, set_json_seq},
+		pdu::seq::{get_json_positions, set_json_positions},
 	},
 };
 
@@ -80,9 +80,9 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 		.media_refs
 		.list_event_mxc_uris(&pdu);
 
-	// Redaction strips `unsigned`; the event keeps its place in the room, so
-	// its seq goes back afterwards.
-	let seq = get_json_seq(&pdu);
+	// Redaction strips `unsigned`; the event keeps its place, so its positions
+	// go back afterwards.
+	let positions = get_json_positions(&pdu);
 
 	redact_in_place(
 		&mut pdu,
@@ -91,8 +91,8 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 	)
 	.map_err(|err| err!("invalid event: {err}"))?;
 
-	if let Some(seq) = seq {
-		set_json_seq(&mut pdu, seq);
+	if let Some(positions) = positions {
+		set_json_positions(&mut pdu, positions);
 	}
 
 	self.replace_pdu(&pdu_id, &pdu).await?;

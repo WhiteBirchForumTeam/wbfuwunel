@@ -1,20 +1,28 @@
-//! The per-room sequence number a stored PDU carries in its `unsigned`.
+//! The two positions a stored PDU carries in its `unsigned`.
 //!
-//! Every event that enters a room's timeline gets one: forward events count
-//! 1, 2, 3… in arrival order; history backfilled from before the room's
-//! first known event counts 0, −1, −2… (see `docs/design/room-seq-and-recent.md`).
-//! The number lives in the stored JSON under [`SEQ_KEY`], so every path that
-//! serves the stored event carries it without knowing about it. The two
-//! things that rewrite that JSON, redaction and the federation wire format,
-//! are the only readers here.
+//! `r_seq` is the room's own sequence: forward events count 1, 2, 3… in
+//! arrival order; history backfilled from before the room's first known
+//! event counts 0, −1, −2…. `g_seq` is the server-wide count the
+//! event was stored under, the same number a `/messages` token encodes: a
+//! watermark a client keeps to ask "everything newer than this" across all
+//! its rooms. Neither is contiguous for a reader (other rooms, invisible
+//! events); `r_seq` is contiguous within a room. See
+//! `docs/design/room-seq-and-recent.md`.
+//!
+//! Both live in the stored JSON, so every path that serves the stored event
+//! carries them without knowing about them. The things that rewrite that
+//! JSON, redaction and the federation wire format, are the only readers here.
 
 use ruma::{CanonicalJsonObject, CanonicalJsonValue};
 
 use crate::{Result, err};
 
-/// The `unsigned` key. Namespaced to this fork; other servers and clients
-/// ignore keys they do not know.
-pub const SEQ_KEY: &str = "org.wbftw.wbfuwunel.seq";
+/// The `unsigned` key of the per-room sequence number.
+pub const R_SEQ_KEY: &str = "org.wbftw.wbfuwunel.r_seq";
+
+/// The `unsigned` key of the server-wide position (the event's PduCount, in
+/// its signed form: backfilled history is nonpositive).
+pub const G_SEQ_KEY: &str = "org.wbftw.wbfuwunel.g_seq";
 
 /// A room's counters, stored as one 16-byte value under the room id.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -67,25 +75,31 @@ impl SeqBounds {
 	}
 }
 
+/// The two positions of one stored event, as written at append time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Positions {
+	/// The per-room sequence number.
+	pub r_seq: i64,
+	/// The server-wide count, signed.
+	pub g_seq: i64,
+}
+
 /// Args:
 ///     json: a stored PDU object, example: the value of `pduid_pdu`
 /// Return:
-///     Option<i64>  None when the event carries no seq (an outlier, or a
+///     Option<Positions>  None when either key is missing (an outlier, or a
 ///     database from before this fork numbered its rooms).
 #[must_use]
-pub fn get_json_seq(json: &CanonicalJsonObject) -> Option<i64> {
-	match json.get("unsigned")? {
-		| CanonicalJsonValue::Object(unsigned) => match unsigned.get(SEQ_KEY)? {
-			| CanonicalJsonValue::Integer(seq) => Some(i64::from(*seq)),
-			| _ => None,
-		},
-		| _ => None,
-	}
+pub fn get_json_positions(json: &CanonicalJsonObject) -> Option<Positions> {
+	Some(Positions {
+		r_seq: get_unsigned_integer(json, R_SEQ_KEY)?,
+		g_seq: get_unsigned_integer(json, G_SEQ_KEY)?,
+	})
 }
 
-/// Writes `seq` into `json["unsigned"]`, creating the object when absent and
-/// replacing a non-object `unsigned` outright.
-pub fn set_json_seq(json: &mut CanonicalJsonObject, seq: i64) {
+/// Writes both positions into `json["unsigned"]`, creating the object when
+/// absent and replacing a non-object `unsigned` outright.
+pub fn set_json_positions(json: &mut CanonicalJsonObject, positions: Positions) {
 	let unsigned = json
 		.entry("unsigned".into())
 		.or_insert_with(|| CanonicalJsonValue::Object(CanonicalJsonObject::new()));
@@ -95,17 +109,32 @@ pub fn set_json_seq(json: &mut CanonicalJsonObject, seq: i64) {
 	}
 
 	if let CanonicalJsonValue::Object(unsigned) = unsigned {
-		// Canonical JSON integers are bounded to ±2^53; a seq will never get
-		// there, and clamping is the honest fallback if one somehow did.
-		let seq = ruma::Int::new_saturating(seq);
-		unsigned.insert(SEQ_KEY.into(), CanonicalJsonValue::Integer(seq));
+		// Canonical JSON integers are bounded to ±2^53; neither number will
+		// get there, and clamping is the honest fallback if one somehow did.
+		unsigned.insert(R_SEQ_KEY.into(), CanonicalJsonValue::Integer(ruma::Int::new_saturating(positions.r_seq)));
+		unsigned.insert(
+			G_SEQ_KEY.into(),
+			CanonicalJsonValue::Integer(ruma::Int::new_saturating(positions.g_seq)),
+		);
 	}
 }
 
-/// Removes the seq from `json["unsigned"]`, for copies that leave this server.
-pub fn remove_json_seq(json: &mut CanonicalJsonObject) {
+/// Removes both positions from `json["unsigned"]`, for copies that leave this
+/// server.
+pub fn remove_json_positions(json: &mut CanonicalJsonObject) {
 	if let Some(CanonicalJsonValue::Object(unsigned)) = json.get_mut("unsigned") {
-		unsigned.remove(SEQ_KEY);
+		unsigned.remove(R_SEQ_KEY);
+		unsigned.remove(G_SEQ_KEY);
+	}
+}
+
+fn get_unsigned_integer(json: &CanonicalJsonObject, key: &str) -> Option<i64> {
+	match json.get("unsigned")? {
+		| CanonicalJsonValue::Object(unsigned) => match unsigned.get(key)? {
+			| CanonicalJsonValue::Integer(value) => Some(i64::from(*value)),
+			| _ => None,
+		},
+		| _ => None,
 	}
 }
 
@@ -114,6 +143,13 @@ mod tests {
 	use ruma::CanonicalJsonValue;
 
 	use super::*;
+
+	fn unsigned_of(json: &CanonicalJsonObject) -> &CanonicalJsonObject {
+		match json.get("unsigned") {
+			| Some(CanonicalJsonValue::Object(unsigned)) => unsigned,
+			| _ => panic!("unsigned is an object"),
+		}
+	}
 
 	#[test]
 	fn forward_counts_from_one_and_backfilled_from_zero_downward() {
@@ -135,23 +171,31 @@ mod tests {
 	}
 
 	#[test]
-	fn seq_is_written_read_and_removed_under_unsigned() {
+	fn positions_are_written_read_and_removed_under_unsigned() {
 		let mut json = CanonicalJsonObject::new();
-		assert_eq!(get_json_seq(&json), None);
+		assert_eq!(get_json_positions(&json), None);
 
-		set_json_seq(&mut json, 42);
-		assert_eq!(get_json_seq(&json), Some(42));
-		let Some(CanonicalJsonValue::Object(unsigned)) = json.get("unsigned") else {
-			panic!("unsigned is an object")
-		};
-		assert_eq!(unsigned.get(SEQ_KEY), Some(&CanonicalJsonValue::Integer(42.into())));
+		let positions = Positions { r_seq: 42, g_seq: 9001 };
+		set_json_positions(&mut json, positions);
+		assert_eq!(get_json_positions(&json), Some(positions));
+		assert_eq!(unsigned_of(&json).get(R_SEQ_KEY), Some(&CanonicalJsonValue::Integer(42.into())));
+		assert_eq!(unsigned_of(&json).get(G_SEQ_KEY), Some(&CanonicalJsonValue::Integer(9001.into())));
 
-		set_json_seq(&mut json, -3);
-		assert_eq!(get_json_seq(&json), Some(-3));
+		set_json_positions(&mut json, Positions { r_seq: -3, g_seq: -77 });
+		assert_eq!(get_json_positions(&json), Some(Positions { r_seq: -3, g_seq: -77 }));
 
-		remove_json_seq(&mut json);
-		assert_eq!(get_json_seq(&json), None);
-		assert!(matches!(json.get("unsigned"), Some(CanonicalJsonValue::Object(_))));
+		remove_json_positions(&mut json);
+		assert_eq!(get_json_positions(&json), None);
+		assert!(unsigned_of(&json).is_empty());
+	}
+
+	#[test]
+	fn one_key_alone_is_not_a_position() {
+		let mut json = CanonicalJsonObject::new();
+		let mut unsigned = CanonicalJsonObject::new();
+		unsigned.insert(R_SEQ_KEY.into(), CanonicalJsonValue::Integer(1.into()));
+		json.insert("unsigned".into(), CanonicalJsonValue::Object(unsigned));
+		assert_eq!(get_json_positions(&json), None);
 	}
 
 	#[test]
@@ -161,16 +205,13 @@ mod tests {
 		unsigned.insert("age".into(), CanonicalJsonValue::Integer(5.into()));
 		json.insert("unsigned".into(), CanonicalJsonValue::Object(unsigned));
 
-		set_json_seq(&mut json, 1);
-		let Some(CanonicalJsonValue::Object(unsigned)) = json.get("unsigned") else {
-			panic!("unsigned is an object")
-		};
-		assert_eq!(unsigned.get("age"), Some(&CanonicalJsonValue::Integer(5.into())));
-		assert_eq!(get_json_seq(&json), Some(1));
+		set_json_positions(&mut json, Positions { r_seq: 1, g_seq: 1 });
+		assert_eq!(unsigned_of(&json).get("age"), Some(&CanonicalJsonValue::Integer(5.into())));
+		assert_eq!(get_json_positions(&json).map(|p| p.r_seq), Some(1));
 
 		json.insert("unsigned".into(), CanonicalJsonValue::String("bogus".into()));
-		assert_eq!(get_json_seq(&json), None);
-		set_json_seq(&mut json, 9);
-		assert_eq!(get_json_seq(&json), Some(9));
+		assert_eq!(get_json_positions(&json), None);
+		set_json_positions(&mut json, Positions { r_seq: 9, g_seq: 8 });
+		assert_eq!(get_json_positions(&json), Some(Positions { r_seq: 9, g_seq: 8 }));
 	}
 }

@@ -1,6 +1,7 @@
 //! One-time numbering of the events a database already holds.
 //!
-//! Every stored PDU gets its per-room seq written into `unsigned` and every
+//! Every stored PDU gets its per-room seq and its global offset written into
+//! `unsigned` and every
 //! room gets its counters, so a database from before this fork numbered its
 //! rooms looks the same as one that always did. Forward events are numbered
 //! 1, 2, 3… in count order; backfilled events 0, −1, −2… from the newest
@@ -15,7 +16,7 @@ use tuwunel_core::{
 	Result, info,
 	matrix::pdu::{
 		PduCount, RawPduId,
-		seq::{SeqBounds, set_json_seq},
+		seq::{Positions, SeqBounds, set_json_positions},
 	},
 	utils::stream::TryIgnore,
 	warn,
@@ -66,11 +67,12 @@ pub(super) async fn backfill_room_seq(services: &Services) -> Result {
 				continue;
 			};
 
-			let seq = match pdu_id.pdu_count() {
+			let count = pdu_id.pdu_count();
+			let r_seq = match count {
 				| PduCount::Backfilled(_) => bounds.take_backfilled(),
 				| PduCount::Normal(_) => bounds.take_forward(),
 			};
-			set_json_seq(&mut json, seq);
+			set_json_positions(&mut json, Positions { r_seq, g_seq: count.into_signed() });
 			pduid_pdu.raw_put(pdu_id, Json(&json));
 			numbered = numbered.saturating_add(1);
 

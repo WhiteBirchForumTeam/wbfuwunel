@@ -288,7 +288,7 @@ fn remove_replacement_bundle_absent_unsigned_noop() {
 }
 
 #[test]
-fn outgoing_federation_strips_the_per_room_seq_but_keeps_other_unsigned() {
+fn outgoing_federation_strips_the_positions_but_keeps_other_unsigned() {
 	use ruma::CanonicalJsonValue;
 
 	use super::{into_outgoing_federation, seq};
@@ -303,11 +303,12 @@ fn outgoing_federation_strips_the_per_room_seq_but_keeps_other_unsigned() {
 		"unsigned": { "age": 4, "transaction_id": "t1" },
 	}))
 	.expect("canonical object");
-	seq::set_json_seq(&mut pdu, 17);
-	assert_eq!(seq::get_json_seq(&pdu), Some(17));
+	let positions = seq::Positions { r_seq: 17, g_seq: 4711 };
+	seq::set_json_positions(&mut pdu, positions);
+	assert_eq!(seq::get_json_positions(&pdu), Some(positions));
 
 	let outgoing = into_outgoing_federation(pdu, &RoomVersionId::V11);
-	assert_eq!(seq::get_json_seq(&outgoing), None, "seq is this server's, not the peer's");
+	assert_eq!(seq::get_json_positions(&outgoing), None, "positions are this server's, not the peer's");
 	let Some(CanonicalJsonValue::Object(unsigned)) = outgoing.get("unsigned") else {
 		panic!("unsigned stays an object")
 	};
