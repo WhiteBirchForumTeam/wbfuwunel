@@ -3111,6 +3111,12 @@
 #
 #wbf_data_max_bytes = 16781312
 
+# How long a wbf WebSocket connection may stay silent before the server
+# closes it, in seconds. Uploads in progress are unaffected: their state
+# is in the database and a reconnecting client resumes from `Status`.
+#
+#wbf_ws_idle_timeout = 300
+
 # Allows users with `redact` power level to request unredacted events with
 # MSC2815.
 #
