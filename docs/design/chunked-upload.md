@@ -1,6 +1,6 @@
 # 分塊上傳、續傳、range 下載（提案，第三版）
 
-> **狀態：維護者 2026-09-03 同意（PR #15）；A 支已合併（PR #16，2026-09-03），B 支（WebSocket）實作中（`media/chunked-upload-b`）。** §9 的答案已寫回各節。
+> **狀態：維護者 2026-09-03 同意（PR #15）；A 支已合併（PR #16，2026-09-03），B 支（WebSocket、中間層、向量）已合併（PR #18，2026-09-04）。server 端可用；下一步是 client。** §9 的答案已寫回各節。
 > **要寫 client 的人請讀 [chunked-upload-spec.md](chunked-upload-spec.md)**：那是線上規格（byte 排法、每個訊息、錯誤碼、流程）；本文是設計與取捨的紀錄。
 > 這是 [roadmap.md](roadmap.md) §2.1，核心設計
 > [why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md) §5.2 的 server 端。
