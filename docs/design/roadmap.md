@@ -6,7 +6,7 @@
 > 狀態標記：✅ 已合併 · 🔧 進行中 · 📄 有提案待同意 · 🔲 下一步 · 💭 候選（還沒決定要不要做）· 🚫 明確不做。
 > 每一項改狀態時順手改這裡；這裡的狀態如果跟 [`CHANGELOG-fork.md`](../../CHANGELOG-fork.md) 對不上，以 CHANGELOG 為準。
 >
-> 最後更新：2026-09-05。
+> 最後更新：2026-09-06。
 
 ## 0. 目標，一句話
 
@@ -60,11 +60,18 @@ pack 格式與 kind 分配在 [wbf-wire-format.md](wbf-wire-format.md)，**未�
 提案已在 [streaming-messages.md](streaming-messages.md)，核心設計 §5.3。走短暫訊息旁路，講完才寫一個正式事件，歷史零污染。
 程式碼落點對照 `rooms/typing/` 與 sync 喚醒，提案 §3 已寫。等維護者同意就能開分支；它與媒體層互不依賴，可以並行。
 
-### 2.4 📄 每房連續序號 `seq` 與跨房間「全域最近 N 則」（issue #20）
+### 2.4 ✅ 每房 `r_seq`、全域 `g_seq` 與 `Event/Recent`（issue #20，PR #22 已合併 2026-09-06）
 
-client（wbf-matrix-client）的聊天模型要 server 配合的兩件事，維護者 2026-09-05 定案要做。提案在
-[room-seq-and-recent.md](room-seq-and-recent.md)：`seq` 寫進存起來的 PDU 的 `unsigned`（一個寫入點、所有讀路徑自動帶）、
-startup migration 回填既有 room；`Event/Recent` pack 用既有全域 count 做 k 路合併，不加索引。
+client（wbf-matrix-client）的聊天模型要 server 配合的兩件事。設計 [room-seq-and-recent.md](room-seq-and-recent.md)：
+兩個位置寫進存起來的 PDU 的 `unsigned`（一個寫入點、所有讀路徑自動帶）、startup migration 回填既有 room；
+`Event/Recent` 依 client 快取的 `cg_seq` 只回差異，k 路合併不加索引。順手加了 `[profile.e2e]`（windows-build.md）。
+
+### 2.5 📄 E2EE 下的媒體引用：送訊息時宣告 attachments、計數 0 由後台掃描清
+
+2026-09-06 發現的破口：引用計數的 +1 來自 server 讀 content，E2EE 房間讀不到，附件永遠不會被計到（漏水）、而 `migrate` 會把它們當孤兒刪。
+維護者定方向，提案 [media-attachments.md](media-attachments.md)：機制不變、來源換成「明文 or 送訊息請求夾帶的 mxc」；
+新表 `eventid_mxcs`；計數 0 的由週期掃描清（新加，保護期至少 7 天）；既存媒體不遷移；非 wbf client 在 E2EE 房間傳檔 → bot 私訊一條英文。
+**client 端必須同步**（spec §12），否則媒體留不住。
 
 ## 3. 候選（要不要做，由維護者決定）
 
