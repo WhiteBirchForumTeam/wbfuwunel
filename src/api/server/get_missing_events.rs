@@ -238,6 +238,7 @@ mod tests {
 			sender_device: None,
 			appservice_info: None,
 			json_body: None,
+			headers: axum::http::HeaderMap::new(),
 		}
 	}
 

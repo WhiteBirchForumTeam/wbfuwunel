@@ -117,10 +117,18 @@ server 認得出的訊號：事件是 `m.room.encrypted`、從舊 HTTP `send` �
 
 ## 8. 驗收
 
-- 單元：宣告驗證每條拒絕原因；`eventid_mxcs` 與事件同交易；聯集去重。
-- e2e：E2EE 房間（`m.room.encryption` state）用 header 宣告送 `m.room.encrypted` → 計數 1 → redact → 計數 0 → bytes 刪、410；
-  不宣告 → 計數 0 → 過保護期被掃、410（e2e 用 config 壓到幾秒；低於 7 天會被夾，所以測試要走一個測試專用的旁路或直接測 sweep 函式）；宣告別人的 mxc → 拒送；明文房間不宣告仍 +1；同一 mxc 兩則訊息 → 2 → 各撤一次才刪；
-  非 wbf client 情境收到 bot 私訊且只收一次；既存哨兵媒體掃描不碰。
+- 單元：宣告拒絕訊息都點名那個 mxc（`attachments.rs`）；讀 content 的四條既有測試不變。
+- e2e（真伺服器，e2e profile，腳本 `e2e9.ps1`，2026-09-06 **23 個檢查點全綠**）：
+  - 身分：`/versions` 的 `server.name`（key `net.zemos.msc4383.server`）= `wbfuwunel`、`unstable_features["org.wbftw.wbfuwunel"]`；`Hello.engine`。
+  - E2EE 房間用 header 宣告送 `m.room.encrypted` → 可下載 → redact → 410。
+  - 拒送四種（別人的、不存在的、非 mxc、遠端）都 400 `M_INVALID_PARAM` 且訊息點名 mxc；拒送的沒寫事件。
+  - 同一 mxc 兩則宣告 → 撤第一則仍 200、撤第二則 410。
+  - 明文房間 `m.image` 不宣告照舊計數與釋放。
+  - `Event/Send` pack：Ack 帶 event_id、事件進房間、redact 後媒體 410；宣告已刪媒體 → `Error(Conflict)`；同 `txn_id` 兩次回同一 event_id。
+  - 警告：bob 舊端點上傳後不宣告送加密事件 → 收到 server user 的 `is_direct` 邀請、房裡一則英文警告；第二次不再邀請。
+  - 掃描：把一個沒被指的上傳的檔案 mtime 改到 8 天前 → `media_gc_sweep_interval=2` 一輪後 410；同時上傳的新檔 200；被活事件指著的不動；log 有
+    `Unreferenced media sweep finished`。（保護期夾 7 天，所以 e2e 用改 mtime 而不是改 config。）
+- 回歸：e2e8（`r_seq`／`g_seq`／`Event/Recent`）37 個檢查點在同一個 binary 上重跑。
 
 ## 9. 落點
 
