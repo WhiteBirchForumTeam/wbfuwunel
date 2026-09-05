@@ -11,7 +11,7 @@
    **`g_seq`**（global sequence）：本站全域的事件序號，就是事件的 PduCount（`/messages` token 裡那個數），跨 room 可比大小，
    client 拿它當水位線「我讀到哪」。兩個都**寫進存起來的 PDU JSON 的 `unsigned`**（`org.wbftw.wbfuwunel.r_seq`、`…g_seq`），
    所以每一條把事件交給 client 的路徑自動都帶，不用逐條路徑補。命名維護者 2026-09-05 定：兩個短名對照，而且跟 pack 標頭的 `seq`（請求號）分得開。
-2. **全域更新**：pack `Event/Recent`（kind `0x14`、subtype `0x01`），client 帶自己的水位 `after`，server 回在它之後的事件（最多 `limit` 則）。
+2. **全域更新**：pack `Event/Recent`（kind `0x14`、subtype `0x01`），client 帶自己快取的水位 `cg_seq`，server 回在它之後的事件（最多 `limit` 則）。
    server 對使用者加入的每個 room 開一條倒序串流，用 `g_seq` 做 k 路合併，套 `/messages` 同一套可見性過濾。**不加索引、不加遷移**。
 
 ## 1. `r_seq`：每房連續序號
@@ -77,7 +77,7 @@ ruma 的 `redact_in_place` 只留規格允許的 key，`unsigned` 不在裡面�
 - `roomid_tscount_pducount`、PduId、PduCount：全域 count 照舊，`r_seq` 是另一個數，不取代 token。
 - `/messages` 的 `from`/`to` 仍是 token；「跳到第 N 則」client 用 `r_seq` 找對應事件是 client 端的事（§3 列為候選）。
 
-## 2. `Event/Recent`：跨房間的全域更新（在 `after` 之後的事件）
+## 2. `Event/Recent`：跨房間的全域更新（在 `cg_seq` 之後的事件）
 
 ### 2.1 wire
 
@@ -86,10 +86,10 @@ kind `0x14 Event`（wire-format §3.3 已分配給 send／messages／context 這
 請求 meta（JSON，明文，server 要讀）；三個欄位都可省略：
 
 ```json
-{ "after": <g_seq>, "before": <g_seq>, "limit": 10000 }
+{ "cg_seq": <g_seq>, "before": <g_seq>, "limit": 10000 }
 ```
 
-- `after`：client 手上最新的 `g_seq`，**只要在它之後的事件**。省略 = 從頭（第一次啟動）。
+- `cg_seq`（cached g_seq）：client 裝置上存的最新 `g_seq`。server 從最新往舊拿，**碰到它就停**；省略或 0 = 沒有快取，直接拿最新的 `limit` 則。
 - `limit`：這頁最多幾則，預設與上限都是 `wbf_recent_max_limit`（10000）。
 - `before`：只在補洞時用（見下），只要比它舊的。
 
@@ -99,8 +99,8 @@ server 從最新往舊走，收滿 `limit` 就停。差 4000 則就回 4000 則�
 回應 `Ack`（`IS_RESPONSE`，`id`、`seq` 抄請求）：
 
 - meta：`{ "returned": n, "latest_g_seq": <g_seq>, "complete": bool, "next": <g_seq> | null }`
-  - `latest_g_seq`：server 此刻最新的全域序號，client 存下來當下次的 `after`（在合併之前讀，所以合併期間新進的事件一定比它新，不會漏）。
-  - `complete`：`after` 到 `latest_g_seq` 之間是否全部給了。`false` 表示有洞，`next` 是洞的上緣：client 帶同一個 `after` 加 `before = next`
+  - `latest_g_seq`：server 此刻最新的全域序號，client 存下來當下次的 `cg_seq`（在合併之前讀，所以合併期間新進的事件一定比它新，不會漏）。
+  - `complete`：`cg_seq` 到 `latest_g_seq` 之間是否全部給了。`false` 表示有洞，`next` 是洞的上緣：client 帶同一個 `cg_seq` 加 `before = next`
     再問，直到 `complete`。
 - data：**JSON 陣列**，每個元素是完整的事件（`Pdu` 格式，含 `room_id`；`unsigned` 帶 `r_seq`、`g_seq`）。順序新到舊。
 
@@ -117,7 +117,7 @@ rooms = state_cache.rooms_joined(user)
 BinaryHeap 以 count 為鍵，每次彈最大的、再從那條串流補一個
 每彈一個：ignored_filter → visibility_filter（api/client/message.rs 既有的兩個，pub(crate)）
 停：滿 limit，或 data 再放一個就超過 wbf_data_max_bytes（→ complete=false，next=最後一則的 g_seq）；
-    或堆頂的 g_seq 已經 ≤ after，或全部串流耗盡（→ complete=true，next=null）
+    或堆頂的 g_seq 已經 ≤ cg_seq，或全部串流耗盡（→ complete=true，next=null）
 ```
 
 - 為什麼不加 `count → pduid` 全域索引：那要一張新表、一次遷移、還要每個 append 多一筆寫；而且使用者只在少數 room 裡時，倒著掃全域

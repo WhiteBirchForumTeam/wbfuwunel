@@ -6,7 +6,7 @@
 //! global count every event carries is comparable across rooms, so one
 //! reverse stream per joined room merged by count is the global order. That
 //! count is the `g_seq` each served event already carries in its
-//! `unsigned`; the request's `after` and `before` and the reply's `next` and
+//! `unsigned`; the request's `cg_seq` and `before` and the reply's `next` and
 //! `latest_g_seq` are the same number. See
 //! `docs/design/room-seq-and-recent.md` §2.
 
@@ -29,15 +29,16 @@ use crate::client::message::{ignored_filter, visibility_filter};
 struct RecentRequest {
 	/// Most events in the reply; clamped to `wbf_recent_max_limit`.
 	limit: usize,
-	/// Only events after this g_seq: the client's watermark.
-	after: Option<PduCount>,
+	/// The newest g_seq the client has cached; the page stops there. Absent or
+	/// 0 means no cache: the newest `limit` events.
+	cg_seq: Option<PduCount>,
 	/// Only events older than this g_seq (a `next` from a reply).
 	before: Option<PduCount>,
 }
 
 impl RecentRequest {
 	/// Args:
-	///     view: the request pack, meta example: `{"limit":100,"after":4711}`
+	///     view: the request pack, meta example: `{"limit":100,"cg_seq":4711}`
 	///     max_limit: `wbf_recent_max_limit`, example: 10000
 	/// Return:
 	///     Result<RecentRequest, Reject>  Conflict when a position is not an
@@ -52,15 +53,15 @@ impl RecentRequest {
 
 		Ok(Self {
 			limit,
-			after: g_seq_field(&meta, "after")?,
+			cg_seq: g_seq_field(&meta, "cg_seq")?.filter(|cached| *cached != PduCount::from_signed(0)),
 			before: g_seq_field(&meta, "before")?,
 		})
 	}
 }
 
 /// Args:
-///     meta: the request meta, example: `{"after":4711}`
-///     name: example: "after"
+///     meta: the request meta, example: `{"cg_seq":4711}`
+///     name: example: "cg_seq"
 /// Return:
 ///     Result<Option<PduCount>, Reject>  None when absent or null; Conflict
 ///     when present but not an integer.
@@ -98,9 +99,9 @@ impl Ord for Head {
 /// Why the page ended.
 #[derive(PartialEq, Eq)]
 enum Stop {
-	/// Every event newer than `after` (or every event at all) was considered.
+	/// Every event newer than `cg_seq` (or every event at all) was considered.
 	Complete,
-	/// `limit` or the pack's byte budget ended the page with newer-than-`after`
+	/// `limit` or the pack's byte budget ended the page with newer-than-`cg_seq`
 	/// events still unread; `next` points at them.
 	More,
 }
@@ -155,9 +156,9 @@ pub(super) async fn handle_event_recent(
 	loop {
 		if returned >= request.limit {
 			// The page is full; anything still on the heap that is newer than
-			// `after` is unread.
+			// `cg_seq` is unread.
 			stop = match heap.peek() {
-				| Some(head) if is_newer_than_after(head.count, request.after) => Stop::More,
+				| Some(head) if is_newer_than_after(head.count, request.cg_seq) => Stop::More,
 				| _ => Stop::Complete,
 			};
 			break;
@@ -165,7 +166,7 @@ pub(super) async fn handle_event_recent(
 		let Some(Head { count, room }) = heap.pop() else {
 			break;
 		};
-		if !is_newer_than_after(count, request.after) {
+		if !is_newer_than_after(count, request.cg_seq) {
 			// The heap is descending: everything left is at or below the
 			// watermark, which the client already has.
 			break;
@@ -235,7 +236,7 @@ pub(super) async fn handle_event_recent(
 }
 
 /// Whether an event at `count` is one the client does not have yet.
-fn is_newer_than_after(count: PduCount, after: Option<PduCount>) -> bool { after.is_none_or(|after| count > after) }
+fn is_newer_than_after(count: PduCount, cg_seq: Option<PduCount>) -> bool { cg_seq.is_none_or(|cg_seq| count > cg_seq) }
 
 /// The room's next event, skipping rows that fail to decode.
 async fn next_item(stream: &mut RoomStream<'_>) -> Option<PdusIterItem> {
