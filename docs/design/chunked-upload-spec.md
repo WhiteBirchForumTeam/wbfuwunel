@@ -301,3 +301,19 @@ client 的做法（任何語言）：把這個檔複製一份進自己的 repo�
 規格改了，向量跟著重生；client 複製的那份沒跟上，client 的測試會紅 —— 漂移在編譯階段被抓到，不是上線才發現。
 這是維護者 2026-09-04 定的共用方式：**共用的是規格與向量，不是程式碼**；Rust client 要直接用 server 的 codec 也可以，
 但向量測試一樣要跑。
+
+## 12. ⚠️ 送訊息時要宣告附件，否則媒體留不住（提案 [media-attachments.md](media-attachments.md)，維護者 2026-09-06 定方向）
+
+server 在 E2EE 房間讀不到訊息內容，所以它不知道哪則訊息用了哪個 mxc；**沒被任何訊息指到的新媒體，計數是 0，
+後台掃描會把它清掉**（寬限期 `media_gc_migrate_skip_recent_seconds`，預設 600 秒）。要讓附件跟著訊息活，client 必須在**送訊息的那個請求**裡宣告：
+
+| 入口 | 怎麼帶 |
+|---|---|
+| wbf pack `Event/Send`（kind `0x14`、subtype `0x02`） | meta `{ "room_id", "type", "txn_id", "attachments": ["mxc://…", …] }`，data = 事件 content 的 JSON |
+| 舊 HTTP `PUT /_matrix/client/v3/rooms/{room}/send/{type}/{txn}` | header `X-Wbf-Attachments: mxc://a,mxc://b`（過渡用，matrix-rust-sdk 加 header 即可） |
+
+- 上傳 → 拿到 mxc → 放進加密內容 → **同一個請求**帶 `attachments`。分兩個請求，中間掛掉就留下一則指著會消失的媒體的訊息。
+- server 會驗：本站的 mxc、找得到、**上傳者是 sender**、沒墓碑；任何一個不過**整則拒送**（`Error(Conflict)` 說哪個為什麼）。
+- 明文房間不用宣告（server 自己讀 `url`／`file.url`），宣告了也無妨。
+- 編輯換附件：新事件宣告新的；轉傳同一 mxc：再宣告一次（計數 +1，各自撤各自 −1）。
+- `Hello.features` 有 `attachments` 才表示 server 支援；沒有就是舊 server，照 Matrix 原樣。
