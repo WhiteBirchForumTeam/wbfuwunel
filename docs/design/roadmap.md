@@ -70,7 +70,7 @@ client（wbf-matrix-client）的聊天模型要 server 配合的兩件事。設�
 
 2026-09-06 發現的破口：引用計數的 +1 來自 server 讀 content，E2EE 房間讀不到，附件永遠不會被計到（漏水）、而 `migrate` 會把它們當孤兒刪。
 維護者定方向，提案 [media-attachments.md](media-attachments.md)：機制不變、來源換成「明文 or 送訊息請求夾帶的 mxc」；
-新表 `eventid_mxcs`；計數 0 的由週期掃描清（新加）；既存媒體不遷移；非 wbf client 在 E2EE 房間傳檔 → bot 私訊一條英文。
+新表 `eventid_mxcs`；計數 0 的由週期掃描清（新加，保護期至少 7 天）；既存媒體不遷移；非 wbf client 在 E2EE 房間傳檔 → bot 私訊一條英文。
 **client 端必須同步**（spec §12），否則媒體留不住。
 
 ## 3. 候選（要不要做，由維護者決定）

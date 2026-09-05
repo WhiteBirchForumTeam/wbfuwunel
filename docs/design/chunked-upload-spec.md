@@ -305,7 +305,7 @@ client 的做法（任何語言）：把這個檔複製一份進自己的 repo�
 ## 12. ⚠️ 送訊息時要宣告附件，否則媒體留不住（提案 [media-attachments.md](media-attachments.md)，維護者 2026-09-06 定方向）
 
 server 在 E2EE 房間讀不到訊息內容，所以它不知道哪則訊息用了哪個 mxc；**沒被任何訊息指到的新媒體，計數是 0，
-後台掃描會把它清掉**（寬限期 `media_gc_migrate_skip_recent_seconds`，預設 600 秒）。要讓附件跟著訊息活，client 必須在**送訊息的那個請求**裡宣告：
+後台掃描會把它清掉**（保護期 `media_unreferenced_grace_seconds`，至少 7 天）。要讓附件跟著訊息活，client 必須在**送訊息的那個請求**裡宣告：
 
 | 入口 | 怎麼帶 |
 |---|---|

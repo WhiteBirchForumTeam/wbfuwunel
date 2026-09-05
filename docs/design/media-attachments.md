@@ -11,7 +11,7 @@
 引用計數的**機制**（merge operator、同交易 ±1、收集器、墓碑、每 mxc 一鎖）全部保留；換掉的是 **+1 的來源**。
 明文房間 server 照舊自己讀 content；**E2EE 房間 server 讀不到，所以 client 在送訊息的請求裡宣告 `attachments`**，
 server 記在自己的表裡、同交易 +1，redact／purge／retention 查自己的表 −1。**計數 0 的媒體由後台掃描清掉**：新上傳被指到之前
-計數是 0，隨時可能被清；既存媒體維持哨兵、不計不刪，**不做遷移**。
+計數是 0，保護期（至少 7 天）過後就會被清；既存媒體維持哨兵、不計不刪，**不做遷移**。
 
 ## 1. 破口
 
@@ -28,7 +28,7 @@ server 記在自己的表裡、同交易 +1，redact／purge／retention 查自�
 
 1. **既存媒體不管、不計、不刪。** 哨兵（`i64::MIN`）照舊，遷移無效、不做。
 2. **不另設 TTL。計數 0 的媒體由後台掃描清掉**，不分通道、不分房間是否加密。新上傳 `Init(0)` 起算，**被指到之前計數是 0，
-   隨時可能被清理**。（現在沒有週期掃描，收集器只在 −1 後動手；這支要加，見 §4.3。）
+   保護期（至少 7 天）過後隨時可能被清理**。（現在沒有週期掃描，收集器只在 −1 後動手；這支要加，見 §4.3。）
 3. **明文 or 附件 mxc ⇒ 計數。** 明文房間 server 自己讀 content；E2EE 房間 server 讀不到，指針由送訊息的請求夾帶
    （`attachments: [mxc, …]`），不放進事件本體。兩者取聯集。
 4. 刪除觸發不變：`MIN < 計數 ≤ 0` 就刪。
@@ -73,11 +73,12 @@ server 收到 `attachments` 逐一驗：是 `mxc://`、本站的、`search_file_
 
 - 現況：收集器只在 −1 交到手上時動手；`migrate-references` 是手動離線工具。**沒有東西會去掃計數 0 的媒體**，這支要加。
 - 做法：`media_refs` 服務多一個週期性任務（間隔 config `media_gc_sweep_interval`，預設 3600 秒），掃 `mxc_refcount` 裡
-  **本地、非哨兵、計數 = 0、建立時間超過 `media_gc_migrate_skip_recent_seconds`（既有，預設 600）** 的 mxc，
-  持每 mxc 一鎖、鎖下重讀計數仍為 0 → `media.collect(Unreferenced)`。跟 migrate 刪孤兒同一個決策形狀（rumia 在 #12 抓過的：決策要在鎖下）。
-- 為什麼不用區分「從沒被指」跟「被指過又歸零」：後者收集器當下就刪了，能在 0 停留超過寬限期的只有前者。
-- ⚠️ 寬限期 600 秒同時是「上傳完到送出」的最長容忍。wbf client 上傳完就送，夠；人手上傳大檔再慢慢打字的情境會超過。
-  要放寬就改那個既有值，或給掃描另開一個更長的（§7 待定）。
+  **本地、非哨兵、計數 = 0、建立時間超過保護期** 的 mxc，持每 mxc 一鎖、鎖下重讀計數仍為 0 → `media.collect(Unreferenced)`。
+  跟 migrate 刪孤兒同一個決策形狀（rumia 在 #12 抓過的：決策要在鎖下）。
+- **保護期：新 config `media_unreferenced_grace_seconds`，預設 604800（7 天），維護者 2026-09-06 定「至少 7 天」。**
+  不沿用 `media_gc_migrate_skip_recent_seconds`（600）—— 那是 migrate 避開「剛上傳還沒送出」的窗口，這裡是「上傳了但一直沒人指」的判定，
+  兩個問題不同，數量級也不同。設定值低於 7 天啟動時 warn 並夾成 7 天（fail closed：寧可多留）。
+- 為什麼不用區分「從沒被指」跟「被指過又歸零」：後者收集器當下就刪了，能在 0 停留超過保護期的只有前者。
 - 頭像不受影響：`set_avatar_ref` 是 server 看得到的引用，照舊 +1。縮圖跟原檔同一個 mxc，前綴刪除一起走。
 
 ### 4.4 `migrate-references` 的角色縮小
@@ -87,7 +88,7 @@ server 收到 `attachments` 逐一驗：是 `mxc://`、本站的、`search_file_
 
 ## 5. client 條款（也寫在 spec §12）
 
-- **凡是 server 讀不到 content 的訊息（E2EE），送出時必須宣告 `attachments`**，否則附件會被後台掃描清掉（寬限期後）。
+- **凡是 server 讀不到 content 的訊息（E2EE），送出時必須宣告 `attachments`**，否則附件會被後台掃描清掉（保護期 7 天後）。
 - 上傳 → 拿到 mxc → 把 mxc 放進加密內容 → **同一個送訊息請求**帶 `attachments`。不要分兩個請求。
 - 編輯（`m.replace`）若換附件：新事件宣告新的；舊事件不動（它自己被 redact 時才 −1）。
 - 轉傳（forward）同一個 mxc 到另一則：再宣告一次，計數 +1；各自 redact 各自 −1。
@@ -109,7 +110,7 @@ server 認得出的訊號：事件是 `m.room.encrypted`、從舊 HTTP `send` �
 
 ## 7. 待維護者定
 
-1. 掃描的寬限期沿用 `media_gc_migrate_skip_recent_seconds`（600）就好，還是另開一個更長的值？
+1. ~~掃描的寬限期~~ 已定：另開 `media_unreferenced_grace_seconds`，至少 7 天。
 2. `Event/Send` 要不要這支就做，還是先只做 HTTP header（client 現在用 matrix-rust-sdk 送，header 對它最省）？我建議這支兩個都做，
    pack 是目標、header 是過渡。
 
@@ -117,7 +118,7 @@ server 認得出的訊號：事件是 `m.room.encrypted`、從舊 HTTP `send` �
 
 - 單元：宣告驗證每條拒絕原因；`eventid_mxcs` 與事件同交易；聯集去重。
 - e2e：E2EE 房間（`m.room.encryption` state）用 header 宣告送 `m.room.encrypted` → 計數 1 → redact → 計數 0 → bytes 刪、410；
-  不宣告 → 計數 0 → 過寬限期被掃、410；宣告別人的 mxc → 拒送；明文房間不宣告仍 +1；同一 mxc 兩則訊息 → 2 → 各撤一次才刪；
+  不宣告 → 計數 0 → 過保護期被掃、410（e2e 用 config 壓到幾秒；低於 7 天會被夾，所以測試要走一個測試專用的旁路或直接測 sweep 函式）；宣告別人的 mxc → 拒送；明文房間不宣告仍 +1；同一 mxc 兩則訊息 → 2 → 各撤一次才刪；
   非 wbf client 情境收到 bot 私訊且只收一次；既存哨兵媒體掃描不碰。
 
 ## 9. 落點
@@ -129,4 +130,4 @@ server 認得出的訊號：事件是 `m.room.encrypted`、從舊 HTTP `send` �
 | redact／purge／retention 改查表 | `timeline/redact.rs`、`timeline/purge.rs`、`retention/mod.rs` |
 | 週期掃描 | `media_refs/collect.rs`（收集器旁邊，同一把每 mxc 鎖） |
 | 警告 | `src/service/admin/`（bot 發話的既有路徑） |
-| config：`media_gc_sweep_interval`、`attachments_max_per_event` | `src/core/config/mod.rs` |
+| config：`media_gc_sweep_interval`、`media_unreferenced_grace_seconds`（≥ 7 天）、`attachments_max_per_event` | `src/core/config/mod.rs` |
