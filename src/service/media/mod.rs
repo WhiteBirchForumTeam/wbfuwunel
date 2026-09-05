@@ -378,6 +378,10 @@ impl Service {
 			.map(|object| mtime_millis(&object))
 	}
 
+	/// The local user who uploaded `mxc`, from the uploader index; `None` for
+	/// media without one (remote, server-generated, or predating the index).
+	pub async fn uploader_of(&self, mxc: &Mxc<'_>) -> Option<OwnedUserId> { self.db.mxc_user(mxc).await }
+
 	/// Returns whether `mxc` names media this server is the origin of.
 	pub fn is_local(&self, mxc: &Mxc<'_>) -> bool {
 		self.services

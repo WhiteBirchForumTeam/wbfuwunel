@@ -73,12 +73,13 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 		.delete_typed_relation(&pdu_id, &pdu)
 		.await;
 
-	// Read before the strip, because the strip is what removes the content the
-	// list comes from.
+	// Read before the strip: the row written when the event was stored, or
+	// for an older event the content the strip is about to remove.
 	let media_refs = self
 		.services
 		.media_refs
-		.list_event_mxc_uris(&pdu);
+		.list_event_refs(event_id, &pdu)
+		.await;
 
 	// Redaction strips `unsigned`; the event keeps its place, so its positions
 	// go back afterwards.
@@ -105,7 +106,7 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 		let mut txn = self.db.db.txn();
 		self.services
 			.media_refs
-			.del_event_refs(&mut txn, &media_refs);
+			.del_event_refs(&mut txn, event_id, &media_refs);
 		txn.execute();
 	}
 

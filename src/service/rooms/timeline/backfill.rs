@@ -30,6 +30,7 @@ use tuwunel_database::Json;
 
 use super::{ExtractBody, bias_count};
 use crate::{
+	media_refs::list_event_refs_at_store,
 	federation::Candidates,
 	fetcher::{Op, Opts},
 	rooms::state_accessor::plain_text_topic,
@@ -411,10 +412,13 @@ pub async fn backfill_pdu(
 
 	// Hold the media this event references until its count has committed,
 	// so the collector cannot remove it between reading zero and deleting.
+	// Nothing is declared on this path: backfilled events are other servers'
+	// history, and only plaintext content can name media here.
+	let media_refs = list_event_refs_at_store(&value, &[]);
 	let media_held = self
 		.services
 		.media_refs
-		.hold_event_media(&value)
+		.hold_media_list(&media_refs)
 		.await;
 
 	// Insert pdu
@@ -425,6 +429,7 @@ pub async fn backfill_pdu(
 		u64::from(pdu.origin_server_ts),
 		&value,
 		seq_bounds,
+		&media_refs,
 	);
 	drop(media_held);
 	drop(insert_lock);
@@ -461,6 +466,7 @@ fn prepend_backfill_pdu(
 	origin_server_ts: u64,
 	json: &CanonicalJsonObject,
 	seq_bounds: SeqBounds,
+	media_refs: &[String],
 ) {
 	let mut txn = self.db.db.txn();
 
@@ -478,7 +484,7 @@ fn prepend_backfill_pdu(
 	// media reading as unreferenced.
 	self.services
 		.media_refs
-		.add_event_refs(&mut txn, json);
+		.add_event_refs(&mut txn, event_id, media_refs);
 
 	txn.execute();
 }

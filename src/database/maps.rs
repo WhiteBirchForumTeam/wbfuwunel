@@ -144,6 +144,15 @@ pub(super) static MAPS: &[Descriptor] = &[
 		index_size: 512,
 		..descriptor::RANDOM
 	},
+	// `event_id → JSON [mxc]`: the media an event references, as known when
+	// it was stored (declared with the send, or read from plaintext content).
+	// Released and removed together; an absent row means "read the content".
+	Descriptor {
+		name: "eventid_mxcs",
+		key_size_hint: Some(48),
+		val_size_hint: Some(128),
+		..descriptor::RANDOM_SMALL
+	},
 	Descriptor {
 		name: "eventid_pduid",
 		cache_disp: CacheDisp::Unique,
@@ -433,6 +442,19 @@ pub(super) static MAPS: &[Descriptor] = &[
 		name: "roomid_tscount_pducount",
 		val_size_hint: Some(8),
 		..descriptor::RANDOM
+	},
+	// `user_id → ()`: users already told, once, that their client attaches
+	// media in encrypted rooms without declaring it.
+	Descriptor {
+		name: "userid_attachmentwarned",
+		..descriptor::RANDOM_SMALL
+	},
+	// `user_id → u64 millis`: when the user last uploaded through the legacy
+	// Matrix upload endpoints, for the same warning's decision.
+	Descriptor {
+		name: "userid_lastlegacyupload",
+		val_size_hint: Some(8),
+		..descriptor::RANDOM_SMALL
 	},
 	Descriptor {
 		name: "roomid_seqbounds",

@@ -1,7 +1,7 @@
 # E2EE 下的媒體引用：送訊息時宣告 attachments、計數 0 由後台掃描清
 
 > **這份文件回答：server 讀不到訊息內容時，媒體的引用計數從哪裡來；沒人來指的媒體怎麼辦。**
-> 狀態：📄 提案，2026-09-06，維護者在對話中已定方向（§2），等同意文件後開實作分支。
+> 狀態：🔧 維護者 2026-09-06 同意（PR #23），實作分支 `media/attachments`：`Event/Send` 與 HTTP header 都做；`migrate-references` 整個移除。
 > 上位文件：[media-gc.md](media-gc.md)（計數、收集器、墓碑、哨兵都不變）；
 > 核心設計 [why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md) §5.4。
 > client 條款同步寫在 [chunked-upload-spec.md](chunked-upload-spec.md) §12。
@@ -81,12 +81,12 @@ server 收到 `attachments` 逐一驗：是 `mxc://`、本站的、`search_file_
 - 為什麼不用區分「從沒被指」跟「被指過又歸零」：後者收集器當下就刪了，能在 0 停留超過保護期的只有前者。
 - 頭像不受影響：`set_avatar_ref` 是 server 看得到的引用，照舊 +1。縮圖跟原檔同一個 mxc，前綴刪除一起走。
 
-### 4.4 `migrate-references` 的角色縮小
+### 4.4 `migrate-references` 移除
 
-重算只對「有 `eventid_mxcs` 列或 content 讀得到」的事件有意義。它**不再**把計數 ≤ 0 的當孤兒刪 —— 那個工作交給 4.3 的掃描，
-規則只有一條、時間可預期。migrate 保留為「重算計數」的工具，dry-run 印差異。
-順手：`media_gc_migrate_skip_recent_seconds` 預設 600 太緊，維護者 2026-09-06 建議改成 86400（一天）；這支一起改預設值。
-保護期的判定方式兩邊一樣：**要刪的那一刻**看媒體的建立時間，近期的跳過，不是另外記一個到期時間。
+維護者 2026-09-06 定：遷移工具沒有用了，整個拿掉（admin 指令、`media_refs/migrate.rs`、`collector_paused`、
+`media_gc_migrate_skip_recent_seconds`）。理由同 §1：靠 content 重算對 E2EE 是死路，重算會把活著的附件當孤兒刪。
+既存媒體維持哨兵；計數 0 的由 §4.3 的掃描清；`TombstoneReason::Migrated` 保留給舊墓碑解碼。
+`media_gc_migrate_skip_recent_seconds` 是 unknown config key 之後只會 warn（`error_on_unknown_config_opts` 預設 false）。
 
 ## 5. client 條款（也寫在 spec §12）
 
@@ -113,8 +113,7 @@ server 認得出的訊號：事件是 `m.room.encrypted`、從舊 HTTP `send` �
 ## 7. 待維護者定
 
 1. ~~掃描的寬限期~~ 已定：另開 `media_unreferenced_grace_seconds`，至少 7 天。
-2. `Event/Send` 要不要這支就做，還是先只做 HTTP header（client 現在用 matrix-rust-sdk 送，header 對它最省）？我建議這支兩個都做，
-   pack 是目標、header 是過渡。
+2. ~~`Event/Send` 要不要這支就做~~ 已定：都做。
 
 ## 8. 驗收
 
@@ -128,8 +127,11 @@ server 認得出的訊號：事件是 `m.room.encrypted`、從舊 HTTP `send` �
 | 什麼 | 哪裡 |
 |---|---|
 | `eventid_mxcs` 表、驗證、聯集 | `src/service/media_refs/`、`src/database/maps.rs` |
-| 送訊息入口（header、`Event/Send`） | `src/api/client/send.rs`（或 `Ruma` 抽 header）、`src/api/client/wbf/` |
+| 送訊息入口（header、`Event/Send`） | `src/api/client/send.rs`（`send_message_event` 兩個入口共用；`Args.headers`）、`src/api/client/wbf/send.rs` |
 | redact／purge／retention 改查表 | `timeline/redact.rs`、`timeline/purge.rs`、`retention/mod.rs` |
-| 週期掃描 | `media_refs/collect.rs`（收集器旁邊，同一把每 mxc 鎖） |
+| 週期掃描 | `media_refs/collect.rs`（`sweep_unreferenced`，收集器旁邊，同一把每 mxc 鎖） |
+| 宣告驗證、legacy 上傳記錄、一次性警告的判定 | `media_refs/attachments.rs` |
+| 警告私訊本體 | `src/service/admin/attachments_notice.rs`（server user 開 DM、`is_direct`、一則明文） |
+| 引擎識別 | `/_matrix/client/versions` 的 `unstable_features["org.wbftw.wbfuwunel"]` 與 `server.name`；`Hello.engine`；`version::name()` = `wbfuwunel` |
 | 警告 | `src/service/admin/`（bot 發話的既有路徑） |
 | config：`media_gc_sweep_interval`、`media_unreferenced_grace_seconds`（≥ 7 天）、`attachments_max_per_event` | `src/core/config/mod.rs` |

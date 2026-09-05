@@ -3034,25 +3034,38 @@
 # avatar. A redacted event keeps its reference while its unredacted
 # original is retained (see `save_unredacted_events`), so media goes when
 # the last retained original is dropped, not when the message is redacted.
-# Media created before reference counting existed is never collected
-# until `!admin media migrate-references` has rebuilt the counts.
+# Media created before reference counting existed is never collected.
 #
-# When false, the collector only logs what it would delete.
+# When false, the collector and the sweep only log what they would
+# delete.
 #
 # reloadable: yes
 #
 #media_gc_enabled = true
 
-# How recent an upload may be before `!admin media migrate-references`
-# refuses to treat it as an orphan, in seconds.
+# How long an upload nothing references yet is protected from the
+# unreferenced-media sweep, in seconds, counted from when the file was
+# stored. Below seven days is clamped to seven days.
 #
 # An upload is not a reference: the message naming it may still be on
-# its way. Media created within this window is skipped by the rebuild and
-# looked at again next time.
+# its way, and in an encrypted room the server only learns of the
+# reference when the client declares it with the message. Media older
+# than this whose count is still zero is removed by the sweep.
 #
 # reloadable: yes
 #
-#media_gc_migrate_skip_recent_seconds = 600
+#media_unreferenced_grace_seconds = 604800
+
+# How often the sweep looks for local media whose reference count is
+# zero and whose protection has expired, in seconds.
+#
+#media_gc_sweep_interval = 3600
+
+# Most media one event may declare as attachments (the wbf
+# `X-Wbf-Attachments` header or `Event/Send` meta). A declaration
+# longer than this is refused with the whole send.
+#
+#attachments_max_per_event = 32
 
 # Chunk size a chunked upload uses when the client does not choose one,
 # in bytes. The client encrypts each chunk on its own, so this is the

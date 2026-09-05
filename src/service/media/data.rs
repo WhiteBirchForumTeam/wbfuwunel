@@ -113,10 +113,14 @@ pub struct ChunkedMedia {
 pub enum TombstoneReason {
 	/// The collector saw its reference count reach zero.
 	GarbageCollected,
-	/// `migrate-references` found it referenced by nothing.
+	/// The removed `migrate-references` rebuild found it referenced by nothing.
+	/// Kept so tombstones written before the rebuild went away still decode.
 	Migrated,
 	/// An administrator deleted it by MXC.
 	AdminDeleted,
+	/// The sweep found its count still zero after the protection period:
+	/// uploaded, never attached to anything the server was told about.
+	Unreferenced,
 }
 
 /// The record left behind when media is removed, so a later fetch answers

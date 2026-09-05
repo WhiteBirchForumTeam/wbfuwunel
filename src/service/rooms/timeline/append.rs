@@ -82,7 +82,7 @@ where
 	}
 
 	let pdu_id = self
-		.append_pdu(pdu, pdu_json, new_room_leafs, state_lock)
+		.append_pdu(pdu, pdu_json, new_room_leafs, &[], state_lock)
 		.await?;
 
 	Ok(Some(pdu_id))
@@ -110,6 +110,7 @@ pub async fn append_pdu<'a, Leafs>(
 	pdu: &'a PduEvent,
 	mut pdu_json: CanonicalJsonObject,
 	leafs: Leafs,
+	attachments: &'a [String],
 	state_lock: &'a RoomMutexGuard,
 ) -> Result<RawPduId>
 where
@@ -218,16 +219,19 @@ where
 	let count = PduCount::Normal(*next_count);
 	let pdu_id: RawPduId = PduId { shortroomid, count }.into();
 
-	// Hold the media this event references until its count has committed,
-	// so the collector cannot remove it between reading zero and deleting.
+	// The media this event references: what the sender declared (already
+	// checked) plus what plaintext content names. Held until the count has
+	// committed, so the collector cannot remove it between reading zero and
+	// deleting.
+	let media_refs = crate::media_refs::list_event_refs_at_store(&pdu_json, attachments);
 	let media_held = self
 		.services
 		.media_refs
-		.hold_event_media(&pdu_json)
+		.hold_media_list(&media_refs)
 		.await;
 
 	// Insert pdu
-	self.append_pdu_json(&pdu_id, pdu, &pdu_json, seq_bounds);
+	self.append_pdu_json(&pdu_id, pdu, &pdu_json, seq_bounds, &media_refs);
 
 	drop(media_held);
 	drop(insert_lock);
@@ -445,6 +449,7 @@ fn append_pdu_json(
 	pdu: &PduEvent,
 	json: &CanonicalJsonObject,
 	seq_bounds: SeqBounds,
+	media_refs: &[String],
 ) {
 	debug_assert!(matches!(pdu_id.pdu_count(), PduCount::Normal(_)), "PduCount not Normal");
 
@@ -464,7 +469,7 @@ fn append_pdu_json(
 	// existing without the event justifying it, or the other way round.
 	self.services
 		.media_refs
-		.add_event_refs(&mut txn, json);
+		.add_event_refs(&mut txn, &pdu.event_id, media_refs);
 
 	txn.execute();
 }

@@ -157,7 +157,11 @@ async fn drop_original(&self, event_id: &EventId, time_redacted: Option<u64>) {
 	let _serialised = self.drop_original_lock.lock().await;
 
 	let media_refs = match self.get_original_pdu_json(event_id).await {
-		| Ok(original) => self.services.media_refs.list_event_mxc_uris(&original),
+		| Ok(original) =>
+			self.services
+				.media_refs
+				.list_event_refs(event_id, &original)
+				.await,
 		| Err(e) if e.is_not_found() => Vec::new(),
 		| Err(e) => {
 			warn!(?event_id, ?e, "Retained original unreadable; its media references stay held.");
@@ -172,6 +176,6 @@ async fn drop_original(&self, event_id: &EventId, time_redacted: Option<u64>) {
 	}
 	self.services
 		.media_refs
-		.del_event_refs(&mut txn, &media_refs);
+		.del_event_refs(&mut txn, event_id, &media_refs);
 	txn.execute();
 }

@@ -41,19 +41,20 @@ pub async fn delete_pdus(&self, room_id: &RoomId) -> Result {
 		.pduid_pdu
 		.raw_stream_from(&current)
 		.ready_try_take_while(move |(key, _)| Ok(key.starts_with(&prefix)))
-		.ready_try_for_each(move |(key, value)| {
+		.try_for_each(async |(key, value)| {
 			let pdu = serde_json::from_slice::<PduEvent>(value)?;
 			let ts: u64 = pdu.origin_server_ts.into();
 			let event_id = &pdu.event_id;
 
 			// A second parse of the same bytes, because the media reference list
-			// is read from raw content rather than from the typed event. Room
-			// deletion is rare enough to pay for it.
+			// falls back to raw content for events stored before `eventid_mxcs`.
+			// Room deletion is rare enough to pay for it.
 			let event_json = serde_json::from_slice::<CanonicalJsonObject>(value)?;
 			let media_refs = self
 				.services
 				.media_refs
-				.list_event_mxc_uris(&event_json);
+				.list_event_refs(event_id, &event_json)
+				.await;
 
 			let mut txn = self.db.db.txn();
 
@@ -63,7 +64,7 @@ pub async fn delete_pdus(&self, room_id: &RoomId) -> Result {
 
 			self.services
 				.media_refs
-				.del_event_refs(&mut txn, &media_refs);
+				.del_event_refs(&mut txn, event_id, &media_refs);
 
 			let room_id_ts_key = (room_id, ts, bias_count(RawPduId::from(key).count()));
 			txn.del(&self.db.roomid_tscount_pducount, room_id_ts_key);

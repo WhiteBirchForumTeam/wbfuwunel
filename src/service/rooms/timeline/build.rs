@@ -40,6 +40,9 @@ pub async fn build_and_append_pdu(
 			.await?;
 	}
 
+	// Request-side data, taken out before the builder becomes the event.
+	let attachments = std::mem::take(&mut pdu_builder.attachments);
+
 	let (pdu, mut pdu_json) = self
 		.create_hash_and_sign_event(pdu_builder, sender, room_id, state_lock)
 		.await?;
@@ -107,6 +110,7 @@ pub async fn build_and_append_pdu(
 			// Since this PDU references all pdu_leaves we can update the leaves
 			// of the room
 			once(pdu.event_id()),
+			&attachments,
 			state_lock,
 		)
 		.boxed()

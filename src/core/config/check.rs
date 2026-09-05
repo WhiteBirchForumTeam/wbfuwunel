@@ -236,6 +236,15 @@ fn check_storage(config: &Config) -> Result {
 		);
 	}
 
+	if config.media_unreferenced_grace_seconds < crate::config::MEDIA_UNREFERENCED_GRACE_MIN_SECONDS {
+		warn!(
+			configured = config.media_unreferenced_grace_seconds,
+			effective = config.media_unreferenced_grace_seconds_effective(),
+			"media_unreferenced_grace_seconds is below the seven-day floor; the floor is used. An \
+			 upload nothing has claimed yet is never removed sooner than that."
+		);
+	}
+
 	// yeah, unless the user built a debug build hopefully for local testing only
 	#[cfg(not(debug_assertions))]
 	if config.server_name == "your.server.name" {

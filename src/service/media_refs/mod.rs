@@ -1,4 +1,4 @@
-//! Media reference counting, and the collector that acts on it.
+//! Media reference counting, and the collector and sweep that act on it.
 //!
 //! Answers one question exactly: **how many things still hold a reference to
 //! this media?** The count lives in `mxc_refcount` as a signed 64-bit value
@@ -9,48 +9,53 @@
 //! A row that does not exist is media created before the counter did. The
 //! first operand such a row receives turns it into the sentinel, which every
 //! later operand leaves alone, so media the counter never saw created is never
-//! counted and never collected until an operator rebuilds the counts.
+//! counted and never collected.
 //!
-//! Event references are read from event content, which redaction strips. A
-//! redacted event keeps its unredacted original for the retention period, and
-//! the reference is released when that original is dropped, not when the
+//! **Where an event's references come from.** Plaintext content names its
+//! media (`url`, `file.url`, thumbnails) and the server reads it. Encrypted
+//! content names nothing the server can see, so the sender declares the
+//! media with the send (`attachments`), and the server checks the claim
+//! before counting it. The union of the two is written to `eventid_mxcs`
+//! with the event, and that row, not the content, is what a later release
+//! reads: redaction strips content, and a declared reference was never in
+//! it. Releasing removes the row, so nothing can release twice. An event
+//! without a row (stored before this existed) falls back to its content.
+//!
+//! A redacted event keeps its unredacted original for the retention period,
+//! and the reference is released when that original is dropped, not when the
 //! event is stripped, so media outlives the redacted message exactly as long
 //! as the message's original does.
 //!
 //! Every release hands the media it released to the collector once the
 //! releasing transaction has committed. The collector reads the count back
-//! and removes local media whose count is `MIN < count <= 0`: zero is the
-//! rule, and a negative count is a caller that released more than it counted,
-//! which is logged before the rule is applied.
+//! and removes local media whose count is `MIN < count <= 0`. Media whose
+//! count never left zero (uploaded, never attached to anything the server
+//! was told about) is removed by the periodic sweep once it is older than
+//! the protection period; see `collect.rs`.
 //!
-//! One lock per media closes the window between the collector reading a
-//! count of zero and removing the bytes: whoever adds a reference holds the
-//! media's lock from before the increment until it has committed, and the
-//! collector holds it from the read through the removal. Either the increment
-//! lands first and the collector reads it, or the removal lands first and the
-//! new reference points at a tombstone, which is the documented outcome.
+//! One lock per media closes the window between a reader seeing a count of
+//! zero and removing the bytes: whoever adds a reference holds the media's
+//! lock from before the increment until it has committed, and the collector
+//! and the sweep hold it from the read through the removal.
 
+pub mod attachments;
 mod collect;
-mod migrate;
 #[cfg(test)]
 mod tests;
 
-use std::sync::{
-	Arc, RwLock as StdRwLock,
-	atomic::{AtomicBool, Ordering},
-};
+use std::sync::{Arc, RwLock as StdRwLock};
 
 use async_trait::async_trait;
-use ruma::{CanonicalJsonObject, CanonicalJsonValue, UserId};
+use ruma::{CanonicalJsonObject, CanonicalJsonValue, EventId, UserId};
 use tokio::sync::mpsc;
 use tuwunel_core::{
 	Result, debug, error, implement,
 	matrix::list_content_mxc_uris,
 	utils::{MutexMap, MutexMapGuard},
 };
-use tuwunel_database::{COUNTER_SENTINEL, CounterOperand, Map, Txn, decode_counter};
+use tuwunel_database::{COUNTER_SENTINEL, CounterOperand, Json, Map, Txn, decode_counter};
 
-pub use self::migrate::RebuildReport;
+pub use self::attachments::AttachmentError;
 
 /// Holds one media's lock; dropping it releases the media.
 pub type MediaHold = MutexMapGuard<String, ()>;
@@ -59,18 +64,21 @@ pub struct Service {
 	services: Arc<crate::services::OnceServices>,
 	db: Data,
 	/// One lock per media, shared by whoever adds a reference and the
-	/// collector deciding whether to remove it.
+	/// collector or sweep deciding whether to remove it.
 	mxc_locks: MutexMap<String, ()>,
 	/// Where a release sends the media it released, once the releasing
 	/// transaction has committed. Absent while the collector is not running.
 	released: StdRwLock<Option<mpsc::UnboundedSender<String>>>,
-	/// Set while a rebuild owns the counts; the collector then skips whatever
-	/// it is sent, and the rebuild removes the orphans itself.
-	collector_paused: AtomicBool,
 }
 
 struct Data {
 	mxc_refcount: Arc<Map>,
+	/// `event_id → JSON [mxc]`, see the module documentation.
+	eventid_mxcs: Arc<Map>,
+	/// `user_id → ()`: told once about undeclared attachments.
+	userid_attachmentwarned: Arc<Map>,
+	/// `user_id → u64 millis`: last upload through the legacy endpoints.
+	userid_lastlegacyupload: Arc<Map>,
 }
 
 #[async_trait]
@@ -78,10 +86,14 @@ impl crate::Service for Service {
 	fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
 		Ok(Arc::new(Self {
 			services: args.services.clone(),
-			db: Data { mxc_refcount: args.db["mxc_refcount"].clone() },
+			db: Data {
+				mxc_refcount: args.db["mxc_refcount"].clone(),
+				eventid_mxcs: args.db["eventid_mxcs"].clone(),
+				userid_attachmentwarned: args.db["userid_attachmentwarned"].clone(),
+				userid_lastlegacyupload: args.db["userid_lastlegacyupload"].clone(),
+			},
 			mxc_locks: MutexMap::new(),
 			released: StdRwLock::new(None),
-			collector_paused: AtomicBool::new(false),
 		}))
 	}
 
@@ -93,12 +105,14 @@ impl crate::Service for Service {
 			.expect("locked for writing")
 			.insert(sender);
 
+		let mut sweep = self.sweep_interval();
 		loop {
 			tokio::select! {
 				released = receiver.recv() => match released {
 					| Some(mxc) => self.collect(&mxc).await,
 					| None => break,
 				},
+				_ = sweep.tick() => self.sweep_unreferenced().await,
 				() = self.services.server.until_shutdown() => break,
 			}
 		}
@@ -117,19 +131,33 @@ impl crate::Service for Service {
 	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }
 }
 
-/// Locks every media `event_json`'s content names, for the caller to hold
-/// until the transaction counting them has committed.
+/// Lists every media an event being stored references: what the sender
+/// declared plus what its plaintext content names, deduplicated and sorted.
 ///
-/// Taken in sorted order without repeats, so two events naming the same media
-/// in different orders cannot wait on each other.
-#[implement(Service)]
-pub async fn hold_event_media(&self, event_json: &CanonicalJsonObject) -> Vec<MediaHold> {
-	let mut mxc_uris = self.list_event_mxc_uris(event_json);
+/// Args:
+///     event_json: the event as it will be stored, example: an m.room.encrypted
+///     declared: the checked `attachments`, example: ["mxc://localhost/abc"]
+/// Return:
+///     Vec<String>  empty for an event referencing no media.
+#[must_use]
+pub fn list_event_refs_at_store(event_json: &CanonicalJsonObject, declared: &[String]) -> Vec<String> {
+	let mut mxc_uris = list_event_mxc_uris_in(event_json);
+	mxc_uris.extend(declared.iter().cloned());
 	mxc_uris.sort_unstable();
 	mxc_uris.dedup();
+	mxc_uris
+}
 
+/// Locks every media in `mxc_uris`, for the caller to hold until the
+/// transaction counting them has committed.
+///
+/// Taken in sorted order without repeats (`list_event_refs_at_store` gives
+/// that), so two events naming the same media in different orders cannot
+/// wait on each other.
+#[implement(Service)]
+pub async fn hold_media_list(&self, mxc_uris: &[String]) -> Vec<MediaHold> {
 	let mut holds = Vec::with_capacity(mxc_uris.len());
-	for mxc in &mxc_uris {
+	for mxc in mxc_uris {
 		holds.push(self.hold_media(mxc).await);
 	}
 
@@ -141,31 +169,70 @@ pub async fn hold_event_media(&self, event_json: &CanonicalJsonObject) -> Vec<Me
 #[implement(Service)]
 pub async fn hold_media(&self, mxc: &str) -> MediaHold { self.mxc_locks.lock(mxc).await }
 
-/// Counts, in `txn`, one reference to each media `event_json`'s content names.
+/// Counts, in `txn`, one reference to each media in `mxc_uris` and records
+/// the list under `event_id`, so the release later reads the same list.
 ///
-/// Content naming no media writes nothing. The caller holds the media
-/// (`hold_event_media`) until `txn` has committed.
+/// An empty list writes nothing. The caller holds the media
+/// (`hold_media_list`) until `txn` has committed.
 #[implement(Service)]
-pub(crate) fn add_event_refs(&self, txn: &mut Txn, event_json: &CanonicalJsonObject) {
-	for mxc in self.list_event_mxc_uris(event_json) {
+pub(crate) fn add_event_refs(&self, txn: &mut Txn, event_id: &EventId, mxc_uris: &[String]) {
+	if mxc_uris.is_empty() {
+		return;
+	}
+
+	for mxc in mxc_uris {
 		txn.merge(&self.db.mxc_refcount, mxc.as_str(), CounterOperand::Add(1).to_bytes());
+	}
+
+	txn.raw_put(&self.db.eventid_mxcs, event_id, Json(mxc_uris));
+}
+
+/// Lists the media an already stored event references, for releasing them:
+/// the row written when it was stored, or, for an event from before the row
+/// existed, what its content names now.
+///
+/// Args:
+///     event_id: example: $abc:localhost
+///     event_json: the stored event, example: the value of `pduid_pdu`
+/// Return:
+///     Vec<String>  empty when nothing is referenced or the row is unreadable
+///     (logged; media held one count too long is recoverable, released one
+///     count too early is not).
+#[implement(Service)]
+pub async fn list_event_refs(&self, event_id: &EventId, event_json: &CanonicalJsonObject) -> Vec<String> {
+	match self.db.eventid_mxcs.get(event_id).await {
+		| Ok(row) => match serde_json::from_slice::<Vec<String>>(&row) {
+			| Ok(mxc_uris) => mxc_uris,
+			| Err(error) => {
+				error!(?event_id, ?error, "eventid_mxcs row unreadable; its references stay held.");
+				Vec::new()
+			},
+		},
+		| Err(error) if error.is_not_found() => list_event_mxc_uris_in(event_json),
+		| Err(error) => {
+			error!(?event_id, ?error, "eventid_mxcs unreadable; the event's references stay held.");
+			Vec::new()
+		},
 	}
 }
 
-/// Releases, in `txn`, one reference to each of `mxc_uris`, and hands them to
-/// the collector once `txn` commits.
+/// Releases, in `txn`, one reference to each of `mxc_uris`, removes the
+/// event's row so nothing releases them again, and hands them to the
+/// collector once `txn` commits.
 ///
-/// The caller supplies the list because redaction strips the content it would
-/// otherwise be read from. Release only once the event, or its retained
-/// original, is truly gone: a count that stays high holds media that could be
-/// released, while a count that drops early releases media something still
-/// points at.
+/// The caller supplies the list (`list_event_refs`) because redaction strips
+/// the content it would otherwise be read from. Release only once the event,
+/// or its retained original, is truly gone: a count that stays high holds
+/// media that could be released, while a count that drops early releases
+/// media something still points at.
 ///
 /// A count never goes below zero when every release pairs with a count:
 /// a negative count read back is a caller releasing what it never counted, or
 /// releasing the same event twice, and is the bug to find.
 #[implement(Service)]
-pub(crate) fn del_event_refs(&self, txn: &mut Txn, mxc_uris: &[String]) {
+pub(crate) fn del_event_refs(&self, txn: &mut Txn, event_id: &EventId, mxc_uris: &[String]) {
+	txn.del_raw(&self.db.eventid_mxcs, event_id);
+
 	for mxc in mxc_uris {
 		txn.merge(&self.db.mxc_refcount, mxc.as_str(), CounterOperand::Add(-1).to_bytes());
 	}
@@ -173,19 +240,10 @@ pub(crate) fn del_event_refs(&self, txn: &mut Txn, mxc_uris: &[String]) {
 	self.hand_to_collector(txn, mxc_uris.to_vec());
 }
 
-/// Lists the `mxc://` URIs named by one event's `content`.
+/// Lists the `mxc://` URIs named by one event's plaintext `content`.
 ///
 /// Returns an empty vector for an event without a content object, which
-/// includes every redacted event.
-#[implement(Service)]
-pub(crate) fn list_event_mxc_uris(&self, event_json: &CanonicalJsonObject) -> Vec<String> {
-	list_event_mxc_uris_in(event_json)
-}
-
-/// Lists the `mxc://` URIs named by one event's `content`.
-///
-/// Returns an empty vector for an event without a content object, which
-/// includes every redacted event.
+/// includes every redacted event and every encrypted one.
 fn list_event_mxc_uris_in(event_json: &CanonicalJsonObject) -> Vec<String> {
 	event_json
 		.get("content")
@@ -227,7 +285,7 @@ pub fn set_avatar_ref(
 ///
 /// Registered on the transaction rather than sent now, so the collector can
 /// never read a count the release has not yet been applied to. With no
-/// collector running (startup, shutdown) nothing is sent: a rebuild finds
+/// collector running (startup, shutdown) nothing is sent: the sweep finds
 /// what was missed.
 #[implement(Service)]
 fn hand_to_collector(&self, txn: &mut Txn, mxc_uris: Vec<String>) {
@@ -242,14 +300,14 @@ fn hand_to_collector(&self, txn: &mut Txn, mxc_uris: Vec<String>) {
 		.clone();
 
 	let Some(sender) = sender else {
-		debug!(?mxc_uris, "No collector running; released media waits for a rebuild.");
+		debug!(?mxc_uris, "No collector running; released media waits for the sweep.");
 		return;
 	};
 
 	txn.on_execute(move || {
 		for mxc in mxc_uris {
 			// A closed receiver means the collector is shutting down; the
-			// rebuild covers what it drops.
+			// sweep covers what it drops.
 			_ = sender.send(mxc);
 		}
 	});
@@ -286,7 +344,3 @@ pub async fn is_mxc_referenced(&self, mxc: &str) -> bool {
 		},
 	}
 }
-
-/// Returns whether the collector is standing aside for a rebuild.
-#[implement(Service)]
-pub(super) fn is_collector_paused(&self) -> bool { self.collector_paused.load(Ordering::Acquire) }

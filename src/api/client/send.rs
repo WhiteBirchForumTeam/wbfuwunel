@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
-use axum::extract::State;
+use axum::{extract::State, http::HeaderMap};
 use futures::{FutureExt, future::try_join4};
 use ruma::{
-	DeviceId, RoomId, TransactionId, UserId,
+	DeviceId, MilliSecondsSinceUnixEpoch, OwnedEventId, RoomId, TransactionId, UserId,
 	api::client::message::send_message_event,
 	events::{
 		AnyMessageLikeEventContent, MessageLikeEventType,
@@ -20,7 +20,7 @@ use tuwunel_core::{
 	utils::{self},
 	warn,
 };
-use tuwunel_service::Services;
+use tuwunel_service::{Services, appservice::RegistrationInfo};
 
 use crate::{Ruma, client::utils::is_self_redaction};
 
@@ -39,46 +39,131 @@ struct ExtractRelatesTo {
 /// - The only requirement for the content is that it has to be valid json
 /// - Tries to send the event into the room, auth rules will determine if it is
 ///   allowed
+/// - `X-Wbf-Attachments: mxc://a,mxc://b` declares the media the event
+///   attaches, which the server cannot read out of encrypted content; see
+///   `docs/design/media-attachments.md`.
 pub(crate) async fn send_message_event_route(
 	State(services): State<crate::State>,
 	body: Ruma<send_message_event::v3::Request>,
 ) -> Result<send_message_event::v3::Response> {
-	let sender_user = body.sender_user();
-	let sender_device = body.sender_device.as_deref();
-	let appservice_info = body.appservice_info.as_ref();
+	let declared = declared_attachments_from_header(&body.headers);
+	let send = SendMessageEvent {
+		sender_user: body.sender_user(),
+		sender_device: body.sender_device.as_deref(),
+		appservice_info: body.appservice_info.as_ref(),
+		room_id: &body.room_id,
+		event_type: &body.event_type,
+		txn_id: &body.txn_id,
+		content: &body.body.body,
+		timestamp: body.timestamp,
+		declared_attachments: declared,
+		via_legacy_http: true,
+	};
+
+	let event_id = send_message_event(&services, send).await?;
+
+	Ok(send_message_event::v3::Response { event_id })
+}
+
+/// The header a client sets on the legacy send endpoint to declare the media
+/// the event attaches: comma-separated `mxc://` URIs.
+pub(crate) const ATTACHMENTS_HEADER: &str = "x-wbf-attachments";
+
+/// Args:
+///     headers: the request headers, example: `X-Wbf-Attachments: mxc://a/1, mxc://a/2`
+/// Return:
+///     Vec<String>  the entries, trimmed, empty ones dropped; empty when the
+///     header is absent or not valid text.
+pub(crate) fn declared_attachments_from_header(headers: &HeaderMap) -> Vec<String> {
+	headers
+		.get_all(ATTACHMENTS_HEADER)
+		.iter()
+		.filter_map(|value| value.to_str().ok())
+		.flat_map(|value| value.split(','))
+		.map(str::trim)
+		.filter(|entry| !entry.is_empty())
+		.map(ToOwned::to_owned)
+		.collect()
+}
+
+/// One send, from either transport (the legacy HTTP route or the wbf
+/// `Event/Send` pack); both end up here so there is one set of rules.
+pub(crate) struct SendMessageEvent<'a> {
+	pub(crate) sender_user: &'a UserId,
+	pub(crate) sender_device: Option<&'a DeviceId>,
+	pub(crate) appservice_info: Option<&'a RegistrationInfo>,
+	pub(crate) room_id: &'a RoomId,
+	pub(crate) event_type: &'a MessageLikeEventType,
+	pub(crate) txn_id: &'a TransactionId,
+	pub(crate) content: &'a Raw<AnyMessageLikeEventContent>,
+	pub(crate) timestamp: Option<MilliSecondsSinceUnixEpoch>,
+	/// The media the sender says this event attaches; checked here.
+	pub(crate) declared_attachments: Vec<String>,
+	/// Whether this came through the legacy HTTP endpoint: an encrypted send
+	/// from there with nothing declared is what the one-time warning is for.
+	pub(crate) via_legacy_http: bool,
+}
+
+/// Args:
+///     send: see `SendMessageEvent`
+/// Return:
+///     Result<OwnedEventId>  the event id (the earlier one for a repeated
+///     transaction id); Err for a refused declaration (400, naming the
+///     attachment), or anything the event itself is refused for.
+pub(crate) async fn send_message_event(
+	services: &Services,
+	send: SendMessageEvent<'_>,
+) -> Result<OwnedEventId> {
+	let SendMessageEvent {
+		sender_user,
+		sender_device,
+		appservice_info,
+		room_id,
+		event_type,
+		txn_id,
+		content: body,
+		timestamp,
+		declared_attachments,
+		via_legacy_http,
+	} = send;
 
 	// Forbid m.room.encrypted if encryption is disabled
-	if body.event_type == MessageLikeEventType::RoomEncrypted && !services.config.allow_encryption
-	{
+	if *event_type == MessageLikeEventType::RoomEncrypted && !services.config.allow_encryption {
 		return Err!(Request(Forbidden("Encryption has been disabled")));
 	}
+
+	// Checked before anything is written: a refused attachment refuses the
+	// whole send, so a client bug shows up here and not as a message pointing
+	// at media that will be swept.
+	let attachments = services
+		.media_refs
+		.check_attachments(sender_user, &declared_attachments)
+		.await
+		.map_err(|error| err!(Request(InvalidParam("{error}"))))?;
 
 	// MSC4169: clients sending m.room.redaction via /send put `redacts` in
 	// `content`. Pre-v11 auth rules read it from the top level; lift it so
 	// `redacts_id(...)` resolves regardless of room version. Mirrors the
 	// /redact handler.
 	let redaction_content = || {
-		body.body
-			.body
-			.deserialize_as_unchecked::<RoomRedactionEventContent>()
+		body.deserialize_as_unchecked::<RoomRedactionEventContent>()
 			.inspect_err(|_| {
 				debug_warn!(
 					%sender_user,
-					event = %body.body.body.json(),
+					event = %body.json(),
 					"Client sent invalid redaction event"
 				);
 			})
 			.ok()
 	};
 
-	let redacts_id = body
-		.event_type
+	let redacts_id = event_type
 		.eq(&MessageLikeEventType::RoomRedaction)
 		.then(redaction_content)
 		.flatten()
 		.and_then(|content| content.redacts);
 
-	if body.event_type == MessageLikeEventType::RoomRedaction
+	if *event_type == MessageLikeEventType::RoomRedaction
 		&& services.config.disable_local_redactions
 		&& !services.admin.user_is_admin(sender_user).await
 	{
@@ -92,7 +177,7 @@ pub(crate) async fn send_message_event_route(
 	}
 
 	if services.users.is_suspended(sender_user).await {
-		if body.event_type != MessageLikeEventType::RoomRedaction {
+		if *event_type != MessageLikeEventType::RoomRedaction {
 			return Err!(Request(UserSuspended(
 				"Cannot send non-redaction events while suspended."
 			)));
@@ -100,7 +185,7 @@ pub(crate) async fn send_message_event_route(
 
 		let is_self = match &redacts_id {
 			| None => false,
-			| Some(redacts_id) => is_self_redaction(&services, sender_user, redacts_id).await,
+			| Some(redacts_id) => is_self_redaction(services, sender_user, redacts_id).await,
 		};
 
 		if !is_self {
@@ -108,39 +193,44 @@ pub(crate) async fn send_message_event_route(
 		}
 	}
 
-	let state_lock = services.state.mutex.lock(&body.room_id).await;
+	let state_lock = services.state.mutex.lock(room_id).await;
 
 	let (existing_txnid, ..) = try_join4(
-		check_existing_txnid(&services, sender_user, sender_device, &body.txn_id).map(Ok),
-		check_duplicate_reaction(&services, &body.event_type, sender_user, &body.body.body),
-		check_public_call_invite(&services, &body.event_type, &body.room_id),
-		check_nested_thread(&services, &body.body.body),
+		check_existing_txnid(services, sender_user, sender_device, txn_id).map(Ok),
+		check_duplicate_reaction(services, event_type, sender_user, body),
+		check_public_call_invite(services, event_type, room_id),
+		check_nested_thread(services, body),
 	)
 	.await?;
 
 	if let Some(existing_txnid) = existing_txnid {
-		return existing_txnid;
+		return existing_txnid.map(|response| response.event_id);
 	}
 
 	let mut unsigned = BTreeMap::new();
-	unsigned.insert("transaction_id".to_owned(), body.txn_id.to_string().into());
+	unsigned.insert("transaction_id".to_owned(), txn_id.to_string().into());
 
-	let content = from_str(body.body.body.json().get())
+	let content = from_str(body.json().get())
 		.map_err(|e| err!(Request(BadJson("Invalid JSON body: {e}"))))?;
+
+	let is_undeclared_encrypted = via_legacy_http
+		&& *event_type == MessageLikeEventType::RoomEncrypted
+		&& attachments.is_empty();
 
 	let event_id = services
 		.timeline
 		.build_and_append_pdu(
 			PduBuilder {
-				event_type: body.event_type.clone().into(),
+				event_type: event_type.clone().into(),
 				content,
 				unsigned: Some(unsigned),
-				timestamp: appservice_info.and(body.timestamp),
+				timestamp: appservice_info.and(timestamp),
 				redacts: redacts_id,
+				attachments,
 				..Default::default()
 			},
 			sender_user,
-			&body.room_id,
+			room_id,
 			&state_lock,
 		)
 		.await?;
@@ -148,13 +238,22 @@ pub(crate) async fn send_message_event_route(
 	services.transaction_ids.add_txnid(
 		sender_user,
 		sender_device,
-		&body.txn_id,
+		txn_id,
 		event_id.as_bytes(),
 	);
 
 	drop(state_lock);
 
-	Ok(send_message_event::v3::Response { event_id })
+	// After the send, never instead of it: a client that does not declare is
+	// told once, if it looks like it just attached something.
+	if is_undeclared_encrypted {
+		services
+			.media_refs
+			.warn_if_undeclared_attachments(sender_user)
+			.await;
+	}
+
+	Ok(event_id)
 }
 
 async fn check_public_call_invite(

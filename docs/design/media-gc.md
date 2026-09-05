@@ -171,32 +171,12 @@ None 或 i64::MIN  → skip（沒被算過 / 哨兵）
 
 📌 上一版提的「啟動時枚舉所有本地媒體種 `Set(MIN)`」已撤銷：它做的事懶惰植入免費就有。
 
-## 5. `migrate`：重算 ＋ 清理，像一個 clean CLI
+## 5. ~~`migrate`：重算 ＋ 清理~~（已移除，2026-09-06）
 
-```
-!admin media migrate-references [--dry-run]
-```
-
-**預設不跑，定位是離線維護作業**（維護視窗內執行；執行當下或中途才建立的房間沒掃到，不用管，
-下次再掃）。一律**掃全部房間、全部使用者**找出關聯的媒體。跑的時候：
-
-1. **暫停 worker**（記憶體旗標）。
-2. **全部歸零**：`mxc_refcount.clear()`。
-3. **掃事件**：走 `pduid_pdu` 全表（照 `rebuild_typed_relations` 的 `raw_stream`），每筆用 `list_content_mxc_uris(content)`
-   在**記憶體裡**累加。已 redact 的內容為空，自然不加 —— 但它的**原文備份才是持有者**（§3.0），所以再走一遍
-   `retention.retained_pdus_raw()` 把備份內容也算進去。漏了這一步，每一則已 redact 但備份還在的訊息的媒體都會被當孤兒刪掉。
-4. **掃使用者**：`users.list_local_users()` × `profile.avatar_url()` → 累加。
-5. **寫回**（非 dry-run）：`mxc_refcount.clear()` 後，對 `get_all_mxcs()` 的每一個媒體 `merge(Set(計數))`，沒被引用的寫 0
-   （不是留空 —— 留空的列下次被 ±1 就變哨兵）；被引用但沒有檔案列的（遠端尚未快取）也寫。每 1000 列一筆交易。
-6. **掃媒體**：`get_all_mxcs()` 裡**本地**且計數 ≤ 0 的 ＝ 孤兒 → `media.collect(Migrated)`（刪 bytes、寫墓碑、刪計數列）。
-   ⚠️ 跳過「最近 N 秒內建立」的（上傳空窗；建立時間走既有的 `mtime_millis`，讀不到 mtime 也視為太新，不刪）。
-7. 恢復 worker；印摘要（掃了幾個事件／備份／頭像／媒體，刪了哪些，跳過哪些）。
-
-`--dry-run` 只做 1–4 ＋ 6 的判斷，印**會刪哪些**，不寫計數、不刪。**第一次一定先 dry-run。**
-實作在 `src/service/media_refs/migrate.rs`（`rebuild`），admin 包裝在 `src/admin/media/migrate_references.rs`。
-
-📎 **為什麼掃事件而不是「逐個 room」**：`pduid_pdu` 的鍵以 room 為前綴，全表順掃**就是**逐個 room，不必另外枚舉房間。
-使用者那邊才需要 `list_local_users()`。跑完後哨兵全部消失（被 `clear()` 清掉、重算成真實數字），之後就是純自動模式。
+`!admin media migrate-references` 與 `media_refs/migrate.rs` 在 E2EE 破口定案時被維護者移除：靠 content 重算對 E2EE 房間是死路
+（server 讀不到密文裡的 mxc），重算出來的計數會把活著的附件當孤兒刪。取代它的兩件事在 [media-attachments.md](media-attachments.md)：
+引用由送訊息的請求宣告（`eventid_mxcs`），計數 0 的媒體由**週期掃描**在保護期（≥ 7 天）後清。既存媒體維持哨兵、不計不刪，沒有遷移。
+`TombstoneReason::Migrated` 保留給舊墓碑解碼。
 
 ## 6. 墓碑（維護者已同意）
 
@@ -221,7 +201,9 @@ None 或 i64::MIN  → skip（沒被算過 / 哨兵）
 | 設定 | 預設 | 意義 |
 |---|---|---|
 | `media_gc_enabled` | **`true`** | 主開關；`false` 時 worker 只 `info!` 會刪什麼，不刪 |
-| `media_gc_migrate_skip_recent_seconds` | `600` | migrate 掃媒體時，跳過多新的上傳 |
+| `media_unreferenced_grace_seconds` | `604800` | 計數 0 的新上傳受保護多久，低於 7 天夾成 7 天（[media-attachments.md](media-attachments.md) §4.3） |
+| `media_gc_sweep_interval` | `3600` | 掃計數 0 媒體的週期 |
+| `attachments_max_per_event` | `32` | 一則事件最多宣告幾個附件 |
 
 沒有寬限期設定 —— 維護者要立刻生效。「刪錯能救」在 Matrix 的答案本來就是重新上傳。
 

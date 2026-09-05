@@ -26,12 +26,11 @@ pub(super) async fn refcount(&self, mxc: OwnedMxcUri) -> Result {
 	let report = match self.services.media_refs.refcount(mxc).await? {
 		| None => format!(
 			"{mxc} has no reference count.\n\nIt was created before counting existed and nothing \
-			 has touched it since. It will not be collected until references are rebuilt."
+			 has touched it since. It is never collected automatically."
 		),
 		| Some(COUNTER_SENTINEL) => format!(
 			"{mxc} predates reference counting (sentinel).\n\nSomething referenced or released \
-			 it after counting began, but its true count is unknown. It will not be collected \
-			 until references are rebuilt."
+			 it after counting began, but its true count is unknown. It is never collected \n			 automatically."
 		),
 		| Some(count) => format!("{mxc} has {count} reference(s)."),
 	};

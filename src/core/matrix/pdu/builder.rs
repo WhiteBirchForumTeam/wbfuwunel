@@ -49,6 +49,15 @@ pub struct Builder {
 	/// An absent value uses the current time when the PDU is built. Ordinary
 	/// callers should leave this field unset.
 	pub timestamp: Option<MilliSecondsSinceUnixEpoch>,
+
+	/// Media the sender declares this event attaches, as `mxc://` URIs.
+	///
+	/// The server cannot read the content of an encrypted event, so this is
+	/// how a reference to uploaded media reaches the reference counter for
+	/// one. It is request-side data, never part of the event: not serialized,
+	/// not hashed, not federated.
+	#[serde(skip)]
+	pub attachments: Vec<String>,
 }
 
 impl Default for Builder {
@@ -60,6 +69,7 @@ impl Default for Builder {
 			state_key: None,
 			redacts: None,
 			timestamp: None,
+			attachments: Vec::new(),
 		}
 	}
 }
