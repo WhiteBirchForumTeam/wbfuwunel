@@ -26,6 +26,7 @@ use tuwunel_service::{
 	media::{UploadError, UploadRequest},
 };
 
+mod recent;
 mod ws;
 
 pub(crate) use self::ws::ws_route;
@@ -52,6 +53,11 @@ mod upload {
 mod download {
 	pub(super) const INFO: u8 = 0x01;
 	pub(super) const READ: u8 = 0x02;
+}
+
+/// `Event` subtypes.
+mod event {
+	pub(super) const RECENT: u8 = 0x01;
 }
 
 /// # `POST /_wbf/v1/pack`
@@ -141,6 +147,7 @@ pub(crate) async fn handle_pack(services: &Services, user: &UserId, view: PackVi
 		| (Kind::Upload, upload::ABORT) => handle_upload_abort(services, user, &view).await,
 		| (Kind::Download, download::INFO) => handle_download_info(services, &view).await,
 		| (Kind::Download, download::READ) => handle_download_read(services, &view).await,
+		| (Kind::Event, event::RECENT) => recent::handle_event_recent(services, user, &view).await,
 		| (Kind::Stream, _) => Err(Reject::code("Conflict", "streams need the WebSocket channel")),
 		| _ => Err(Reject::code("UnknownKind", "no handler for this kind and subtype")),
 	};
@@ -398,7 +405,7 @@ fn hello(services: &Services, view: &PackView<'_>) -> Vec<u8> {
 		json!({
 			"protocol": 1,
 			"server": services.globals.server_name(),
-			"features": ["upload", "download"],
+			"features": ["upload", "download", "recent", "seq"],
 			"chunk_size_default": services.config.media_chunk_size_default,
 			"chunk_size_large": services.config.media_chunk_size_large,
 			"data_max_bytes": services.config.wbf_data_max_bytes,

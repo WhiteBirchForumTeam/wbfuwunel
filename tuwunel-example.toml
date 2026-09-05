@@ -3117,6 +3117,14 @@
 #
 #wbf_ws_idle_timeout = 300
 
+# Most events one `Event/Recent` pack returns: the newest events across
+# all of a user's joined rooms, for a client mounting its cache on first
+# start. A larger `limit` in the request is clamped to this. The reply is
+# also cut at `wbf_data_max_bytes`, so a page may be shorter; the client
+# follows `next` either way.
+#
+#wbf_recent_max_limit = 10000
+
 # Allows users with `redact` power level to request unredacted events with
 # MSC2815.
 #

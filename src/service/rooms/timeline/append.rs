@@ -16,7 +16,10 @@ use tuwunel_core::{
 	Result, err, error, implement,
 	matrix::{
 		event::Event,
-		pdu::{PduCount, PduEvent, PduId, RawPduId},
+		pdu::{
+			PduCount, PduEvent, PduId, RawPduId,
+			seq::{Positions, SeqBounds, set_json_positions},
+		},
 		room_version,
 	},
 	smallvec::SmallVec,
@@ -179,6 +182,15 @@ where
 	let insert_lock = self.mutex_insert.lock(pdu.room_id()).await;
 	let next_count = self.services.globals.next_count();
 
+	// The room's own sequence number, read and advanced under the insert lock
+	// and stored with the event below in one transaction; the global count
+	// rides along so every served copy carries both positions.
+	let mut seq_bounds = self.get_seq_bounds(pdu.room_id()).await?;
+	set_json_positions(&mut pdu_json, Positions {
+		r_seq: seq_bounds.take_forward(),
+		g_seq: PduCount::Normal(*next_count).into_signed(),
+	});
+
 	// Mark as read first so the sending client doesn't get a notification even if
 	// appending fails. Route through the dispatcher so per-thread counts are
 	// also cleared; the sender's own send subsumes any thread receipt.
@@ -215,7 +227,7 @@ where
 		.await;
 
 	// Insert pdu
-	self.append_pdu_json(&pdu_id, pdu, &pdu_json);
+	self.append_pdu_json(&pdu_id, pdu, &pdu_json, seq_bounds);
 
 	drop(media_held);
 	drop(insert_lock);
@@ -427,12 +439,19 @@ async fn append_member_effects(&self, pdu: &PduEvent, count: PduCount) -> Result
 }
 
 #[implement(super::Service)]
-fn append_pdu_json(&self, pdu_id: &RawPduId, pdu: &PduEvent, json: &CanonicalJsonObject) {
+fn append_pdu_json(
+	&self,
+	pdu_id: &RawPduId,
+	pdu: &PduEvent,
+	json: &CanonicalJsonObject,
+	seq_bounds: SeqBounds,
+) {
 	debug_assert!(matches!(pdu_id.pdu_count(), PduCount::Normal(_)), "PduCount not Normal");
 
 	let mut txn = self.db.db.txn();
 
 	txn.raw_put(&self.db.pduid_pdu, pdu_id, Json(json));
+	self.put_seq_bounds(&mut txn, pdu.room_id(), seq_bounds);
 	txn.insert_raw(&self.db.eventid_pduid, pdu.event_id.as_bytes(), pdu_id);
 	txn.del_raw(&self.db.eventid_outlierpdu, pdu.event_id.as_bytes());
 

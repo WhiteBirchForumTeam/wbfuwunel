@@ -5,6 +5,7 @@ mod create;
 mod pdus;
 mod purge;
 mod redact;
+mod seq;
 
 use std::{fmt::Write, sync::Arc};
 
@@ -56,6 +57,8 @@ struct Data {
 	eventid_pduid: Arc<Map>,
 	pduid_pdu: Arc<Map>,
 	roomid_tscount_pducount: Arc<Map>,
+	/// `room_id → SeqBounds`: the room's per-room seq counters.
+	roomid_seqbounds: Arc<Map>,
 	db: Arc<Database>,
 }
 
@@ -94,6 +97,7 @@ impl crate::Service for Service {
 				eventid_pduid: args.db["eventid_pduid"].clone(),
 				pduid_pdu: args.db["pduid_pdu"].clone(),
 				roomid_tscount_pducount: args.db["roomid_tscount_pducount"].clone(),
+				roomid_seqbounds: args.db["roomid_seqbounds"].clone(),
 				db: args.db.clone(),
 			},
 			mutex_insert: RoomMutexMap::new(),

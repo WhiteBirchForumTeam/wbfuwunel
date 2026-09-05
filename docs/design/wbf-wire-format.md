@@ -78,6 +78,7 @@ offset  size  欄位          說明
 | `0x02 Stream` | `Open` `Fragment` `Close` `Abandon` | [streaming-messages.md](streaming-messages.md) §4 | 密文本體 |
 | `0x03 Upload` | `Create` `Chunk` `Status` `Seal` `Abort` | [chunked-upload.md](chunked-upload.md) §4 | 塊 bytes（`Chunk`） |
 | `0x04 Download` | `Info` `Read` | [chunked-upload.md](chunked-upload.md) §5 | 回應的 data 是讀出的 bytes |
+| `0x14 Event` | `0x01 Recent` | `{ "limit": 10000, "cg_seq": <g_seq>?, "before": <g_seq>? }`；回應 `{ "returned": n, "latest_g_seq": <g_seq>, "complete": bool, "next": <g_seq> 或 null }` | 回應的 data 是事件的 JSON 陣列（含 `room_id`；每則 `unsigned` 帶 `org.wbftw.wbfuwunel.r_seq` 與 `…g_seq`），見 [room-seq-and-recent.md](room-seq-and-recent.md) §2 |
 | 其餘 | — | 拒收並回 `Error(UnknownKind)` | |
 
 ### 3.3 kind 的分配表（為之後把所有 HTTP 請求遷到 WS 預留）
@@ -97,7 +98,7 @@ offset  size  欄位          說明
 | `0x11` | Account | account data、profile、3pid、password（`account/`、`account_data/`、`profile.rs`） |
 | `0x12` | Sync | sync、filter（`sync/`、`filter.rs`） |
 | `0x13` | Room | create、join、leave、invite、kick、ban、alias、directory、space（`room/`、`membership/`、`alias/`、`directory.rs`、`space.rs`） |
-| `0x14` | Event | send、redact、state、context、relations、threads、messages（`send.rs`、`redact.rs`、`state.rs`、`context.rs`、`message.rs`、`relations.rs`、`threads.rs`） |
+| `0x14` | Event | send、redact、state、context、relations、threads、messages（`send.rs`、`redact.rs`、`state.rs`、`context.rs`、`message.rs`、`relations.rs`、`threads.rs`）。已定：`0x01 Recent` |
 | `0x15` | Receipt | read marker、receipts、typing、presence（`read_marker/`、`typing.rs`、`presence.rs`） |
 | `0x16` | Device | devices、to-device、dehydrated（`device/`、`to_device.rs`、`dehydrated_device.rs`） |
 | `0x17` | Keys | E2EE keys、backup、cross-signing（`keys/`、`backup/`） |

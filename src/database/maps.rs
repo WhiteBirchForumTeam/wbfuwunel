@@ -435,6 +435,11 @@ pub(super) static MAPS: &[Descriptor] = &[
 		..descriptor::RANDOM
 	},
 	Descriptor {
+		name: "roomid_seqbounds",
+		val_size_hint: Some(16),
+		..descriptor::RANDOM_SMALL
+	},
+	Descriptor {
 		name: "roomserverids",
 		..descriptor::RANDOM_SMALL
 	},

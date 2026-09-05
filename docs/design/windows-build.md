@@ -47,6 +47,16 @@ cargo build -p tuwunel --release --no-default-features --features \
 實測：**36 分 30 秒**（release，thin LTO），產物
 `target\release\tuwunel.exe` 約 **110 MB**，單一 binary，只動態連 MSVC CRT。
 
+### e2e 用的快速 profile（維護者 2026-09-05 同意）
+
+release 慢在 thin LTO：連結時把整支程式跨 crate 重新最佳化，改一行也要全部重做（實測那一步就要十幾分鐘），而且
+`tuwunel_core` 動了會連帶重編 database → service → api → main 五個 crate。跑 e2e 不需要那個最佳化，所以 `Cargo.toml` 多了
+`[profile.e2e]`：繼承 release、`lto = false`、`codegen-units = 16`、`opt-level = 1`。同一條指令把 `--release` 換成 `--profile e2e`，
+產物在 `target\e2e\tuwunel.exe`，跟正式的 `target\release` 互不影響。🚫 不拿它上線，只拿它跑測試。
+
+實測（2026-09-06，同一台機器）：第一次全建 **34 分**（所有第三方套件在新 profile 下編一次，只付一次）；之後動 `tuwunel_api` 一個檔
+重建 **8 分 47 秒**（api → router → main 三個 crate，沒有 LTO 那一步）。release 同樣的改動是 20 分以上，而且大半在連結。
+
 ## 實測結果
 
 編譯成功不等於跑得動 —— RocksDB 能不能在 Windows 開起來才是這題真正要問的。實跑：

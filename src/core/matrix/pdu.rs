@@ -10,6 +10,7 @@ mod format;
 mod hashes;
 mod id;
 mod raw_id;
+pub mod seq;
 #[cfg(test)]
 mod tests;
 mod unsigned;

@@ -66,6 +66,7 @@ fork 專屬的文件都在 [`docs/design/`](docs/design/)。它們刻意不進�
 | 規格的黃金測試向量（server 實作產生，client 複製一份對著測；漂移在測試階段被抓到） | [docs/design/wbf-vectors.json](docs/design/wbf-vectors.json) |
 | 流式訊息（文字 token 串流，走 WebSocket 二進位通道，草案） | [docs/design/streaming-messages.md](docs/design/streaming-messages.md) |
 | WebSocket 通道的二進位封包外框（兩者共用） | [docs/design/wbf-wire-format.md](docs/design/wbf-wire-format.md) |
+| 每房連續序號 `r_seq`、全域序號 `g_seq`，與跨房間的 `Event/Recent`（client 帶快取水位、只拿差異） | [docs/design/room-seq-and-recent.md](docs/design/room-seq-and-recent.md) |
 
 上游的使用文件（[`docs/`](docs/) 其餘部分：設定、部署、維護）大體仍適用，因為程式碼的骨架還是
 上游的。但凡 `CHANGELOG-fork.md` 寫了行為有變的地方，以它為準。

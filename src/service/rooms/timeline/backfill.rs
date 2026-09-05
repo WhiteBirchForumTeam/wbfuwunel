@@ -15,7 +15,10 @@ use tuwunel_core::{
 	Result, at, debug, debug_warn, implement, is_false,
 	matrix::{
 		event::Event,
-		pdu::{PduCount, PduId, RawPduId},
+		pdu::{
+			PduCount, PduId, RawPduId,
+			seq::{Positions, SeqBounds, set_json_positions},
+		},
 	},
 	utils::{
 		BoolExt, IterStream, ReadyExt,
@@ -387,18 +390,24 @@ pub async fn backfill_pdu(
 
 	let insert_lock = self.mutex_insert.lock(room_id).map(Ok);
 
-	let (pdu, value, shortroomid, insert_lock) =
+	let (pdu, mut value, shortroomid, insert_lock) =
 		try_join4(pdu, value, shortroomid, insert_lock).await?;
+
+	// History from before the room's first known event is numbered downward
+	// from 0, under the same insert lock and in the same transaction as the
+	// event; the forward counter is untouched.
+	let mut seq_bounds = self.get_seq_bounds(room_id).await?;
 
 	// A pdu_id is not returned from handle_incoming_pdu() when accepting a new
 	// event on this codepath. The pdu_id is instead created here in ℤ−
 	let count = self.services.globals.next_count();
 	let count: i64 = (*count).try_into()?;
-	let pdu_id: RawPduId = PduId {
-		shortroomid,
-		count: PduCount::Backfilled(validated!(0 - count)),
-	}
-	.into();
+	let count = PduCount::Backfilled(validated!(0 - count));
+	let pdu_id: RawPduId = PduId { shortroomid, count }.into();
+	set_json_positions(&mut value, Positions {
+		r_seq: seq_bounds.take_backfilled(),
+		g_seq: count.into_signed(),
+	});
 
 	// Hold the media this event references until its count has committed,
 	// so the collector cannot remove it between reading zero and deleting.
@@ -415,6 +424,7 @@ pub async fn backfill_pdu(
 		&event_id,
 		u64::from(pdu.origin_server_ts),
 		&value,
+		seq_bounds,
 	);
 	drop(media_held);
 	drop(insert_lock);
@@ -450,10 +460,12 @@ fn prepend_backfill_pdu(
 	event_id: &EventId,
 	origin_server_ts: u64,
 	json: &CanonicalJsonObject,
+	seq_bounds: SeqBounds,
 ) {
 	let mut txn = self.db.db.txn();
 
 	txn.raw_put(&self.db.pduid_pdu, pdu_id, Json(json));
+	self.put_seq_bounds(&mut txn, room_id, seq_bounds);
 	txn.insert_raw(&self.db.eventid_pduid, event_id, pdu_id);
 	txn.del_raw(&self.db.eventid_outlierpdu, event_id);
 
