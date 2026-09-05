@@ -6,7 +6,7 @@
 > 狀態標記：✅ 已合併 · 🔧 進行中 · 📄 有提案待同意 · 🔲 下一步 · 💭 候選（還沒決定要不要做）· 🚫 明確不做。
 > 每一項改狀態時順手改這裡；這裡的狀態如果跟 [`CHANGELOG-fork.md`](../../CHANGELOG-fork.md) 對不上，以 CHANGELOG 為準。
 >
-> 最後更新：2026-09-03。
+> 最後更新：2026-09-05。
 
 ## 0. 目標，一句話
 
@@ -59,6 +59,12 @@ pack 格式與 kind 分配在 [wbf-wire-format.md](wbf-wire-format.md)，**未�
 
 提案已在 [streaming-messages.md](streaming-messages.md)，核心設計 §5.3。走短暫訊息旁路，講完才寫一個正式事件，歷史零污染。
 程式碼落點對照 `rooms/typing/` 與 sync 喚醒，提案 §3 已寫。等維護者同意就能開分支；它與媒體層互不依賴，可以並行。
+
+### 2.4 📄 每房連續序號 `seq` 與跨房間「全域最近 N 則」（issue #20）
+
+client（wbf-matrix-client）的聊天模型要 server 配合的兩件事，維護者 2026-09-05 定案要做。提案在
+[room-seq-and-recent.md](room-seq-and-recent.md)：`seq` 寫進存起來的 PDU 的 `unsigned`（一個寫入點、所有讀路徑自動帶）、
+startup migration 回填既有 room；`Event/Recent` pack 用既有全域 count 做 k 路合併，不加索引。
 
 ## 3. 候選（要不要做，由維護者決定）
 
