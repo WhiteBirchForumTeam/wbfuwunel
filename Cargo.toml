@@ -737,6 +737,16 @@ default-features = false
 strip = "symbols"
 lto = "thin"
 
+# Fast-turnaround build for running the real server in end-to-end tests. No
+# LTO (the link step that makes a one-line change cost twenty minutes),
+# parallel codegen, light optimization. Output: target/e2e/. Not for serving.
+[profile.e2e]
+inherits = "release"
+lto = false
+codegen-units = 16
+opt-level = 1
+strip = "none"
+
 # release profile with debug symbols
 [profile.release-debuginfo]
 inherits = "release"

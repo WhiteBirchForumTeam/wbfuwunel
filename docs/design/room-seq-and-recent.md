@@ -150,9 +150,15 @@ BinaryHeap 以 count 為鍵，每次彈最大的、再從那條串流補一個
 
 - 單元：計數器同一交易；redact 前後 `r_seq` 不變；`into_outgoing_federation` 剝掉 `r_seq`；k 路合併順序（三個 room 交錯的 count）
   與 byte 上限截斷後 `next` 正確。
-- e2e（真伺服器）：兩個 room 各送幾則 → `/sync`、`/messages`、`/context`、`/event`、`/relations`、search 都帶同一個 `r_seq`；redact 後
-  `r_seq` 不變；`Event/Recent` 用 WS 拿 limit=5、再用 `next` 翻到耗盡，順序等於送出順序的倒序；被 ignore 的使用者的訊息不出現；
-  舊庫啟動後 migration 給每個既有事件編號、bounds 正確。
+- e2e（真伺服器，Windows release build，腳本 `e2e8.ps1`，2026-09-05 **33 個檢查點全綠**）：
+  - `r_seq`：兩個 room 各 1..n 連續、`m.room.create` 是 1、同一事件在 `/event`／`/messages`／`/context`／`/sync` 同號、redact 後不變且
+    redaction 事件拿下一號。
+  - `Event/Recent`（WS）：第一頁 3 則新到舊、`g_seq` 遞減、`next` = 頁尾的 `g_seq`；用 `before` 翻到耗盡，總集合＝使用者所有加入 room
+    （含 admin room）的 `/messages` 聯集、無重複、`complete=true`、`next=null`；`cg_seq` 帶第三新的 `g_seq` 只回 2 則且 `complete`；
+    `cg_seq=latest_g_seq` 回 0 則；`cg_seq=0` 等於沒設；`limit=1` 小於差距 → `complete=false`，再帶 `before=next` 補到 `complete`。
+  - 可見性：bob 只拿到自己加入的 room；alice ignore bob 後他的訊息在 `Recent` 與 `/messages` 同樣消失。
+  - HTTP fallback 同結果；`cg_seq` 非整數 → `Error(Conflict)`；空 meta = 預設；未知 subtype → `UnknownKind`。
+  - migration：PR #18 版 binary 建的庫（沒有任何號）換新 binary 啟動 → 每則 1..n 且帶 `g_seq`、下一則接 n+1、第二次啟動不重編。
 - 合併後：CHANGELOG 一列、roadmap §2.4 標 ✅（wire-format §3.2、§3.3 已在實作分支同步）。
 
 ## 5. 實作落點（給下一個讀的人）
