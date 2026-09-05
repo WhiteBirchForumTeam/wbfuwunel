@@ -2,7 +2,7 @@
 
 > **這份文件回答：client 的聊天模型要 server 配合的兩件事，server 端怎麼做、為什麼這樣做。**
 > 需求出處：issue #20（wbf-matrix-client `docs/design/chat-model.md` §4.3、§7）。
-> 狀態：📄 提案，2026-09-05，等維護者同意後開實作分支。
+> 狀態：🔧 維護者 2026-09-05 同意（PR #21），實作分支 `event/room-seq-recent`。
 > 相關：[wbf-wire-format.md](wbf-wire-format.md)（pack 與 kind 分配）、[roadmap.md](roadmap.md)。
 
 ## 0. 一句話
@@ -37,6 +37,11 @@ issue 列了七條要帶 `seq` 的路徑（sync、messages、context、event、r
 兩條路徑在拿號那一刻都已經持有 `timeline.mutex_insert` 這把每房一鎖（`append.rs:179`、`backfill.rs:391`），所以同一 room 內
 拿號不會撞；表的寫入跟 PDU 本身同一交易，不會出現「號發了 PDU 沒存」或反過來。
 
+- **`seq` 是本站的到達順序，不是 `origin_server_ts` 順序。** 聯邦即時送來的事件（`PUT /send`），不管它的時間戳多舊 ——
+  對方斷線一陣子、重連後一次送來的也一樣 —— 都走 `append_pdu`，拿當下的正號接在尾巴；收到事件時缺的 `prev_events` 抓回來後
+  進 timeline 也走同一條、拿當下的正號。Matrix 的 timeline 本來就是到達順序，token、PduCount 都不會為時間戳重排，`seq` 跟它們一致。
+  負號**只**給 `/backfill`：本站對這個 room 已知的最早事件之前還有歷史、而本站從來沒有（典型是透過聯邦加入一個聊了很久的 room，
+  使用者往上滑到頭）。這條路徑在 `allow_federation=false` 時不會發生，但程式碼在，就要有定義；維護者 2026-09-05 確認這個模型。
 - 同一 room 內唯一且單調：新 append 一定大於之前所有正號。
 - 正號發出去**永不重排**；backfill 只碰負號。
 - state 事件也算：所有進 timeline 的 PDU 都編號（與 PduId 的 count 語意一致，server 端最簡單）。

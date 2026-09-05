@@ -2,7 +2,13 @@ use ruma::{
 	EventId, RoomId,
 	canonical_json::{RedactedBecause, redact_in_place},
 };
-use tuwunel_core::{Result, err, implement, matrix::event::Event};
+use tuwunel_core::{
+	Result, err, implement,
+	matrix::{
+		event::Event,
+		pdu::seq::{get_json_seq, set_json_seq},
+	},
+};
 
 use crate::rooms::{short::ShortRoomId, timeline::RoomMutexGuard};
 
@@ -74,12 +80,20 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 		.media_refs
 		.list_event_mxc_uris(&pdu);
 
+	// Redaction strips `unsigned`; the event keeps its place in the room, so
+	// its seq goes back afterwards.
+	let seq = get_json_seq(&pdu);
+
 	redact_in_place(
 		&mut pdu,
 		&room_version_rules.redaction,
 		Some(RedactedBecause::from_json(reason.to_canonical_object())),
 	)
 	.map_err(|err| err!("invalid event: {err}"))?;
+
+	if let Some(seq) = seq {
+		set_json_seq(&mut pdu, seq);
+	}
 
 	self.replace_pdu(&pdu_id, &pdu).await?;
 

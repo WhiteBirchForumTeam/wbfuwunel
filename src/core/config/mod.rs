@@ -3581,6 +3581,16 @@ pub struct Config {
 	#[serde(default = "default_wbf_ws_idle_timeout")]
 	pub wbf_ws_idle_timeout: u64,
 
+	/// Most events one `Event/Recent` pack returns: the newest events across
+	/// all of a user's joined rooms, for a client mounting its cache on first
+	/// start. A larger `limit` in the request is clamped to this. The reply is
+	/// also cut at `wbf_data_max_bytes`, so a page may be shorter; the client
+	/// follows `next` either way.
+	///
+	/// default: 10000
+	#[serde(default = "default_wbf_recent_max_limit")]
+	pub wbf_recent_max_limit: usize,
+
 	/// Allows users with `redact` power level to request unredacted events with
 	/// MSC2815.
 	///
@@ -5807,6 +5817,8 @@ fn default_wbf_meta_max_bytes() -> usize { 64 * 1024 }
 fn default_wbf_data_max_bytes() -> usize { 16 * 1024 * 1024 + 4096 }
 
 fn default_wbf_ws_idle_timeout() -> u64 { 300 }
+
+fn default_wbf_recent_max_limit() -> usize { 10_000 }
 
 fn default_media_storage_providers() -> BTreeSet<String> { ["media".to_owned()].into() }
 

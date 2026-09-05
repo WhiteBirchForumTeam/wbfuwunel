@@ -21,6 +21,7 @@ use tuwunel_database::Deserialized;
 
 use self::{
 	account_status::migrate_account_status,
+	backfill_room_seq::backfill_room_seq,
 	clear_servername_status::clear_servername_status,
 	email_bindings::migrate_email_bindings,
 	fix_bad_double_separator_in_state_cache::fix_bad_double_separator_in_state_cache,
@@ -40,6 +41,7 @@ use self::{
 use crate::Services;
 
 mod account_status;
+mod backfill_room_seq;
 mod clear_servername_status;
 mod conduit;
 mod email_bindings;
@@ -220,6 +222,7 @@ async fn fresh(services: &Services) -> Result {
 	db["global"].insert(b"upgrade_legacy_mediaid_user", []);
 	db["global"].insert(b"remove_remote_media_userid", []);
 	db["global"].insert(b"rebuild_roomid_tscount_pducount", []);
+	db["global"].insert(b"backfill_room_seq", []);
 	db["global"].insert(b"rebuild_relatesto_typed", []);
 	db["global"].insert(b"migrate_profile_keys_to_useridprofilekey", []);
 	db["global"].insert(b"rebuild_thread_activity", []);
@@ -347,6 +350,14 @@ async fn migrate(services: &Services, foreign_lineage: bool) -> Result {
 		.is_not_found()
 	{
 		rebuild_roomid_tscount_pducount(services).await?;
+	}
+
+	if db["global"]
+		.get(b"backfill_room_seq")
+		.await
+		.is_not_found()
+	{
+		backfill_room_seq(services).await?;
 	}
 
 	if db["global"]

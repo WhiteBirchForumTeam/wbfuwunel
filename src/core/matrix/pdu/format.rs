@@ -9,8 +9,8 @@ use crate::{extract_variant, is_equal_to, matrix::room_version};
 
 /// Converts a stored PDU object to its federation wire representation.
 ///
-/// Local transaction metadata is removed and room-version rules select the
-/// fields and event-reference shape sent to peers. When rules are unavailable,
+/// Local transaction metadata and this server's per-room seq are removed, and
+/// room-version rules select the fields and event-reference shape sent to peers. When rules are unavailable,
 /// the event ID is removed without rewriting event references.
 #[must_use]
 pub fn into_outgoing_federation(
@@ -22,6 +22,7 @@ pub fn into_outgoing_federation(
 		.and_then(|val| val.as_object_mut())
 	{
 		unsigned.remove("transaction_id");
+		unsigned.remove(super::seq::SEQ_KEY);
 	}
 
 	let Ok(room_rules) = room_version::rules(room_version) else {
