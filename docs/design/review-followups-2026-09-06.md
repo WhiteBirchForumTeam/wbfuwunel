@@ -1,7 +1,7 @@
 # PR #24 合併後的再審，與外部審查（2026-09-05 兩輪）的逐條驗證
 
 > **這份文件回答：main `389152df6`（PR #24 合併後）還有哪些已確認的缺陷、各自的證據在哪一行、建議怎麼修、怎麼驗。**
-> 狀態：維護者 2026-09-06 同意三支都修（§4）。✅ `media/managed-origin`（§2.1、§2.6、§2.7、§2.9）PR #26 已合併；🔧 `wbf/auth-and-ws-lifetime`（§2.3、§2.4）實作中；`media/upload-lifecycle`（§2.2、§2.5、§2.8）待開。
+> 狀態：維護者 2026-09-06 同意三支都修（§4）。✅ `media/managed-origin`（§2.1、§2.6、§2.7、§2.9）PR #26 已合併；✅ `wbf/auth-and-ws-lifetime`（§2.3、§2.4）PR #28 已合併；`media/upload-lifecycle`（§2.2、§2.5、§2.8）排最後（維護者有自己的 checklist，逐條確認設計漏洞後再開）；在它之前先寫 WS `Login`／`Refresh`／`Logout` 的提案（wbf-wire-format.md §6.3）。
 > 來源兩個：(1) 持有者集合是實作到一半重做的（[media-holders.md](media-holders.md)），合併後對 main 重看一次；
 > (2) `../external-review/wbfuwunel-2026-09-05.md` 與 `-v2.md`，一位外部審查者對 `0c964d522`／`3091c7ce3` 做的靜態審查，共 9＋5 條。
 > 外部審查的每一條都**對現在的程式碼重新讀過**再下結論，不沿用它的判定；它看的版本沒有 #22 與 #24。
@@ -78,7 +78,7 @@ provider 的 `multipart_part_size()`（S3 預設 10 MiB；本地回 `usize::MAX`
 **驗收**：e2e6 加「本地 Seal 512 MiB，過程中量 server 的 working set 不超過啟動值 + 64 MiB」（PowerShell 讀 `Get-Process` 的 `WorkingSet64`）；
 S3 用 MinIO 容器跑一次 ≥ 100 MiB 的 Seal（沒有 MinIO 就記成「未驗」，不要寫成綠）。
 
-### 2.3 🔴 P1：`/_wbf/*` 與 WebSocket 不查帳號鎖定（🔧 `wbf/auth-and-ws-lifetime`）
+### 2.3 🔴 P1：`/_wbf/*` 與 WebSocket 不查帳號鎖定（✅ `wbf/auth-and-ws-lifetime`，PR #28）
 
 **現況**：`wbf/mod.rs:102-127` 的 `authenticate` 只做 token 查找與到期；標準路由的 `locked_account_check`／`suspended_account_check`
 （`router/auth.rs:96-121`）它都沒走。鎖帳號刻意保留 access token（MSC3939），所以被鎖的人拿同一個 token 打 `/_wbf/v1/pack` 照樣
@@ -90,7 +90,7 @@ Create／Chunk／Seal／Read，WebSocket 握手也一樣。
 
 **驗收**：e2e 加「鎖帳號後同 token 打 `/_wbf/v1/pack` 與 WS 握手都 401；解鎖後恢復」。
 
-### 2.4 🔴 P1：WebSocket 連線的生命週期與 session（🔧 `wbf/auth-and-ws-lifetime`）
+### 2.4 🔴 P1：WebSocket 連線的生命週期與 session（✅ `wbf/auth-and-ws-lifetime`，PR #28）
 
 兩件事，同一條線：
 
