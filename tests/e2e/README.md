@@ -33,5 +33,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\e2e\e2e10.ps1
 
 - 從 `e2e10.ps1` 抄骨架：dot-source helpers、`Check name ok detail`、每個情境一個乾淨的資料庫目錄、結束 `Stop-Server`。
 - ⚠️ PowerShell 變數**不分大小寫**：`$m3` 會蓋掉 `$M3`。狀態碼用 `$st…` 之類的名字。
+- ⚠️ 字串裡變數後面接 `?` 要寫 `${id}?width=…`：5.1 把 `$id?` 當成一個叫 `id?` 的變數（問號是合法名字元），URL 會少一段、server 回 400。
 - ⚠️ 中文不要寫進 `.ps1` 字面值（5.1 讀無 BOM 檔案當 ANSI 會變亂碼）；訊息用英文。
 - helper 只放真的共用的東西；腳本專用的函式留在腳本裡（`Room-Messages` 之類），不然沒定義時只在 console 印例外，`results.txt` 看不到。

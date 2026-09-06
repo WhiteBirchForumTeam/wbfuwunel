@@ -171,7 +171,7 @@ function Upload-Png($tok, [byte[]]$bytes, $name) {
 }
 function Get-Thumbnail($mxc, $tok) {
   $id = $mxc -replace '^mxc://localhost/', ''
-  $req = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::Get, "$B/_matrix/client/v1/media/thumbnail/localhost/$id?width=32&height=32&method=scale")
+  $req = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::Get, "$B/_matrix/client/v1/media/thumbnail/localhost/${id}?width=32&height=32&method=scale")
   $req.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $tok)
   $resp = $script:Http.SendAsync($req).Result; @{ status = [int]$resp.StatusCode; bytes = $resp.Content.ReadAsByteArrayAsync().Result }
 }
