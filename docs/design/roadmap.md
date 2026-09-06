@@ -85,11 +85,11 @@ PR #24 合併後對 main 重看一次，加上 `../external-review` 兩輪（202
 | `wbf/auth-and-ws-lifetime` | `/_wbf/*` 與 WebSocket 不查帳號鎖定（P1）；WebSocket 在登出／到期後仍有權限、關機時 `State` 懸空（P1） | ✅ PR #28 |
 | `media/upload-lifecycle` | Seal 在本地儲存收整檔進記憶體、S3 的 1 MiB parts（P1）；`Status` 冷載入不持鎖、sweeper 鎖下不重讀進度（P2）；升級前舊上傳卡配額（P2） | 🔲 |
 
-### 2.7 📄 WS 的 `Login`／`Refresh`／`Logout`（提案 [wbf-wire-format.md](wbf-wire-format.md) §6.3）
+### 2.7 🔧 WS 的 `Login`／`Refresh`／`Logout`（提案 [wbf-wire-format.md](wbf-wire-format.md) §6.3，維護者 2026-09-07 同意，實作分支 `wbf/session-login`）
 
-維護者 2026-09-06 提出：登入該有 WS 專用的 pack 格式，升級帶 Bearer 可以留著。提案：kind `0x10 Session`（§3.3 早就留給登入這一章）下三個 subtype，meta 沿用 Matrix `/login` 的請求體、
-登入本體抽成 service 函式讓 HTTP 與 WS 共用；允許不帶 Bearer 升級但只接受 `Hello`／`Ping`／`Login`／`Refresh`，未登入用 10 秒的短超時；
-**登入限速是必做**（HTTP `/login` 現在沒有），同一個 token bucket 管 HTTP 與 WS，預設值等維護者定。排在 `media/upload-lifecycle` 之前。
+維護者 2026-09-06 提出：登入該有 WS 專用的 pack 格式，升級帶 Bearer 可以留著。定案：kind `0x10 Session`（§3.3 早就留給登入這一章）下三個 subtype，meta 沿用 Matrix `/login` 的請求體、
+登入本體抽成 service 函式讓 HTTP 與 WS 共用；允許不帶 Bearer 升級但只接受 `Hello`／`Ping`／`Login`／`Refresh`，**未登入 30 秒就斷**（從升級起算，不是 idle）；
+Logout 後直接關線；同一條連線重複 Login 允許；**登入限速預設開**（每秒 1、突發 10），同一個 token bucket 管 HTTP `/login`／`/refresh` 與 WS。排在 `media/upload-lifecycle` 之前。
 
 ## 3. 候選（要不要做，由維護者決定）
 
