@@ -111,6 +111,13 @@ Create／Chunk／Seal／Read，WebSocket 握手也一樣。
 **驗收**：e2e7 加「WS 連著 → HTTP logout → 下一個 pack 回 Unauthorized 且線關」；「WS 連著 → `server shutdown` → 程序乾淨退出、log 沒有
 dangling references」（`run.rs:125` 的 `debug_error!` 就是現成的探針，e2e 開 debug log 抓它）。
 
+**結果（2026-09-06，e2e7 情境 3）**：鎖 bob → HTTP pack 401 `M_USER_LOCKED`、WS 升級 401，解鎖恢復；bob 連著 → HTTP logout → 下一個 Ping 回
+`Error(Unauthorized)`（`M_UNKNOWN_TOKEN`）、server Close 1008；alice 連著 → admin room `!admin server shutdown` → client 收到 Close **1001**
+`EndpointUnavailable`（第一版送 1012，.NET 的 `ClientWebSocket` 把它當協定錯誤 Aborted，改 1001 後收到 Close），程序 30 秒內乾淨退出，
+log `Waiting for long-lived connections to end... open=2` → `Long-lived connections ended`，無 abnormal。
+⚠️ `release_max_log_level` 把 `debug!` 編譯掉，e2e binary 看不到 `debug_error!("dangling references")` 那個探針，
+「沒有懸空」是靠「追蹤器 join 完 → 程序乾淨退出」間接證；直接證要 debug build，沒做。
+
 ### 2.5 🔴 P2：上傳 `Status` 冷載入不持鎖；sweeper 鎖下不重讀進度
 
 - `upload_status`（`upload.rs:363`）→ `hot_upload`（`:566`）：快取沒中就讀 DB 再 `remember_upload` 寫回，**全程沒拿 `upload_locks`**。
