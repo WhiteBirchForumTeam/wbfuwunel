@@ -150,7 +150,7 @@ BinaryHeap 以 count 為鍵，每次彈最大的、再從那條串流補一個
 
 - 單元：計數器同一交易；redact 前後 `r_seq` 不變；`into_outgoing_federation` 剝掉 `r_seq`；k 路合併順序（三個 room 交錯的 count）
   與 byte 上限截斷後 `next` 正確。
-- e2e（真伺服器，Windows release build，腳本 `e2e8.ps1`，2026-09-06 **37 個檢查點全綠**）：
+- e2e（真伺服器，Windows release build，腳本 `tests/e2e/e2e8.ps1`，2026-09-06 **37 個檢查點全綠**）：
   - `r_seq`：兩個 room 各 1..n 連續、`m.room.create` 是 1、同一事件在 `/event`／`/messages`／`/context`／`/sync` 同號、redact 後不變且
     redaction 事件拿下一號。
   - `Event/Recent`（WS）：第一頁 3 則新到舊、`g_seq` 遞減、`next` = 頁尾的 `g_seq`；用 `before` 翻到耗盡，總集合＝使用者所有加入 room

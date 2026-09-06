@@ -146,7 +146,7 @@ is_removable(mxc) -> bool           收集器與掃描共用的決策
 
 ## 9. 驗收（e2e，照 §2.3 的例子）
 
-**2026-09-06 結果**：e2e10 **13 個檢查點全綠**（下列前四項）；e2e9（宣告、拒送、`Event/Send`、警告、redact 保留備份後 purge）26 綠；e2e8（`r_seq`／`g_seq`）37 綠回歸；單元五個 crate 全綠。
+**2026-09-06 結果**（腳本 `tests/e2e/e2e10.ps1`）：e2e10 **13 個檢查點全綠**（下列前四項）；e2e9（宣告、拒送、`Event/Send`、警告、redact 保留備份後 purge）26 綠；e2e8（`r_seq`／`g_seq`）37 綠回歸；單元五個 crate 全綠。
 
 - 五則事件（兩房）引用同一媒體 → 刪房 a → 仍在；redact b1（備份保留）→ 仍在；重啟讓 retention（1 秒）清備份 → 仍在（b2 持有）；設頭像後 redact b2 並清備份 → 仍在（頭像持有）；清頭像 → 410。同一 redact 與刪房再做一次：無錯。
 - purge_history 到 marker 之前：範圍內的 Event（c2）與 Backup（redact 過的 c1）都拿掉 → 410；marker 之後的 c4 持有的媒體 200；同一範圍再 purge 一次無錯、狀態不變。

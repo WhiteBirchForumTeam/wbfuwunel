@@ -132,7 +132,7 @@ server 認得出的訊號：事件是 `m.room.encrypted`、從舊 HTTP `send` �
 ## 8. 驗收
 
 - 單元：宣告拒絕訊息都點名那個 mxc（`attachments.rs`）；讀 content 的四條既有測試不變。
-- e2e（真伺服器，e2e profile，腳本 `e2e9.ps1`，2026-09-06 **26 個檢查點全綠**，持有者模型重做後重跑）：
+- e2e（真伺服器，e2e profile，腳本 `tests/e2e/e2e9.ps1`，2026-09-06 **26 個檢查點全綠**，持有者模型重做後重跑）：
   - 身分：`/versions` 的 `server.name`（key `net.zemos.msc4383.server`）= `wbfuwunel`、`unstable_features["org.wbftw.wbfuwunel"]`；`Hello.engine`。
   - E2EE 房間用 header 宣告送 `m.room.encrypted` → 可下載 → redact → 410。
   - 拒送四種（別人的、不存在的、非 mxc、遠端）都 400 `M_INVALID_PARAM` 且訊息點名 mxc；拒送的沒寫事件。
