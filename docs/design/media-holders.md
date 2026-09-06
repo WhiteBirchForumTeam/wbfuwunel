@@ -8,7 +8,7 @@
 ## 0. 一句話
 
 媒體不記「被引用幾次」，記**「被誰持有」**：一個集合，元素是外鍵。事件持有它就是 `(room_id, g_seq)`，原文備份持有它就是
-`(room_id, backup, g_seq)`，本站使用者頭像持有它就是 `(avatar, user_id)`。加入與拿掉都是集合操作，**重複做是 no-op**。
+`(room_id, backup, g_seq)`，本站使用者頭像持有它就是 `(avatar, localpart)`。加入與拿掉都是集合操作，**重複做是 no-op**。
 集合空了、而且媒體曾被管過或已超過保護期，就刪。
 
 ## 1. 為什麼不用計數（維護者 2026-09-06 的判斷）
@@ -58,9 +58,8 @@ redact 5678、備份到期、清頭像    → {}  → 刪
 | 表 | 鍵 | 值 | 用途 |
 |---|---|---|---|
 | `mxc_holder` | `mxc ‖ kind ‖ id` | 空 | 「M 被誰持有」。**空集合的判定 = 前綴 seek 一筆都沒有**。 |
-| `holder_mxc` | `room_id ‖ kind ‖ g_seq ‖ mxc`（Avatar：`user_id ‖ mxc`） | 空 | 反向索引：「這則事件／這份備份／這個人持有哪些媒體」。purge 與刪房用前綴掃它。 |
+| `holder_mxc` | `room_id ‖ kind ‖ g_seq ‖ mxc`（Avatar：`localpart ‖ mxc`） | 空 | 反向索引：「這則事件／這份備份／這個人持有哪些媒體」。purge 與刪房用前綴掃它。 |
 | `mxc_managed` | `mxc` | 建立時間（ms） | **只有這個模型上線後上傳的媒體**才有列。沒列＝既存媒體＝永不自動刪。也是保護期的時鐘，不再看檔案 mtime。 |
-
 | `room_mxc` | `room_id ‖ mxc` | 空 | **加速索引**：這個 room 曾經持有過哪些媒體（去重）。刪房時直接走它，每個媒體前綴刪 `mxc_holder(M, Event, room…)` 與 `(M, Backup, room…)`，不必掃反向索引的每一則事件。 |
 
 四張表都是「鍵即資料」，沒有 merge operator、沒有哨兵、沒有計數列。
@@ -99,8 +98,8 @@ is_removable(mxc) -> bool           收集器與掃描共用的決策
 | 備份到期／`purge_original` | 反向索引 `(room, Backup, g_seq)` 找媒體；每個 `del Backup`；交收集器 |
 | `purge_history(room, until)` | `release_range(room, Event, until)` ＋ `release_range(room, Backup, until)`：走 `holder_mxc` 範圍；每個 `del`；交收集器。**不讀事件內容** |
 | 刪房 | `release_room(room)`：走 `room_mxc`，每個媒體前綴刪它在這個 room 的 Event／Backup 外鍵；交收集器。**不走事件** |
-| 設頭像 | `del (Avatar, user)` 舊的、`put (Avatar, user)` 新的；舊的交收集器 |
-| 刪使用者 | `del (Avatar, user)` |
+| 設頭像 | `del (Avatar, localpart)` 舊的、`put (Avatar, localpart)` 新的；舊的交收集器 |
+| 刪使用者 | `del (Avatar, localpart)` |
 
 「交收集器」= 交易 commit 後把 mxc 丟給收集器（既有的 `on_execute` 掛鉤）。任何一條路徑重跑一次，結果一樣。
 
