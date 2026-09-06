@@ -60,7 +60,10 @@ fork 專屬的文件都在 [`docs/design/`](docs/design/)。它們刻意不進�
 | 程式碼結構導覽（要改東西時去哪裡找） | [docs/design/repo-structure.md](docs/design/repo-structure.md) |
 | Windows 建置與實跑驗證 | [docs/design/windows-build.md](docs/design/windows-build.md) |
 | 媒體引用計數（上半：索引，已被下一筆取代） | [docs/design/media-refcount.md](docs/design/media-refcount.md) |
-| 媒體的真正刪除：精確計數、哨兵、立即清理、migrate | [docs/design/media-gc.md](docs/design/media-gc.md) |
+| 媒體的真正刪除：計數器時期的收集器、墓碑 410、每 mxc 一鎖（計數與哨兵已被下兩筆取代） | [docs/design/media-gc.md](docs/design/media-gc.md) |
+| E2EE 下的媒體引用：送訊息時宣告 `attachments`（header 或 `Event/Send`）、驗證、對舊 client 的一次性警告 | [docs/design/media-attachments.md](docs/design/media-attachments.md) |
+| **媒體持有者集合**：以外鍵取代引用計數，重做是 no-op；五張表、一個管理器、收集器與 7 天掃描 | [docs/design/media-holders.md](docs/design/media-holders.md) |
+| PR #24 合併後的再審與外部審查（2026-09-05 兩輪）的逐條驗證：哪些已修、哪些仍在、建議怎麼修 | [docs/design/review-followups-2026-09-06.md](docs/design/review-followups-2026-09-06.md) |
 | 分塊上傳、續傳、range 下載（提案，以塊加密、CRC、先 HTTP 後 WebSocket） | [docs/design/chunked-upload.md](docs/design/chunked-upload.md) |
 | **分塊上傳／下載規格書**（給 client 開發者：byte 排法、每個訊息、錯誤碼、流程） | [docs/design/chunked-upload-spec.md](docs/design/chunked-upload-spec.md) |
 | 規格的黃金測試向量（server 實作產生，client 複製一份對著測；漂移在測試階段被抓到） | [docs/design/wbf-vectors.json](docs/design/wbf-vectors.json) |
