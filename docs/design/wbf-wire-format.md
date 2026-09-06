@@ -180,11 +180,11 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 
 `POST /_wbf/v1/pack`，`Content-Type: application/octet-stream`，**body 是一個 pack，回應 body 也是一個 pack**。
 一個請求一個 pack；`id` 由 server 在 `Upload/Create` 的回應裡發，之後帶著它。它存在的理由是 curl 就能測；效能不是它的目標。
-`Stream` kind 走 HTTP 沒意義（沒人連著收），回 `Error(Conflict)`。
+`Stream` kind 走 HTTP 沒意義（沒人連著收），回 `Error(Conflict)`。`Session` kind（§6.3）也不走 HTTP pack：它的語意是「換這條連線的 Session」，HTTP 沒有連線可換，回 `Error(Conflict)`；HTTP 登入照舊用 `/login`。
 
 ### 6.3 📄 提案：`Login`／`Refresh`／`Logout` —— 在通道上取得與放掉 session
 
-> 狀態：📄 提案，2026-09-07，等維護者同意。起因：維護者 2026-09-06 提出「登入應該有 WS 專用的 pack 格式；升級帶 Bearer 可以留著」。
+> 狀態：✅ 維護者 2026-09-07 同意（§6.3.9 的點都已定），實作分支 `wbf/session-login`。起因：維護者 2026-09-06 提出「登入應該有 WS 專用的 pack 格式；升級帶 Bearer 可以留著」。
 > 建在 PR #28 的 `Session` 上（§6.1「連線背後的 session」）：Login 就是**換掉這條連線的 Session**，其餘機制（每個 message 重驗、關機 join）不變。
 
 #### 6.3.1 為什麼要有
@@ -201,7 +201,7 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 |---|---|---|---|
 | `0x01 Login` | **Matrix `/login` 的請求體原樣**：`type`（`m.login.password` 或 `m.login.token`）、`identifier`、`password` 或 `token`、`device_id`?、`initial_device_display_name`?、`refresh_token`?: bool | `/login` 回應的欄位原樣：`user_id`、`device_id`、`access_token`、`refresh_token`?、`expires_in_ms`? | `Error(Forbidden)`（憑證錯、帳號停用；message 帶 Matrix errcode）、`Error(Unauthorized)`（帳號被鎖 `M_USER_LOCKED`）、`Error(RateLimited)` |
 | `0x02 Refresh` | `{ "refresh_token" }` | 同 Login | `Error(Unauthorized)`（refresh token 不認、已用過、硬登出）、`Error(RateLimited)` |
-| `0x03 Logout` | `{ "all"?: bool }`（`all` = 撤這個 user 的全部 device，對應 `/logout/all`） | `{}` | `Error(Unauthorized)`（這條連線本來就沒登入） |
+| `0x03 Logout` | `{ "all"?: bool }`（`all` = 撤這個 user 的全部 device，對應 `/logout/all`） | `{}`，緊接 Close `1000` 關線 | `Error(Unauthorized)`（這條連線本來就沒登入） |
 
 **不自己發明欄位**：meta 直接餵給既有的 login／refresh／logout 邏輯，client 不用學第二套；server 端要做的是把 `login_route` 的本體（驗證 → 發 token → 建或更新 device）
 抽到 `tuwunel_service`（例：`users::login::issue_session`），HTTP 路由與 WS handler 都叫它。🚫 不在 `api/client/wbf/` 裡複製一份登入流程。
@@ -209,27 +209,29 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 **Login 的 `type` 只收 `m.login.password` 與 `m.login.token`**（後者是 SSO 流程最後一步的一次性 token）。SSO／OIDC 本身要瀏覽器重導，走 HTTP；
 `m.login.application_service` 與 JWT 也留在 HTTP（appservice 不會用 WS 登入，JWT 之後有需要再加）。收到別的 `type` 回 `Error(Forbidden)`，message 說明。
 
-#### 6.3.3 連線的狀態機
+#### 6.3.3 連線的狀態機（維護者 2026-09-07 定）
 
 ```
-                Login ok                    Logout ok
- 未登入 ────────────────▶ 已登入(Session) ──────────────▶ 未登入
-   │  Hello/Ping/Login/Refresh 以外 → Error(Unauthorized)      │
-   │  沉默或未登入超過 wbf_ws_unauthenticated_timeout → Close 1008
+                 Login ok                          Logout ok
+ 未登入 ─────────────────▶ 已登入(Session) ─────────────────▶ Ack，然後 Close 1000（關線）
+   │  Hello/Ping/Login/Refresh 以外 → Error(Unauthorized)     │  再 Login → 換 Session（允許）
+   │  升級後 30 秒內沒登入 → Close 1008（Ping 不延長）
    ▼
- Login 失敗 → Error(Forbidden)，連線留著（受 §6.3.4 限速）
+ Login 失敗 → Error(Forbidden)，連線留著（受 §6.3.4 限速與那 30 秒）
 ```
 
 - **允許不帶 Bearer 升級**（這是提案裡唯一改升級行為的地方）：Session 是「未登入」，只接受 `Hello`、`Ping`、`Login`、`Refresh`；其他 kind 回 `Error(Unauthorized)`。
   帶 Bearer 升級照 §6.1 不變，直接是已登入。兩條路都在，client 自己選。
-- **未登入的連線用短得多的 idle 上限**：新 config `wbf_ws_unauthenticated_timeout`（預設 10 秒），跟已登入的 `wbf_ws_idle_timeout`（300 秒）分開。
-  否則任何人不登入就能佔一條連線 5 分鐘。超時送 Close 1008。
+- **未登入的連線最多活 30 秒**：新 config `wbf_ws_unauthenticated_timeout`（預設 30 秒），**從升級起算，不是 idle**：送 Ping 不延長。到時還沒登入送 Close 1008。
+  理由（維護者）：連上但沒授權的連線不能佔著什麼都不做；帳密本來就是先打好才開連線送的，30 秒夠（註冊也一樣）；斷了 client 重連就好，自動重連是 client 的事。
+  已登入的連線照舊用 `wbf_ws_idle_timeout`（300 秒）。
 - **Login 成功後這條連線的 Session 換成新的**，之後每個 message 的重驗用新 token。同一條連線再送 Login：允許，換成另一個 session（舊 token 不撤，
-  那是 Logout 的事）—— 這對「切帳號」有用，而且不允許的話 client 只是多開一條連線，防不到什麼。
+  那是 Logout 的事）。切帳號用這條，不需要先 Logout。
 - **Refresh 成功後 Session 的 token 換新**，user／device 不變；舊 access token 照 Matrix 語意失效。
-- **Logout 成功後連線回到未登入**，不關線：client 可以立刻 Login 別的帳號。從這一刻起未登入超時開始算。`all: true` 撤全部 device，
+- **Logout 成功後 server 送 Ack、再送 Close 1000 關線**（維護者定：換帳號重開一條 WS 就好）。`all: true` 撤全部 device，
   同一個 user 的**其他** WS 連線在下一個 message 的重驗就被關（§6.1 的機制，不用另外通知）。
 - **重驗照舊每個 message 一次**；未登入狀態沒有 token，跳過重驗（沒東西可驗），只做 kind 白名單。
+- **server 的責任只有即時回應**。client 的登入重試（維護者建議：3 秒沒回應重送、連續 3 次算伺服器無回應）是 client 的事，這裡不規定。
 
 #### 6.3.4 限速（這條是必做，不是加分）
 
@@ -238,8 +240,8 @@ HTTP `/login` 現在**沒有**限速（只有 OIDC 端點有 `oidc_rc_per_second
 
 - 新 config `login_rc_per_second`／`login_rc_burst_count`，**同一個 token bucket 同時管 HTTP `/login`、`/refresh` 與 WS `Login`／`Refresh`**，key 是 client IP
   （WS 在升級時取 `ClientIp`，存進連線狀態）。形狀抄 OIDC 那組（既有實作可以直接用）。
-- 預設值**由維護者定**。OIDC 那組預設 0（關），理由是「保留開放存取」；登入不同，我建議預設開：`login_rc_per_second = 1`、`login_rc_burst_count = 10`
-  ——一個人手打密碼打不到這個速度，NAT 後面十個人同時登入也剛好夠。低了會傷到真人、高了等於沒有，這個數字該你拍板。
+- 預設值（維護者 2026-09-07 同意）：`login_rc_per_second = 1`、`login_rc_burst_count = 10`，**預設開**。OIDC 那組預設 0（關）是「保留開放存取」；
+  登入不同：一個人手打密碼打不到這個速度，NAT 後面十個人同時登入也剛好夠。
 - 超過回 `Error(RateLimited)`，meta 多 `retry_after_ms`；HTTP 側回 429 `M_LIMIT_EXCEEDED`（Matrix 既有）。
 - 🚫 不做「連錯 N 次鎖帳號」：那是讓攻擊者能鎖住別人帳號的 DoS 入口。
 
@@ -255,11 +257,11 @@ HTTP `/login` 現在**沒有**限速（只有 OIDC 端點有 `oidc_rc_per_second
 
 #### 6.3.7 驗收（e2e7 新情境）
 
-- 不帶 Bearer 升級 → `Hello` 可、`Ping` 可、`Upload/Create` 回 `Error(Unauthorized)`；沉默 10 秒 → Close 1008。
+- 不帶 Bearer 升級 → `Hello` 可、`Ping` 可、`Upload/Create` 回 `Error(Unauthorized)`；一直 Ping 但不 Login，到 `wbf_ws_unauthenticated_timeout` → Close 1008（e2e 把它壓到 3 秒）。
 - `Login`（密碼）→ Ack 帶 token；接著 `Upload/Create` 可；同一 token 打 HTTP `/_wbf/v1/pack` 也可（同一個 session）。
 - 錯密碼 → `Error(Forbidden)` 且連線仍開；連錯到超過 burst → `Error(RateLimited)` 帶 `retry_after_ms`；同一 IP 打 HTTP `/login` 也 429。
 - `Refresh` → 新 access token，舊的打 HTTP 401；連線繼續可用。
-- `Logout` → Ack；接著 `Upload/Create` 回 `Error(Unauthorized)`；再 `Login` 別的帳號成功。`Logout { all: true }` → 同 user 另一條已登入的 WS 在下一個 Ping 收到 `Error(Unauthorized)` ＋ Close 1008。
+- `Logout` → Ack 緊接 Close 1000；那個 token 打 HTTP 401。已登入的連線再 `Login` 別的帳號 → Ack，之後的 pack 以新帳號計。`Logout { all: true }` → 同 user 另一條已登入的 WS 在下一個 Ping 收到 `Error(Unauthorized)` ＋ Close 1008。
 - 鎖帳號後 `Login` → `Error(Unauthorized)`（`M_USER_LOCKED`）。
 - 回歸：e2e7 情境 1～3、e2e6。
 
@@ -273,11 +275,13 @@ HTTP `/login` 現在**沒有**限速（只有 OIDC 端點有 `oidc_rc_per_second
 | 未登入超時 | `src/core/config/mod.rs`（`wbf_ws_unauthenticated_timeout`）、`ws.rs` |
 | 向量 | `wbf-vectors.json` 加 Login／Refresh／Logout 各一個 pack |
 
-#### 6.3.9 待維護者定
+#### 6.3.9 維護者 2026-09-07 定的
 
-1. 限速預設值（§6.3.4 我建議 1／10）。
-2. Logout 後是「回到未登入」還是「直接關線」（§6.3.3 我選前者）。
-3. 同一條連線重複 Login 是否允許（我選允許）。
+1. 限速預設 1／10，預設開。
+2. **Logout 直接關線**（Ack 後 Close 1000）；換帳號重開一條 WS，或直接再 Login。
+3. 同一條連線重複 Login 允許（換 Session，不強制中斷）。
+4. **未登入的連線 30 秒就斷**，從升級起算、不是 idle。
+5. client 的登入重試是 client 的事；server 只要即時回應。
 
 ## 7. 程式：一個型別，四個函式，先寫測試
 
