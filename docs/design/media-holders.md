@@ -27,7 +27,7 @@
 |---|---|---|---|
 | `Event` | `(room_id, g_seq)` | `append_pdu`（宣告 ∪ 明文 content 讀到的） | redact（不留備份時）、purge_history、刪房 |
 | `Backup` | `(room_id, g_seq)` | redact 而原文備份保留時，**用 `Backup` 換掉 `Event`**（同交易） | 備份到期（retention reap）、`purge_original`、刪房 |
-| `Avatar` | `user_id`（只記本站使用者） | 設頭像 | 換頭像／清頭像（拿掉舊的、加新的，同交易）、刪使用者 |
+| `Avatar` | 本站使用者的 **localpart**（不帶 domain：domain 可能會變，外站的頭像本來就計不到） | 設頭像 | 換頭像／清頭像（拿掉舊的、加新的，同交易）、刪使用者 |
 
 房間頭像（`m.room.avatar` state 事件）就是一個 `Event` 持有者，不另立種類。聯邦來的使用者頭像不記（那是別站的媒體或別站的人）。
 g_seq 用有號值（backfill 的歷史是負的）。
@@ -49,7 +49,7 @@ timeline
 刪掉 room_a（刪房不進備份）      → {(b,1234), (b,5678)}
 redact b 的 1234，備份保留       → {(b,backup,1234), (b,5678)}
 備份到期                         → {(b,5678)}
-某本站使用者拿 M 當頭像          → {(b,5678), (avatar,@u:localhost)}
+某本站使用者拿 M 當頭像          → {(b,5678), (avatar,u)}
 redact 5678、備份到期、清頭像    → {}  → 刪
 ```
 
@@ -61,8 +61,32 @@ redact 5678、備份到期、清頭像    → {}  → 刪
 | `holder_mxc` | `room_id ‖ kind ‖ g_seq ‖ mxc`（Avatar：`user_id ‖ mxc`） | 空 | 反向索引：「這則事件／這份備份／這個人持有哪些媒體」。purge 與刪房用前綴掃它。 |
 | `mxc_managed` | `mxc` | 建立時間（ms） | **只有這個模型上線後上傳的媒體**才有列。沒列＝既存媒體＝永不自動刪。也是保護期的時鐘，不再看檔案 mtime。 |
 
-三張表都是「鍵即資料」，沒有 merge operator、沒有哨兵、沒有計數列。拆掉 `mxc_refcount`、`CounterOperand`、`COUNTER_SENTINEL`、
+| `room_mxc` | `room_id ‖ mxc` | 空 | **加速索引**：這個 room 曾經持有過哪些媒體（去重）。刪房時直接走它，每個媒體前綴刪 `mxc_holder(M, Event, room…)` 與 `(M, Backup, room…)`，不必掃反向索引的每一則事件。 |
+
+四張表都是「鍵即資料」，沒有 merge operator、沒有哨兵、沒有計數列。
+
+**加速索引的原則（維護者 2026-09-06）**：平時它們只是多寫一筆、永遠不讀（no-op），只在清除時當指標用。要多快就多加幾張，
+每張都是「從清除的入口直接指到媒體」：房間 → 媒體（`room_mxc`）、事件範圍 → 媒體（`holder_mxc`）、使用者 → 媒體（Avatar 的 `holder_mxc`）。
+之後若加「刪使用者連他上傳的都清」之類的入口，就再加一張 `user_mxc`，形狀一樣。拆掉 `mxc_refcount`、`CounterOperand`、`COUNTER_SENTINEL`、
 `eventid_mxcs`、`roomid_seqbounds` 以外與計數相關的東西（引擎的 merge 掛點留著不用也可以，之後再拆）。
+
+## 3.1 一個管理器，所有插入點只叫它
+
+維護者 2026-09-06：抽象成管理器，下次不用再找出所有插入點。`media_refs` 服務只露出這幾個入口，**其他模組不碰四張表**：
+
+```
+hold(txn, mxc, holder)              加一個外鍵（含所有索引）
+release(txn, mxc, holder)           拿掉一個外鍵；commit 後交收集器
+swap(txn, mxc, from, to)            換外鍵（redact → Backup）
+release_room(txn, room_id)          走 room_mxc，拔掉這個 room 的全部外鍵
+release_range(txn, room_id, kind, until)   走 holder_mxc，拔掉 g_seq < until 的
+release_avatar(txn, localpart)
+list_holders(mxc) -> Vec<Holder>    admin 印用
+is_removable(mxc) -> bool           收集器與掃描共用的決策
+```
+
+`holder` 是一個 enum（`Event{room, g_seq}`、`Backup{room, g_seq}`、`Avatar{localpart}`），編碼只在這個模組裡。
+呼叫點清單寫在這份文件 §4，新的路徑出現時加一列、叫一次 `hold`／`release`，不用理解表。
 
 ## 4. 每條路徑做什麼（全部是集合操作，全部冪等）
 
@@ -73,8 +97,8 @@ redact 5678、備份到期、清頭像    → {}  → 刪
 | redact，備份**不**保留 | 反向索引找這則的媒體；每個：`del Event`；commit 後交收集器 |
 | redact，備份保留 | 每個：`del Event`、`put Backup`（同一交易換掉）。媒體不會空 |
 | 備份到期／`purge_original` | 反向索引 `(room, Backup, g_seq)` 找媒體；每個 `del Backup`；交收集器 |
-| `purge_history(room, until)` | 反向索引前綴 `(room, Event)` 範圍 `< until` 與 `(room, Backup)` 同範圍；每個 `del`；交收集器。**不讀事件內容** |
-| 刪房 | 反向索引前綴 `room`（兩種 kind）；同上 |
+| `purge_history(room, until)` | `release_range(room, Event, until)` ＋ `release_range(room, Backup, until)`：走 `holder_mxc` 範圍；每個 `del`；交收集器。**不讀事件內容** |
+| 刪房 | `release_room(room)`：走 `room_mxc`，每個媒體前綴刪它在這個 room 的 Event／Backup 外鍵；交收集器。**不走事件** |
 | 設頭像 | `del (Avatar, user)` 舊的、`put (Avatar, user)` 新的；舊的交收集器 |
 | 刪使用者 | `del (Avatar, user)` |
 
@@ -132,8 +156,8 @@ redact 5678、備份到期、清頭像    → {}  → 刪
 
 | 什麼 | 哪裡 |
 |---|---|
-| 三張表 | `src/database/maps.rs` |
-| 外鍵型別、編碼、`add_holders`／`del_holders`／`swap_event_to_backup`／`is_removable` | `src/service/media_refs/`（重寫 mod.rs；`attachments.rs` 留） |
+| 四張表 | `src/database/maps.rs` |
+| `Holder` enum、編碼、§3.1 的管理器 | `src/service/media_refs/`（重寫 mod.rs；`attachments.rs` 留） |
 | 各路徑 | `timeline/{append,backfill,redact,purge,pdus}.rs`、`retention/mod.rs`、`profile/mod.rs`、`rooms/delete/mod.rs`、`users`（刪使用者） |
 | 收集器＋掃描 | `media_refs/collect.rs`（決策函數一個） |
 | `mxc_managed` 寫入 | `media/data.rs::create_file_metadata`（取代 `Init` merge） |
