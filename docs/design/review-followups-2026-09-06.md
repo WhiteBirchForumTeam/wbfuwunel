@@ -78,7 +78,7 @@ provider 的 `multipart_part_size()`（S3 預設 10 MiB；本地回 `usize::MAX`
 **驗收**：e2e6 加「本地 Seal 512 MiB，過程中量 server 的 working set 不超過啟動值 + 64 MiB」（PowerShell 讀 `Get-Process` 的 `WorkingSet64`）；
 S3 用 MinIO 容器跑一次 ≥ 100 MiB 的 Seal（沒有 MinIO 就記成「未驗」，不要寫成綠）。
 
-### 2.3 🔴 P1：`/_wbf/*` 與 WebSocket 不查帳號鎖定
+### 2.3 🔴 P1：`/_wbf/*` 與 WebSocket 不查帳號鎖定（🔧 `wbf/auth-and-ws-lifetime`）
 
 **現況**：`wbf/mod.rs:102-127` 的 `authenticate` 只做 token 查找與到期；標準路由的 `locked_account_check`／`suspended_account_check`
 （`router/auth.rs:96-121`）它都沒走。鎖帳號刻意保留 access token（MSC3939），所以被鎖的人拿同一個 token 打 `/_wbf/v1/pack` 照樣
@@ -90,7 +90,7 @@ Create／Chunk／Seal／Read，WebSocket 握手也一樣。
 
 **驗收**：e2e 加「鎖帳號後同 token 打 `/_wbf/v1/pack` 與 WS 握手都 401；解鎖後恢復」。
 
-### 2.4 🔴 P1：WebSocket 連線的生命週期與 session
+### 2.4 🔴 P1：WebSocket 連線的生命週期與 session（🔧 `wbf/auth-and-ws-lifetime`）
 
 兩件事，同一條線：
 
@@ -110,6 +110,13 @@ Create／Chunk／Seal／Read，WebSocket 握手也一樣。
 
 **驗收**：e2e7 加「WS 連著 → HTTP logout → 下一個 pack 回 Unauthorized 且線關」；「WS 連著 → `server shutdown` → 程序乾淨退出、log 沒有
 dangling references」（`run.rs:125` 的 `debug_error!` 就是現成的探針，e2e 開 debug log 抓它）。
+
+**結果（2026-09-06，e2e7 情境 3）**：鎖 bob → HTTP pack 401 `M_USER_LOCKED`、WS 升級 401，解鎖恢復；bob 連著 → HTTP logout → 下一個 Ping 回
+`Error(Unauthorized)`（`M_UNKNOWN_TOKEN`）、server Close 1008；alice 連著 → admin room `!admin server shutdown` → client 收到 Close **1001**
+`EndpointUnavailable`（第一版送 1012，.NET 的 `ClientWebSocket` 把它當協定錯誤 Aborted，改 1001 後收到 Close），程序 30 秒內乾淨退出，
+log `Waiting for long-lived connections to end... open=2` → `Long-lived connections ended`，無 abnormal。
+⚠️ `release_max_log_level` 把 `debug!` 編譯掉，e2e binary 看不到 `debug_error!("dangling references")` 那個探針，
+「沒有懸空」是靠「追蹤器 join 完 → 程序乾淨退出」間接證；直接證要 debug build，沒做。
 
 ### 2.5 🔴 P2：上傳 `Status` 冷載入不持鎖；sweeper 鎖下不重讀進度
 

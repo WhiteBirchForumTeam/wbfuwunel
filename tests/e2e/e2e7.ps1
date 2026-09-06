@@ -238,4 +238,61 @@ $r = Ws-Call $ws2 (New-Pack 3 3 0 $idD 3 @() @())
 Log "[2.3] fresh connection, Status of sealed D -> $(Describe $r)  (expect NotFound: sealed; server still serving)"
 try { $ws2.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, 'bye', [Threading.CancellationToken]::None).Wait(3000) | Out-Null } catch {}
 Stop-Server $p
+# ================= Scenario 3: the session behind the connection (review-followups 2.3 / 2.4) =================
+# A locked account is refused on both transports; a logged-out token stops working at the next pack, not never;
+# a connection still open at shutdown is closed by the server and the process exits without dangling references.
+Log '################ Scenario 3: locked account, logout mid-connection, shutdown with a connection open ################'
+$db3 = "$S\e2e7db-3"; Remove-Item -Recurse -Force $db3 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db3 | Out-Null
+$cfg3 = "$S\e2e7-3.toml"
+@('[global]','server_name = "localhost"',('database_path = "' + ($db3 -replace '\\','/') + '"'),'port = 8015','address = ["127.0.0.1"]',
+  'allow_registration = true','yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse = true','allow_federation = false',
+  'wbf_ws_idle_timeout = 60','log = "info,tuwunel_api=debug,tuwunel_router=debug,tuwunel_service::services=debug"') -join "`n" | Set-Content -Path $cfg3 -Encoding ascii
+$p = Start-Server $cfg3 's3'
+$regA = Api Post '/_matrix/client/v3/register' '{"username":"alice","password":"correct-horse-battery","auth":{"type":"m.login.dummy"}}' $null
+$tokA = $regA.access_token
+$regB = Api Post '/_matrix/client/v3/register' '{"username":"bob","password":"correct-horse-battery","auth":{"type":"m.login.dummy"}}' $null
+$tokB = $regB.access_token
+$ping = New-Pack 1 4 0 0 1 @() @()
+
+# [3.1] locked account: HTTP pack and WS upgrade both refused; unlocking restores both
+$null = Api Put "/_synapse/admin/v2/users/$([uri]::EscapeDataString('@bob:localhost'))" '{"locked":true}' $tokA
+$r = Send-Pack $ping $tokB
+Log "[3.1a] locked bob, HTTP Ping -> $(Describe $r)  (expect http=401 Error Unauthorized)"
+try { $wsL = Ws-Open $tokB; Log "[3.1b] locked bob, WS upgrade -> connected?! state=$($wsL.State)  (expect refused: FAIL)" } catch { $inner = $_.Exception; while ($inner.InnerException) { $inner = $inner.InnerException }; Log "[3.1b] locked bob, WS upgrade refused: $($inner.Message)  (expect 401)" }
+$null = Api Put "/_synapse/admin/v2/users/$([uri]::EscapeDataString('@bob:localhost'))" '{"locked":false}' $tokA
+$r = Send-Pack $ping $tokB
+Log "[3.1c] unlocked bob, HTTP Ping -> $(Describe $r)  (expect http=200 Pong)"
+
+# [3.2] logout while connected: the next pack is refused and the server closes the connection
+$wsB = Ws-Open $tokB
+$r = Ws-Call $wsB $ping
+Log "[3.2a] bob connected, Ping -> $(Describe $r)  (expect Pong)"
+$null = Api Post '/_matrix/client/v3/logout' '{}' $tokB
+$r = Ws-Call $wsB $ping
+Log "[3.2b] after HTTP logout, Ping -> $(Describe $r)  (expect Error Unauthorized)"
+$buf = New-Object byte[] 4096
+$t = $wsB.ReceiveAsync([ArraySegment[byte]]$buf, [Threading.CancellationToken]::None)
+if ($t.Wait(5000)) { Log "[3.2c] then server sent $($t.Result.MessageType) code=$($t.Result.CloseStatus) state=$($wsB.State)  (expect Close, PolicyViolation)" } else { Log "[3.2c] no close within 5 s, state=$($wsB.State)  (expect Close: FAIL)" }
+
+# [3.3] shutdown with a connection open: the server closes it, the process exits, nothing dangles
+$wsA = Ws-Open $tokA
+$r = Ws-Call $wsA $ping
+Log "[3.3a] alice connected, Ping -> $(Describe $r)  (expect Pong)"
+$admins = (Api Post "/_matrix/client/v3/join/$([uri]::EscapeDataString('#admins:localhost'))" '{}' $tokA).room_id
+$txn = [guid]::NewGuid().ToString('N')
+$null = Api Put "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($admins))/send/m.room.message/$txn" '{"msgtype":"m.text","body":"!admin server shutdown"}' $tokA
+$t = $wsA.ReceiveAsync([ArraySegment[byte]]$buf, [Threading.CancellationToken]::None)
+try {
+  if ($t.Wait(15000)) { Log "[3.3b] shutdown ordered, server sent $($t.Result.MessageType) code=$($t.Result.CloseStatus) reason='$($t.Result.CloseStatusDescription)' state=$($wsA.State)  (expect Close, EndpointUnavailable = 1001 going away)" } else { Log "[3.3b] no close within 15 s, state=$($wsA.State)  (expect Close: FAIL)" }
+} catch { $inner = $_.Exception; while ($inner.InnerException) { $inner = $inner.InnerException }; Log "[3.3b] receive failed: $($inner.GetType().Name): $($inner.Message) state=$($wsA.State)  (expect Close frame, not a failure: FAIL)" }
+$exited = $p.WaitForExit(30000)
+Log "[3.3c] process exited within 30 s: $exited  (expect True)"
+# release_max_log_level strips debug! at compile time, so the probes are the info lines the connection tracker prints at shutdown.
+$log3 = ((Get-Content "$OUT\s3.out","$OUT\s3.err" -EA SilentlyContinue) -join "`n") -replace "`e\[[0-9;]*m", ''
+$waited = [bool]($log3 -match 'Waiting for long-lived connections to end')
+$ended = [bool]($log3 -match 'Long-lived connections ended')
+$abnormal = [bool]($log3 -match 'ended abnormally|panicked|dangling references')
+Log "[3.3d] log: waited-for-connections=$waited ended=$ended abnormal=$abnormal  (expect True / True / False)"
+if (-not $exited) { Stop-Server $p }
+
 Log ''; Log 'DONE'

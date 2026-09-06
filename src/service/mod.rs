@@ -11,6 +11,7 @@ pub mod admin;
 pub mod appservice;
 pub mod client;
 pub mod config;
+pub mod connections;
 pub mod deactivate;
 pub mod emergency;
 pub mod federation;
