@@ -325,15 +325,21 @@ pub async fn release_range(&self, txn: &mut Txn, room: &RoomId, until_g_seq: i64
 		let prefix = (kind, room.as_str());
 		// Keys are ordered by g_seq, so the scan stops at the boundary rather
 		// than walking the whole room.
-		let rows: Vec<(u64, String)> = self
-			.db
-			.holder_mxc
-			.keys_prefix(&prefix)
-			.ignore_err()
-			.map(|(_, _, biased, mxc): (Ignore, Ignore, u64, &str)| (biased, mxc.to_owned()))
-			.take_while(|(biased, _)| futures::future::ready(*biased < until))
-			.collect()
-			.await;
+		let mut rows: Vec<(u64, String)> = Vec::new();
+		{
+			let keys = self
+				.db
+				.holder_mxc
+				.keys_prefix::<(Ignore, Ignore, u64, &str), _>(&prefix)
+				.ignore_err();
+			futures::pin_mut!(keys);
+			while let Some((_, _, biased, mxc)) = keys.next().await {
+				if biased >= until {
+					break;
+				}
+				rows.push((biased, mxc.to_owned()));
+			}
+		}
 
 		for (biased, mxc) in rows {
 			let g_seq = unbias_g_seq(biased);
