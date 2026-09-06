@@ -132,6 +132,13 @@ pub(crate) async fn send_message_event(
 		return Err!(Request(Forbidden("Encryption has been disabled")));
 	}
 
+	// A repeated transaction id answers with the stored event before anything
+	// else is looked at, so a retry stays idempotent even if what it declares
+	// has changed or been removed since the first send.
+	if let Some(existing) = check_existing_txnid(services, sender_user, sender_device, txn_id).await {
+		return existing.map(|response| response.event_id);
+	}
+
 	// Checked before anything is written: a refused attachment refuses the
 	// whole send, so a client bug shows up here and not as a message pointing
 	// at media that will be swept.

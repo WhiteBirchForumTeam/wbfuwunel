@@ -61,6 +61,9 @@ server 記在自己的表裡、同交易 +1，redact／purge／retention 查自�
 - 讀取：redact、`purge_history`、retention 丟原文備份 —— 現在讀 content 的三處改成**先查這張表**，查不到再退回讀 content
   （舊事件沒有列；它們指的媒體本來就是哨兵，退回讀 content 只是為了明文房間的舊事件仍能正確 −1）。
 - 事件被刪（`del_event`、purge）時連這列一起刪。
+- **誰是持有者，誰釋放（review 抓到的雙扣，salvia）**：redact 而原文備份保留時，列不動、不釋放，備份成為持有者；之後 `purge_history`／
+  刪房碰到這則事件，先問 `retention.is_original_retained`，是就**跳過自己的釋放**，交給 `drop_original`（讀列，沒有列才讀備份的 content）
+  釋放一次並刪列。少了這條會扣兩次：purge 先刪列並 −1，緊接的 `purge_original` 查不到列退回讀備份 content 再 −1，多引用時活媒體會被刪。
 - **為什麼不寫進 `unsigned`**：`r_seq`／`g_seq` 是給 client 看的；attachments 是 server 自己的帳，不該送出去，也不該進 redact 要剝的地方。
 
 ### 4.2 宣告的驗證（fail closed）
@@ -109,6 +112,16 @@ server 認得出的訊號：事件是 `m.room.encrypted`、從舊 HTTP `send` �
 > without telling the server which uploaded files it attaches, so files you attach in encrypted rooms from this client
 > will be deleted by the server's cleanup shortly after upload. To keep attachments in encrypted rooms, use a client that
 > supports this server's attachment declaration (wbf).
+
+## 6.1 已知限制（review 記下的，都非阻塞）
+
+- **驗證與寫入之間的窗口（rumia）**：`check_attachments` 不持媒體鎖；被宣告的媒體若計數 0 且已超過 7 天保護期，掃描可能在「驗證通過」與
+  「append +1」之間刪掉它，那則訊息就指向墓碑。要同時滿足「7 天沒人指」與「此刻被宣告」，窗口極窄；接受，不在鎖下重驗（append 已在寫 state 之後，
+  失敗會留下不一致）。
+- **警告標記的競態（salvia）**：同一 user 兩則真正同時的未宣告加密送出可能都通過「沒警告過」的讀取，收到兩間警告房；序貫的 burst 只一次。
+- **同 txn_id 重送**：現在先查 txn 再驗宣告（rumia #1），重送一律回原事件，宣告變了也不重驗。
+- **沒有重算工具**：`migrate-references` 拔掉後，計數壞掉沒有修復路徑（哨兵媒體永不收）。若之後需要，做一個只重算「有 `eventid_mxcs` 列的事件」的
+  admin 工具（列在 roadmap 候選）。
 
 ## 7. 待維護者定
 

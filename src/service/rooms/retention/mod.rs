@@ -91,6 +91,20 @@ pub async fn get_original_pdu_json(&self, event_id: &EventId) -> Result<Canonica
 		.deserialized()
 }
 
+/// Whether an unredacted original of `event_id` is retained right now.
+///
+/// While it is, the original is the holder of the event's media references:
+/// whoever removes the stripped event must not release them, `drop_original`
+/// will. A read error answers `true`, so uncertainty keeps a reference
+/// rather than releasing it twice.
+#[implement(Service)]
+pub async fn is_original_retained(&self, event_id: &EventId) -> bool {
+	match self.eventid_originalpdu.get(event_id).await {
+		| Ok(_) => true,
+		| Err(error) => !error.is_not_found(),
+	}
+}
+
 /// Retains the unredacted original of `event_id` for the retention period.
 ///
 /// Returns whether an original is retained afterwards, either by this call or

@@ -49,12 +49,17 @@ pub async fn delete_pdus(&self, room_id: &RoomId) -> Result {
 			// A second parse of the same bytes, because the media reference list
 			// falls back to raw content for events stored before `eventid_mxcs`.
 			// Room deletion is rare enough to pay for it.
+			// A retained original holds the references instead; the retention
+			// worker releases them, once, when it drops the original.
 			let event_json = serde_json::from_slice::<CanonicalJsonObject>(value)?;
-			let media_refs = self
-				.services
-				.media_refs
-				.list_event_refs(event_id, &event_json)
-				.await;
+			let media_refs = if self.services.retention.is_original_retained(event_id).await {
+				Vec::new()
+			} else {
+				self.services
+					.media_refs
+					.list_event_refs(event_id, &event_json)
+					.await
+			};
 
 			let mut txn = self.db.db.txn();
 
@@ -62,9 +67,11 @@ pub async fn delete_pdus(&self, room_id: &RoomId) -> Result {
 			txn.del_raw(&self.db.eventid_pduid, event_id);
 			txn.del_raw(&self.db.eventid_outlierpdu, event_id);
 
-			self.services
-				.media_refs
-				.del_event_refs(&mut txn, event_id, &media_refs);
+			if !media_refs.is_empty() {
+				self.services
+					.media_refs
+					.del_event_refs(&mut txn, event_id, &media_refs);
+			}
 
 			let room_id_ts_key = (room_id, ts, bias_count(RawPduId::from(key).count()));
 			txn.del(&self.db.roomid_tscount_pducount, room_id_ts_key);

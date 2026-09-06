@@ -24,7 +24,10 @@
 //! A redacted event keeps its unredacted original for the retention period,
 //! and the reference is released when that original is dropped, not when the
 //! event is stripped, so media outlives the redacted message exactly as long
-//! as the message's original does.
+//! as the message's original does. While the original is retained it is the
+//! holder: purging or deleting the stripped event releases nothing then
+//! (`retention.is_original_retained`), or the row would be released by the
+//! purge and the original's content released again by `drop_original`.
 //!
 //! Every release hands the media it released to the collector once the
 //! releasing transaction has committed. The collector reads the count back

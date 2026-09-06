@@ -61,21 +61,29 @@ pub async fn purge_history(
 			let ts: u64 = pdu.origin_server_ts.into();
 
 			// The row written when the event was stored, or for an older event
-			// its raw content, so the list matches what was counted.
+			// its raw content, so the list matches what was counted. Unless a
+			// retained original holds the references: then the row (or the
+			// original's content) belongs to it and `purge_original` below
+			// releases them, once.
 			let event_json = serde_json::from_slice::<CanonicalJsonObject>(value)?;
-			let media_refs = self
-				.services
-				.media_refs
-				.list_event_refs(&event_id, &event_json)
-				.await;
+			let media_refs = if self.services.retention.is_original_retained(&event_id).await {
+				Vec::new()
+			} else {
+				self.services
+					.media_refs
+					.list_event_refs(&event_id, &event_json)
+					.await
+			};
 
 			txn.del_raw(&self.db.pduid_pdu, key);
 			txn.del_raw(&self.db.eventid_pduid, &event_id);
 			txn.del_raw(&self.db.eventid_outlierpdu, &event_id);
 
-			self.services
-				.media_refs
-				.del_event_refs(&mut txn, &event_id, &media_refs);
+			if !media_refs.is_empty() {
+				self.services
+					.media_refs
+					.del_event_refs(&mut txn, &event_id, &media_refs);
+			}
 
 			let room_id_ts_id = (room_id, ts, bias_count(raw_id.count()));
 			txn.del(&self.db.roomid_tscount_pducount, room_id_ts_id);
