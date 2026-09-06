@@ -1,7 +1,7 @@
 # 媒體持有者集合：以外鍵取代引用計數（第三版，打掉重做）
 
 > **這份文件回答：一份媒體「還有沒有人在用」怎麼記，才不會漏、不會扣兩次；誰加、誰拿掉、什麼時候刪。**
-> 狀態：📄 提案，2026-09-06，維護者口述模型、我寫成條件；核可後在 `media/attachments` 分支上照這份**打掉重做**。
+> 狀態：🔧 維護者 2026-09-06 核可，`media/attachments` 分支照這份打掉重做中。
 > 取代：[media-gc.md](media-gc.md) §2（merge operator 計數器）、[media-attachments.md](media-attachments.md) §4（`eventid_mxcs` 列與 fallback）。
 > 不變：宣告附件的方式（[media-attachments.md](media-attachments.md) §3、§5、§6）、墓碑與 410（media-gc.md §6）、每 mxc 一鎖、7 天保護期、bot 警告。
 

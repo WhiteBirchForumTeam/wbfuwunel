@@ -13,7 +13,7 @@ use tuwunel_core::{
 	},
 };
 use tuwunel_database::{
-	Cbor, CounterOperand, Database, Deserialized, Ignore, Interfix, Map, Txn, serialize_key,
+	Cbor, Database, Deserialized, Ignore, Interfix, Map, Txn, serialize_key,
 };
 
 use super::{Media, preview::CachedPreview, thumbnail::Dim};
@@ -25,7 +25,7 @@ pub(crate) struct Data {
 	mediaid_lazycontent: Arc<Map>,
 	mediaid_pending: Arc<Map>,
 	mediaid_user: Arc<Map>,
-	mxc_refcount: Arc<Map>,
+	mxc_managed: Arc<Map>,
 	mxc_tombstone: Arc<Map>,
 	mediaid_upload: Arc<Map>,
 	mediaid_upload_progress: Arc<Map>,
@@ -192,7 +192,7 @@ impl Data {
 			mediaid_lazycontent: db["mediaid_lazycontent"].clone(),
 			mediaid_pending: db["mediaid_pending"].clone(),
 			mediaid_user: db["mediaid_user"].clone(),
-			mxc_refcount: db["mxc_refcount"].clone(),
+			mxc_managed: db["mxc_managed"].clone(),
 			mxc_tombstone: db["mxc_tombstone"].clone(),
 			mediaid_upload: db["mediaid_upload"].clone(),
 			mediaid_upload_progress: db["mediaid_upload_progress"].clone(),
@@ -337,7 +337,7 @@ impl Data {
 	}
 
 	/// Queues, in `txn`, the tombstone for `mxc` and the removal of its
-	/// reference count row. Both land with the deletion they describe.
+	/// managed row. Both land with the deletion they describe.
 	pub(super) fn write_tombstone(
 		&self,
 		txn: &mut Txn,
@@ -346,7 +346,7 @@ impl Data {
 	) {
 		let key = mxc.to_string();
 		txn.put(&self.mxc_tombstone, &key, Cbor(tombstone));
-		txn.del(&self.mxc_refcount, &key);
+		txn.del(&self.mxc_managed, &key);
 	}
 
 	pub(super) fn create_file_metadata(
@@ -364,11 +364,15 @@ impl Data {
 
 		txn.insert_raw(&self.mediaid_file, &key, []);
 
-		// Opens the reference count at zero in the same batch that creates the
-		// media, so media without a count row is exactly media that predates
-		// the counter. Init leaves an existing row alone, so a thumbnail made
-		// later for already counted media cannot reset it.
-		txn.merge(&self.mxc_refcount, mxc.to_string(), CounterOperand::Init.to_bytes());
+		// Marks the media as managed by the holder model, with its creation
+		// time, in the same batch that creates it: media without this row is
+		// exactly media that predates the model and is never removed
+		// automatically. A thumbnail made later for the same mxc must not
+		// restart the clock, so an existing row is kept.
+		let mxc_key = mxc.to_string();
+		if self.mxc_managed.exists_blocking(&mxc_key).is_err() {
+			txn.insert_raw(&self.mxc_managed, &mxc_key, tuwunel_core::utils::time::now_millis().to_be_bytes());
+		}
 
 		if let Some(user) = user {
 			let key = (mxc, user);

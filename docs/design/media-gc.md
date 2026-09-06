@@ -7,8 +7,9 @@
 > 上位文件：[media-refcount.md](media-refcount.md)（PR #5 的列式索引）；
 > 更上位：[why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md) §5.4。
 >
-> ⚠️ **2026-09-06 發現的破口**：這份文件的 +1 來源是 server 讀 content，**E2EE 房間讀不到**，附件永遠不會被計到。
-> 機制不變、來源要換：見 [media-attachments.md](media-attachments.md)（送訊息時宣告、新媒體一律 TTL、既存媒體不遷移）。
+> ⚠️ **2026-09-06：計數器整個被取代。** E2EE 房間讀不到 content（[media-attachments.md](media-attachments.md)），而計數的「恰好一次」在三個 PR 後仍被抓到雙扣，
+> 維護者改用**持有者集合**：[media-holders.md](media-holders.md)。這份文件的 §2（merge operator）、§4（哨兵）、§5（migrate）已成歷史；
+> 仍有效的是 §3.3 的每 mxc 一鎖與 §6 的墓碑／410。
 >
 > ⚠️ **這一版改變了計數的形狀**：PR #5 的「列就是計數」被**精確的有號整數**取代，理由在 §2。
 > 列式索引（`mxc_holder`）在本階段退場。

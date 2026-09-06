@@ -2,17 +2,17 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use futures::{Stream, TryStreamExt};
-use ruma::{CanonicalJsonObject, EventId, OwnedEventId};
+use ruma::{CanonicalJsonObject, CanonicalJsonValue, EventId, OwnedEventId, RoomId};
 use tokio::sync::Mutex;
 use tuwunel_core::{
 	Result, debug_info, expected, implement,
-	matrix::pdu::PduEvent,
+	matrix::pdu::{PduEvent, seq::get_json_positions},
 	utils::{TryReadyExt, time::now},
 	warn,
 };
 use tuwunel_database::{Database, Deserialized, Json, Map};
 
-use crate::rooms::timeline::RoomMutexGuard;
+use crate::{media_refs::Holder, rooms::timeline::RoomMutexGuard};
 
 pub struct Service {
 	services: Arc<crate::services::OnceServices>,
@@ -91,20 +91,6 @@ pub async fn get_original_pdu_json(&self, event_id: &EventId) -> Result<Canonica
 		.deserialized()
 }
 
-/// Whether an unredacted original of `event_id` is retained right now.
-///
-/// While it is, the original is the holder of the event's media references:
-/// whoever removes the stripped event must not release them, `drop_original`
-/// will. A read error answers `true`, so uncertainty keeps a reference
-/// rather than releasing it twice.
-#[implement(Service)]
-pub async fn is_original_retained(&self, event_id: &EventId) -> bool {
-	match self.eventid_originalpdu.get(event_id).await {
-		| Ok(_) => true,
-		| Err(error) => !error.is_not_found(),
-	}
-}
-
 /// Retains the unredacted original of `event_id` for the retention period.
 ///
 /// Returns whether an original is retained afterwards, either by this call or
@@ -155,13 +141,13 @@ pub fn retained_pdus_raw(&self) -> impl Stream<Item = Result<&[u8]>> + Send {
 #[implement(Service)]
 pub async fn purge_original(&self, event_id: &EventId) { self.drop_original(event_id, None).await; }
 
-/// Drops a retained original and releases the media references it held, in
+/// Drops a retained original and removes it as a holder of its media, in
 /// one batch. `time_redacted` also drops the retention index entry.
 ///
-/// The original is the only remaining copy of the content that named the
-/// media, so it is read for its references before it goes. An unreadable
-/// original releases nothing: media held one count too long is recoverable,
-/// media released one count too early is not.
+/// The original's holder is `Backup{room, g_seq}`, named by the positions
+/// stored in the original; an original from before positions existed holds
+/// nothing. An unreadable original releases nothing: media held too long is
+/// recoverable, media released too early is not.
 ///
 /// The retention worker and a history purge can both reach here for one
 /// event. The lock is held from the read through the write, so the second
@@ -170,16 +156,12 @@ pub async fn purge_original(&self, event_id: &EventId) { self.drop_original(even
 async fn drop_original(&self, event_id: &EventId, time_redacted: Option<u64>) {
 	let _serialised = self.drop_original_lock.lock().await;
 
-	let media_refs = match self.get_original_pdu_json(event_id).await {
-		| Ok(original) =>
-			self.services
-				.media_refs
-				.list_event_refs(event_id, &original)
-				.await,
-		| Err(e) if e.is_not_found() => Vec::new(),
+	let backup_holder = match self.get_original_pdu_json(event_id).await {
+		| Ok(original) => backup_holder_of(&original),
+		| Err(e) if e.is_not_found() => None,
 		| Err(e) => {
-			warn!(?event_id, ?e, "Retained original unreadable; its media references stay held.");
-			Vec::new()
+			warn!(?event_id, ?e, "Retained original unreadable; its media stays held.");
+			None
 		},
 	};
 
@@ -188,8 +170,25 @@ async fn drop_original(&self, event_id: &EventId, time_redacted: Option<u64>) {
 	if let Some(time_redacted) = time_redacted {
 		txn.del(&self.timeredacted_eventid, (time_redacted, event_id));
 	}
-	self.services
-		.media_refs
-		.del_event_refs(&mut txn, event_id, &media_refs);
+	if let Some(holder) = backup_holder {
+		self.services
+			.media_refs
+			.release_all_of(&mut txn, &holder)
+			.await;
+	}
 	txn.execute();
+}
+
+/// The `Backup` holder a retained original is, from its stored positions.
+///
+/// Return:
+///     Option<Holder>  None for an original without positions or room_id.
+fn backup_holder_of(original: &CanonicalJsonObject) -> Option<Holder> {
+	let positions = get_json_positions(original)?;
+	let room = original
+		.get("room_id")
+		.and_then(CanonicalJsonValue::as_str)
+		.and_then(|room| RoomId::parse(room).ok())?;
+
+	Some(Holder::backup(&room, positions.g_seq))
 }

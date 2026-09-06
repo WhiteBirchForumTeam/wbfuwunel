@@ -144,15 +144,6 @@ pub(super) static MAPS: &[Descriptor] = &[
 		index_size: 512,
 		..descriptor::RANDOM
 	},
-	// `event_id → JSON [mxc]`: the media an event references, as known when
-	// it was stored (declared with the send, or read from plaintext content).
-	// Released and removed together; an absent row means "read the content".
-	Descriptor {
-		name: "eventid_mxcs",
-		key_size_hint: Some(48),
-		val_size_hint: Some(128),
-		..descriptor::RANDOM_SMALL
-	},
 	Descriptor {
 		name: "eventid_pduid",
 		cache_disp: CacheDisp::Unique,
@@ -235,22 +226,43 @@ pub(super) static MAPS: &[Descriptor] = &[
 		name: "mediaid_user",
 		..descriptor::RANDOM_SMALL
 	},
-	// Superseded by `mxc_refcount`: the row-per-holder index could not answer
-	// "how many" at the moment a reference was removed.
+	// Media holders (docs/design/media-holders.md): `mxc ‖ kind ‖ id -> ()`,
+	// one row per thing that keeps the media alive. An empty prefix is media
+	// nothing holds. Set semantics, so adding or removing twice is a no-op.
 	Descriptor {
 		name: "mxc_holder",
-		..descriptor::DROPPED
+		key_size_hint: Some(96),
+		..descriptor::RANDOM_SMALL
 	},
-	// Media reference count: `mxc` -> i64, folded by the counter merge operator
-	// so an increment is a pure write inside the transaction that justifies
-	// it. A missing row is media created before the counter existed, and the
-	// first operand it receives turns it into the sentinel rather than a count.
+	// Reverse of `mxc_holder`: `kind ‖ room ‖ g_seq ‖ mxc -> ()` (avatars:
+	// `a ‖ localpart ‖ mxc`). What one holder holds; purge_history walks a
+	// range of it instead of reading events.
 	Descriptor {
-		name: "mxc_refcount",
-		merge: descriptor::MergeKind::Counter,
+		name: "holder_mxc",
+		key_size_hint: Some(96),
+		..descriptor::RANDOM_SMALL
+	},
+	// `room ‖ mxc -> ()`: every media a room ever held. Written once per
+	// media and room, read only by room deletion, which then removes the
+	// room's holders media by media without touching events.
+	Descriptor {
+		name: "room_mxc",
+		key_size_hint: Some(96),
+		..descriptor::RANDOM_SMALL
+	},
+	// `mxc -> created millis`: media stored since the holder model exists.
+	// Only media with a row is ever removed automatically; the time is the
+	// clock of the unreferenced-media protection period.
+	Descriptor {
+		name: "mxc_managed",
 		key_size_hint: Some(64),
 		val_size_hint: Some(8),
 		..descriptor::RANDOM_SMALL
+	},
+	// Superseded by the holder set: a count could not say who had counted.
+	Descriptor {
+		name: "mxc_refcount",
+		..descriptor::DROPPED
 	},
 	// Deleted media: `mxc` -> (deleted at, reason), so a later fetch can say
 	// "gone" rather than "never existed". Rows age out after a year.

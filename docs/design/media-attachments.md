@@ -1,7 +1,8 @@
 # E2EE 下的媒體引用：送訊息時宣告 attachments、計數 0 由後台掃描清
 
 > **這份文件回答：server 讀不到訊息內容時，媒體的引用計數從哪裡來；沒人來指的媒體怎麼辦。**
-> 狀態：🔧 維護者 2026-09-06 同意（PR #23），實作分支 `media/attachments`：`Event/Send` 與 HTTP header 都做；`migrate-references` 整個移除。
+> 狀態：🔧 維護者 2026-09-06 同意（PR #23），實作分支 `media/attachments`。**§4 的計數表與列（`eventid_mxcs`、後台掃 0）已被 [media-holders.md](media-holders.md) 的持有者集合取代**；
+> 這份文件仍是宣告（§3、§5）、驗證（§4.2）、警告（§6）的權威。
 > 上位文件：[media-gc.md](media-gc.md)（計數、收集器、墓碑、哨兵都不變）；
 > 核心設計 [why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md) §5.4。
 > client 條款同步寫在 [chunked-upload-spec.md](chunked-upload-spec.md) §12。

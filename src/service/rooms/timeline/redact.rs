@@ -1,5 +1,5 @@
 use ruma::{
-	EventId, RoomId,
+	CanonicalJsonValue, EventId, OwnedRoomId, RoomId,
 	canonical_json::{RedactedBecause, redact_in_place},
 };
 use tuwunel_core::{
@@ -10,7 +10,10 @@ use tuwunel_core::{
 	},
 };
 
-use crate::rooms::{short::ShortRoomId, timeline::RoomMutexGuard};
+use crate::{
+	media_refs::Holder,
+	rooms::{short::ShortRoomId, timeline::RoomMutexGuard},
+};
 
 /// Replace a PDU with the redacted form.
 #[implement(super::Service)]
@@ -54,7 +57,12 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 			.deindex_pdu(shortroomid, &pdu_id, body);
 	}
 
-	let room_id: &RoomId = pdu.get("room_id").try_into()?;
+	let room_id: OwnedRoomId = pdu
+		.get("room_id")
+		.and_then(CanonicalJsonValue::as_str)
+		.and_then(|room| RoomId::parse(room).ok())
+		.ok_or_else(|| err!(Database("stored PDU {event_id} has no room_id")))?;
+	let room_id: &RoomId = &room_id;
 
 	let room_version_id = self
 		.services
@@ -73,16 +81,8 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 		.delete_typed_relation(&pdu_id, &pdu)
 		.await;
 
-	// Read before the strip: the row written when the event was stored, or
-	// for an older event the content the strip is about to remove.
-	let media_refs = self
-		.services
-		.media_refs
-		.list_event_refs(event_id, &pdu)
-		.await;
-
 	// Redaction strips `unsigned`; the event keeps its place, so its positions
-	// go back afterwards.
+	// go back afterwards. They also name the event's holder (its g_seq).
 	let positions = get_json_positions(&pdu);
 
 	redact_in_place(
@@ -98,15 +98,23 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 
 	self.replace_pdu(&pdu_id, &pdu).await?;
 
-	// Released only once the stripped event is stored, and only when no
-	// retained original holds the references instead; retention releases them
-	// when it drops the original. A count held too long keeps media that could
-	// have gone; a count released early frees media something still shows.
-	if !original_retained && !media_refs.is_empty() {
+	// Only once the stripped event is stored. With the original retained it
+	// takes the media over (Event becomes Backup, never unheld in between);
+	// without one, the event's holder goes and the collector decides. An
+	// event from before positions existed holds nothing to move.
+	if let Some(positions) = positions {
+		let media_refs = &self.services.media_refs;
+		let event_holder = Holder::event(room_id, positions.g_seq);
 		let mut txn = self.db.db.txn();
-		self.services
-			.media_refs
-			.del_event_refs(&mut txn, event_id, &media_refs);
+		if original_retained {
+			media_refs
+				.swap_all_of(&mut txn, &event_holder, &Holder::backup(room_id, positions.g_seq))
+				.await;
+		} else {
+			media_refs
+				.release_all_of(&mut txn, &event_holder)
+				.await;
+		}
 		txn.execute();
 	}
 
