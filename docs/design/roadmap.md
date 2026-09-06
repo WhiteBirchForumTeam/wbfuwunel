@@ -75,13 +75,15 @@ client（wbf-matrix-client）的聊天模型要 server 配合的兩件事。設�
 （[media-attachments.md](media-attachments.md)），**形狀**換成外鍵集合（[media-holders.md](media-holders.md)），
 `migrate-references` 拔掉，既存媒體永不自動刪。**client 端必須同步**（spec §12），否則 E2EE 房間的附件 7 天後被掃掉。
 
-### 2.6 🔲 合併後再審與外部審查的修補（[review-followups-2026-09-06.md](review-followups-2026-09-06.md)）
+### 2.6 🔧 合併後再審與外部審查的修補（[review-followups-2026-09-06.md](review-followups-2026-09-06.md)），三支，維護者 2026-09-06 同意
 
-PR #24 合併後對 main 重看一次，加上 `../external-review` 兩輪（2026-09-05）逐條對現在的程式碼驗證。**已確認仍在、要修的**（照嚴重度）：
-既存媒體被縮圖拉進 `mxc_managed` 後 7 天被掃（P1，等於外部審查第 2 條的新形態）；Seal 在本地儲存把整檔收進記憶體、S3 的 1 MiB parts（P1）；
-`/_wbf/*` 與 WebSocket 不查帳號鎖定（P1）；WebSocket 連線在登出／token 到期後仍有效、關機時 `State` 懸空（P1）；`Status` 冷載入不持鎖蓋回舊快照、
-sweeper 鎖下不重讀進度（P2）；`(mxc,)` 前綴少 `Interfix`、頭像併發留下幽靈持有者（P2，漏水方向）；升級前的舊上傳沒有清理路徑（P2）；
-墓碑的 365 天 TTL 在 Universal compaction 下不會刪 key（文件講反話）。每一條的證據、修法、驗收在那份文件；**等維護者同意再開實作分支**。
+PR #24 合併後對 main 重看一次，加上 `../external-review` 兩輪（2026-09-05）逐條對現在的程式碼驗證；外部審查 14 條裡 4 條已由 #24 修掉、8 條仍在、1 條降級、1 條文件講反話，另抓到 1 條新的 P1。
+
+| 分支 | 內容 | 狀態 |
+|---|---|---|
+| `media/managed-origin` | 既存媒體被縮圖拉進 `mxc_managed` 後 7 天被掃（P1，只有 `create`／Seal 確立受管）；`(mxc, Interfix)` 前綴；頭像幽靈持有者；墓碑 TTL 文件 | ✅ PR #26 |
+| `wbf/auth-and-ws-lifetime` | `/_wbf/*` 與 WebSocket 不查帳號鎖定（P1）；WebSocket 在登出／到期後仍有權限、關機時 `State` 懸空（P1） | 🔧 |
+| `media/upload-lifecycle` | Seal 在本地儲存收整檔進記憶體、S3 的 1 MiB parts（P1）；`Status` 冷載入不持鎖、sweeper 鎖下不重讀進度（P2）；升級前舊上傳卡配額（P2） | 🔲 |
 
 ## 3. 候選（要不要做，由維護者決定）
 
