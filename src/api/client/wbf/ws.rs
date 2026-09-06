@@ -57,6 +57,13 @@ pub(crate) async fn ws_route(
 	headers: HeaderMap,
 	upgrade: WebSocketUpgrade,
 ) -> Response {
+	// Checked before the token lookup: a stopping server owes nobody a
+	// database read.
+	if !services.server.is_running() {
+		let reply = error_pack(0, 0, "Internal", "server is shutting down");
+		return pack_response(StatusCode::SERVICE_UNAVAILABLE, reply);
+	}
+
 	let session = match authenticate(&services, &headers).await {
 		| Ok(session) => session,
 		| Err(error) => {
@@ -64,11 +71,6 @@ pub(crate) async fn ws_route(
 			return pack_response(StatusCode::UNAUTHORIZED, reply);
 		},
 	};
-
-	if !services.server.is_running() {
-		let reply = error_pack(0, 0, "Internal", "server is shutting down");
-		return pack_response(StatusCode::SERVICE_UNAVAILABLE, reply);
-	}
 
 	// One pack is at most the configured meta and data plus the frame around
 	// them; anything larger is refused by the WebSocket layer before it is
@@ -113,6 +115,11 @@ async fn serve(services: crate::State, session: Session, socket: WebSocket) {
 	let user = &session.user;
 	let (mut sink, mut stream) = socket.split();
 
+	// One subscription for the life of the connection, polled from every
+	// turn of the loop, rather than a fresh one per message.
+	let shutdown = server.until_shutdown();
+	futures::pin_mut!(shutdown);
+
 	loop {
 		let message = tokio::select! {
 			next = tokio::time::timeout(idle_timeout, stream.next()) => match next {
@@ -123,7 +130,7 @@ async fn serve(services: crate::State, session: Session, socket: WebSocket) {
 					break;
 				},
 			},
-			() = server.until_shutdown() => {
+			() = &mut shutdown => {
 				debug!(%user, "wbf WebSocket connection closing: server shutting down");
 				// 1001 (going away) rather than 1012 (service restart): the
 				// former is in RFC 6455 itself and every client library
@@ -149,6 +156,24 @@ async fn serve(services: crate::State, session: Session, socket: WebSocket) {
 			},
 		};
 
+		// The token was good at the upgrade; is it still? Asked before the
+		// bytes are even decoded, so a session that is gone cannot keep the
+		// connection alive by sending malformed packs either. One point read
+		// per message, the same order of cost as the message itself. Not
+		// cached by time: a cache would be one more copy of the truth that
+		// can go stale.
+		if let Err(error) = revalidate(&services, &session).await {
+			debug!(%user, ?error, "wbf WebSocket session no longer valid; closing");
+			// Header fields read without any CRC check: they only address the
+			// refusal, they decide nothing.
+			let (id, seq) = header_id_seq(&bytes);
+			let reply = error_pack(id, seq, "Unauthorized", &error.to_string());
+			let _refused = sink.send(Message::Binary(reply.into())).await;
+			let frame = CloseFrame { code: close_code::POLICY, reason: "session no longer valid".into() };
+			let _closing = sink.send(Message::Close(Some(frame))).await;
+			break;
+		}
+
 		let view = match decode(&mut bytes) {
 			| Ok(view) => view,
 			| Err(error) => {
@@ -164,18 +189,6 @@ async fn serve(services: crate::State, session: Session, socket: WebSocket) {
 				continue;
 			},
 		};
-
-		// The token was good at the upgrade; is it still? One point read per
-		// pack, the same order of cost as the pack itself. Not cached by time:
-		// a cache would be one more copy of the truth that can go stale.
-		if let Err(error) = revalidate(&services, &session).await {
-			debug!(%user, ?error, "wbf WebSocket session no longer valid; closing");
-			let reply = error_pack(view.header.id, view.header.seq, "Unauthorized", &error.to_string());
-			let _refused = sink.send(Message::Binary(reply.into())).await;
-			let frame = CloseFrame { code: close_code::POLICY, reason: "session no longer valid".into() };
-			let _closing = sink.send(Message::Close(Some(frame))).await;
-			break;
-		}
 
 		let reply = handle_pack(&services, user, view).await;
 		if sink.send(Message::Binary(reply.into())).await.is_err() {

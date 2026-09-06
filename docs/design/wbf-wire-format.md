@@ -164,11 +164,12 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 **連線背後的 session（2026-09-06，`wbf/auth-and-ws-lifetime`，[review-followups-2026-09-06.md](review-followups-2026-09-06.md) §2.3／§2.4）**：
 
 - 升級時的驗證跟標準 client 路由一樣多：token 存在、沒到期、**帳號沒被鎖**（MSC3939，`M_USER_LOCKED` 401）。`POST /_wbf/v1/pack` 同一套。
-- 升級時驗過的不算永久：server 記住 `Session { user, device, token }`，**每個 pack 處理前重驗一次**（token 仍解到同一個 user 與 device、沒到期、沒被鎖）。
+- 升級時驗過的不算永久：server 記住 `Session { user, device, token }`，**每個 binary message 處理前重驗一次**（token 仍解到同一個 user 與 device、沒到期、沒被鎖），而且在**解碼之前**：已失效的 session 不能靠送壞封包讓連線活着（review，rumia）。
   登出、撤 device、到期、鎖帳號都在**下一個 pack** 生效：回 `Error(Unauthorized)`（帶那個 pack 的 `id`／`seq`），接著 server 送 Close `1008`（policy）關線。
   代價是每個 pack 多一次 token 點讀與一次鎖定讀，跟一個 HTTP 請求本來就付的一樣；🚫 不做「每 N 秒才驗」的快取，那是一份會過期的真相。
 - 關機：server 進入 stopping 就對每條連線送 Close `1001`（going away；不用 IANA 的 `1012` service restart，.NET 的 `ClientWebSocket` 會把 1012 當協定錯誤斷線）並結束它的 task；`Services::stop` **等所有連線的 task 結束**才往下走
   （`Services.connections`），因為 handler 拿的 `State` 是 `Services` 的裸指標，升級後的 socket 活得比 request 久，不等就是 use-after-free。
+  等最多 `JOIN_TIMEOUT`（15 秒）：連線的 loop 看到 stopping 就自己結束，會等到超時的只有卡在某個永不返回的呼叫裡的 task，那時 abort 它（drop future 連帶 drop 對 `Services` 的借用），不讓一條連線卡整個關機（review，rumia）。
   已經在關機的 server 拒絕新的升級（503，body 仍是 Error pack）。
 - 之後的 `Login`／`Refresh`／`Logout` subtype（提案待寫）會建在同一個 `Session` 上：Login 就是換掉這條連線的 Session。
 

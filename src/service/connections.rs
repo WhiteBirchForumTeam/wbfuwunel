@@ -8,10 +8,17 @@
 //! spawned here so that `Services::stop` can wait for them; a task that would
 //! start while shutdown is already under way is refused instead.
 
-use std::sync::Mutex;
+use std::{sync::Mutex, time::Duration};
 
 use tokio::task::JoinSet;
-use tuwunel_core::{error, info};
+use tuwunel_core::{error, info, warn};
+
+/// How long `close_and_join` waits for connections to end on their own
+/// before aborting the rest. Each connection's loop returns as soon as it
+/// sees the server stopping, so this only ever runs out when a task is stuck
+/// inside one call that never returns; then it must not hold the whole
+/// shutdown hostage (review of PR #28, rumia).
+pub const JOIN_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct Connections {
 	/// `None` once `close_and_join` has begun: nothing may start after that.
@@ -34,6 +41,7 @@ impl Connections {
 	/// Return:
 	///     bool  true when started; false when shutdown has begun and the task
 	///     was not started (the caller drops the connection).
+	#[must_use = "false means the task was not started; the caller has to drop the connection"]
 	pub fn spawn<F>(&self, task: F) -> bool
 	where
 		F: Future<Output = ()> + Send + 'static,
@@ -50,7 +58,9 @@ impl Connections {
 
 	/// Refuses new connections from now on and waits for the running ones to
 	/// end. Each connection's loop ends on its own when it sees the server
-	/// stopping, so this returns once they have all noticed.
+	/// stopping, so this normally returns once they have all noticed; one that
+	/// has not after `JOIN_TIMEOUT` is aborted, which drops its future and
+	/// with it every borrow of `Services`.
 	pub async fn close_and_join(&self) {
 		let Some(mut set) = self
 			.tasks
@@ -68,10 +78,18 @@ impl Connections {
 		if open > 0 {
 			info!(open, "Waiting for long-lived connections to end...");
 		}
-		while let Some(joined) = set.join_next().await {
-			if let Err(e) = joined {
-				error!(?e, "A connection task ended abnormally.");
+		let drain = async {
+			while let Some(joined) = set.join_next().await {
+				if let Err(e) = joined {
+					error!(?e, "A connection task ended abnormally.");
+				}
 			}
+		};
+		if tokio::time::timeout(JOIN_TIMEOUT, drain).await.is_err() {
+			let stuck = set.len();
+			warn!(stuck, timeout = ?JOIN_TIMEOUT, "Connections still running after the timeout; aborting them.");
+			set.abort_all();
+			while set.join_next().await.is_some() {}
 		}
 		if open > 0 {
 			info!(open, "Long-lived connections ended.");
