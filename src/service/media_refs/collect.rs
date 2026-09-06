@@ -113,9 +113,8 @@ async fn remove(&self, mxc: &str, reason: TombstoneReason) -> bool {
 
 	match self.services.media.collect(&parsed, reason).await {
 		| Ok(()) => {
-			// The media is gone; the room accelerator rows that pointed at it
-			// go too, or they would outlive everything they were for.
-			self.forget_media(mxc).await;
+			// `media.collect` also dropped the rows that pointed at it
+			// (`forget_media`), as it does for an admin removal.
 			debug!(?mxc, ?reason, "Removed media nothing holds.");
 			true
 		},

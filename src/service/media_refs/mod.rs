@@ -224,10 +224,13 @@ fn del_holder_rows(&self, txn: &mut Txn, mxc: &str, holder: &Holder) {
 	// (`forget_media`), so they are bounded by live media times rooms.
 }
 
-/// Drops every `room_mxc`/`mxc_room` row of `mxc`, once the media itself is
-/// gone. Idempotent; called by the collector and the sweep after a removal.
+/// Drops every row that points at `mxc` once the media itself is gone: its
+/// `room_mxc`/`mxc_room` accelerator rows and any holder rows still on it
+/// (an administrator can remove held media; the holders are then ghosts).
+/// Idempotent. Called by `media.collect` for every tombstoning removal, so
+/// the collector, the sweep and `!admin media delete` all clean up alike.
 #[implement(Service)]
-pub(super) async fn forget_media(&self, mxc: &str) {
+pub async fn forget_media(&self, mxc: &str) {
 	let rooms: Vec<OwnedRoomId> = self
 		.db
 		.mxc_room
@@ -239,7 +242,8 @@ pub(super) async fn forget_media(&self, mxc: &str) {
 		})
 		.collect()
 		.await;
-	if rooms.is_empty() {
+	let holders = self.list_holders(mxc).await;
+	if rooms.is_empty() && holders.is_empty() {
 		return;
 	}
 
@@ -247,6 +251,9 @@ pub(super) async fn forget_media(&self, mxc: &str) {
 	for room in &rooms {
 		txn.del(&self.db.room_mxc, (room, mxc));
 		txn.del(&self.db.mxc_room, (mxc, room));
+	}
+	for holder in &holders {
+		self.del_holder_rows(&mut txn, mxc, holder);
 	}
 	txn.execute();
 }

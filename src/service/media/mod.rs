@@ -360,6 +360,13 @@ impl Service {
 			warn!(?mxc, ?e, "Tombstone written but the WAL flush failed.");
 		}
 
+		// Whatever still pointed at it (holder rows, the room accelerator
+		// rows) goes with it, whichever path removed it.
+		self.services
+			.media_refs
+			.forget_media(&mxc.to_string())
+			.await;
+
 		Ok(())
 	}
 
