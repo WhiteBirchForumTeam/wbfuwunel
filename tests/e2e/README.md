@@ -5,11 +5,16 @@
 
 | 腳本 | 驗什麼 | 設計文件 |
 |---|---|---|
+| `e2e6.ps1` | 分塊上傳／下載（HTTP 一包一請求）：Create、有序塊、續傳、Seal、截斷、串流模式、按塊與明文位置讀、Abort、sweeper。**舊式**：每行印預期值，沒有 pass／fail 總結，看 `results.txt` | [chunked-upload-spec.md](../../docs/design/chunked-upload-spec.md) |
+| `e2e7.ps1` | WebSocket 通道：Hello、Ping、一 message 一 pack、HTTP 與 WS 交錯續傳、idle 關線。舊式同上 | [wbf-wire-format.md](../../docs/design/wbf-wire-format.md) §6.1 |
 | `e2e8.ps1` | 每房 `r_seq`、全域 `g_seq`、`Event/Recent`（`cg_seq`／`before`／byte 上限）、舊庫啟動的一次性編號 | [room-seq-and-recent.md](../../docs/design/room-seq-and-recent.md) |
 | `e2e9.ps1` | 附件宣告（header 與 `Event/Send`）、四種拒送、共用附件、明文 fallback、bot 一次性警告、redact 保留備份後 purge、掃描不碰新上傳 | [media-attachments.md](../../docs/design/media-attachments.md) |
 | `e2e10.ps1` | 媒體持有者集合：刪房／redact 保留備份／備份到期／頭像／purge 範圍／重複操作、`WBFUWUNEL_MEDIA_GRACE_SECONDS` 下的掃描 | [media-holders.md](../../docs/design/media-holders.md) |
 | `wbf-helpers.ps1` | 共用：pack 編解碼（CRC-32C）、HTTP／WS 傳輸、起停 server、寫設定檔。不是測試 | [wbf-wire-format.md](../../docs/design/wbf-wire-format.md) |
 | `build-win.ps1` | 建 e2e profile 的 binary（MSVC 環境、Windows 的 feature 組） | [windows-build.md](../../docs/design/windows-build.md) |
+
+更早的 e2e2–e2e5（媒體引用計數、哨兵、migrate-references）針對的是已被持有者集合取代的計數器，沒有進 repo；它們驗的行為
+（redact 立刻釋放、備份持有、purge 只釋放一次、410 墓碑）現在由 e2e9 情境 2 與 e2e10 涵蓋。
 
 ## 跑
 
