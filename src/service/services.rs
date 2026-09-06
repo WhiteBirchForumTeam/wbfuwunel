@@ -9,6 +9,7 @@ use tuwunel_database::Database;
 
 pub(crate) use crate::OnceServices;
 use crate::{
+	connections::Connections,
 	account_data, admin, appservice, client, config, deactivate, emergency, federation, fetcher,
 	globals, key_backups,
 	manager::Manager,
@@ -75,6 +76,8 @@ pub struct Services {
 	pub profile: Arc<profile::Service>,
 
 	manager: Mutex<Option<Arc<Manager>>>,
+	/// Tasks that outlive their request (WebSockets); joined in `stop`.
+	pub connections: Connections,
 	pub server: Arc<Server>,
 	pub db: Arc<Database>,
 }
@@ -143,6 +146,7 @@ pub async fn build(server: Arc<Server>) -> Result<Arc<Self>> {
 		profile: profile::Service::build(&args)?,
 
 		manager: Mutex::new(None),
+		connections: Connections::new(),
 		server,
 		db,
 	});
@@ -240,6 +244,11 @@ pub async fn start(self: &Arc<Self>) -> Result<Arc<Self>> {
 #[implement(Services)]
 pub async fn stop(&self) {
 	info!("Shutting down services...");
+
+	// Connections first: their loops end on their own when they see the
+	// server stopping, and they still call into services while they wind
+	// down. Nothing below may run while one could still dereference us.
+	self.connections.close_and_join().await;
 
 	self.interrupt().await;
 	if let Some(manager) = self.manager.lock().await.as_ref() {

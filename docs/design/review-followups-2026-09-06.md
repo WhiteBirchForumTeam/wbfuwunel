@@ -78,7 +78,7 @@ provider 的 `multipart_part_size()`（S3 預設 10 MiB；本地回 `usize::MAX`
 **驗收**：e2e6 加「本地 Seal 512 MiB，過程中量 server 的 working set 不超過啟動值 + 64 MiB」（PowerShell 讀 `Get-Process` 的 `WorkingSet64`）；
 S3 用 MinIO 容器跑一次 ≥ 100 MiB 的 Seal（沒有 MinIO 就記成「未驗」，不要寫成綠）。
 
-### 2.3 🔴 P1：`/_wbf/*` 與 WebSocket 不查帳號鎖定
+### 2.3 🔴 P1：`/_wbf/*` 與 WebSocket 不查帳號鎖定（🔧 `wbf/auth-and-ws-lifetime`）
 
 **現況**：`wbf/mod.rs:102-127` 的 `authenticate` 只做 token 查找與到期；標準路由的 `locked_account_check`／`suspended_account_check`
 （`router/auth.rs:96-121`）它都沒走。鎖帳號刻意保留 access token（MSC3939），所以被鎖的人拿同一個 token 打 `/_wbf/v1/pack` 照樣
@@ -90,7 +90,7 @@ Create／Chunk／Seal／Read，WebSocket 握手也一樣。
 
 **驗收**：e2e 加「鎖帳號後同 token 打 `/_wbf/v1/pack` 與 WS 握手都 401；解鎖後恢復」。
 
-### 2.4 🔴 P1：WebSocket 連線的生命週期與 session
+### 2.4 🔴 P1：WebSocket 連線的生命週期與 session（🔧 `wbf/auth-and-ws-lifetime`）
 
 兩件事，同一條線：
 

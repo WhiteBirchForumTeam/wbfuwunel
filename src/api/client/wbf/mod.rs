@@ -13,7 +13,7 @@ use axum::{
 	response::{IntoResponse, Response},
 };
 use ruma::{
-	Mxc, UserId,
+	Mxc, OwnedDeviceId, OwnedUserId, UserId,
 	api::error::{ErrorKind, UnknownTokenErrorData},
 };
 use serde_json::{Value, json};
@@ -72,8 +72,8 @@ pub(crate) async fn pack_route(
 	headers: HeaderMap,
 	body: Bytes,
 ) -> Result<Response> {
-	let user = match authenticate(&services, &headers).await {
-		| Ok(user) => user,
+	let session = match authenticate(&services, &headers).await {
+		| Ok(session) => session,
 		| Err(error) => {
 			let reply = error_pack(0, 0, "Unauthorized", &error.to_string());
 			return Ok(pack_response(StatusCode::UNAUTHORIZED, reply));
@@ -82,7 +82,7 @@ pub(crate) async fn pack_route(
 
 	let mut body = body.to_vec();
 	let reply = match decode(&mut body) {
-		| Ok(view) => handle_pack(&services, &user, view).await,
+		| Ok(view) => handle_pack(&services, &session.user, view).await,
 		| Err(error) => {
 			debug!(?error, "Rejected pack");
 			// Only a data CRC failure leaves the header trustworthy (the meta
@@ -98,23 +98,42 @@ pub(crate) async fn pack_route(
 	Ok(pack_response(StatusCode::OK, reply))
 }
 
-/// Resolves the bearer token to a user, failing closed on anything else.
-async fn authenticate(services: &Services, headers: &HeaderMap) -> Result<ruma::OwnedUserId> {
+/// What a bearer token resolved to, kept so a long-lived connection can ask
+/// again later whether it is still good (`revalidate`).
+pub(super) struct Session {
+	pub(super) user: OwnedUserId,
+	pub(super) device: OwnedDeviceId,
+	token: String,
+}
+
+/// Resolves the bearer header to a session, failing closed on anything else:
+/// no header, unknown or expired token, or a locked account (MSC3939, the
+/// same check every standard client route runs).
+async fn authenticate(services: &Services, headers: &HeaderMap) -> Result<Session> {
 	let token = headers
 		.get(header::AUTHORIZATION)
 		.and_then(|value| value.to_str().ok())
 		.and_then(|value| value.strip_prefix("Bearer "))
 		.ok_or_else(|| err!(Request(MissingToken("Missing access token."))))?;
 
-	let unknown_token = |soft_logout: bool, message: &'static str| {
-		Error::Request(
-			ErrorKind::UnknownToken(UnknownTokenErrorData { soft_logout }),
-			message.into(),
-			StatusCode::UNAUTHORIZED,
-		)
-	};
+	check_token(services, token).await
+}
 
-	let (user, _device, expires_at) = services
+/// Checks that `session` is still what its token resolves to: same user and
+/// device, not expired, account not locked. A WebSocket calls this before
+/// every pack, so a logout, a revoked device, an expiry or a lock ends the
+/// connection's authority at the next message instead of never.
+pub(super) async fn revalidate(services: &Services, session: &Session) -> Result {
+	let current = check_token(services, &session.token).await?;
+	if current.user != session.user || current.device != session.device {
+		return Err(unknown_token(false, "Access token now belongs to another session."));
+	}
+
+	Ok(())
+}
+
+async fn check_token(services: &Services, token: &str) -> Result<Session> {
+	let (user, device, expires_at) = services
 		.users
 		.find_from_token(token)
 		.await
@@ -124,7 +143,17 @@ async fn authenticate(services: &Services, headers: &HeaderMap) -> Result<ruma::
 		return Err(unknown_token(true, "Access token expired."));
 	}
 
-	Ok(user)
+	services.users.locked_check(&user).await?;
+
+	Ok(Session { user, device, token: token.to_owned() })
+}
+
+fn unknown_token(soft_logout: bool, message: &'static str) -> Error {
+	Error::Request(
+		ErrorKind::UnknownToken(UnknownTokenErrorData { soft_logout }),
+		message.into(),
+		StatusCode::UNAUTHORIZED,
+	)
 }
 
 /// Dispatches one decoded pack to its handler and returns the reply pack.

@@ -6,7 +6,7 @@
 | 腳本 | 驗什麼 | 設計文件 |
 |---|---|---|
 | `e2e6.ps1` | 分塊上傳／下載（HTTP 一包一請求）：Create、有序塊、續傳、Seal、截斷、串流模式、按塊與明文位置讀、Abort、sweeper。**舊式**：每行印預期值，沒有 pass／fail 總結，看 `results.txt` | [chunked-upload-spec.md](../../docs/design/chunked-upload-spec.md) |
-| `e2e7.ps1` | WebSocket 通道：Hello、Ping、一 message 一 pack、HTTP 與 WS 交錯續傳、idle 關線。舊式同上 | [wbf-wire-format.md](../../docs/design/wbf-wire-format.md) §6.1 |
+| `e2e7.ps1` | WebSocket 通道：Hello、Ping、一 message 一 pack、HTTP 與 WS 交錯續傳、idle 關線；情境 3：鎖定帳號兩個傳輸都拒、登出後下一個 pack 被拒並關線、連線開著時 `!admin server shutdown` 正常退出無 dangling。舊式同上 | [wbf-wire-format.md](../../docs/design/wbf-wire-format.md) §6.1、[review-followups-2026-09-06.md](../../docs/design/review-followups-2026-09-06.md) §2.3／2.4 |
 | `e2e8.ps1` | 每房 `r_seq`、全域 `g_seq`、`Event/Recent`（`cg_seq`／`before`／byte 上限）、舊庫啟動的一次性編號 | [room-seq-and-recent.md](../../docs/design/room-seq-and-recent.md) |
 | `e2e9.ps1` | 附件宣告（header 與 `Event/Send`）、四種拒送、共用附件、明文 fallback、bot 一次性警告、redact 保留備份後 purge、掃描不碰新上傳 | [media-attachments.md](../../docs/design/media-attachments.md) |
 | `e2e10.ps1` | 媒體持有者集合：刪房／redact 保留備份／備份到期／頭像／purge 範圍／重複操作、`WBFUWUNEL_MEDIA_GRACE_SECONDS` 下的掃描；情境 4（要 `E2E_OLD_EXE`）：既存媒體被生成縮圖後仍不受管、不被掃 | [media-holders.md](../../docs/design/media-holders.md)、[review-followups-2026-09-06.md](../../docs/design/review-followups-2026-09-06.md) §2.1 |
