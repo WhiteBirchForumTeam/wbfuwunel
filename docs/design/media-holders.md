@@ -1,7 +1,7 @@
 # 媒體持有者集合：以外鍵取代引用計數（第三版，打掉重做）
 
 > **這份文件回答：一份媒體「還有沒有人在用」怎麼記，才不會漏、不會扣兩次；誰加、誰拿掉、什麼時候刪。**
-> 狀態：🔧 維護者 2026-09-06 核可，`media/attachments` 分支照這份打掉重做中。
+> 狀態：✅ 實作完成（`media/attachments` 分支，PR #24），2026-09-06；驗收結果在 §9。
 > 取代：[media-gc.md](media-gc.md) §2（merge operator 計數器）、[media-attachments.md](media-attachments.md) §4（`eventid_mxcs` 列與 fallback）。
 > 不變：宣告附件的方式（[media-attachments.md](media-attachments.md) §3、§5、§6）、墓碑與 410（media-gc.md §6）、每 mxc 一鎖、7 天保護期、bot 警告。
 
@@ -143,9 +143,11 @@ is_removable(mxc) -> bool           收集器與掃描共用的決策
 
 ## 9. 驗收（e2e，照 §2.3 的例子）
 
-- 五則事件（兩房）引用同一媒體 → 持有者 5；刪房 a → 3 個持有者、媒體仍在；redact b/1234（備份保留）→ 換 Backup、仍在；備份到期 → 4→… 直到空 → 410。
-- purge_history 一個範圍 → 範圍內 Event 與 Backup 都拿掉，範圍外的還在，媒體對錯與否只看集合。
-- 頭像：設 → 持有；換 → 舊的空了就刪；清 → 同。
+**2026-09-06 結果**：e2e10 **13 個檢查點全綠**（下列前四項）；e2e9（宣告、拒送、`Event/Send`、警告、redact 保留備份後 purge）26 綠；e2e8（`r_seq`／`g_seq`）37 綠回歸；單元五個 crate 全綠。
+
+- 五則事件（兩房）引用同一媒體 → 刪房 a → 仍在；redact b1（備份保留）→ 仍在；重啟讓 retention（1 秒）清備份 → 仍在（b2 持有）；設頭像後 redact b2 並清備份 → 仍在（頭像持有）；清頭像 → 410。同一 redact 與刪房再做一次：無錯。
+- purge_history 到 marker 之前：範圍內的 Event（c2）與 Backup（redact 過的 c1）都拿掉 → 410；marker 之後的 c4 持有的媒體 200；同一範圍再 purge 一次無錯、狀態不變。
+- 掃描：`WBFUWUNEL_MEDIA_GRACE_SECONDS=3`、`media_gc_sweep_interval=2` → 沒被指的上傳 8 秒後 410、被指的 200，啟動 log 有 override 警告；沒設變數時新上傳不被掃。
 - E2EE 宣告、四種拒送、`Event/Send`、警告一次：沿用 e2e9 情境 1。
 - 既存媒體（用舊 binary 建的庫）：沒有 `mxc_managed` 列，掃描與收集器都不碰。
 - 反覆執行：同一則 redact 兩次、同一 purge 跑兩次、備份到期後再 purge —— 集合狀態與第一次相同，log 無錯。
