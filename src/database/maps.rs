@@ -250,6 +250,14 @@ pub(super) static MAPS: &[Descriptor] = &[
 		key_size_hint: Some(96),
 		..descriptor::RANDOM_SMALL
 	},
+	// `mxc ‖ room -> ()`: reverse of `room_mxc`, so the rows of a media that
+	// is removed can be found and dropped without scanning every room.
+	// Written with `room_mxc`, read only when the media is removed.
+	Descriptor {
+		name: "mxc_room",
+		key_size_hint: Some(96),
+		..descriptor::RANDOM_SMALL
+	},
 	// `mxc -> created millis`: media stored since the holder model exists.
 	// Only media with a row is ever removed automatically; the time is the
 	// clock of the unreferenced-media protection period.

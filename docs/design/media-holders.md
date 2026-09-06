@@ -60,9 +60,10 @@ redact 5678、備份到期、清頭像    → {}  → 刪
 | `mxc_holder` | `mxc ‖ kind ‖ id` | 空 | 「M 被誰持有」。**空集合的判定 = 前綴 seek 一筆都沒有**。 |
 | `holder_mxc` | `room_id ‖ kind ‖ g_seq ‖ mxc`（Avatar：`localpart ‖ mxc`） | 空 | 反向索引：「這則事件／這份備份／這個人持有哪些媒體」。purge 與刪房用前綴掃它。 |
 | `mxc_managed` | `mxc` | 建立時間（ms） | **只有這個模型上線後上傳的媒體**才有列。沒列＝既存媒體＝永不自動刪。也是保護期的時鐘，不再看檔案 mtime。 |
-| `room_mxc` | `room_id ‖ mxc` | 空 | **加速索引**：這個 room 曾經持有過哪些媒體（去重）。刪房時直接走它，每個媒體前綴刪 `mxc_holder(M, Event, room…)` 與 `(M, Backup, room…)`，不必掃反向索引的每一則事件。 |
+| `room_mxc` | `room_id ‖ mxc` | 空 | **加速索引**：這個 room 持有或持有過哪些媒體（去重）。刪房時直接走它，每個媒體前綴刪 `mxc_holder(M, Event, room…)` 與 `(M, Backup, room…)`，不必掃反向索引的每一則事件。 |
+| `mxc_room` | `mxc ‖ room_id` | 空 | `room_mxc` 的反向。**只在媒體被刪掉那一刻讀**：把它列出的 `room_mxc` 列一起清掉，所以 `room_mxc` 以「活著的媒體 × 房間」為界（review 抓到的無界成長，rumia）。 |
 
-四張表都是「鍵即資料」，沒有 merge operator、沒有哨兵、沒有計數列。
+五張表都是「鍵即資料」，沒有 merge operator、沒有哨兵、沒有計數列。
 
 **加速索引的原則（維護者 2026-09-06）**：平時它們只是多寫一筆、永遠不讀（no-op），只在清除時當指標用。要多快就多加幾張，
 每張都是「從清除的入口直接指到媒體」：房間 → 媒體（`room_mxc`）、事件範圍 → 媒體（`holder_mxc`）、使用者 → 媒體（Avatar 的 `holder_mxc`）。
@@ -71,7 +72,7 @@ redact 5678、備份到期、清頭像    → {}  → 刪
 
 ## 3.1 一個管理器，所有插入點只叫它
 
-維護者 2026-09-06：抽象成管理器，下次不用再找出所有插入點。`media_refs` 服務只露出這幾個入口，**其他模組不碰四張表**：
+維護者 2026-09-06：抽象成管理器，下次不用再找出所有插入點。`media_refs` 服務只露出這幾個入口，**其他模組不碰五張表**：
 
 ```
 hold(txn, mxc, holder)              加一個外鍵（含所有索引）
@@ -115,6 +116,8 @@ is_removable(mxc) -> bool           收集器與掃描共用的決策
 - 週期掃描走 `mxc_managed`（不再掃全部媒體），只處理「從沒被指過、超過 7 天」的：沒有持有者且 `created + 7d < now`。
 - 既存媒體沒有 `mxc_managed` 列，兩條路都不會碰它。不需要哨兵。
 - 鎖：加持有者的人從寫入前持鎖到 commit（現有做法）；收集器與掃描持鎖下 seek 前綴再刪。同型的窗口論述沿用 media-gc.md §3.3。
+- 刪掉媒體之後順手 `forget_media`：走 `mxc_room` 把 `room_mxc`／`mxc_room` 的列清掉。拿掉一個持有者時**不**清這兩張（那要掃一次才知道這房還有沒有別的持有者），
+  所以它們記的是「持有或持有過」，上界是活著的媒體 × 房間。
 
 ## 6. 宣告、警告、7 天：不變
 
@@ -160,7 +163,7 @@ is_removable(mxc) -> bool           收集器與掃描共用的決策
 
 | 什麼 | 哪裡 |
 |---|---|
-| 四張表 | `src/database/maps.rs` |
+| 五張表 | `src/database/maps.rs` |
 | `Holder` enum、編碼、§3.1 的管理器 | `src/service/media_refs/`（重寫 mod.rs；`attachments.rs` 留） |
 | 各路徑 | `timeline/{append,backfill,redact,purge,pdus}.rs`、`retention/mod.rs`、`profile/mod.rs`、`rooms/delete/mod.rs`、`users`（刪使用者） |
 | 收集器＋掃描 | `media_refs/collect.rs`（決策函數一個） |

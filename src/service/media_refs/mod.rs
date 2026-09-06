@@ -8,8 +8,8 @@
 //! there is no "exactly once" to get right, which is what sank the counter
 //! this replaces (`docs/design/media-holders.md` §1).
 //!
-//! This module is the only writer of the four tables (`mxc_holder`,
-//! `holder_mxc`, `room_mxc`, `mxc_managed`). Every path that makes or
+//! This module is the only writer of the five tables (`mxc_holder`,
+//! `holder_mxc`, `room_mxc`, `mxc_room`, `mxc_managed`). Every path that makes or
 //! breaks a reference calls one of the entry points below inside its own
 //! transaction; the list of those paths is `media-holders.md` §4.
 //!
@@ -68,8 +68,10 @@ struct Data {
 	mxc_holder: Arc<Map>,
 	/// `kind ‖ room ‖ g_seq ‖ mxc → ()` (avatars: `a ‖ localpart ‖ mxc`): what a holder holds.
 	holder_mxc: Arc<Map>,
-	/// `room ‖ mxc → ()`: every media a room ever held; the room-deletion accelerator.
+	/// `room ‖ mxc → ()`: every media a room holds or held; the room-deletion accelerator.
 	room_mxc: Arc<Map>,
+	/// `mxc ‖ room → ()`: reverse of `room_mxc`, read when the media is removed.
+	mxc_room: Arc<Map>,
 	/// `mxc → created millis`: media this model manages. No row, never removed.
 	mxc_managed: Arc<Map>,
 	/// `user_id → ()`: told once about undeclared attachments.
@@ -87,6 +89,7 @@ impl crate::Service for Service {
 				mxc_holder: args.db["mxc_holder"].clone(),
 				holder_mxc: args.db["holder_mxc"].clone(),
 				room_mxc: args.db["room_mxc"].clone(),
+				mxc_room: args.db["mxc_room"].clone(),
 				mxc_managed: args.db["mxc_managed"].clone(),
 				userid_attachmentwarned: args.db["userid_attachmentwarned"].clone(),
 				userid_lastlegacyupload: args.db["userid_lastlegacyupload"].clone(),
@@ -189,6 +192,7 @@ pub fn hold(&self, txn: &mut Txn, mxc: &str, holder: &Holder) {
 	txn.insert_raw(&self.db.holder_mxc, holder.holder_mxc_key(mxc), []);
 	if let Some(room) = holder.room() {
 		txn.put_raw(&self.db.room_mxc, (room, mxc), []);
+		txn.put_raw(&self.db.mxc_room, (mxc, room), []);
 	}
 }
 
@@ -214,9 +218,37 @@ pub fn swap(&self, txn: &mut Txn, mxc: &str, from: &Holder, to: &Holder) {
 fn del_holder_rows(&self, txn: &mut Txn, mxc: &str, holder: &Holder) {
 	txn.del_raw(&self.db.mxc_holder, holder.mxc_holder_key(mxc));
 	txn.del_raw(&self.db.holder_mxc, holder.holder_mxc_key(mxc));
-	// `room_mxc` is left in place on purpose: it lists what the room *ever*
-	// held, and removing it here would need a scan to know whether anything
-	// of the room still holds the media. Room deletion clears it.
+	// `room_mxc`/`mxc_room` are left in place on purpose: knowing whether
+	// anything of the room still holds the media would need a scan here.
+	// They go when the room is deleted or when the media is removed
+	// (`forget_media`), so they are bounded by live media times rooms.
+}
+
+/// Drops every `room_mxc`/`mxc_room` row of `mxc`, once the media itself is
+/// gone. Idempotent; called by the collector and the sweep after a removal.
+#[implement(Service)]
+pub(super) async fn forget_media(&self, mxc: &str) {
+	let rooms: Vec<OwnedRoomId> = self
+		.db
+		.mxc_room
+		.keys_prefix(&(mxc,))
+		.ignore_err()
+		.filter_map(|(_, room): (Ignore, &str)| {
+			let parsed = RoomId::parse(room).ok();
+			async move { parsed }
+		})
+		.collect()
+		.await;
+	if rooms.is_empty() {
+		return;
+	}
+
+	let mut txn = self.services.db.txn();
+	for room in &rooms {
+		txn.del(&self.db.room_mxc, (room, mxc));
+		txn.del(&self.db.mxc_room, (mxc, room));
+	}
+	txn.execute();
 }
 
 /// Lists the media `holder` holds, from the reverse index.
@@ -291,19 +323,19 @@ pub async fn release_range(&self, txn: &mut Txn, room: &RoomId, until_g_seq: i64
 
 	for kind in [KIND_EVENT, KIND_BACKUP] {
 		let prefix = (kind, room.as_str());
+		// Keys are ordered by g_seq, so the scan stops at the boundary rather
+		// than walking the whole room.
 		let rows: Vec<(u64, String)> = self
 			.db
 			.holder_mxc
 			.keys_prefix(&prefix)
 			.ignore_err()
 			.map(|(_, _, biased, mxc): (Ignore, Ignore, u64, &str)| (biased, mxc.to_owned()))
+			.take_while(|(biased, _)| futures::future::ready(*biased < until))
 			.collect()
 			.await;
 
 		for (biased, mxc) in rows {
-			if biased >= until {
-				continue;
-			}
 			let g_seq = unbias_g_seq(biased);
 			let holder = if kind == KIND_EVENT { Holder::event(room, g_seq) } else { Holder::backup(room, g_seq) };
 			self.del_holder_rows(txn, &mxc, &holder);
@@ -354,6 +386,7 @@ pub async fn release_room(&self, txn: &mut Txn, room: &RoomId) -> usize {
 			}
 		}
 		txn.del(&self.db.room_mxc, (room, mxc.as_str()));
+		txn.del(&self.db.mxc_room, (mxc.as_str(), room));
 	}
 
 	self.hand_to_collector(txn, media.clone());
