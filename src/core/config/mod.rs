@@ -1966,6 +1966,30 @@ pub struct Config {
 	#[serde(default)]
 	pub oidc_rc_burst_count: u32,
 
+	/// Token-bucket refill rate (attempts per second) for logging in, per
+	/// client IP. `POST /_matrix/client/v3/login`, `POST /_matrix/client/v3/refresh`
+	/// and the wbf channel's `Login` and `Refresh` packs all draw from the one
+	/// bucket of the address they come from, so opening the channel does not
+	/// open a second, faster road for guessing passwords. `0` disables the
+	/// throttle. The key is the client IP: a rate low enough to bite a guesser
+	/// also throttles many users behind one NAT, which is what the burst is
+	/// for.
+	///
+	/// reloadable: yes
+	/// default: 1
+	#[serde(default = "default_login_rc_per_second")]
+	pub login_rc_per_second: u32,
+
+	/// Token-bucket depth (burst size) for the login throttle: how many
+	/// attempts one client IP may make at once before `login_rc_per_second`
+	/// governs. Ten people behind one address logging in together fit; a
+	/// password guesser does not. Ignored while `login_rc_per_second` is `0`.
+	///
+	/// reloadable: yes
+	/// default: 10
+	#[serde(default = "default_login_rc_burst_count")]
+	pub login_rc_burst_count: u32,
+
 	/// Enable the rendezvous session APIs used to sign in with a QR code
 	/// (MSC4108 and MSC4388).
 	///
@@ -3599,6 +3623,17 @@ pub struct Config {
 	/// default: 300
 	#[serde(default = "default_wbf_ws_idle_timeout")]
 	pub wbf_ws_idle_timeout: u64,
+
+	/// How long a wbf WebSocket connection that was upgraded without a bearer
+	/// token may exist before it logs in, in seconds. Counted from the upgrade,
+	/// not from the last message: pinging does not extend it. A connection
+	/// that has not logged in by then is closed. The credentials are typed
+	/// before the connection is opened, so a short window is enough; a client
+	/// that missed it reconnects.
+	///
+	/// default: 30
+	#[serde(default = "default_wbf_ws_unauthenticated_timeout")]
+	pub wbf_ws_unauthenticated_timeout: u64,
 
 	/// Most events one `Event/Recent` pack returns: the newest events across
 	/// all of a user's joined rooms, for a client mounting its cache on first
@@ -5868,6 +5903,12 @@ fn default_wbf_meta_max_bytes() -> usize { 64 * 1024 }
 fn default_wbf_data_max_bytes() -> usize { 16 * 1024 * 1024 + 4096 }
 
 fn default_wbf_ws_idle_timeout() -> u64 { 300 }
+
+fn default_wbf_ws_unauthenticated_timeout() -> u64 { 30 }
+
+fn default_login_rc_per_second() -> u32 { 1 }
+
+fn default_login_rc_burst_count() -> u32 { 10 }
 
 fn default_wbf_recent_max_limit() -> usize { 10_000 }
 

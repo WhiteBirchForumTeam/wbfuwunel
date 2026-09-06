@@ -139,7 +139,10 @@ $p = Start-Server $cfg 's1'
 $reg = Api Post '/_matrix/client/v3/register' '{"username":"e2e","password":"correct-horse-battery","auth":{"type":"m.login.dummy"}}' $null
 $tok = $reg.access_token; Log "user = $($reg.user_id)"
 
-try { $bad = Ws-Open $null; Log "[1.0] no token -> connected?! state=$($bad.State)" } catch { Log "[1.0] no token -> upgrade refused: $($_.Exception.InnerException.Message)  (expect 401)" }
+# Since the Session kind (wire-format 6.3) an upgrade without a token is allowed: the connection may only Hello, Ping,
+# Login or Refresh until it logs in, and is closed after wbf_ws_unauthenticated_timeout. Scenario 4 covers it.
+try { $anon = Ws-Open $null; $r = Ws-Call $anon (New-Pack 3 1 0 0 1 (FileInfo-Meta 16 16 1) @()); Log "[1.0] no token -> connected state=$($anon.State); Upload/Create -> $(Describe $r)  (expect Open, Error Unauthorized)"; try { $anon.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, 'bye', [Threading.CancellationToken]::None).Wait(3000) | Out-Null } catch {} } catch { Log "[1.0] no token -> upgrade refused: $($_.Exception.InnerException.Message)  (expect Open: FAIL)" }
+try { $badTok = Ws-Open 'not-a-token'; Log "[1.0b] wrong token -> connected?! state=$($badTok.State)  (expect refused: FAIL)" } catch { Log "[1.0b] wrong token -> upgrade refused: $($_.Exception.InnerException.Message)  (expect 401)" }
 
 $ws = Ws-Open $tok
 Log "[1.1] connected state=$($ws.State)  (expect Open)"
@@ -294,5 +297,124 @@ $ended = [bool]($log3 -match 'Long-lived connections ended')
 $abnormal = [bool]($log3 -match 'ended abnormally|panicked|dangling references')
 Log "[3.3d] log: waited-for-connections=$waited ended=$ended abnormal=$abnormal  (expect True / True / False)"
 if (-not $exited) { Stop-Server $p }
+
+# ================= Scenario 4: the Session kind (wire-format 6.3): Login / Refresh / Logout over the channel =================
+# Unauthenticated upgrade, the 30 s (here 3 s) login deadline, login by password, wrong password, the shared login
+# throttle (HTTP and channel draw from one bucket), refresh, logout closes, a second login switches accounts,
+# logout-all ends the other connection, a locked account cannot log in.
+Log '################ Scenario 4: Session kind over the WebSocket ################'
+$db4 = "$S\e2e7db-4"; Remove-Item -Recurse -Force $db4 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db4 | Out-Null
+$cfg4 = "$S\e2e7-4.toml"
+@('[global]','server_name = "localhost"',('database_path = "' + ($db4 -replace '\\','/') + '"'),'port = 8015','address = ["127.0.0.1"]',
+  'allow_registration = true','yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse = true','allow_federation = false',
+  'wbf_ws_idle_timeout = 60','wbf_ws_unauthenticated_timeout = 3','login_rc_per_second = 1','login_rc_burst_count = 4','log = "info"') -join "`n" | Set-Content -Path $cfg4 -Encoding ascii
+$p = Start-Server $cfg4 's4'
+$regA = Api Post '/_matrix/client/v3/register' '{"username":"alice","password":"correct-horse-battery","auth":{"type":"m.login.dummy"}}' $null
+$tokA = $regA.access_token
+$regB = Api Post '/_matrix/client/v3/register' '{"username":"bob","password":"correct-horse-battery","auth":{"type":"m.login.dummy"}}' $null
+$tokB = $regB.access_token
+$ping = New-Pack 1 4 0 0 1 @() @()
+$createPack = New-Pack 3 1 0 0 1 (FileInfo-Meta 16 16 1) @()
+function Login-Pack($user, $password, [bool]$wantRefresh) {
+  Json-Pack 16 1 0 1 @{ type = 'm.login.password'; identifier = @{ type = 'm.id.user'; user = $user }; password = $password; initial_device_display_name = 'e2e7'; refresh_token = $wantRefresh } @()
+}
+function Recv-Frame($ws, [int]$ms) {
+  $buf = New-Object byte[] 65536
+  $t = $ws.ReceiveAsync([ArraySegment[byte]]$buf, [Threading.CancellationToken]::None)
+  if (-not $t.Wait($ms)) { return @{ kind = 'timeout' } }
+  $res = $t.Result
+  if ($res.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close) { return @{ kind = 'close'; code = $res.CloseStatus; reason = $res.CloseStatusDescription } }
+  $bytes = New-Object byte[] $res.Count; [Array]::Copy($buf, $bytes, $res.Count)
+  $pk = Read-Pack $bytes; $pk.http = 'ws'; @{ kind = 'pack'; pack = $pk }
+}
+
+# [4.1] unauthenticated upgrade: Hello and Ping answered, everything else refused, closed at the deadline even while pinging
+$anon = Ws-Open $null
+$r = Ws-Call $anon (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e7.ps1'; features = @() } @())
+$featuresHaveLogin = ($r.metaText -match '"login"')
+Log "[4.1a] anonymous Hello -> $(Describe $r)  (expect Ack, features include login=$featuresHaveLogin)"
+$r = Ws-Call $anon $createPack
+Log "[4.1b] anonymous Upload/Create -> $(Describe $r)  (expect Error Unauthorized)"
+$closed = $null; $sw = [Diagnostics.Stopwatch]::StartNew()
+while ($sw.Elapsed.TotalSeconds -lt 8 -and -not $closed) {
+  Ws-Send $anon $ping
+  $f = Recv-Frame $anon 2000
+  if ($f.kind -eq 'close') { $closed = $f } elseif ($f.kind -eq 'pack') { Start-Sleep -Milliseconds 500 }
+}
+if ($closed) { Log "[4.1c] pinging without logging in: closed after $([int]$sw.Elapsed.TotalSeconds) s, code=$($closed.code) reason='$($closed.reason)'  (expect ~3 s, PolicyViolation)" } else { Log "[4.1c] pinging without logging in: still open after 8 s  (expect Close: FAIL)" }
+
+# [4.2] login by password on a fresh anonymous connection; the session works on the channel and its token works over HTTP
+$ws4 = Ws-Open $null
+$r = Ws-Call $ws4 (Login-Pack 'alice' 'correct-horse-battery' $true)
+$loginMeta = $null; try { $loginMeta = $r.metaText | ConvertFrom-Json } catch {}
+Log "[4.2a] Login alice -> $(Describe $r)  (expect Ack with user_id, device_id, access_token, refresh_token)"
+$tokWs = $loginMeta.access_token; $refreshTok = $loginMeta.refresh_token
+$r = Ws-Call $ws4 $createPack
+Log "[4.2b] after Login, Upload/Create -> $(Describe $r)  (expect Ack)"
+$r = Send-Pack $ping $tokWs
+Log "[4.2c] the channel-issued token over HTTP pack -> $(Describe $r)  (expect http=200 Pong)"
+
+# [4.3] refresh: new access token, old one dead, connection continues as the same user
+$r = Ws-Call $ws4 (Json-Pack 16 2 0 2 @{ refresh_token = $refreshTok } @())
+$refreshMeta = $null; try { $refreshMeta = $r.metaText | ConvertFrom-Json } catch {}
+Log "[4.3a] Refresh -> $(Describe $r)  (expect Ack with a new access_token)"
+$r = Send-Pack $ping $tokWs
+Log "[4.3b] old access token over HTTP -> $(Describe $r)  (expect http=401)"
+$r = Send-Pack $ping $refreshMeta.access_token
+Log "[4.3c] new access token over HTTP -> $(Describe $r)  (expect http=200 Pong)"
+$r = Ws-Call $ws4 $ping
+Log "[4.3d] the connection after Refresh, Ping -> $(Describe $r)  (expect Pong)"
+
+# [4.4] wrong password is refused but keeps the connection; the bucket (burst 4) is shared with HTTP /login
+$r = Ws-Call $ws4 (Login-Pack 'alice' 'wrong' $false)
+Log "[4.4a] wrong password -> $(Describe $r)  (expect Error Forbidden)"
+$r = Ws-Call $ws4 (Login-Pack 'alice' 'wrong' $false)
+Log "[4.4b] wrong password again (4th attempt from this address) -> $(Describe $r)  (expect Error Forbidden: burst not yet spent)"
+$r = Ws-Call $ws4 (Login-Pack 'alice' 'correct-horse-battery' $false)
+Log "[4.4c] 5th attempt within the burst window -> $(Describe $r)  (expect Error RateLimited with retry_after_ms)"
+$httpLogin = $null
+try { $httpLogin = Api Post '/_matrix/client/v3/login' '{"type":"m.login.password","identifier":{"type":"m.id.user","user":"alice"},"password":"correct-horse-battery"}' $null; Log "[4.4d] HTTP /login from the same address right after -> 200?!  (expect 429: FAIL)" } catch { $inner = $_.Exception; while ($inner.InnerException) { $inner = $inner.InnerException }; Log "[4.4d] HTTP /login from the same address right after -> refused: $($inner.Message)  (expect 429 M_LIMIT_EXCEEDED)" }
+$r = Ws-Call $ws4 $ping
+Log "[4.4e] the connection is still alice after the refusals, Ping -> $(Describe $r)  (expect Pong)"
+Start-Sleep -Seconds 5
+
+# [4.5] a second Login on the same connection switches the account; Logout answers then closes
+$r = Ws-Call $ws4 (Login-Pack 'bob' 'correct-horse-battery' $false)
+$bobMeta = $null; try { $bobMeta = $r.metaText | ConvertFrom-Json } catch {}
+Log "[4.5a] Login bob on alice's connection -> $(Describe $r)  (expect Ack user_id=@bob:localhost)"
+$wsB2 = Ws-Open $bobMeta.access_token
+$r = Ws-Call $wsB2 $ping
+Log "[4.5b] a second connection with bob's channel-issued token, Ping -> $(Describe $r)  (expect Pong)"
+Ws-Send $ws4 (Json-Pack 16 3 0 3 @{} @())
+$ackF = Recv-Frame $ws4 5000; $closeF = Recv-Frame $ws4 5000
+$ackDesc = if ($ackF.kind -eq 'pack') { Describe $ackF.pack } else { $ackF.kind }
+Log "[4.5c] Logout -> $ackDesc then $($closeF.kind) code=$($closeF.code) reason='$($closeF.reason)'  (expect Ack then Close NormalClosure)"
+$r = Send-Pack $ping $bobMeta.access_token
+Log "[4.5d] the logged-out token over HTTP -> $(Describe $r)  (expect http=401)"
+$r = Ws-Call $wsB2 $ping
+Log "[4.5e] bob's other connection (different device) after that logout, Ping -> $(Describe $r)  (expect Pong: only one device was logged out)"
+
+# [4.6] logout-all from one connection ends bob's other sessions at their next message
+$r = Ws-Call $wsB2 (Login-Pack 'bob' 'correct-horse-battery' $false)
+$bob2 = $null; try { $bob2 = $r.metaText | ConvertFrom-Json } catch {}
+$wsB3 = Ws-Open $bob2.access_token
+$r = Ws-Call $wsB3 $ping
+Log "[4.6a] bob logged in again on wsB2 and opened wsB3 with that token, Ping -> $(Describe $r)  (expect Pong)"
+Ws-Send $wsB2 (Json-Pack 16 3 0 4 @{ all = $true } @())
+$null = Recv-Frame $wsB2 5000; $null = Recv-Frame $wsB2 5000
+$r = Ws-Call $wsB3 $ping
+$f = Recv-Frame $wsB3 5000
+Log "[4.6b] after Logout all on wsB2, wsB3 Ping -> $(Describe $r) then $($f.kind) code=$($f.code)  (expect Error Unauthorized then Close PolicyViolation)"
+$r = Send-Pack $ping $tokB
+Log "[4.6c] bob's registration token over HTTP after logout-all -> $(Describe $r)  (expect http=401)"
+Start-Sleep -Seconds 5
+
+# [4.7] a locked account cannot log in over the channel
+$null = Api Put "/_synapse/admin/v2/users/$([uri]::EscapeDataString('@alice:localhost'))" '{"locked":true}' $tokA
+$wsL = Ws-Open $null
+$r = Ws-Call $wsL (Login-Pack 'alice' 'correct-horse-battery' $false)
+Log "[4.7] locked alice, Login -> $(Describe $r)  (expect Error Unauthorized M_USER_LOCKED)"
+$null = Api Put "/_synapse/admin/v2/users/$([uri]::EscapeDataString('@alice:localhost'))" '{"locked":false}' $tokA
+Stop-Server $p
 
 Log ''; Log 'DONE'

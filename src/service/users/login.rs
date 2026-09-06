@@ -1,0 +1,209 @@
+//! Issuing, refreshing and ending a session: the part of logging in that
+//! comes after the credentials have been checked. `POST /login`,
+//! `POST /refresh`, `POST /logout` and the wbf channel's `Session` packs all
+//! call these, so there is one place that decides how a device gets its
+//! tokens (`docs/design/wbf-wire-format.md` §6.3).
+
+use std::{net::IpAddr, time::Duration};
+
+use futures::StreamExt;
+use ruma::{
+	DeviceId, OwnedDeviceId, OwnedUserId, UserId,
+	api::error::{ErrorKind, UnknownTokenErrorData},
+};
+use tuwunel_core::{
+	Err, Error, Result, debug_info, implement, info,
+	utils::{
+		future::OptionFutureExt,
+		rate_limit::limit_exceeded,
+		stream::ReadyExt,
+		time::timepoint_has_passed,
+		BoolExt,
+	},
+};
+
+use super::device::{RefreshToken, generate_refresh_token};
+
+/// What a successful login hands the client: the fields of the Matrix
+/// `/login` response that name the session.
+pub struct IssuedSession {
+	pub user_id: OwnedUserId,
+	pub device_id: OwnedDeviceId,
+	pub access_token: String,
+	pub refresh_token: Option<String>,
+	pub expires_in: Option<Duration>,
+}
+
+/// What a successful refresh hands the client: the fields of the Matrix
+/// `/refresh` response.
+pub struct RefreshedSession {
+	pub access_token: String,
+	pub refresh_token: Option<String>,
+	pub expires_in: Option<Duration>,
+}
+
+/// One login attempt from `client` against the shared login throttle.
+///
+/// Args:
+///     client: the peer address, example: 203.0.113.7
+/// Return:
+///     Result  Err 429 `M_LIMIT_EXCEEDED` (with `retry_after_ms`) when the
+///     address has used up `login_rc_burst_count` and must wait for
+///     `login_rc_per_second` to refill; Ok otherwise, including when the
+///     throttle is disabled (`login_rc_per_second = 0`).
+#[implement(super::Service)]
+pub fn check_login_rate(&self, client: IpAddr) -> Result {
+	let config = &self.services.config;
+	self.login_limiter
+		.take(client, f64::from(config.login_rc_per_second), f64::from(config.login_rc_burst_count))
+		.map_err(|retry_after| limit_exceeded("Too many login attempts from this address.", retry_after))
+}
+
+/// Gives an authenticated user a session on a device: a new access token
+/// (and refresh token when asked), on the named device if the user has it
+/// or on a newly created one otherwise. The caller has already checked the
+/// credentials; this checks the account is not locked.
+///
+/// Args:
+///     user_id: example: @alice:localhost
+///     device_id: the device the client wants to keep using, example: Some("RJYKSTBOIE"); None or unknown creates one
+///     initial_device_display_name: example: Some("wbf desktop")
+///     want_refresh_token: the request's `refresh_token: true`
+///     client_ip: recorded as the new device's last seen address
+/// Return:
+///     Result<IssuedSession>  Err 401 `M_USER_LOCKED` for a locked account.
+#[implement(super::Service)]
+pub async fn issue_session(
+	&self,
+	user_id: &UserId,
+	device_id: Option<&DeviceId>,
+	initial_device_display_name: Option<&str>,
+	want_refresh_token: bool,
+	client_ip: Option<IpAddr>,
+) -> Result<IssuedSession> {
+	self.locked_check(user_id).await?;
+
+	let (access_token, expires_in) = self.generate_access_token(want_refresh_token);
+	let refresh_token = expires_in.is_some().then(generate_refresh_token);
+
+	let device_id = if let Some(device_id) = device_id
+		&& self
+			.all_device_ids(user_id)
+			.ready_any(|known| known == device_id)
+			.await
+	{
+		self.set_access_token(user_id, device_id, &access_token, expires_in, refresh_token.as_deref())
+			.await?;
+
+		device_id.to_owned()
+	} else {
+		self.create_device(
+			user_id,
+			device_id,
+			(Some(&access_token), expires_in),
+			refresh_token.as_deref(),
+			initial_device_display_name,
+			client_ip,
+		)
+		.await?
+	};
+
+	info!("{user_id} logged in");
+
+	Ok(IssuedSession {
+		user_id: user_id.to_owned(),
+		device_id,
+		access_token,
+		refresh_token,
+		expires_in,
+	})
+}
+
+/// Turns a refresh token into a fresh access token (and a rotated refresh
+/// token), with the Matrix rules for expired, replayed and unknown tokens.
+///
+/// Args:
+///     presented: the client's refresh token, example: "refresh_..."
+/// Return:
+///     Result<RefreshedSession>  Err 403 for a malformed or unknown token;
+///     Err 401 `M_UNKNOWN_TOKEN` for an expired one or a replay after
+///     rotation (the device is removed when the configuration says so).
+#[implement(super::Service)]
+pub async fn refresh_session(&self, presented: &str) -> Result<RefreshedSession> {
+	if !presented.starts_with("refresh_") {
+		return Err!(Request(Forbidden("Refresh token is malformed.")));
+	}
+
+	match self.classify_refresh_token(presented).await {
+		| RefreshToken::Current { user_id, device_id, expires_at } => {
+			if expires_at.is_some_and(timepoint_has_passed) {
+				let hard = self.services.server.config.refresh_token_hard_logout;
+				hard.then_async(|| self.remove_device(&user_id, &device_id))
+					.unwrap_or_else_async(async || {
+						self.remove_refresh_token(&user_id, &device_id)
+							.await
+							.ok();
+					})
+					.await;
+
+				return Err(Error::BadRequest(
+					ErrorKind::UnknownToken(UnknownTokenErrorData { soft_logout: !hard }),
+					"Refresh token has expired.",
+				));
+			}
+
+			let refresh_token = Some(generate_refresh_token());
+			let (access_token, expires_in) = self.generate_access_token(true);
+			self.set_access_token(&user_id, &device_id, &access_token, expires_in, refresh_token.as_deref())
+				.await?;
+
+			debug_info!(?user_id, ?device_id, ?expires_in, "refreshed their access_token");
+
+			Ok(RefreshedSession { access_token, refresh_token, expires_in })
+		},
+
+		| RefreshToken::Replayed { user_id, device_id, current, grace } if grace => {
+			// Benign double-submit: re-issue an access token for the unchanged
+			// refresh token rather than rotating it.
+			let (access_token, expires_in) = self.generate_access_token(true);
+			self.set_access_token(&user_id, &device_id, &access_token, expires_in, None)
+				.await?;
+
+			Ok(RefreshedSession { access_token, refresh_token: Some(current), expires_in })
+		},
+
+		| RefreshToken::Replayed { user_id, device_id, .. } => {
+			let revoke = self.services.server.config.refresh_token_reuse_revoke;
+			debug_info!(?user_id, ?device_id, revoke, "refresh token reused after rotation");
+
+			if revoke {
+				self.remove_device(&user_id, &device_id).await;
+			}
+
+			Err(Error::BadRequest(
+				ErrorKind::UnknownToken(UnknownTokenErrorData { soft_logout: !revoke }),
+				"Refresh token has already been used.",
+			))
+		},
+
+		| RefreshToken::Unknown => Err!(Request(Forbidden("Refresh token is unrecognized."))),
+	}
+}
+
+/// Ends a session: removes `device_id` (its tokens, metadata and to-device
+/// queue), or every device of the user when `all_devices` is set.
+///
+/// Args:
+///     user_id: example: @alice:localhost
+///     device_id: the device logging out, example: "RJYKSTBOIE"
+///     all_devices: `/logout/all` semantics
+#[implement(super::Service)]
+pub async fn end_session(&self, user_id: &UserId, device_id: &DeviceId, all_devices: bool) {
+	if all_devices {
+		self.all_device_ids(user_id)
+			.for_each(|device| self.remove_device(user_id, device))
+			.await;
+	} else {
+		self.remove_device(user_id, device_id).await;
+	}
+}

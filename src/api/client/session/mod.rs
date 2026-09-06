@@ -2,10 +2,10 @@ mod appservice;
 pub(crate) mod jwt;
 mod ldap;
 mod logout;
-mod password;
+pub(crate) mod password;
 mod refresh;
 mod sso;
-mod token;
+pub(crate) mod token;
 
 use axum::extract::State;
 use ruma::api::client::session::{
@@ -21,8 +21,7 @@ use ruma::api::client::session::{
 		v3::{DiscoveryInfo, HomeserverInfo, LoginInfo},
 	},
 };
-use tuwunel_core::{Err, Result, info, utils::stream::ReadyExt};
-use tuwunel_service::users::device::generate_refresh_token;
+use tuwunel_core::{Err, Result};
 
 use self::{ldap::ldap_login, password::password_login};
 pub(crate) use self::{
@@ -120,6 +119,10 @@ pub(crate) async fn login_route(
 	ClientIp(client): ClientIp,
 	body: Ruma<login::v3::Request>,
 ) -> Result<login::v3::Response> {
+	// One bucket per address, shared with `/refresh` and the wbf channel's
+	// Login, so no transport is a faster road for guessing.
+	services.users.check_login_rate(client)?;
+
 	// Validate login method
 	let user_id = match &body.login_info {
 		| LoginInfo::Password(info) if services.config.login_with_password =>
@@ -138,51 +141,16 @@ pub(crate) async fn login_route(
 		},
 	};
 
-	services.users.locked_check(&user_id).await?;
-
-	// Generate a new token for the device
-	let (access_token, expires_in) = services
+	let issued = services
 		.users
-		.generate_access_token(body.body.refresh_token);
-
-	// Generate a new refresh_token if requested by client
-	let refresh_token = expires_in.is_some().then(generate_refresh_token);
-
-	// Determine if device_id was provided and exists in the db for this user
-	let device_id = if let Some(device_id) = &body.device_id
-		&& services
-			.users
-			.all_device_ids(&user_id)
-			.ready_any(|v| v == device_id)
-			.await
-	{
-		services
-			.users
-			.set_access_token(
-				&user_id,
-				device_id,
-				&access_token,
-				expires_in,
-				refresh_token.as_deref(),
-			)
-			.await?;
-
-		device_id.clone()
-	} else {
-		services
-			.users
-			.create_device(
-				&user_id,
-				body.device_id.as_deref(),
-				(Some(&access_token), expires_in),
-				refresh_token.as_deref(),
-				body.initial_device_display_name.as_deref(),
-				Some(client),
-			)
-			.await?
-	};
-
-	info!("{user_id} logged in");
+		.issue_session(
+			&user_id,
+			body.device_id.as_deref(),
+			body.initial_device_display_name.as_deref(),
+			body.body.refresh_token,
+			Some(client),
+		)
+		.await?;
 
 	let home_server = services.server.name.clone().into();
 
@@ -198,12 +166,12 @@ pub(crate) async fn login_route(
 
 	#[expect(deprecated)]
 	Ok(login::v3::Response {
-		user_id,
-		access_token,
-		device_id,
+		user_id: issued.user_id,
+		access_token: issued.access_token,
+		device_id: issued.device_id,
 		home_server,
 		well_known,
-		expires_in,
-		refresh_token,
+		expires_in: issued.expires_in,
+		refresh_token: issued.refresh_token,
 	})
 }

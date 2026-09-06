@@ -2,6 +2,7 @@ mod dehydrated_device;
 pub mod device;
 mod keys;
 mod ldap;
+pub mod login;
 mod register;
 
 use std::sync::Arc;
@@ -21,11 +22,16 @@ use tuwunel_core::{
 	Err, Result, debug_warn, err, is_equal_to,
 	matrix::pdu::PduCount,
 	trace,
-	utils::{self, BoolExt, ReadyExt, stream::TryIgnore},
+	utils::{self, BoolExt, ReadyExt, rate_limit::IpTokenBuckets, stream::TryIgnore},
 };
 use tuwunel_database::{Deserialized, Json, Map};
 
-pub use self::{dehydrated_device::DehydratedDevice, keys::parse_master_key, register::Register};
+pub use self::{
+	dehydrated_device::DehydratedDevice,
+	keys::parse_master_key,
+	login::{IssuedSession, RefreshedSession},
+	register::Register,
+};
 
 pub const PASSWORD_SENTINEL: &str = "*";
 pub const PASSWORD_DISABLED: &str = "";
@@ -42,6 +48,9 @@ pub struct Moderation {
 pub struct Service {
 	services: Arc<crate::services::OnceServices>,
 	db: Data,
+	/// One bucket per client address for login attempts, shared by HTTP
+	/// `/login`, `/refresh` and the wbf channel (`login.rs`).
+	login_limiter: IpTokenBuckets,
 }
 
 struct Data {
@@ -79,6 +88,7 @@ impl crate::Service for Service {
 	fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
 		Ok(Arc::new(Self {
 			services: args.services.clone(),
+			login_limiter: IpTokenBuckets::new(),
 			db: Data {
 				keychangeid_userid: args.db["keychangeid_userid"].clone(),
 				keyid_key: args.db["keyid_key"].clone(),
