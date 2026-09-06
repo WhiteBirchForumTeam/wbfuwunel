@@ -375,7 +375,9 @@ pub async fn release_room(&self, txn: &mut Txn, room: &RoomId) -> usize {
 	let media: Vec<String> = self
 		.db
 		.room_mxc
-		.keys_prefix(&(room.as_str(),))
+		// Ends at the separator: a room whose id merely starts with this one
+		// must not have its media released along (review of PR #26, rumia).
+		.keys_prefix(&(room.as_str(), Interfix))
 		.ignore_err()
 		.map(|(_, mxc): (Ignore, &str)| mxc.to_owned())
 		.collect()

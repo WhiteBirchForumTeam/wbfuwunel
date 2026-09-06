@@ -135,6 +135,8 @@ sweeper 用 `media_upload_ttl=2`：「等 3 秒 → 同時送 Chunk 與觸發 sw
 自己 `(room, mxc)` 的列，無害。
 
 **修法**：兩處改 `(mxc, Interfix)`；`holder.rs` 的 `keys_start_with_their_prefixes` 測試加一條「相似 mxc 的鍵不被對方的前綴匹配」。
+PR #26 review（rumia）再抓到同形的第三處：`release_room` 掃 `room_mxc` 用 `(room,)`，兩個 room id 一個是另一個的位元組前綴時（`!x:server` 與 `!x:server2`）
+刪房會連後者的媒體一起釋放。同支補成 `(room, Interfix)`。`media_refs` 裡其餘前綴都是雙元素以上。
 
 ### 2.7 🟡 P2：頭像併發更新留下幽靈持有者
 
