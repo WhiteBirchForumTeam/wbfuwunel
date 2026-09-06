@@ -81,7 +81,11 @@ static VERSIONS: [&str; 27] = [
 	"v1.19",  /* mutual rooms (MSC2666) */
 ];
 
-static UNSTABLE_FEATURES: [&str; 38] = [
+static UNSTABLE_FEATURES: [&str; 39] = [
+	// This fork. A client that sees this may use the wbf channel
+	// (`/_wbf/v1/*`), `X-Wbf-Attachments`, `r_seq`/`g_seq` and the rest of
+	// docs/design/; `server.name` in this response says the same.
+	"org.wbftw.wbfuwunel",
 	"org.matrix.e2e_cross_signing",
 	// private read receipts (https://github.com/matrix-org/matrix-spec-proposals/pull/2285)
 	"org.matrix.msc2285.stable",

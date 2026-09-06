@@ -22,7 +22,7 @@
 - ⚠️ **行為有變、或有已知限制，一定要寫進來。** 這裡是使用者與維護者會先看到的地方，藏在設計文件
   深處的警告等於沒寫。
 - 測試（Windows）：單元 `cargo test -p <crate> --lib`；release build 與實跑見
-  [`docs/design/windows-build.md`](docs/design/windows-build.md)；端到端用真伺服器跑（腳本在各 PR 說明裡）。
+  [`docs/design/windows-build.md`](docs/design/windows-build.md)；端到端用真伺服器跑：腳本在 [`tests/e2e/`](tests/e2e/README.md)（PR #24 起進 repo；更早的腳本只在各 PR 說明裡）。
 
 ## 共用程式碼的不變式
 

@@ -68,6 +68,10 @@ pub(crate) async fn create_content_route(
 		.create(mxc, Some(user), Some(&content_disposition), content_type, &body.file)
 		.await?;
 
+	// A legacy upload: if an undeclared encrypted send follows, the user is
+	// told once that such attachments do not last.
+	services.media_refs.note_legacy_upload(user);
+
 	Ok(create_content::v3::Response {
 		content_uri: mxc.to_string().into(),
 		blurhash: None,
@@ -142,6 +146,8 @@ pub(crate) async fn create_content_async_route(
 		.media
 		.upload_pending(&mxc, user, Some(&content_disposition), content_type, &body.file)
 		.await?;
+
+	services.media_refs.note_legacy_upload(user);
 
 	Ok(create_content_async::v3::Response {})
 }

@@ -47,6 +47,10 @@ pub(crate) struct Args<T> {
 	/// Parsed JSON content.
 	/// None when body is not a valid string
 	pub(crate) json_body: Option<CanonicalJsonValue>,
+
+	/// The request's HTTP headers, for the few endpoints that read one Ruma
+	/// does not model (e.g. `X-Wbf-Attachments` on send).
+	pub(crate) headers: http::HeaderMap,
 }
 
 impl<T> Args<T> {
@@ -130,8 +134,10 @@ where
 		)
 		.await?;
 
+		let headers = request.parts.headers.clone();
 		Ok(Self {
 			body: make_body::<T>(services, &mut request, json_body.as_mut(), &auth)?,
+			headers,
 			cookie: request.cookie,
 			origin: auth.origin,
 			sender_user: auth.sender_user,

@@ -1,7 +1,8 @@
 # E2EE 下的媒體引用：送訊息時宣告 attachments、計數 0 由後台掃描清
 
 > **這份文件回答：server 讀不到訊息內容時，媒體的引用計數從哪裡來；沒人來指的媒體怎麼辦。**
-> 狀態：📄 提案，2026-09-06，維護者在對話中已定方向（§2），等同意文件後開實作分支。
+> 狀態：🔧 維護者 2026-09-06 同意（PR #23），實作分支 `media/attachments`。**§4 的計數表與列（`eventid_mxcs`、後台掃 0）已被 [media-holders.md](media-holders.md) 的持有者集合取代**；
+> 這份文件仍是宣告（§3、§5）、驗證（§4.2）、警告（§6）的權威。
 > 上位文件：[media-gc.md](media-gc.md)（計數、收集器、墓碑、哨兵都不變）；
 > 核心設計 [why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md) §5.4。
 > client 條款同步寫在 [chunked-upload-spec.md](chunked-upload-spec.md) §12。
@@ -61,6 +62,9 @@ server 記在自己的表裡、同交易 +1，redact／purge／retention 查自�
 - 讀取：redact、`purge_history`、retention 丟原文備份 —— 現在讀 content 的三處改成**先查這張表**，查不到再退回讀 content
   （舊事件沒有列；它們指的媒體本來就是哨兵，退回讀 content 只是為了明文房間的舊事件仍能正確 −1）。
 - 事件被刪（`del_event`、purge）時連這列一起刪。
+- **誰是持有者，誰釋放（review 抓到的雙扣，salvia）**：redact 而原文備份保留時，列不動、不釋放，備份成為持有者；之後 `purge_history`／
+  刪房碰到這則事件，先問 `retention.is_original_retained`，是就**跳過自己的釋放**，交給 `drop_original`（讀列，沒有列才讀備份的 content）
+  釋放一次並刪列。少了這條會扣兩次：purge 先刪列並 −1，緊接的 `purge_original` 查不到列退回讀備份 content 再 −1，多引用時活媒體會被刪。
 - **為什麼不寫進 `unsigned`**：`r_seq`／`g_seq` 是給 client 看的；attachments 是 server 自己的帳，不該送出去，也不該進 redact 要剝的地方。
 
 ### 4.2 宣告的驗證（fail closed）
@@ -81,12 +85,12 @@ server 收到 `attachments` 逐一驗：是 `mxc://`、本站的、`search_file_
 - 為什麼不用區分「從沒被指」跟「被指過又歸零」：後者收集器當下就刪了，能在 0 停留超過保護期的只有前者。
 - 頭像不受影響：`set_avatar_ref` 是 server 看得到的引用，照舊 +1。縮圖跟原檔同一個 mxc，前綴刪除一起走。
 
-### 4.4 `migrate-references` 的角色縮小
+### 4.4 `migrate-references` 移除
 
-重算只對「有 `eventid_mxcs` 列或 content 讀得到」的事件有意義。它**不再**把計數 ≤ 0 的當孤兒刪 —— 那個工作交給 4.3 的掃描，
-規則只有一條、時間可預期。migrate 保留為「重算計數」的工具，dry-run 印差異。
-順手：`media_gc_migrate_skip_recent_seconds` 預設 600 太緊，維護者 2026-09-06 建議改成 86400（一天）；這支一起改預設值。
-保護期的判定方式兩邊一樣：**要刪的那一刻**看媒體的建立時間，近期的跳過，不是另外記一個到期時間。
+維護者 2026-09-06 定：遷移工具沒有用了，整個拿掉（admin 指令、`media_refs/migrate.rs`、`collector_paused`、
+`media_gc_migrate_skip_recent_seconds`）。理由同 §1：靠 content 重算對 E2EE 是死路，重算會把活著的附件當孤兒刪。
+既存媒體維持哨兵；計數 0 的由 §4.3 的掃描清；`TombstoneReason::Migrated` 保留給舊墓碑解碼。
+`media_gc_migrate_skip_recent_seconds` 是 unknown config key 之後只會 warn（`error_on_unknown_config_opts` 預設 false）。
 
 ## 5. client 條款（也寫在 spec §12）
 
@@ -110,26 +114,46 @@ server 認得出的訊號：事件是 `m.room.encrypted`、從舊 HTTP `send` �
 > will be deleted by the server's cleanup shortly after upload. To keep attachments in encrypted rooms, use a client that
 > supports this server's attachment declaration (wbf).
 
+## 6.1 已知限制（review 記下的，都非阻塞）
+
+- **驗證與寫入之間的窗口（rumia）**：`check_attachments` 不持媒體鎖；被宣告的媒體若計數 0 且已超過 7 天保護期，掃描可能在「驗證通過」與
+  「append +1」之間刪掉它，那則訊息就指向墓碑。要同時滿足「7 天沒人指」與「此刻被宣告」，窗口極窄；接受，不在鎖下重驗（append 已在寫 state 之後，
+  失敗會留下不一致）。
+- **警告標記的競態（salvia）**：同一 user 兩則真正同時的未宣告加密送出可能都通過「沒警告過」的讀取，收到兩間警告房；序貫的 burst 只一次。
+- **同 txn_id 重送**：現在先查 txn 再驗宣告（rumia #1），重送一律回原事件，宣告變了也不重驗。
+- **沒有重算工具**：`migrate-references` 拔掉後，計數壞掉沒有修復路徑（哨兵媒體永不收）。若之後需要，做一個只重算「有 `eventid_mxcs` 列的事件」的
+  admin 工具（列在 roadmap 候選）。
+
 ## 7. 待維護者定
 
 1. ~~掃描的寬限期~~ 已定：另開 `media_unreferenced_grace_seconds`，至少 7 天。
-2. `Event/Send` 要不要這支就做，還是先只做 HTTP header（client 現在用 matrix-rust-sdk 送，header 對它最省）？我建議這支兩個都做，
-   pack 是目標、header 是過渡。
+2. ~~`Event/Send` 要不要這支就做~~ 已定：都做。
 
 ## 8. 驗收
 
-- 單元：宣告驗證每條拒絕原因；`eventid_mxcs` 與事件同交易；聯集去重。
-- e2e：E2EE 房間（`m.room.encryption` state）用 header 宣告送 `m.room.encrypted` → 計數 1 → redact → 計數 0 → bytes 刪、410；
-  不宣告 → 計數 0 → 過保護期被掃、410（e2e 用 config 壓到幾秒；低於 7 天會被夾，所以測試要走一個測試專用的旁路或直接測 sweep 函式）；宣告別人的 mxc → 拒送；明文房間不宣告仍 +1；同一 mxc 兩則訊息 → 2 → 各撤一次才刪；
-  非 wbf client 情境收到 bot 私訊且只收一次；既存哨兵媒體掃描不碰。
+- 單元：宣告拒絕訊息都點名那個 mxc（`attachments.rs`）；讀 content 的四條既有測試不變。
+- e2e（真伺服器，e2e profile，腳本 `tests/e2e/e2e9.ps1`，2026-09-06 **26 個檢查點全綠**，持有者模型重做後重跑）：
+  - 身分：`/versions` 的 `server.name`（key `net.zemos.msc4383.server`）= `wbfuwunel`、`unstable_features["org.wbftw.wbfuwunel"]`；`Hello.engine`。
+  - E2EE 房間用 header 宣告送 `m.room.encrypted` → 可下載 → redact → 410。
+  - 拒送四種（別人的、不存在的、非 mxc、遠端）都 400 `M_INVALID_PARAM` 且訊息點名 mxc；拒送的沒寫事件。
+  - 同一 mxc 兩則宣告 → 撤第一則仍 200、撤第二則 410。
+  - 明文房間 `m.image` 不宣告照舊計數與釋放。
+  - `Event/Send` pack：Ack 帶 event_id、事件進房間、redact 後媒體 410；宣告已刪媒體 → `Error(Conflict)`；同 `txn_id` 兩次回同一 event_id。
+  - 警告：bob 舊端點上傳後不宣告送加密事件 → 收到 server user 的 `is_direct` 邀請、房裡一則英文警告；第二次不再邀請。
+  - 掃描：新上傳與被指著的都不會被掃（保護期）；過期刪除的驗證在 media-holders.md §9（用 `WBFUWUNEL_MEDIA_GRACE_SECONDS`）。
+  - redact 保留備份後 purge：兩則共用一媒體，purge 掉 redact 過的那則 → 媒體仍在；再撤另一則並 purge → 410；無錯誤 log。
+- 回歸：e2e8（`r_seq`／`g_seq`／`Event/Recent`）37 個檢查點在同一個 binary 上重跑。
 
 ## 9. 落點
 
 | 什麼 | 哪裡 |
 |---|---|
 | `eventid_mxcs` 表、驗證、聯集 | `src/service/media_refs/`、`src/database/maps.rs` |
-| 送訊息入口（header、`Event/Send`） | `src/api/client/send.rs`（或 `Ruma` 抽 header）、`src/api/client/wbf/` |
+| 送訊息入口（header、`Event/Send`） | `src/api/client/send.rs`（`send_message_event` 兩個入口共用；`Args.headers`）、`src/api/client/wbf/send.rs` |
 | redact／purge／retention 改查表 | `timeline/redact.rs`、`timeline/purge.rs`、`retention/mod.rs` |
-| 週期掃描 | `media_refs/collect.rs`（收集器旁邊，同一把每 mxc 鎖） |
+| 週期掃描 | `media_refs/collect.rs`（`sweep_unreferenced`，收集器旁邊，同一把每 mxc 鎖） |
+| 宣告驗證、legacy 上傳記錄、一次性警告的判定 | `media_refs/attachments.rs` |
+| 警告私訊本體 | `src/service/admin/attachments_notice.rs`（server user 開 DM、`is_direct`、一則明文） |
+| 引擎識別 | `/_matrix/client/versions` 的 `unstable_features["org.wbftw.wbfuwunel"]` 與 `server.name`；`Hello.engine`；`version::name()` = `wbfuwunel` |
 | 警告 | `src/service/admin/`（bot 發話的既有路徑） |
 | config：`media_gc_sweep_interval`、`media_unreferenced_grace_seconds`（≥ 7 天）、`attachments_max_per_event` | `src/core/config/mod.rs` |

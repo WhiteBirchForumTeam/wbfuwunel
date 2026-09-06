@@ -7,7 +7,10 @@
 
 use std::sync::OnceLock;
 
-static BRANDING: &str = "Tuwunel";
+// This fork's name: it is what `/_matrix/federation/v1/version`,
+// `/_tuwunel/server_version`, the User-Agent and the wbf `Hello` report, so a
+// client (or a peer) can tell it from upstream Tuwunel.
+static BRANDING: &str = "wbfuwunel";
 static SEMANTIC: &str = env!("CARGO_PKG_VERSION");
 tuwunel_macros::git_commit! {}
 tuwunel_macros::git_semantic! {}

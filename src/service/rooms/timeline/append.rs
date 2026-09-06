@@ -28,6 +28,7 @@ use tuwunel_core::{
 use tuwunel_database::Json;
 
 use super::{ExtractBody, ExtractRelatesTo, ExtractRelatesToEventId, RoomMutexGuard, bias_count};
+use crate::media_refs::Holder;
 use crate::rooms::{
 	read_receipt::PrivateRead, short::ShortRoomId, state_accessor::plain_text_topic,
 	state_cache::MembershipUpdate, state_compressor::CompressedState,
@@ -82,7 +83,7 @@ where
 	}
 
 	let pdu_id = self
-		.append_pdu(pdu, pdu_json, new_room_leafs, state_lock)
+		.append_pdu(pdu, pdu_json, new_room_leafs, &[], state_lock)
 		.await?;
 
 	Ok(Some(pdu_id))
@@ -110,6 +111,7 @@ pub async fn append_pdu<'a, Leafs>(
 	pdu: &'a PduEvent,
 	mut pdu_json: CanonicalJsonObject,
 	leafs: Leafs,
+	attachments: &'a [String],
 	state_lock: &'a RoomMutexGuard,
 ) -> Result<RawPduId>
 where
@@ -186,10 +188,11 @@ where
 	// and stored with the event below in one transaction; the global count
 	// rides along so every served copy carries both positions.
 	let mut seq_bounds = self.get_seq_bounds(pdu.room_id()).await?;
-	set_json_positions(&mut pdu_json, Positions {
+	let positions = Positions {
 		r_seq: seq_bounds.take_forward(),
 		g_seq: PduCount::Normal(*next_count).into_signed(),
-	});
+	};
+	set_json_positions(&mut pdu_json, positions);
 
 	// Mark as read first so the sending client doesn't get a notification even if
 	// appending fails. Route through the dispatcher so per-thread counts are
@@ -218,16 +221,18 @@ where
 	let count = PduCount::Normal(*next_count);
 	let pdu_id: RawPduId = PduId { shortroomid, count }.into();
 
-	// Hold the media this event references until its count has committed,
-	// so the collector cannot remove it between reading zero and deleting.
+	// The media this event references: what the sender declared (already
+	// checked) plus what plaintext content names. Locked until the holder has
+	// committed, so the collector cannot remove it in between.
+	let media_refs = crate::media_refs::list_event_refs_at_store(&pdu_json, attachments);
 	let media_held = self
 		.services
 		.media_refs
-		.hold_event_media(&pdu_json)
+		.hold_media_list(&media_refs)
 		.await;
 
 	// Insert pdu
-	self.append_pdu_json(&pdu_id, pdu, &pdu_json, seq_bounds);
+	self.append_pdu_json(&pdu_id, pdu, &pdu_json, seq_bounds, &media_refs, positions.g_seq);
 
 	drop(media_held);
 	drop(insert_lock);
@@ -445,6 +450,8 @@ fn append_pdu_json(
 	pdu: &PduEvent,
 	json: &CanonicalJsonObject,
 	seq_bounds: SeqBounds,
+	media_refs: &[String],
+	g_seq: i64,
 ) {
 	debug_assert!(matches!(pdu_id.pdu_count(), PduCount::Normal(_)), "PduCount not Normal");
 
@@ -460,11 +467,12 @@ fn append_pdu_json(
 	let key = (pdu.room_id(), ts, count_key);
 	txn.put_raw(&self.db.roomid_tscount_pducount, key, pdu_id.count());
 
-	// Sharing the event's own batch is what keeps a media reference from
-	// existing without the event justifying it, or the other way round.
-	self.services
-		.media_refs
-		.add_event_refs(&mut txn, json);
+	// Sharing the event's own batch is what keeps a holder from existing
+	// without the event justifying it, or the other way round.
+	let holder = Holder::event(pdu.room_id(), g_seq);
+	for mxc in media_refs {
+		self.services.media_refs.hold(&mut txn, mxc, &holder);
+	}
 
 	txn.execute();
 }

@@ -66,7 +66,7 @@ client（wbf-matrix-client）的聊天模型要 server 配合的兩件事。設�
 兩個位置寫進存起來的 PDU 的 `unsigned`（一個寫入點、所有讀路徑自動帶）、startup migration 回填既有 room；
 `Event/Recent` 依 client 快取的 `cg_seq` 只回差異，k 路合併不加索引。順手加了 `[profile.e2e]`（windows-build.md）。
 
-### 2.5 📄 E2EE 下的媒體引用：送訊息時宣告 attachments、計數 0 由後台掃描清
+### 2.5 🔧 E2EE 下的媒體引用：送訊息時宣告 attachments、計數 0 由後台掃描清（提案 PR #23 已合併，實作分支 `media/attachments`）
 
 2026-09-06 發現的破口：引用計數的 +1 來自 server 讀 content，E2EE 房間讀不到，附件永遠不會被計到（漏水）、而 `migrate` 會把它們當孤兒刪。
 維護者定方向，提案 [media-attachments.md](media-attachments.md)：機制不變、來源換成「明文 or 送訊息請求夾帶的 mxc」；

@@ -1,5 +1,5 @@
 use futures::TryStreamExt;
-use ruma::{CanonicalJsonObject, RoomId, api::Direction, events::TimelineEventType};
+use ruma::{RoomId, api::Direction, events::TimelineEventType};
 use tuwunel_core::{
 	Result, implement,
 	matrix::{
@@ -37,6 +37,20 @@ pub async fn purge_history(
 
 	let prefix = start.shortroomid();
 
+	// The purged range's media holders go first, from the reverse index:
+	// every Event and Backup holder of this room below `until`, in one
+	// batch, without reading a single event. Doing it twice is a no-op.
+	{
+		let mut txn = self.db.db.txn();
+		let released = self
+			.services
+			.media_refs
+			.release_range(&mut txn, room_id, until.into_signed())
+			.await;
+		txn.execute();
+		trace!(?room_id, ?until, released, "Released media holders of the purged range");
+	}
+
 	self.db
 		.pduid_pdu
 		.raw_stream_from(&start)
@@ -60,21 +74,9 @@ pub async fn purge_history(
 			let event_id = pdu.event_id.clone();
 			let ts: u64 = pdu.origin_server_ts.into();
 
-			// Read from the raw event rather than the typed one, so the list
-			// matches what the index was written from.
-			let event_json = serde_json::from_slice::<CanonicalJsonObject>(value)?;
-			let media_refs = self
-				.services
-				.media_refs
-				.list_event_mxc_uris(&event_json);
-
 			txn.del_raw(&self.db.pduid_pdu, key);
 			txn.del_raw(&self.db.eventid_pduid, &event_id);
 			txn.del_raw(&self.db.eventid_outlierpdu, &event_id);
-
-			self.services
-				.media_refs
-				.del_event_refs(&mut txn, &media_refs);
 
 			let room_id_ts_id = (room_id, ts, bias_count(raw_id.count()));
 			txn.del(&self.db.roomid_tscount_pducount, room_id_ts_id);
@@ -94,8 +96,9 @@ pub async fn purge_history(
 				.purge_event_relations(shortroomid, count, room_id, &event_id)
 				.await;
 
-			// Dropping the retained original releases the media references it
-			// held; the stripped event above had none left to release.
+			// Dropping the retained original removes it as a holder too; its
+			// holder was already taken by `release_range`, so this is a no-op
+			// for media and still drops the original itself.
 			self.services
 				.retention
 				.purge_original(&event_id)

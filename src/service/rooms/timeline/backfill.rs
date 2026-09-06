@@ -30,6 +30,7 @@ use tuwunel_database::Json;
 
 use super::{ExtractBody, bias_count};
 use crate::{
+	media_refs::{Holder, list_event_refs_at_store},
 	federation::Candidates,
 	fetcher::{Op, Opts},
 	rooms::state_accessor::plain_text_topic,
@@ -404,17 +405,21 @@ pub async fn backfill_pdu(
 	let count: i64 = (*count).try_into()?;
 	let count = PduCount::Backfilled(validated!(0 - count));
 	let pdu_id: RawPduId = PduId { shortroomid, count }.into();
-	set_json_positions(&mut value, Positions {
+	let positions = Positions {
 		r_seq: seq_bounds.take_backfilled(),
 		g_seq: count.into_signed(),
-	});
+	};
+	set_json_positions(&mut value, positions);
 
 	// Hold the media this event references until its count has committed,
 	// so the collector cannot remove it between reading zero and deleting.
+	// Nothing is declared on this path: backfilled events are other servers'
+	// history, and only plaintext content can name media here.
+	let media_refs = list_event_refs_at_store(&value, &[]);
 	let media_held = self
 		.services
 		.media_refs
-		.hold_event_media(&value)
+		.hold_media_list(&media_refs)
 		.await;
 
 	// Insert pdu
@@ -425,6 +430,8 @@ pub async fn backfill_pdu(
 		u64::from(pdu.origin_server_ts),
 		&value,
 		seq_bounds,
+		&media_refs,
+		positions.g_seq,
 	);
 	drop(media_held);
 	drop(insert_lock);
@@ -461,6 +468,8 @@ fn prepend_backfill_pdu(
 	origin_server_ts: u64,
 	json: &CanonicalJsonObject,
 	seq_bounds: SeqBounds,
+	media_refs: &[String],
+	g_seq: i64,
 ) {
 	let mut txn = self.db.db.txn();
 
@@ -474,11 +483,12 @@ fn prepend_backfill_pdu(
 	txn.put_raw(&self.db.roomid_tscount_pducount, key, pdu_id.count());
 
 	// Backfill stores an event the same way append does, so it owes the media
-	// reference index the same row. An event stored without one leaves its
-	// media reading as unreferenced.
-	self.services
-		.media_refs
-		.add_event_refs(&mut txn, json);
+	// the same holder. An event stored without one leaves its media reading
+	// as unheld.
+	let holder = Holder::event(room_id, g_seq);
+	for mxc in media_refs {
+		self.services.media_refs.hold(&mut txn, mxc, &holder);
+	}
 
 	txn.execute();
 }

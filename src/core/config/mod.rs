@@ -3474,27 +3474,46 @@ pub struct Config {
 	/// avatar. A redacted event keeps its reference while its unredacted
 	/// original is retained (see `save_unredacted_events`), so media goes when
 	/// the last retained original is dropped, not when the message is redacted.
-	/// Media created before reference counting existed is never collected
-	/// until `!admin media migrate-references` has rebuilt the counts.
+	/// Media created before reference counting existed is never collected.
 	///
-	/// When false, the collector only logs what it would delete.
+	/// When false, the collector and the sweep only log what they would
+	/// delete.
 	///
 	/// reloadable: yes
 	/// default: true
 	#[serde(default = "true_fn")]
 	pub media_gc_enabled: bool,
 
-	/// How recent an upload may be before `!admin media migrate-references`
-	/// refuses to treat it as an orphan, in seconds.
+	/// How long an upload nothing references yet is protected from the
+	/// unreferenced-media sweep, in seconds, counted from when the file was
+	/// stored. Below seven days is clamped to seven days. The environment
+	/// variable `WBFUWUNEL_MEDIA_GRACE_SECONDS` overrides this without the
+	/// floor; it exists for tests and should not be set in production.
 	///
 	/// An upload is not a reference: the message naming it may still be on
-	/// its way. Media created within this window is skipped by the rebuild and
-	/// looked at again next time.
+	/// its way, and in an encrypted room the server only learns of the
+	/// reference when the client declares it with the message. Media older
+	/// than this whose count is still zero is removed by the sweep.
 	///
 	/// reloadable: yes
-	/// default: 600
-	#[serde(default = "default_media_gc_migrate_skip_recent_seconds")]
-	pub media_gc_migrate_skip_recent_seconds: u64,
+	/// default: 604800
+	#[serde(default = "default_media_unreferenced_grace_seconds")]
+	pub media_unreferenced_grace_seconds: u64,
+
+	/// How often the sweep looks for local media whose reference count is
+	/// zero and whose protection has expired, in seconds.
+	///
+	/// default: 3600
+	#[serde(default = "default_media_gc_sweep_interval")]
+	pub media_gc_sweep_interval: u64,
+
+	/// Most media one event may declare as attachments (the wbf
+	/// `X-Wbf-Attachments` header or `Event/Send` meta). A declaration
+	/// longer than this is refused with the whole send.
+	///
+	/// default: 32
+	#[serde(default = "default_attachments_max_per_event")]
+	pub attachments_max_per_event: usize,
 
 	/// Chunk size a chunked upload uses when the client does not choose one,
 	/// in bytes. The client encrypts each chunk on its own, so this is the
@@ -5387,6 +5406,34 @@ impl TlsConfig {
 
 fn true_fn() -> bool { true }
 
+/// The floor of `media_unreferenced_grace_seconds`: seven days. An upload
+/// nothing has claimed is never removed sooner than this, whatever the
+/// configuration says (see `Config::media_unreferenced_grace_seconds_effective`).
+pub const MEDIA_UNREFERENCED_GRACE_MIN_SECONDS: u64 = 7 * 24 * 60 * 60;
+
+/// Environment override of the protection period, in seconds, for tests: the
+/// floor does not apply to it. Unset in production, where the config value
+/// (floored at seven days) is the rule.
+pub const MEDIA_UNREFERENCED_GRACE_ENV: &str = "WBFUWUNEL_MEDIA_GRACE_SECONDS";
+
+impl Config {
+	/// The protection period in effect: `WBFUWUNEL_MEDIA_GRACE_SECONDS` if set
+	/// to a number, else `media_unreferenced_grace_seconds` with the seven-day
+	/// floor applied.
+	#[must_use]
+	pub fn media_unreferenced_grace_seconds_effective(&self) -> u64 {
+		if let Some(seconds) = std::env::var(MEDIA_UNREFERENCED_GRACE_ENV)
+			.ok()
+			.and_then(|value| value.trim().parse::<u64>().ok())
+		{
+			return seconds;
+		}
+
+		self.media_unreferenced_grace_seconds
+			.max(MEDIA_UNREFERENCED_GRACE_MIN_SECONDS)
+	}
+}
+
 fn default_policy_server_request_timeout() -> u64 { 5 }
 
 fn default_rendezvous_session_max_bytes() -> usize { 4096 }
@@ -5794,7 +5841,11 @@ fn default_sso_grant_session_duration() -> Option<u64> { Some(300) }
 
 fn default_redaction_retention_seconds() -> u64 { 5_184_000 }
 
-fn default_media_gc_migrate_skip_recent_seconds() -> u64 { 600 }
+fn default_media_unreferenced_grace_seconds() -> u64 { MEDIA_UNREFERENCED_GRACE_MIN_SECONDS }
+
+fn default_media_gc_sweep_interval() -> u64 { 3600 }
+
+fn default_attachments_max_per_event() -> usize { 32 }
 
 fn default_media_chunk_size_default() -> usize { 64 * 1024 }
 

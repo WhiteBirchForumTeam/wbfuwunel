@@ -108,6 +108,8 @@ fn current() -> Value {
 			pack("recent_with_cached_g_seq", Kind::Event, 0x01, Flags::default(), 0, 11, br#"{"limit":10000,"cg_seq":4700}"#, b""),
 			pack("recent_older_page", Kind::Event, 0x01, Flags::default(), 0, 12, br#"{"limit":10000,"cg_seq":4700,"before":4711}"#, b""),
 			pack("ack_recent", Kind::Control, 0x02, Flags::IS_RESPONSE, 0, 10, br#"{"complete":false,"latest_g_seq":4712,"next":4711,"returned":2}"#, br#"[{"content":{"body":"b","msgtype":"m.text"},"event_id":"$b:localhost","origin_server_ts":2,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":1,"org.wbftw.wbfuwunel.g_seq":4712,"org.wbftw.wbfuwunel.r_seq":2}},{"content":{"body":"a","msgtype":"m.text"},"event_id":"$a:localhost","origin_server_ts":1,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":2,"org.wbftw.wbfuwunel.g_seq":4711,"org.wbftw.wbfuwunel.r_seq":1}}]"#),
+			pack("send_encrypted_with_attachments", Kind::Event, 0x02, Flags::default(), 0, 13, br#"{"room_id":"!r:localhost","type":"m.room.encrypted","txn_id":"t1","attachments":["mxc://localhost/1122334455667788"]}"#, br#"{"algorithm":"m.megolm.v1.aes-sha2","ciphertext":"AwgAEnACgAkLmt6qF84IK++J7UDH2Za1YVchHyprqTqsg","device_id":"RJYKSTBOIE","sender_key":"IlRMeOPX2e0MurIyfWEucYBRVOEEUMrOHqn/8mLqMjA","session_id":"X3lUlvLELLYxeTx4yOVu6UDpasGEVO0Jbu+QFnm0cKQ"}"#),
+			pack("ack_send", Kind::Control, 0x02, Flags::IS_RESPONSE, 0, 13, br#"{"event_id":"$Zm9vYmFy:localhost"}"#, b""),
 			pack("error_out_of_order", Kind::Control, 0x03, Flags::IS_RESPONSE, 0x1122_3344_5566_7788, 2, br#"{"code":"OutOfOrder","expected_seq":1,"message":"expected chunk 1"}"#, b""),
 			pack("empty", Kind::Control, 0x04, Flags::default(), 0, 0, b"", b""),
 		],

@@ -287,6 +287,7 @@ async fn finalize_knock_membership(
 			&parsed_knock_pdu,
 			knock_event,
 			once(parsed_knock_pdu.event_id.borrow()),
+			&[],
 			state_lock,
 		)
 		.await?;
@@ -386,6 +387,7 @@ async fn knock_room_helper_remote(
 			&parsed_knock_pdu,
 			knock_event,
 			once(parsed_knock_pdu.event_id.borrow()),
+			&[],
 			state_lock,
 		)
 		.await?;

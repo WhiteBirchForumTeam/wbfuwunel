@@ -1,4 +1,5 @@
 mod attach;
+mod attachments_notice;
 pub mod console;
 pub mod context;
 pub mod create;

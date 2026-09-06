@@ -360,6 +360,13 @@ impl Service {
 			warn!(?mxc, ?e, "Tombstone written but the WAL flush failed.");
 		}
 
+		// Whatever still pointed at it (holder rows, the room accelerator
+		// rows) goes with it, whichever path removed it.
+		self.services
+			.media_refs
+			.forget_media(&mxc.to_string())
+			.await;
+
 		Ok(())
 	}
 
@@ -377,6 +384,10 @@ impl Service {
 			.await
 			.map(|object| mtime_millis(&object))
 	}
+
+	/// The local user who uploaded `mxc`, from the uploader index; `None` for
+	/// media without one (remote, server-generated, or predating the index).
+	pub async fn uploader_of(&self, mxc: &Mxc<'_>) -> Option<OwnedUserId> { self.db.mxc_user(mxc).await }
 
 	/// Returns whether `mxc` names media this server is the origin of.
 	pub fn is_local(&self, mxc: &Mxc<'_>) -> bool {

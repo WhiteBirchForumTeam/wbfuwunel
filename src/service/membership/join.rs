@@ -385,6 +385,7 @@ async fn join_remote(
 			&parsed_join_pdu,
 			join_event,
 			once(parsed_join_pdu.event_id.borrow()),
+			&[],
 			&state_lock,
 		)
 		.await?;

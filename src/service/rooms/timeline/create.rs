@@ -41,6 +41,8 @@ pub async fn create_hash_and_sign_event(
 		state_key,
 		redacts,
 		timestamp,
+		// Request-side data; `build_and_append_pdu` took it out already.
+		attachments: _,
 	} = pdu_builder;
 
 	let prev_events = self
