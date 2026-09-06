@@ -5,7 +5,7 @@ use ruma::{Mxc, OwnedMxcUri, OwnedUserId, UserId, http_headers::ContentDispositi
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
 use tuwunel_core::{
-	Err, Error, Result, at, debug, debug_info, err,
+	Err, Error, Result, at, debug, debug_info, err, warn,
 	utils::{
 		ReadyExt, str_from_bytes,
 		stream::{TryExpect, TryIgnore},
@@ -17,6 +17,17 @@ use tuwunel_database::{
 };
 
 use super::{Media, preview::CachedPreview, thumbnail::Dim};
+
+/// What a `create_file_metadata` call is creating; only a new media item is
+/// taken into the holder model (`mxc_managed`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FileOrigin {
+	/// The first file of an mxc: an upload or a sealed chunked upload.
+	NewMedia,
+	/// Another file of an mxc that already exists, such as a thumbnail; its
+	/// lifetime is the original's and it says nothing about being managed.
+	DerivedOfExisting,
+}
 
 pub(crate) struct Data {
 	db: Arc<Database>,
@@ -349,6 +360,15 @@ impl Data {
 		txn.del(&self.mxc_managed, &key);
 	}
 
+	/// Writes the `mediaid_file` row for one stored file of `mxc`, and, for a
+	/// new media item, its `mxc_managed` row in the same batch.
+	///
+	/// Args:
+	///     origin: whether this file starts a new media item or is derived
+	///         from one that already exists, example: `FileOrigin::NewMedia`
+	///         for an upload, `FileOrigin::DerivedOfExisting` for a thumbnail
+	/// Return:
+	///     Result<Vec<u8>>  the `mediaid_file` key the bytes are stored under.
 	pub(super) fn create_file_metadata(
 		&self,
 		mxc: &Mxc<'_>,
@@ -356,6 +376,7 @@ impl Data {
 		dim: &Dim,
 		content_disposition: Option<&ContentDisposition>,
 		content_type: Option<&str>,
+		origin: FileOrigin,
 	) -> Result<Vec<u8>> {
 		let dim: &[u32] = &[dim.width, dim.height];
 		let key = (mxc, dim, content_disposition, content_type);
@@ -364,14 +385,22 @@ impl Data {
 
 		txn.insert_raw(&self.mediaid_file, &key, []);
 
-		// Marks the media as managed by the holder model, with its creation
-		// time, in the same batch that creates it: media without this row is
-		// exactly media that predates the model and is never removed
-		// automatically. A thumbnail made later for the same mxc must not
-		// restart the clock, so an existing row is kept.
-		let mxc_key = mxc.to_string();
-		if self.mxc_managed.exists_blocking(&mxc_key).is_err() {
-			txn.insert_raw(&self.mxc_managed, &mxc_key, tuwunel_core::utils::time::now_millis().to_be_bytes());
+		// Only a new media item is marked as managed by the holder model (with
+		// its creation time, in the batch that creates it). A missing row cannot
+		// tell "new" from "predates the model", so the caller says which: a
+		// thumbnail made for existing media must neither restart the clock of a
+		// managed item nor hand an unmanaged one to the sweep. Media without
+		// the row is never removed automatically, so on any doubt (a read error)
+		// nothing is written.
+		if matches!(origin, FileOrigin::NewMedia) {
+			let mxc_key = mxc.to_string();
+			match self.mxc_managed.exists_blocking(&mxc_key) {
+				| Ok(()) => {},
+				| Err(e) if e.is_not_found() => {
+					txn.insert_raw(&self.mxc_managed, &mxc_key, tuwunel_core::utils::time::now_millis().to_be_bytes());
+				},
+				| Err(e) => warn!(?mxc, ?e, "Could not read mxc_managed; the media stays unmanaged."),
+			}
 		}
 
 		if let Some(user) = user {

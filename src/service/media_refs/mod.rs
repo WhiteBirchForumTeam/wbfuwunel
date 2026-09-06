@@ -42,7 +42,7 @@ use tuwunel_core::{
 	matrix::list_content_mxc_uris,
 	utils::{MutexMap, MutexMapGuard, stream::TryIgnore},
 };
-use tuwunel_database::{Ignore, Map, Txn};
+use tuwunel_database::{Ignore, Interfix, Map, Txn};
 
 pub use self::{
 	attachments::AttachmentError,
@@ -234,7 +234,7 @@ pub async fn forget_media(&self, mxc: &str) {
 	let rooms: Vec<OwnedRoomId> = self
 		.db
 		.mxc_room
-		.keys_prefix(&(mxc,))
+		.keys_prefix(&(mxc, Interfix))
 		.ignore_err()
 		.filter_map(|(_, room): (Ignore, &str)| {
 			let parsed = RoomId::parse(room).ok();
@@ -375,7 +375,9 @@ pub async fn release_room(&self, txn: &mut Txn, room: &RoomId) -> usize {
 	let media: Vec<String> = self
 		.db
 		.room_mxc
-		.keys_prefix(&(room.as_str(),))
+		// Ends at the separator: a room whose id merely starts with this one
+		// must not have its media released along (review of PR #26, rumia).
+		.keys_prefix(&(room.as_str(), Interfix))
 		.ignore_err()
 		.map(|(_, mxc): (Ignore, &str)| mxc.to_owned())
 		.collect()
@@ -406,24 +408,32 @@ pub async fn release_room(&self, txn: &mut Txn, room: &RoomId) -> usize {
 	media.len()
 }
 
-/// Moves `user_id`'s avatar holder from `old_mxc` to `new_mxc` in `txn`, and
-/// hands the old media to the collector once `txn` commits.
+/// Makes `new_mxc` the one media `user_id`'s avatar holds, in `txn`: every
+/// other media the avatar holder is on is released (handed to the collector
+/// once `txn` commits), `new_mxc` is held. `None` releases them all.
 ///
-/// Equal values write nothing, so a profile update leaving the avatar alone
-/// cannot release its own holder. The caller holds `new_mxc` (`hold_media`)
-/// until `txn` has committed.
+/// What the avatar held is read from the reverse index, not taken from the
+/// caller: two updates racing on the same profile both read the same old
+/// value, and the loser's media would keep an avatar holder nobody can ever
+/// release. Read from the index, the next update finds and releases it.
+/// Idempotent. The caller holds `new_mxc` (`hold_media`) until `txn` has
+/// committed.
 #[implement(Service)]
-pub fn set_avatar_ref(&self, txn: &mut Txn, user_id: &UserId, old_mxc: Option<&str>, new_mxc: Option<&str>) {
-	if old_mxc == new_mxc {
-		return;
-	}
-
+pub async fn set_avatar_ref(&self, txn: &mut Txn, user_id: &UserId, new_mxc: Option<&str>) {
 	let holder = Holder::avatar(user_id);
+	let held = self.list_mxcs_of(&holder).await;
+
+	let released: Vec<String> = held
+		.into_iter()
+		.filter(|mxc| Some(mxc.as_str()) != new_mxc)
+		.collect();
+	for mxc in &released {
+		self.del_holder_rows(txn, mxc, &holder);
+	}
+	self.hand_to_collector(txn, released);
+
 	if let Some(new_mxc) = new_mxc {
 		self.hold(txn, new_mxc, &holder);
-	}
-	if let Some(old_mxc) = old_mxc {
-		self.release(txn, old_mxc, &holder);
 	}
 }
 
@@ -473,10 +483,12 @@ pub async fn list_holders(&self, mxc: &str) -> Vec<Holder> {
 	holders
 }
 
-/// Whether anything holds `mxc`: one prefix seek.
+/// Whether anything holds `mxc`: one prefix seek. The prefix ends at the
+/// key separator, so a media whose URI merely starts with `mxc` does not
+/// count as holding it.
 #[implement(Service)]
 pub async fn has_holders(&self, mxc: &str) -> bool {
-	let prefix = (mxc,);
+	let prefix = (mxc, Interfix);
 	let first = self.db.mxc_holder.keys_prefix_raw(&prefix);
 	futures::pin_mut!(first);
 	first.next().await.is_some()

@@ -187,7 +187,9 @@ None 或 i64::MIN  → skip（沒被算過 / 哨兵）
 - **HTTP**：`410 Gone`，errcode 維持 `M_NOT_FOUND`（客戶端只認標準碼）。📎 `Err!(Request(...))` 巨集一律填
   `BAD_REQUEST` 當提示，`response::status_code` 只在提示是 `BAD_REQUEST` 時才依 kind 換算 —— 所以 410 要
   **直接建構** `Error::Request(NotFound, msg, StatusCode::GONE)`。
-- **TTL**：CF 設 `ttl = 365 天`（descriptor 既有欄位）。
+- **墓碑是永久的**（2026-09-06 更正）：CF 上的 `ttl = 365 天` 在 Universal compaction 下只是「舊檔排進 compaction」的提示，**不刪 key**
+  （RocksDB 只有 FIFO 會依年齡丟整個檔），`find_tombstone` 也不看 `deleted_at_secs`。一筆約 80 byte，一百萬次刪除約 80 MB；410 永遠成立，
+  比一年後變 404 好懂。🚫 不改成 FIFO：它超過 `limit_size` 會連新墓碑一起丟。之前這裡寫的「365 天 TTL」是講反話，外部審查抓到的。
 - `!admin media list-references` 改名 **`refcount`**：印計數，含「哨兵」與「已刪除 + 墓碑」兩種特殊狀態。
   列式索引退場後「誰引用」查不到了 —— 維護者要數字，這是明知的取捨。
 - **實作**：值是 `Cbor(Tombstone { deleted_at_secs, reason })`；寫墓碑與刪 `mxc_refcount` 列同一交易（`media.collect()`），

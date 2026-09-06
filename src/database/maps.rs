@@ -273,7 +273,10 @@ pub(super) static MAPS: &[Descriptor] = &[
 		..descriptor::DROPPED
 	},
 	// Deleted media: `mxc` -> (deleted at, reason), so a later fetch can say
-	// "gone" rather than "never existed". Rows age out after a year.
+	// "gone" rather than "never existed". Rows are kept for good: under
+	// Universal compaction the `ttl` below only schedules old files for
+	// compaction, it removes no key (only FIFO drops whole files by age), and
+	// nothing else expires these. About 80 bytes per removed media.
 	Descriptor {
 		name: "mxc_tombstone",
 		ttl: 60 * 60 * 24 * 365,

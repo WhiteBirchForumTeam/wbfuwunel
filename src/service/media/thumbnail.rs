@@ -21,7 +21,10 @@ use tuwunel_core::{
 	utils::{result::LogDebugErr, stream::IterStream},
 };
 
-use super::{Media, data::Metadata};
+use super::{
+	Media,
+	data::{FileOrigin, Metadata},
+};
 
 /// Content type of every thumbnail tuwunel generates.
 #[cfg(feature = "media_thumbnail")]
@@ -61,7 +64,7 @@ impl super::Service {
 	) -> Result {
 		let key =
 			self.db
-				.create_file_metadata(mxc, None, dim, content_disposition, content_type)?;
+				.create_file_metadata(mxc, None, dim, content_disposition, content_type, FileOrigin::DerivedOfExisting)?;
 
 		//TODO: Dangling metadata in database if creation fails
 		self.create_media_file(&key, file).await?;
@@ -299,6 +302,7 @@ async fn get_thumbnail_generate(
 		dim,
 		data.content_disposition.as_ref(),
 		data.content_type.as_deref(),
+		FileOrigin::DerivedOfExisting,
 	)?;
 
 	self.create_media_file(&thumbnail_key, &thumbnail_bytes)

@@ -1,7 +1,7 @@
 # PR #24 合併後的再審，與外部審查（2026-09-05 兩輪）的逐條驗證
 
 > **這份文件回答：main `389152df6`（PR #24 合併後）還有哪些已確認的缺陷、各自的證據在哪一行、建議怎麼修、怎麼驗。**
-> 狀態：📄 提案，等維護者同意後開實作分支（照 [fork-overview.md](fork-overview.md) 的流程，同意前不動 `src/`）。
+> 狀態：維護者 2026-09-06 同意三支都修（§4）。🔧 `media/managed-origin`（§2.1、§2.6、§2.7、§2.9）實作中；`media/upload-lifecycle`（§2.2、§2.5、§2.8）與 `wbf/auth-and-ws-lifetime`（§2.3、§2.4）待開。
 > 來源兩個：(1) 持有者集合是實作到一半重做的（[media-holders.md](media-holders.md)），合併後對 main 重看一次；
 > (2) `../external-review/wbfuwunel-2026-09-05.md` 與 `-v2.md`，一位外部審查者對 `0c964d522`／`3091c7ce3` 做的靜態審查，共 9＋5 條。
 > 外部審查的每一條都**對現在的程式碼重新讀過**再下結論，不沿用它的判定；它看的版本沒有 #22 與 #24。
@@ -36,7 +36,9 @@
 
 ## 2. 要修的，照嚴重度
 
-### 2.1 🔴 P1：既存媒體被縮圖拉進 `mxc_managed`，7 天後被掃
+### 2.1 🔴 P1：既存媒體被縮圖拉進 `mxc_managed`，7 天後被掃（🔧 `media/managed-origin`）
+
+維護者 2026-09-06 的判斷，與這裡的修法一致：只有 `create` 與 Seal 確立受管；縮圖跟原檔同一個 mxc，壽命已經跟著原檔（前綴刪除），不需要自己的 mxc 或外鍵。
 
 **現況**：`create_file_metadata`（`media/data.rs:352`）對**任何**一列（原檔、上傳的縮圖、生成的縮圖）都做「`mxc_managed` 沒列就 insert 現在時間」。
 註解只想到「同一 mxc 的縮圖不能重設時鐘」，沒想到**沒列的可能是既存媒體**。生成縮圖（`thumbnail.rs:296`）對一張 2026-09-06 之前上傳、
@@ -57,6 +59,10 @@ enum FileOrigin { NewMedia, DerivedOfExisting }
 **驗收**：e2e10 加一個情境：用舊 binary 建庫、上傳一張圖並在明文事件引用 → 換新 binary、`WBFUWUNEL_MEDIA_GRACE_SECONDS=3` → 抓縮圖 →
 等兩輪掃描 → 原圖與縮圖仍 200，`!admin media refcount` 印「predates the holder model」。單元：`create_file_metadata` 兩種 origin 對
 `mxc_managed` 的寫入（真 DB 測試，`media/data.rs` 已有夾具可抄）。
+
+**結果（2026-09-06）**：e2e10 情境 4 綠（17/17）；**紅燈驗過** —— 把判斷暫時改回舊行為重建，[4.2] 讀到 `held=410 free=410 thumb=410`，
+連被引用的既存圖都被掃掉；還原後再綠。e2e9 26、e2e8 37 回歸綠。單元：`holder.rs` 加 `a_media_prefix_does_not_match_a_longer_uri`（§2.6）；
+`create_file_metadata` 兩種 origin 的真 DB 單元測試**沒做**（`media/data.rs` 的測試夾具只有 CBOR round-trip，沒有開 DB 的），由 e2e 情境 4 涵蓋。
 
 ### 2.2 🔴 P1：Seal 在本地儲存收整檔進記憶體；S3 的 parts 太小
 
@@ -129,6 +135,8 @@ sweeper 用 `media_upload_ttl=2`：「等 3 秒 → 同時送 Chunk 與觸發 sw
 自己 `(room, mxc)` 的列，無害。
 
 **修法**：兩處改 `(mxc, Interfix)`；`holder.rs` 的 `keys_start_with_their_prefixes` 測試加一條「相似 mxc 的鍵不被對方的前綴匹配」。
+PR #26 review（rumia）再抓到同形的第三處：`release_room` 掃 `room_mxc` 用 `(room,)`，兩個 room id 一個是另一個的位元組前綴時（`!x:server` 與 `!x:server2`）
+刪房會連後者的媒體一起釋放。同支補成 `(room, Interfix)`。`media_refs` 裡其餘前綴都是雙元素以上。
 
 ### 2.7 🟡 P2：頭像併發更新留下幽靈持有者
 
