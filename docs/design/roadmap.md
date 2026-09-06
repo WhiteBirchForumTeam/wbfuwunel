@@ -6,7 +6,7 @@
 > 狀態標記：✅ 已合併 · 🔧 進行中 · 📄 有提案待同意 · 🔲 下一步 · 💭 候選（還沒決定要不要做）· 🚫 明確不做。
 > 每一項改狀態時順手改這裡；這裡的狀態如果跟 [`CHANGELOG-fork.md`](../../CHANGELOG-fork.md) 對不上，以 CHANGELOG 為準。
 >
-> 最後更新：2026-09-06。
+> 最後更新：2026-09-06（PR #24 合併後）。
 
 ## 0. 目標，一句話
 
@@ -21,17 +21,19 @@
 | 項目 | 狀態 | 去哪看 |
 |---|---|---|
 | fork 定位、分支模型、改動流程、Windows 建置 | ✅ | [fork-overview.md](fork-overview.md)、[windows-build.md](windows-build.md) |
-| 媒體引用計數（精確計數、merge operator、哨兵） | ✅ PR #7 | [media-gc.md](media-gc.md) §2、§4 |
-| 媒體的真正刪除：收集器、墓碑 410、`migrate-references` | ✅ PR #10 | [media-gc.md](media-gc.md) §3、§5、§6 |
-| 每個 mxc 一鎖，關掉收集器與同時 +1 的窗口 | ✅ PR #12 | [media-gc.md](media-gc.md) §3.3 |
+| 媒體引用計數（精確計數、merge operator、哨兵）—— **已被 #24 的持有者集合取代** | ✅ PR #7 → 退場 | [media-gc.md](media-gc.md) §2、§4（歷史） |
+| 媒體的真正刪除：收集器、墓碑 410、`migrate-references`（migrate 已在 #24 拔掉） | ✅ PR #10 | [media-gc.md](media-gc.md) §3、§6 |
+| 每個 mxc 一鎖，關掉收集器與同時加持有者的窗口 | ✅ PR #12 | [media-gc.md](media-gc.md) §3.3 |
 | 分塊上傳／下載 B 支：WebSocket 通道、上傳中間層（進度列＋記憶體＋每上傳一鎖）、規格黃金向量 | ✅ PR #18 | [wbf-wire-format.md](wbf-wire-format.md) §6.1、[chunked-upload.md](chunked-upload.md) §3.1、[wbf-vectors.json](wbf-vectors.json) |
 | 分塊上傳／下載 A 支：wbf pack、`EncryptedFileInfo`、有序上傳與續傳、串流模式、按塊下載、sweeper、`POST /_wbf/v1/pack` | ✅ PR #16 | [chunked-upload.md](chunked-upload.md)、[chunked-upload-spec.md](chunked-upload-spec.md)、[wbf-wire-format.md](wbf-wire-format.md) |
+| 每房 `r_seq`、全域 `g_seq`、`Event/Recent` | ✅ PR #22 | [room-seq-and-recent.md](room-seq-and-recent.md) |
+| **媒體持有者集合**取代計數；附件隨送訊息宣告（header／`Event/Send`）；7 天掃描；舊 client 一次性警告；fork 自報引擎名 | ✅ PR #24 | [media-holders.md](media-holders.md)、[media-attachments.md](media-attachments.md) |
 
-這三支合起來就是核心設計 §5.4「刪除語意」的 server 端，**寬限期被維護者拿掉了**（立刻生效），
-TTL 兜底改成「不確定就持有」加 `migrate-references` 重算。
+媒體這幾支合起來是核心設計 §5.4「刪除語意」的 server 端，**沒有寬限期**（訊息消失媒體立刻消失）；
+「不確定就持有」現在的形狀是：**沒有 `mxc_managed` 列的既存媒體永不自動刪**，沒有重算工具。
 
-**現在成立的性質**：媒體的壽命等於引用它的訊息（含原文備份）的壽命。訊息消失，媒體立刻消失。
-用量等於實際保留的內容，沒有漏水。
+**現在成立的性質**：這個模型上線後上傳的媒體，壽命等於持有它的東西（事件、原文備份、頭像）的壽命；
+上傳後 7 天內沒有任何持有者的會被掃掉。用量等於實際保留的內容加上既存媒體，沒有漏水。
 
 ## 2. 下一步（順序已定）
 
@@ -66,12 +68,20 @@ client（wbf-matrix-client）的聊天模型要 server 配合的兩件事。設�
 兩個位置寫進存起來的 PDU 的 `unsigned`（一個寫入點、所有讀路徑自動帶）、startup migration 回填既有 room；
 `Event/Recent` 依 client 快取的 `cg_seq` 只回差異，k 路合併不加索引。順手加了 `[profile.e2e]`（windows-build.md）。
 
-### 2.5 🔧 E2EE 下的媒體引用：送訊息時宣告 attachments、計數 0 由後台掃描清（提案 PR #23 已合併，實作分支 `media/attachments`）
 
-2026-09-06 發現的破口：引用計數的 +1 來自 server 讀 content，E2EE 房間讀不到，附件永遠不會被計到（漏水）、而 `migrate` 會把它們當孤兒刪。
-維護者定方向，提案 [media-attachments.md](media-attachments.md)：機制不變、來源換成「明文 or 送訊息請求夾帶的 mxc」；
-新表 `eventid_mxcs`；計數 0 的由週期掃描清（新加，保護期至少 7 天）；既存媒體不遷移；非 wbf client 在 E2EE 房間傳檔 → bot 私訊一條英文。
-**client 端必須同步**（spec §12），否則媒體留不住。
+### 2.5 ✅ E2EE 下的媒體引用 → 持有者集合（提案 PR #23，實作 PR #24，2026-09-06 合併）
+
+破口：計數的 +1 來自 server 讀 content，E2EE 房間讀不到。定案分兩層：**來源**換成送訊息時宣告 `attachments`
+（[media-attachments.md](media-attachments.md)），**形狀**換成外鍵集合（[media-holders.md](media-holders.md)），
+`migrate-references` 拔掉，既存媒體永不自動刪。**client 端必須同步**（spec §12），否則 E2EE 房間的附件 7 天後被掃掉。
+
+### 2.6 🔲 合併後再審與外部審查的修補（[review-followups-2026-09-06.md](review-followups-2026-09-06.md)）
+
+PR #24 合併後對 main 重看一次，加上 `../external-review` 兩輪（2026-09-05）逐條對現在的程式碼驗證。**已確認仍在、要修的**（照嚴重度）：
+既存媒體被縮圖拉進 `mxc_managed` 後 7 天被掃（P1，等於外部審查第 2 條的新形態）；Seal 在本地儲存把整檔收進記憶體、S3 的 1 MiB parts（P1）；
+`/_wbf/*` 與 WebSocket 不查帳號鎖定（P1）；WebSocket 連線在登出／token 到期後仍有效、關機時 `State` 懸空（P1）；`Status` 冷載入不持鎖蓋回舊快照、
+sweeper 鎖下不重讀進度（P2）；`(mxc,)` 前綴少 `Interfix`、頭像併發留下幽靈持有者（P2，漏水方向）；升級前的舊上傳沒有清理路徑（P2）；
+墓碑的 365 天 TTL 在 Universal compaction 下不會刪 key（文件講反話）。每一條的證據、修法、驗收在那份文件；**等維護者同意再開實作分支**。
 
 ## 3. 候選（要不要做，由維護者決定）
 
@@ -79,9 +89,9 @@ client（wbf-matrix-client）的聊天模型要 server 配合的兩件事。設�
 |---|---|---|
 | 💭 歷史保留政策 | 事件超過 N 天自動 purge（config ＋ 每房間覆寫 ＋ 一個 worker 呼叫既有的 `purge_history`），原文備份跟著同一期限走 | 維護者 2026-09-03 的看法是**事件一直長是自然的，不必加**。列在這裡是因為若哪天要「算得出來的容量」變成「有上限的容量」，這是唯一的開關 |
 | 💭 遠端媒體快取 TTL | 別台伺服器的媒體被抓來快取後沒有過期時間，收集器也不碰它 | **只有打開聯邦才會發生**（`allow_federation = false` 時連出去的請求在 `federation/execute.rs` 就被擋）。開聯邦之前必做 |
-| 💭 RocksDB 空間回收 | 刪除只寫 tombstone 記錄，空間靠 compaction；大量清理後可能要手動 compaction 或調 periodic compaction | 第一次在真實資料上跑 `migrate-references` 之後量一次 |
-| 💭 「備份存在時 purge 只釋放一次」的 Services 級測試 | 雙路徑互斥目前只有 e2e 涵蓋 | 需要能在測試裡建起 Services 的夾具；有了夾具很多「靠讀碼確認」的東西都能變測試 |
-| 💭 admin 指令顯示「誰引用」 | 列式索引退場後只剩數字 | 維護者當時明說要數字；除非除錯時真的需要，不做 |
+| 💭 RocksDB 空間回收 | 刪除只寫 tombstone 記錄，空間靠 compaction；大量清理後可能要手動 compaction 或調 periodic compaction | 第一次大量刪房或 purge 之後量一次（`migrate-references` 已拔掉） |
+| 💭 Services 級的測試夾具 | 「可刪」決策（本地 ∧ 有 `mxc_managed` ∧ 無持有者）、purge 與備份到期的冪等，目前只有 e2e 涵蓋（雙扣本身已被集合語意消掉） | 需要能在測試裡建起 Services 的夾具；有了夾具很多「靠讀碼確認」的東西都能變測試 |
+| ✅ admin 指令顯示「誰持有」 | `!admin media refcount <mxc>` 從 #24 起印持有者清單與是否受管 | 持有者集合天然有這個答案，不用另做 |
 
 ## 4. 大的未定（核心設計 §7）
 
