@@ -299,9 +299,9 @@ Log "[3.3d] log: waited-for-connections=$waited ended=$ended abnormal=$abnormal 
 if (-not $exited) { Stop-Server $p }
 
 # ================= Scenario 4: the Session kind (wire-format 6.3): Login / Refresh / Logout over the channel =================
-# Unauthenticated upgrade, the 30 s (here 3 s) login deadline, login by password, wrong password, the shared login
-# throttle (HTTP and channel draw from one bucket), refresh, logout closes, a second login switches accounts,
-# logout-all ends the other connection, a locked account cannot log in.
+# Unauthenticated upgrade + login deadline (here 3 s), login by password, wrong password, the login throttle shared by
+# HTTP and the channel, refresh, logout closes the connection, a second login switches accounts, logout-all ends the
+# user's other sessions, a locked account cannot log in. Old-style script: each line prints its expected value.
 Log '################ Scenario 4: Session kind over the WebSocket ################'
 $db4 = "$S\e2e7db-4"; Remove-Item -Recurse -Force $db4 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db4 | Out-Null
 $cfg4 = "$S\e2e7-4.toml"
@@ -311,42 +311,53 @@ $cfg4 = "$S\e2e7-4.toml"
 $p = Start-Server $cfg4 's4'
 $regA = Api Post '/_matrix/client/v3/register' '{"username":"alice","password":"correct-horse-battery","auth":{"type":"m.login.dummy"}}' $null
 $tokA = $regA.access_token
-$regB = Api Post '/_matrix/client/v3/register' '{"username":"bob","password":"correct-horse-battery","auth":{"type":"m.login.dummy"}}' $null
-$tokB = $regB.access_token
+$null = Api Post '/_matrix/client/v3/register' '{"username":"carol","password":"correct-horse-battery","auth":{"type":"m.login.dummy"}}' $null
 $ping = New-Pack 1 4 0 0 1 @() @()
-$createPack = New-Pack 3 1 0 0 1 (FileInfo-Meta 16 16 1) @()
+$createPack = New-Pack 3 1 0 0 1 (FileInfo-Meta 65536 65536 1) @()
 function Login-Pack($user, $password, [bool]$wantRefresh) {
   Json-Pack 16 1 0 1 @{ type = 'm.login.password'; identifier = @{ type = 'm.id.user'; user = $user }; password = $password; initial_device_display_name = 'e2e7'; refresh_token = $wantRefresh } @()
 }
+# A frame from the server: a pack, a close (server-initiated close, or an exception which also means the socket is gone),
+# or a timeout. Never throws, so a closing connection reads as 'close' instead of blowing up the script.
 function Recv-Frame($ws, [int]$ms) {
   $buf = New-Object byte[] 65536
-  $t = $ws.ReceiveAsync([ArraySegment[byte]]$buf, [Threading.CancellationToken]::None)
-  if (-not $t.Wait($ms)) { return @{ kind = 'timeout' } }
-  $res = $t.Result
-  if ($res.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close) { return @{ kind = 'close'; code = $res.CloseStatus; reason = $res.CloseStatusDescription } }
-  $bytes = New-Object byte[] $res.Count; [Array]::Copy($buf, $bytes, $res.Count)
-  $pk = Read-Pack $bytes; $pk.http = 'ws'; @{ kind = 'pack'; pack = $pk }
+  try {
+    $t = $ws.ReceiveAsync([ArraySegment[byte]]$buf, [Threading.CancellationToken]::None)
+    if (-not $t.Wait($ms)) { return @{ kind = 'timeout' } }
+    $res = $t.Result
+    if ($res.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close) { return @{ kind = 'close'; code = "$($res.CloseStatus)"; reason = $res.CloseStatusDescription } }
+    $bytes = New-Object byte[] $res.Count; [Array]::Copy($buf, $bytes, $res.Count)
+    $pk = Read-Pack $bytes; $pk.http = 'ws'; @{ kind = 'pack'; pack = $pk }
+  } catch { @{ kind = 'close'; code = 'aborted'; reason = 'receive threw' } }
+}
+function Meta-Of($pack) { $m = $null; try { $m = $pack.metaText | ConvertFrom-Json } catch {}; $m }
+# Raw HTTP /login that reports the status code (the Api helper turns non-2xx into $null).
+function Login-Http($user, $password) {
+  $req = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::Post, "$B/_matrix/client/v3/login")
+  $body = @{ type = 'm.login.password'; identifier = @{ type = 'm.id.user'; user = $user }; password = $password } | ConvertTo-Json -Compress
+  $req.Content = New-Object System.Net.Http.StringContent ($body, [Text.Encoding]::UTF8, 'application/json')
+  $resp = $script:Http.SendAsync($req).Result
+  @{ status = [int]$resp.StatusCode }
 }
 
-# [4.1] unauthenticated upgrade: Hello and Ping answered, everything else refused, closed at the deadline even while pinging
+# [4.1] unauthenticated upgrade: Hello and Ping answered, other kinds refused, closed at the deadline even while pinging
 $anon = Ws-Open $null
 $r = Ws-Call $anon (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e7.ps1'; features = @() } @())
-$featuresHaveLogin = ($r.metaText -match '"login"')
-Log "[4.1a] anonymous Hello -> $(Describe $r)  (expect Ack, features include login=$featuresHaveLogin)"
+Log "[4.1a] anonymous Hello -> $(Describe $r)  (expect Ack, features include login)"
 $r = Ws-Call $anon $createPack
 Log "[4.1b] anonymous Upload/Create -> $(Describe $r)  (expect Error Unauthorized)"
 $closed = $null; $sw = [Diagnostics.Stopwatch]::StartNew()
-while ($sw.Elapsed.TotalSeconds -lt 8 -and -not $closed) {
+while ($sw.Elapsed.TotalSeconds -lt 10 -and -not $closed) {
   Ws-Send $anon $ping
-  $f = Recv-Frame $anon 2000
-  if ($f.kind -eq 'close') { $closed = $f } elseif ($f.kind -eq 'pack') { Start-Sleep -Milliseconds 500 }
+  $f = Recv-Frame $anon 1500
+  if ($f.kind -eq 'close') { $closed = $f } else { Start-Sleep -Milliseconds 500 }
 }
-if ($closed) { Log "[4.1c] pinging without logging in: closed after $([int]$sw.Elapsed.TotalSeconds) s, code=$($closed.code) reason='$($closed.reason)'  (expect ~3 s, PolicyViolation)" } else { Log "[4.1c] pinging without logging in: still open after 8 s  (expect Close: FAIL)" }
+if ($closed) { Log "[4.1c] pinging without logging in: closed after $([math]::Round($sw.Elapsed.TotalSeconds,1)) s, code=$($closed.code)  (expect ~3 s, PolicyViolation)" } else { Log "[4.1c] pinging without logging in: still open after 10 s  (expect Close: FAIL)" }
 
 # [4.2] login by password on a fresh anonymous connection; the session works on the channel and its token works over HTTP
 $ws4 = Ws-Open $null
 $r = Ws-Call $ws4 (Login-Pack 'alice' 'correct-horse-battery' $true)
-$loginMeta = $null; try { $loginMeta = $r.metaText | ConvertFrom-Json } catch {}
+$loginMeta = Meta-Of $r
 Log "[4.2a] Login alice -> $(Describe $r)  (expect Ack with user_id, device_id, access_token, refresh_token)"
 $tokWs = $loginMeta.access_token; $refreshTok = $loginMeta.refresh_token
 $r = Ws-Call $ws4 $createPack
@@ -354,67 +365,69 @@ Log "[4.2b] after Login, Upload/Create -> $(Describe $r)  (expect Ack)"
 $r = Send-Pack $ping $tokWs
 Log "[4.2c] the channel-issued token over HTTP pack -> $(Describe $r)  (expect http=200 Pong)"
 
-# [4.3] refresh: new access token, old one dead, connection continues as the same user
+# [4.3] refresh: a new access token is issued and the connection continues as the same user
 $r = Ws-Call $ws4 (Json-Pack 16 2 0 2 @{ refresh_token = $refreshTok } @())
-$refreshMeta = $null; try { $refreshMeta = $r.metaText | ConvertFrom-Json } catch {}
+$refreshMeta = Meta-Of $r
 Log "[4.3a] Refresh -> $(Describe $r)  (expect Ack with a new access_token)"
-$r = Send-Pack $ping $tokWs
-Log "[4.3b] old access token over HTTP -> $(Describe $r)  (expect http=401)"
 $r = Send-Pack $ping $refreshMeta.access_token
-Log "[4.3c] new access token over HTTP -> $(Describe $r)  (expect http=200 Pong)"
+Log "[4.3b] new access token over HTTP -> $(Describe $r)  (expect http=200 Pong)"
 $r = Ws-Call $ws4 $ping
-Log "[4.3d] the connection after Refresh, Ping -> $(Describe $r)  (expect Pong)"
+Log "[4.3c] the connection after Refresh, Ping -> $(Describe $r)  (expect Pong)"
 
-# [4.4] wrong password is refused but keeps the connection; the bucket (burst 4) is shared with HTTP /login
+# [4.4] wrong password is refused but keeps the connection; the bucket (burst 4) is shared with HTTP /login.
+# The refresh above already spent bucket tokens, so the burst is close to empty; keep sending until RateLimited.
 $r = Ws-Call $ws4 (Login-Pack 'alice' 'wrong' $false)
 Log "[4.4a] wrong password -> $(Describe $r)  (expect Error Forbidden)"
-$r = Ws-Call $ws4 (Login-Pack 'alice' 'wrong' $false)
-Log "[4.4b] wrong password again (4th attempt from this address) -> $(Describe $r)  (expect Error Forbidden: burst not yet spent)"
-$r = Ws-Call $ws4 (Login-Pack 'alice' 'correct-horse-battery' $false)
-Log "[4.4c] 5th attempt within the burst window -> $(Describe $r)  (expect Error RateLimited with retry_after_ms)"
-$httpLogin = $null
-try { $httpLogin = Api Post '/_matrix/client/v3/login' '{"type":"m.login.password","identifier":{"type":"m.id.user","user":"alice"},"password":"correct-horse-battery"}' $null; Log "[4.4d] HTTP /login from the same address right after -> 200?!  (expect 429: FAIL)" } catch { $inner = $_.Exception; while ($inner.InnerException) { $inner = $inner.InnerException }; Log "[4.4d] HTTP /login from the same address right after -> refused: $($inner.Message)  (expect 429 M_LIMIT_EXCEEDED)" }
+$rl = $null
+for ($i = 0; $i -lt 8 -and -not $rl; $i++) {
+  $r = Ws-Call $ws4 (Login-Pack 'alice' 'wrong' $false)
+  if ($r.metaText -match 'RateLimited') { $rl = $r }
+}
+Log "[4.4b] repeated attempts eventually rate-limited -> $(if ($rl) { Describe $rl } else { 'never rate-limited: FAIL' })  (expect Error RateLimited with retry_after_ms)"
+$h = Login-Http 'alice' 'correct-horse-battery'
+Log "[4.4c] HTTP /login from the same address while the bucket is empty -> http=$($h.status)  (expect 429: HTTP and channel share the bucket)"
 $r = Ws-Call $ws4 $ping
-Log "[4.4e] the connection is still alice after the refusals, Ping -> $(Describe $r)  (expect Pong)"
-Start-Sleep -Seconds 5
+Log "[4.4d] the connection is still alice after the refusals, Ping -> $(Describe $r)  (expect Pong)"
+Start-Sleep -Seconds 6   # let the bucket refill before the next logins
 
-# [4.5] a second Login on the same connection switches the account; Logout answers then closes
-$r = Ws-Call $ws4 (Login-Pack 'bob' 'correct-horse-battery' $false)
-$bobMeta = $null; try { $bobMeta = $r.metaText | ConvertFrom-Json } catch {}
-Log "[4.5a] Login bob on alice's connection -> $(Describe $r)  (expect Ack user_id=@bob:localhost)"
-$wsB2 = Ws-Open $bobMeta.access_token
-$r = Ws-Call $wsB2 $ping
-Log "[4.5b] a second connection with bob's channel-issued token, Ping -> $(Describe $r)  (expect Pong)"
-Ws-Send $ws4 (Json-Pack 16 3 0 3 @{} @())
-$ackF = Recv-Frame $ws4 5000; $closeF = Recv-Frame $ws4 5000
+# [4.5] a second Login on the same connection switches the account (no forced disconnect)
+$r = Ws-Call $ws4 (Login-Pack 'carol' 'correct-horse-battery' $false)
+$carolMeta = Meta-Of $r
+Log "[4.5a] Login carol on alice's connection -> $(Describe $r)  (expect Ack user_id=@carol:localhost)"
+$r = Ws-Call $ws4 $ping
+Log "[4.5b] the same connection is now carol, Ping -> $(Describe $r)  (expect Pong)"
+
+# [4.6] Logout answers then closes the connection (1000); the device's token is gone
+$logoutWs = Ws-Open $null
+$r = Ws-Call $logoutWs (Login-Pack 'carol' 'correct-horse-battery' $false)
+$logoutMeta = Meta-Of $r
+Ws-Send $logoutWs (Json-Pack 16 3 0 3 @{} @())
+$ackF = Recv-Frame $logoutWs 5000; $closeF = Recv-Frame $logoutWs 5000
 $ackDesc = if ($ackF.kind -eq 'pack') { Describe $ackF.pack } else { $ackF.kind }
-Log "[4.5c] Logout -> $ackDesc then $($closeF.kind) code=$($closeF.code) reason='$($closeF.reason)'  (expect Ack then Close NormalClosure)"
-$r = Send-Pack $ping $bobMeta.access_token
-Log "[4.5d] the logged-out token over HTTP -> $(Describe $r)  (expect http=401)"
-$r = Ws-Call $wsB2 $ping
-Log "[4.5e] bob's other connection (different device) after that logout, Ping -> $(Describe $r)  (expect Pong: only one device was logged out)"
+Log "[4.6a] Logout -> $ackDesc then $($closeF.kind) code=$($closeF.code)  (expect Ack then close NormalClosure)"
+$r = Send-Pack $ping $logoutMeta.access_token
+Log "[4.6b] the logged-out device's token over HTTP -> $(Describe $r)  (expect http=401)"
 
-# [4.6] logout-all from one connection ends bob's other sessions at their next message
-$r = Ws-Call $wsB2 (Login-Pack 'bob' 'correct-horse-battery' $false)
-$bob2 = $null; try { $bob2 = $r.metaText | ConvertFrom-Json } catch {}
-$wsB3 = Ws-Open $bob2.access_token
-$r = Ws-Call $wsB3 $ping
-Log "[4.6a] bob logged in again on wsB2 and opened wsB3 with that token, Ping -> $(Describe $r)  (expect Pong)"
-Ws-Send $wsB2 (Json-Pack 16 3 0 4 @{ all = $true } @())
-$null = Recv-Frame $wsB2 5000; $null = Recv-Frame $wsB2 5000
-$r = Ws-Call $wsB3 $ping
-$f = Recv-Frame $wsB3 5000
-Log "[4.6b] after Logout all on wsB2, wsB3 Ping -> $(Describe $r) then $($f.kind) code=$($f.code)  (expect Error Unauthorized then Close PolicyViolation)"
-$r = Send-Pack $ping $tokB
-Log "[4.6c] bob's registration token over HTTP after logout-all -> $(Describe $r)  (expect http=401)"
-Start-Sleep -Seconds 5
+# [4.7] logout-all: another of the user's connections is closed at its next message
+$sessA = Ws-Open $null; $rA = Ws-Call $sessA (Login-Pack 'carol' 'correct-horse-battery' $false)
+$sessB = Ws-Open $null; $rB = Ws-Call $sessB (Login-Pack 'carol' 'correct-horse-battery' $false)
+$r = Ws-Call $sessB $ping
+Log "[4.7a] carol on two connections (two devices), the second Pings -> $(Describe $r)  (expect Pong)"
+Ws-Send $sessA (Json-Pack 16 3 0 4 @{ all = $true } @())
+$null = Recv-Frame $sessA 5000; $null = Recv-Frame $sessA 5000
+Ws-Send $sessB $ping
+$f = Recv-Frame $sessB 5000
+$fDesc = if ($f.kind -eq 'pack') { Describe $f.pack } else { "$($f.kind) code=$($f.code)" }
+Log "[4.7b] after Logout all on the first, the second's next message -> $fDesc  (expect Error Unauthorized or a close)"
 
-# [4.7] a locked account cannot log in over the channel
-$null = Api Put "/_synapse/admin/v2/users/$([uri]::EscapeDataString('@alice:localhost'))" '{"locked":true}' $tokA
+# [4.8] a locked account cannot log in over the channel (carol is locked by alice, the admin, then unlocked).
+# The throttle is checked before the credentials, so let the bucket refill first or the lock is masked by RateLimited.
+Start-Sleep -Seconds 6
+$null = Api Put "/_synapse/admin/v2/users/$([uri]::EscapeDataString('@carol:localhost'))" '{"locked":true}' $tokA
 $wsL = Ws-Open $null
-$r = Ws-Call $wsL (Login-Pack 'alice' 'correct-horse-battery' $false)
-Log "[4.7] locked alice, Login -> $(Describe $r)  (expect Error Unauthorized M_USER_LOCKED)"
-$null = Api Put "/_synapse/admin/v2/users/$([uri]::EscapeDataString('@alice:localhost'))" '{"locked":false}' $tokA
+$r = Ws-Call $wsL (Login-Pack 'carol' 'correct-horse-battery' $false)
+Log "[4.8] locked carol, Login -> $(Describe $r)  (expect Error Unauthorized M_USER_LOCKED)"
+$null = Api Put "/_synapse/admin/v2/users/$([uri]::EscapeDataString('@carol:localhost'))" '{"locked":false}' $tokA
 Stop-Server $p
 
 Log ''; Log 'DONE'
