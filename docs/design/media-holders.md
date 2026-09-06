@@ -121,7 +121,7 @@ is_removable(mxc) -> bool           收集器與掃描共用的決策
 - 密文事件（E2EE）**必須**在送訊息的請求裡宣告 `attachments`（header 或 `Event/Send`），明文可宣告可不宣告，聯集去重。驗證規則照
   [media-attachments.md](media-attachments.md) §4.2 fail closed。
 - 上傳後 7 天內沒有任何持有者 → 掃描刪；用舊 client 在 E2EE 房間傳檔的人收到一次英文警告。
-- 保護期至少 7 天，時鐘是 `mxc_managed` 的建立時間。
+- 保護期至少 7 天，時鐘是 `mxc_managed` 的建立時間；環境變數 `WBFUWUNEL_MEDIA_GRACE_SECONDS` 只給測試覆寫（§9）。
 
 ## 7. 這個模型不會有的問題
 
@@ -149,7 +149,10 @@ is_removable(mxc) -> bool           收集器與掃描共用的決策
 - E2EE 宣告、四種拒送、`Event/Send`、警告一次：沿用 e2e9 情境 1。
 - 既存媒體（用舊 binary 建的庫）：沒有 `mxc_managed` 列，掃描與收集器都不碰。
 - 反覆執行：同一則 redact 兩次、同一 purge 跑兩次、備份到期後再 purge —— 集合狀態與第一次相同，log 無錯。
-- 單元：三種外鍵的編碼／前綴；「可刪」決策函數的真值表；反向索引範圍掃描的邊界（`< until`）。
+- 單元：三種外鍵的編碼／前綴、`g_seq` 偏移編碼保序（`holder.rs`）。「可刪」決策（本地 ∧ 有 `mxc_managed` ∧ 無持有者）要 `Services`，
+  由 e2e 涵蓋。7 天後的掃描刪除在 e2e 用環境變數觸發（下條）。
+- **保護期的環境變數**（維護者 2026-09-06）：`WBFUWUNEL_MEDIA_GRACE_SECONDS`，設了就用它、**不夾底線**；沒設就 config 值且至少 7 天。
+  只給測試用，啟動時若設了會 warn。e2e 用它壓到幾秒，驗「沒被指的上傳過期被掃、被持有的不動、既存（無 `mxc_managed`）不動」。
 
 ## 10. 落點
 

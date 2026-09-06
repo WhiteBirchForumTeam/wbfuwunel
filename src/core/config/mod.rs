@@ -3486,7 +3486,9 @@ pub struct Config {
 
 	/// How long an upload nothing references yet is protected from the
 	/// unreferenced-media sweep, in seconds, counted from when the file was
-	/// stored. Below seven days is clamped to seven days.
+	/// stored. Below seven days is clamped to seven days. The environment
+	/// variable `WBFUWUNEL_MEDIA_GRACE_SECONDS` overrides this without the
+	/// floor; it exists for tests and should not be set in production.
 	///
 	/// An upload is not a reference: the message naming it may still be on
 	/// its way, and in an encrypted room the server only learns of the
@@ -5409,10 +5411,24 @@ fn true_fn() -> bool { true }
 /// configuration says (see `Config::media_unreferenced_grace_seconds_effective`).
 pub const MEDIA_UNREFERENCED_GRACE_MIN_SECONDS: u64 = 7 * 24 * 60 * 60;
 
+/// Environment override of the protection period, in seconds, for tests: the
+/// floor does not apply to it. Unset in production, where the config value
+/// (floored at seven days) is the rule.
+pub const MEDIA_UNREFERENCED_GRACE_ENV: &str = "WBFUWUNEL_MEDIA_GRACE_SECONDS";
+
 impl Config {
-	/// `media_unreferenced_grace_seconds` with the seven-day floor applied.
+	/// The protection period in effect: `WBFUWUNEL_MEDIA_GRACE_SECONDS` if set
+	/// to a number, else `media_unreferenced_grace_seconds` with the seven-day
+	/// floor applied.
 	#[must_use]
 	pub fn media_unreferenced_grace_seconds_effective(&self) -> u64 {
+		if let Some(seconds) = std::env::var(MEDIA_UNREFERENCED_GRACE_ENV)
+			.ok()
+			.and_then(|value| value.trim().parse::<u64>().ok())
+		{
+			return seconds;
+		}
+
 		self.media_unreferenced_grace_seconds
 			.max(MEDIA_UNREFERENCED_GRACE_MIN_SECONDS)
 	}

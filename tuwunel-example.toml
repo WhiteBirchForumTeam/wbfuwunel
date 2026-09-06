@@ -3045,7 +3045,9 @@
 
 # How long an upload nothing references yet is protected from the
 # unreferenced-media sweep, in seconds, counted from when the file was
-# stored. Below seven days is clamped to seven days.
+# stored. Below seven days is clamped to seven days. The environment
+# variable `WBFUWUNEL_MEDIA_GRACE_SECONDS` overrides this without the
+# floor; it exists for tests and should not be set in production.
 #
 # An upload is not a reference: the message naming it may still be on
 # its way, and in an encrypted room the server only learns of the
