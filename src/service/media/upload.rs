@@ -44,7 +44,7 @@ use tuwunel_core::{
 	warn,
 };
 
-use super::{ChunkSpan, ChunkedMedia, Dim, Upload, UploadProgress};
+use super::{ChunkSpan, ChunkedMedia, Dim, Upload, UploadProgress, data::FileOrigin};
 
 /// What a client declares when it starts an upload. The numbers are
 /// plaintext facts the server runs the upload by; `meta` is the client's
@@ -431,7 +431,7 @@ pub async fn upload_seal(
 	// and no type: the server was never told what the bytes are.
 	let key = self
 		.db
-		.create_file_metadata(&mxc_parts, Some(user), &Dim::default(), None, None)?;
+		.create_file_metadata(&mxc_parts, Some(user), &Dim::default(), None, None, FileOrigin::NewMedia)?;
 
 	self.store_staging_file(&key, &path, hot.progress.total_len).await?;
 

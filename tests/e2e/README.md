@@ -9,7 +9,7 @@
 | `e2e7.ps1` | WebSocket 通道：Hello、Ping、一 message 一 pack、HTTP 與 WS 交錯續傳、idle 關線。舊式同上 | [wbf-wire-format.md](../../docs/design/wbf-wire-format.md) §6.1 |
 | `e2e8.ps1` | 每房 `r_seq`、全域 `g_seq`、`Event/Recent`（`cg_seq`／`before`／byte 上限）、舊庫啟動的一次性編號 | [room-seq-and-recent.md](../../docs/design/room-seq-and-recent.md) |
 | `e2e9.ps1` | 附件宣告（header 與 `Event/Send`）、四種拒送、共用附件、明文 fallback、bot 一次性警告、redact 保留備份後 purge、掃描不碰新上傳 | [media-attachments.md](../../docs/design/media-attachments.md) |
-| `e2e10.ps1` | 媒體持有者集合：刪房／redact 保留備份／備份到期／頭像／purge 範圍／重複操作、`WBFUWUNEL_MEDIA_GRACE_SECONDS` 下的掃描 | [media-holders.md](../../docs/design/media-holders.md) |
+| `e2e10.ps1` | 媒體持有者集合：刪房／redact 保留備份／備份到期／頭像／purge 範圍／重複操作、`WBFUWUNEL_MEDIA_GRACE_SECONDS` 下的掃描；情境 4（要 `E2E_OLD_EXE`）：既存媒體被生成縮圖後仍不受管、不被掃 | [media-holders.md](../../docs/design/media-holders.md)、[review-followups-2026-09-06.md](../../docs/design/review-followups-2026-09-06.md) §2.1 |
 | `wbf-helpers.ps1` | 共用：pack 編解碼（CRC-32C）、HTTP／WS 傳輸、起停 server、寫設定檔。不是測試 | [wbf-wire-format.md](../../docs/design/wbf-wire-format.md) |
 | `build-win.ps1` | 建 e2e profile 的 binary（MSVC 環境、Windows 的 feature 組） | [windows-build.md](../../docs/design/windows-build.md) |
 
@@ -25,7 +25,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\e2e\e2e10.ps1
 
 - 所有產物（設定檔、資料庫、server log、`results.txt`）在 `target\e2e-runs\<腳本>-out\`，不會寫到腳本旁邊。
 - server 固定聽 `127.0.0.1:8015`；三支腳本要**依序**跑，不要並行。
-- 環境變數：`E2E_EXE` 換 binary；`E2E_OLD_EXE` 給 e2e8 情境 2（要一個 PR #22 之前的 binary，沒有就跳過）；
+- 環境變數：`E2E_EXE` 換 binary；`E2E_OLD_EXE` 給 e2e8 情境 2 與 e2e10 情境 4（要一個 PR #22 之前的 binary，沒有就跳過）；
   `WBFUWUNEL_MEDIA_GRACE_SECONDS` 由 e2e10 情境 3 自己設與清。
 - 沒有機密：帳號密碼是固定的測試字串，只連 localhost。
 

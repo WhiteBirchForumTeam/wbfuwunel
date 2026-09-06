@@ -42,7 +42,12 @@ use url::Url;
 
 #[cfg(feature = "media_thumbnail")]
 use self::video::{FAILURES, Failures, sweep_staging_dir};
-use self::{data::Data, preview::Agent, remote::Fetch, upload::UploadHot};
+use self::{
+	data::{Data, FileOrigin},
+	preview::Agent,
+	remote::Fetch,
+	upload::UploadHot,
+};
 pub use self::{
 	data::{ChunkSpan, ChunkedMedia, Metadata, Tombstone, TombstoneReason, Upload, UploadProgress},
 	preview::UrlPreviewData,
@@ -290,6 +295,7 @@ impl Service {
 			&Dim::default(),
 			content_disposition,
 			content_type,
+			FileOrigin::NewMedia,
 		)?;
 
 		//TODO: Dangling metadata in database if creation fails

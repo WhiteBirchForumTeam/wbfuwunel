@@ -140,6 +140,21 @@ mod tests {
 	}
 
 	#[test]
+	fn a_media_prefix_does_not_match_a_longer_uri() {
+		// `has_holders` and `forget_media` seek with `(mxc, Interfix)`: the
+		// separator after the URI keeps `mxc://s/ab` from matching the rows of
+		// `mxc://s/abc`. A bare `(mxc,)` prefix would.
+		let room = room_id!("!r:localhost");
+		let longer = Holder::event(room, 1).mxc_holder_key("mxc://localhost/abc");
+		let with_separator = tuwunel_database::serialize_key(("mxc://localhost/ab", tuwunel_database::Interfix)).unwrap();
+		let bare = tuwunel_database::serialize_key(("mxc://localhost/ab",)).unwrap();
+		assert!(!longer.starts_with(&with_separator));
+		assert!(longer.starts_with(&bare), "the bare prefix is the bug this guards against");
+		let exact = tuwunel_database::serialize_key(("mxc://localhost/abc", tuwunel_database::Interfix)).unwrap();
+		assert!(longer.starts_with(&exact));
+	}
+
+	#[test]
 	fn event_and_backup_of_one_position_are_different_holders() {
 		let room = room_id!("!r:localhost");
 		assert_ne!(

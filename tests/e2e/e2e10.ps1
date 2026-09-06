@@ -152,4 +152,69 @@ Check '[3.2] startup warned about the override and the sweep logged a removal' (
 Stop-Server $script:p
 Remove-Item Env:WBFUWUNEL_MEDIA_GRACE_SECONDS -ErrorAction SilentlyContinue
 
+# ================= Scenario 4: media from before the holder model stays unmanaged when a thumbnail is made for it =================
+# Needs a binary from before mxc_managed existed (PR #24); point E2E_OLD_EXE at one, or the scenario is skipped.
+# The bug this guards: create_file_metadata used to write mxc_managed for any row, so the first thumbnail of a
+# pre-model image made it "managed with no holders" and the sweep took it after the protection period.
+$OLDEXE = $env:E2E_OLD_EXE
+if (-not $OLDEXE -or -not (Test-Path $OLDEXE)) { Log '################ Scenario 4 skipped: set E2E_OLD_EXE to a pre-holder-model binary ################' }
+else {
+Log '################ Scenario 4: thumbnail of pre-model media does not hand it to the sweep ################'
+function Upload-Png($tok, [byte[]]$bytes, $name) {
+  $req = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::Post, "$B/_matrix/media/v3/upload?filename=$name")
+  $req.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $tok)
+  $req.Content = New-Object System.Net.Http.ByteArrayContent (,$bytes)
+  $req.Content.Headers.ContentType = New-Object System.Net.Http.Headers.MediaTypeHeaderValue('image/png')
+  $resp = $script:Http.SendAsync($req).Result
+  $json = $resp.Content.ReadAsStringAsync().Result | ConvertFrom-Json
+  @{ status = [int]$resp.StatusCode; mxc = $json.content_uri }
+}
+function Get-Thumbnail($mxc, $tok) {
+  $id = $mxc -replace '^mxc://localhost/', ''
+  $req = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::Get, "$B/_matrix/client/v1/media/thumbnail/localhost/$id?width=32&height=32&method=scale")
+  $req.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $tok)
+  $resp = $script:Http.SendAsync($req).Result; @{ status = [int]$resp.StatusCode; bytes = $resp.Content.ReadAsByteArrayAsync().Result }
+}
+Add-Type -AssemblyName System.Drawing
+$bmp = New-Object System.Drawing.Bitmap 64, 64
+$gfx = [System.Drawing.Graphics]::FromImage($bmp); $gfx.Clear([System.Drawing.Color]::Red); $gfx.Dispose()
+$ms = New-Object IO.MemoryStream; $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); $png = $ms.ToArray(); $bmp.Dispose()
+
+$db4 = "$S\e2e10db-4"; Remove-Item -Recurse -Force $db4 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db4 | Out-Null
+$cfg4 = "$S\e2e10-4.toml"
+@('[global]','server_name = "localhost"',('database_path = "' + ($db4.Replace([string][char]92, '/')) + '"'),'port = 8015','address = ["127.0.0.1"]',
+  'allow_registration = true','yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse = true','allow_federation = false',
+  'media_gc_sweep_interval = 2','log = "info"') -join "`n" | Set-Content -Path $cfg4 -Encoding ascii
+
+# old binary: an image referenced by a message, and one nobody references; neither gets an mxc_managed row
+$saveExe = $EXE; $EXE = $OLDEXE
+$script:p = Start-Server $cfg4 's4-old'
+$regO = Api Post '/_matrix/client/v3/register' '{"username":"alice","password":"correct-horse-battery","auth":{"type":"m.login.dummy"}}' $null
+$tokO = $regO.access_token
+$rL = Create-Room $tokO 'legacy room'
+$Lheld = (Upload-Png $tokO $png 'held.png').mxc
+$Lfree = (Upload-Png $tokO $png 'free.png').mxc
+$null = Send-Image $rL $Lheld 'legacy image' $tokO
+Check '[4.0] old binary serves both uploads' (((Download-Status $Lheld $tokO) -eq 200) -and ((Download-Status $Lfree $tokO) -eq 200)) ''
+Stop-Server $script:p
+$EXE = $saveExe
+
+# new binary, protection period 3 s: thumbnails are made for both, a fresh unheld upload is the control that the sweep runs
+$env:WBFUWUNEL_MEDIA_GRACE_SECONDS = '3'
+$script:p = Start-Server $cfg4 's4-new'
+$tokN = Login-Alice
+$tHeld = Get-Thumbnail $Lheld $tokN; $tFree = Get-Thumbnail $Lfree $tokN
+$isPng = ($tHeld.bytes.Length -gt 8 -and $tHeld.bytes[1] -eq 0x50 -and $tHeld.bytes[2] -eq 0x4E -and $tHeld.bytes[3] -eq 0x47)
+Check '[4.1] thumbnails generated for the pre-model images (200, PNG, smaller than the original)' ($tHeld.status -eq 200 -and $tFree.status -eq 200 -and $isPng -and $tHeld.bytes.Length -lt $png.Length) "held=$($tHeld.status)/$($tHeld.bytes.Length)B free=$($tFree.status)/$($tFree.bytes.Length)B original=$($png.Length)B"
+$Nfree = (Upload-Legacy $tokN $payload 'new-unheld.bin').mxc
+Start-Sleep -Seconds 8
+$sHeld = Download-Status $Lheld $tokN; $sFree = Download-Status $Lfree $tokN; $sNew = Download-Status $Nfree $tokN
+$sThumb = (Get-Thumbnail $Lfree $tokN).status
+Check '[4.2] after the grace: pre-model images stay (200), even the unreferenced one and its thumbnail; the new unheld upload is swept (410)' ($sHeld -eq 200 -and $sFree -eq 200 -and $sThumb -eq 200 -and $sNew -eq 410) "held=$sHeld free=$sFree thumb=$sThumb new=$sNew"
+$log4 = (Get-Content "$OUT\s4-new.out" -Raw) -replace "`e\[[0-9;]*m", ''
+Check '[4.3] the sweep ran' ($log4 -match 'Unreferenced media sweep finished') ''
+Stop-Server $script:p
+Remove-Item Env:WBFUWUNEL_MEDIA_GRACE_SECONDS -ErrorAction SilentlyContinue
+}
+
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"

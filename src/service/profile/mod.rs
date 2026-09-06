@@ -305,10 +305,6 @@ pub fn all_profile_keys(&self, user_id: &UserId) -> impl Stream<Item = ProfileFi
 
 #[implement(Service)]
 pub async fn clear_profile_keys(&self, user_id: &UserId) {
-	// Read before the keys go, because afterwards there is nothing to read it
-	// from.
-	let avatar_url = self.avatar_url(user_id).await.ok();
-
 	let prefix = (user_id, Interfix);
 
 	self.useridprofilekey_value
@@ -320,15 +316,16 @@ pub async fn clear_profile_keys(&self, user_id: &UserId) {
 		.await
 		.ok();
 
-	// Dropped only once the profile is gone. Interrupted the other way round,
-	// a profile would point at media nothing holds.
-	if let Some(avatar_url) = avatar_url.as_deref() {
-		let mut txn = self.db.txn();
-		self.services
-			.media_refs
-			.set_avatar_ref(&mut txn, user_id, Some(avatar_url.as_str()), None);
-		txn.execute();
-	}
+	// Released only once the profile is gone. Interrupted the other way
+	// round, a profile would point at media nothing holds. What to release is
+	// read from the holder index, not from the profile, so nothing had to be
+	// read before the keys went.
+	let mut txn = self.db.txn();
+	self.services
+		.media_refs
+		.set_avatar_ref(&mut txn, user_id, None)
+		.await;
+	txn.execute();
 }
 
 /// Sets new profile key values, removes the key if value is None
@@ -367,17 +364,15 @@ pub async fn set_profile_keys(
 			.await;
 	}
 
-	// Read the avatar the profile still holds, so its media reference can move
-	// in the same batch that replaces it.
-	let avatar_change = match find_avatar_update(profile_values) {
-		| None => None,
-		| Some(new_avatar) => Some((self.avatar_url(user_id).await.ok(), new_avatar)),
-	};
+	// The avatar this update sets, if it touches the avatar at all. What the
+	// avatar held before is not read here: `set_avatar_ref` takes it from the
+	// holder index, so two racing updates cannot both act on one stale value.
+	let avatar_change = find_avatar_update(profile_values);
 
-	// Hold the incoming avatar until its count has committed, so the
-	// collector cannot remove it between reading zero and deleting.
+	// Hold the incoming avatar until its holder has committed, so the
+	// collector cannot remove it in between.
 	let media_held = match &avatar_change {
-		| Some((_, Some(new_avatar))) => Some(
+		| Some(Some(new_avatar)) => Some(
 			self.services
 				.media_refs
 				.hold_media(new_avatar.as_str())
@@ -398,13 +393,11 @@ pub async fn set_profile_keys(
 		}
 	}
 
-	if let Some((old_avatar, new_avatar)) = &avatar_change {
-		self.services.media_refs.set_avatar_ref(
-			&mut txn,
-			user_id,
-			old_avatar.as_ref().map(|url| url.as_str()),
-			new_avatar.as_deref(),
-		);
+	if let Some(new_avatar) = &avatar_change {
+		self.services
+			.media_refs
+			.set_avatar_ref(&mut txn, user_id, new_avatar.as_deref())
+			.await;
 	}
 
 	txn.execute();
