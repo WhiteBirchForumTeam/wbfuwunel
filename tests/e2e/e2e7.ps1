@@ -423,10 +423,16 @@ Log "[4.7b] after Logout all on the first, the second's next message -> $fDesc  
 # [4.8] a locked account cannot log in over the channel (carol is locked by alice, the admin, then unlocked).
 # The throttle is checked before the credentials, so let the bucket refill first or the lock is masked by RateLimited.
 Start-Sleep -Seconds 6
+# A refresh token minted before the lock (logout-all above removed carol's earlier ones with her devices).
+$wsR = Ws-Open $null; $rR = Ws-Call $wsR (Login-Pack 'carol' 'correct-horse-battery' $true); $carolRefresh = (Meta-Of $rR).refresh_token
 $null = Api Put "/_synapse/admin/v2/users/$([uri]::EscapeDataString('@carol:localhost'))" '{"locked":true}' $tokA
 $wsL = Ws-Open $null
 $r = Ws-Call $wsL (Login-Pack 'carol' 'correct-horse-battery' $false)
-Log "[4.8] locked carol, Login -> $(Describe $r)  (expect Error Unauthorized M_USER_LOCKED)"
+Log "[4.8a] locked carol, Login -> $(Describe $r)  (expect Error Unauthorized M_USER_LOCKED)"
+$r = Ws-Call $wsL (Json-Pack 16 2 0 2 @{ refresh_token = $carolRefresh } @())
+Log "[4.8b] locked carol, Refresh with a still-valid refresh token -> $(Describe $r)  (expect Error Unauthorized M_USER_LOCKED: a locked account may not mint tokens)"
+$r = Ws-Call $wsL (Json-Pack 16 2 0 3 @{ refresh_token = 'refresh_nonsense' } @())
+Log "[4.8c] Refresh with an unknown token -> $(Describe $r)  (expect Error Forbidden)"
 $null = Api Put "/_synapse/admin/v2/users/$([uri]::EscapeDataString('@carol:localhost'))" '{"locked":false}' $tokA
 Stop-Server $p
 

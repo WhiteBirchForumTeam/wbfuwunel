@@ -200,7 +200,7 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 | subtype | meta（明文） | 成功的 Ack | 失敗 |
 |---|---|---|---|
 | `0x01 Login` | **Matrix `/login` 的請求體原樣**：`type`（`m.login.password` 或 `m.login.token`）、`identifier`、`password` 或 `token`、`device_id`?、`initial_device_display_name`?、`refresh_token`?: bool | `/login` 回應的欄位原樣：`user_id`、`device_id`、`access_token`、`refresh_token`?、`expires_in_ms`? | `Error(Forbidden)`（憑證錯、帳號停用；message 帶 Matrix errcode）、`Error(Unauthorized)`（帳號被鎖 `M_USER_LOCKED`）、`Error(RateLimited)` |
-| `0x02 Refresh` | `{ "refresh_token" }` | 同 Login | `Error(Unauthorized)`（refresh token 不認、已用過、硬登出）、`Error(RateLimited)` |
+| `0x02 Refresh` | `{ "refresh_token" }` | 同 Login | `Error(Unauthorized)`（到期、重放、帳號被鎖；帶 Matrix 的 `soft_logout` 旗標）、`Error(Forbidden)`（格式錯或不認得）、`Error(RateLimited)` |
 | `0x03 Logout` | `{ "all"?: bool }`（`all` = 撤這個 user 的全部 device，對應 `/logout/all`） | `{}`，緊接 Close `1000` 關線 | `Error(Unauthorized)`（這條連線本來就沒登入） |
 
 **不自己發明欄位**：meta 直接餵給既有的 login／refresh／logout 邏輯，client 不用學第二套；server 端要做的是把 `login_route` 的本體（驗證 → 發 token → 建或更新 device）
@@ -243,6 +243,9 @@ HTTP `/login` 現在**沒有**限速（只有 OIDC 端點有 `oidc_rc_per_second
 - 預設值（維護者 2026-09-07 同意）：`login_rc_per_second = 1`、`login_rc_burst_count = 10`，**預設開**。OIDC 那組預設 0（關）是「保留開放存取」；
   登入不同：一個人手打密碼打不到這個速度，NAT 後面十個人同時登入也剛好夠。
 - 超過回 `Error(RateLimited)`，meta 多 `retry_after_ms`；HTTP 側回 429 `M_LIMIT_EXCEEDED`（Matrix 既有）。
+- **限速先於憑證檢查**：洪水不該還花一次 DB 查找。所以 bucket 空時，鎖定帳號的 Login 也回 `RateLimited` 而不是 `M_USER_LOCKED`。
+- ⚠️ **限速的 key 是 client IP，它的效力前提是那個 IP 可信**（review，rumia／salvia）。沒設 `ip_source` 時 `ClientIp` 先讀 `X-Forwarded-For` 等 header 才退回 socket 位址，攻擊者每次換 header 就拿到一個新 bucket。
+  **部署須知**：直接向公網的伺服器要設 `ip_source`（`rightmost` 加受信代理 subnet），或者確定反向代理覆寫 XFF。這是 OIDC 限速既有的前提，登入限速預設開、所以要講明。
 - 🚫 不做「連錯 N 次鎖帳號」：那是讓攻擊者能鎖住別人帳號的 DoS 入口。
 
 #### 6.3.5 `Hello`

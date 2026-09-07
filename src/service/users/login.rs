@@ -35,8 +35,11 @@ pub struct IssuedSession {
 }
 
 /// What a successful refresh hands the client: the fields of the Matrix
-/// `/refresh` response.
+/// `/refresh` response, plus whose session it is (the caller on the channel
+/// needs that to become the session, without a second lookup).
 pub struct RefreshedSession {
+	pub user_id: OwnedUserId,
+	pub device_id: OwnedDeviceId,
 	pub access_token: String,
 	pub refresh_token: Option<String>,
 	pub expires_in: Option<Duration>,
@@ -127,7 +130,9 @@ pub async fn issue_session(
 /// Return:
 ///     Result<RefreshedSession>  Err 403 for a malformed or unknown token;
 ///     Err 401 `M_UNKNOWN_TOKEN` for an expired one or a replay after
-///     rotation (the device is removed when the configuration says so).
+///     rotation (the device is removed when the configuration says so);
+///     Err 401 `M_USER_LOCKED` for a locked account, which may not mint
+///     tokens either (review of PR #30: the old `/refresh` skipped this).
 #[implement(super::Service)]
 pub async fn refresh_session(&self, presented: &str) -> Result<RefreshedSession> {
 	if !presented.starts_with("refresh_") {
@@ -152,6 +157,8 @@ pub async fn refresh_session(&self, presented: &str) -> Result<RefreshedSession>
 				));
 			}
 
+			self.locked_check(&user_id).await?;
+
 			let refresh_token = Some(generate_refresh_token());
 			let (access_token, expires_in) = self.generate_access_token(true);
 			self.set_access_token(&user_id, &device_id, &access_token, expires_in, refresh_token.as_deref())
@@ -159,17 +166,19 @@ pub async fn refresh_session(&self, presented: &str) -> Result<RefreshedSession>
 
 			debug_info!(?user_id, ?device_id, ?expires_in, "refreshed their access_token");
 
-			Ok(RefreshedSession { access_token, refresh_token, expires_in })
+			Ok(RefreshedSession { user_id, device_id, access_token, refresh_token, expires_in })
 		},
 
 		| RefreshToken::Replayed { user_id, device_id, current, grace } if grace => {
 			// Benign double-submit: re-issue an access token for the unchanged
 			// refresh token rather than rotating it.
+			self.locked_check(&user_id).await?;
+
 			let (access_token, expires_in) = self.generate_access_token(true);
 			self.set_access_token(&user_id, &device_id, &access_token, expires_in, None)
 				.await?;
 
-			Ok(RefreshedSession { access_token, refresh_token: Some(current), expires_in })
+			Ok(RefreshedSession { user_id, device_id, access_token, refresh_token: Some(current), expires_in })
 		},
 
 		| RefreshToken::Replayed { user_id, device_id, .. } => {

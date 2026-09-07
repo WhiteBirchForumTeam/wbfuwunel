@@ -56,6 +56,9 @@ pub(super) async fn handle(
 /// `m.login.token` are accepted here; the flows that need a browser or an
 /// appservice stay on HTTP.
 async fn login(services: &Services, client: IpAddr, view: &PackView<'_>) -> Result<Handled, Reject> {
+	// The throttle comes before the credentials: a flood must not cost a
+	// database lookup per attempt. A locked account behind an empty bucket
+	// therefore reads as RateLimited, not as locked.
 	services
 		.users
 		.check_login_rate(client)
@@ -118,6 +121,7 @@ struct RefreshMeta {
 /// `Refresh`: rotates the refresh token and issues a new access token, then
 /// the connection continues as the session the new token resolves to.
 async fn refresh(services: &Services, client: IpAddr, view: &PackView<'_>) -> Result<Handled, Reject> {
+	// Same bucket and same order as `login`: throttle first.
 	services
 		.users
 		.check_login_rate(client)
@@ -132,13 +136,12 @@ async fn refresh(services: &Services, client: IpAddr, view: &PackView<'_>) -> Re
 		.await
 		.map_err(refuse_login)?;
 
-	// The new access token names the session this connection now is.
-	let (user, device, _expires_at) = services
-		.users
-		.find_from_token(&refreshed.access_token)
-		.await
-		.map_err(|_| Reject::code("Internal", "the refreshed token does not resolve to a device"))?;
-	let session = Session { user, device, token: refreshed.access_token.clone() };
+	// The connection is now the session the new token belongs to.
+	let session = Session {
+		user: refreshed.user_id,
+		device: refreshed.device_id,
+		token: refreshed.access_token.clone(),
+	};
 
 	let mut meta = Map::new();
 	meta.insert("access_token".into(), Value::String(refreshed.access_token));
@@ -210,9 +213,20 @@ fn insert_token_lifetime(meta: &mut Map<String, Value>, refresh_token: Option<St
 }
 
 /// Maps a login-path error to the wire's vocabulary: the throttle's 429 to
-/// `RateLimited` with how long to wait, a locked account or bad token (401)
-/// to `Unauthorized`, everything else about the credentials to `Forbidden`.
+/// `RateLimited` with how long to wait; an unknown, expired or replayed
+/// token (`M_UNKNOWN_TOKEN`, whatever its HTTP status) and a locked account
+/// to `Unauthorized`, carrying Matrix's `soft_logout` when the error has
+/// one so a client can tell "log in again" from "you are out"; everything
+/// else about the credentials to `Forbidden`.
 fn refuse_login(error: Error) -> Reject {
+	if let ErrorKind::UnknownToken(data) = error.kind() {
+		return Reject {
+			code: "Unauthorized",
+			message: error.to_string(),
+			extra: json!({ "soft_logout": data.soft_logout }),
+		};
+	}
+
 	match error.status_code() {
 		| StatusCode::TOO_MANY_REQUESTS => {
 			let retry_after_ms = match error.kind() {

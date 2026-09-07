@@ -1973,7 +1973,11 @@ pub struct Config {
 	/// open a second, faster road for guessing passwords. `0` disables the
 	/// throttle. The key is the client IP: a rate low enough to bite a guesser
 	/// also throttles many users behind one NAT, which is what the burst is
-	/// for.
+	/// for. The IP is only as trustworthy as `ip_source` makes it: without
+	/// it, forwarded-for headers are believed, and a client that rewrites
+	/// them gets a fresh bucket each time. Behind a reverse proxy set
+	/// `ip_source` (rightmost, with the proxy's subnet trusted) or make the
+	/// proxy overwrite the header.
 	///
 	/// reloadable: yes
 	/// default: 1
