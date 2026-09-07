@@ -6,7 +6,7 @@
 > 狀態標記：✅ 已合併 · 🔧 進行中 · 📄 有提案待同意 · 🔲 下一步 · 💭 候選（還沒決定要不要做）· 🚫 明確不做。
 > 每一項改狀態時順手改這裡；這裡的狀態如果跟 [`CHANGELOG-fork.md`](../../CHANGELOG-fork.md) 對不上，以 CHANGELOG 為準。
 >
-> 最後更新：2026-09-07（PR #28 合併後）。
+> 最後更新：2026-09-07（PR #30 合併後）。下一步：§2.6 的 `media/upload-lifecycle`，等維護者的 checklist。
 
 ## 0. 目標，一句話
 
@@ -85,7 +85,7 @@ PR #24 合併後對 main 重看一次，加上 `../external-review` 兩輪（202
 | `wbf/auth-and-ws-lifetime` | `/_wbf/*` 與 WebSocket 不查帳號鎖定（P1）；WebSocket 在登出／到期後仍有權限、關機時 `State` 懸空（P1） | ✅ PR #28 |
 | `media/upload-lifecycle` | Seal 在本地儲存收整檔進記憶體、S3 的 1 MiB parts（P1）；`Status` 冷載入不持鎖、sweeper 鎖下不重讀進度（P2）；升級前舊上傳卡配額（P2） | 🔲 |
 
-### 2.7 🔧 WS 的 `Login`／`Refresh`／`Logout`（提案 [wbf-wire-format.md](wbf-wire-format.md) §6.3，維護者 2026-09-07 同意，實作分支 `wbf/session-login`）
+### 2.7 ✅ WS 的 `Login`／`Refresh`／`Logout`（提案 #29，實作 PR #30，2026-09-07 合併）
 
 維護者 2026-09-06 提出：登入該有 WS 專用的 pack 格式，升級帶 Bearer 可以留著。定案：kind `0x10 Session`（§3.3 早就留給登入這一章）下三個 subtype，meta 沿用 Matrix `/login` 的請求體、
 登入本體抽成 service 函式讓 HTTP 與 WS 共用；允許不帶 Bearer 升級但只接受 `Hello`／`Ping`／`Login`／`Refresh`，**未登入 30 秒就斷**（從升級起算，不是 idle）；
