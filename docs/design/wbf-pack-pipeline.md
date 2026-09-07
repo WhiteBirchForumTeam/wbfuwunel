@@ -25,6 +25,9 @@
 | 8 | 這條 checklist 的範圍是**整條 pack 處理流程**，不只上傳下載：登入登出、以及未來每個 HTTP→WS 的新功能都走它。 |
 | 9 | **同步是 client 拉的視窗**（維護者 2026-09-07 晚）：一次 `Recent` 只拿 `limit` 條（例 320 = 32 個 pack × 10 條），server 只數這一窗、`tc` 是這一窗的條數；client 收完一窗再帶 `before` 叫下一窗，一萬條由 client 自己累計。server **不記串流狀態**、不另起 `Continue` subtype：`before` 游標本來就是 continue。節流完全在 client。 |
 | 10 | client 約定：送出 `Recent` 後若一段時間沒收到回應就自己斷線重連（第一窗可以等長一點，例 60 秒，之後例 10 秒）。**server 不做事**，但這給 first byte 立了門檻（§6.3）。 |
+| 11 | `wbf_recent_max_limit` 從 10000 **壓到 500**：一窗要多大是 client 決定的，不夠就帶 `before` 再要一段，本質是「拿固定區間的一段」；一萬太龐大。 |
+| 12 | **HTTP `/_wbf/v1/pack` 之後是 debug／fallback 用，WS 才是主力。** 准入表裡「HTTP 不可」的 kind 只會變多。 |
+| 13 | 這套 server／client binary **從未上線**，只在本機 debug 過：沒有 #16～#18 之間的庫存在，review-followups §2.8 是純防禦，排最後。 |
 
 ## 1. 模型：一條連線就是一個佇列
 
@@ -189,7 +192,7 @@ client 送 `Recent { limit, cg_seq, before?, batch? }`：
 
 | 欄 | 意思 | 預設／上限 |
 |---|---|---|
-| `limit` | **這一窗**最多幾條 | 沒帶 `wbf_recent_default_limit`（320）；上限 `wbf_recent_max_limit`（10000，現有） |
+| `limit` | **這一窗**最多幾條 | 沒帶 `wbf_recent_default_limit`（320）；上限 `wbf_recent_max_limit`（**預設改 500**，原 10000） |
 | `cg_seq` | client 已有的最新 `g_seq`，這窗不會回到它或比它舊 | 沒帶或 0 = 沒有快取 |
 | `before` | 只要比這個舊的（上一窗最後一條的 `ls`） | 沒帶 = 從最新開始 |
 | `batch` | 每個 Batch 幾條 | 預設 `wbf_recent_default_batch`（10）；上限 `wbf_recent_max_batch`（100），超過夾 |
@@ -277,7 +280,7 @@ wire-format §3.3 已經把 kind 按 Matrix 章節占好號。搬一個端點 = 
 |---|---|---|---|
 | 1 | §2.5 | `upload_status` 拿 `upload_locks`；sweeper 鎖下重讀 `last_chunk_at_secs` | 無；純 service 層 |
 | 2 | §2.2 | Seal 永遠串流 `put_multi`，塊大小用 provider 的 `multipart_part_size`（本地夾 8 MiB） | Seal 是慢 handler 的代表，§4.3-5 說的「佔住連線」就是它；驗收要在 WS 上量 |
-| 3 | §2.8 | sweeper 多掃「宣告在、進度不在、超過 TTL」的舊上傳 | 無。**維護者先答**：有沒有跑過 #16～#18 之間的版本？沒有就只是防禦 |
+| 3 | §2.8 | sweeper 多掃「宣告在、進度不在、超過 TTL」的舊上傳 | 無。維護者已答（§0-13）：從未上線，這條是純防禦，做最小的那版、排最後 |
 
 ## 9. 版本與相容
 
@@ -291,6 +294,7 @@ wire-format §3.3 已經把 kind 按 Matrix 章節占好號。搬一個端點 = 
 
 新錯碼兩個：`Unsupported`、`TooManyConnections`（wire-format §3.2 Error 那列補）。
 新 config 五個：`wbf_ws_max_connections_per_device`（4）、`wbf_ws_send_queue_len`（32）、`wbf_recent_default_limit`（320）、`wbf_recent_default_batch`（10）、`wbf_recent_max_batch`（100）。
+既有 config 改預設一個：`wbf_recent_max_limit` 10000 → **500**（§0-11）。
 
 ## 10. 驗收（e2e7 加情境 5、e2e9 改）
 
@@ -298,7 +302,7 @@ wire-format §3.3 已經把 kind 按 Matrix 章節占好號。搬一個端點 = 
   匿名開 5 條都活，第 5 條 `Login` 回 `TooManyConnections` 並被 Close 1008，其他四條的 session 正常。
 - **名額回收**：4 條全關再開 4 條成功（RAII 有放）；一條在上傳中被 server 關機關掉，重啟後名額是 0（表在記憶體，重啟即清）。
 - **視窗**：灌 1000 條 → `Recent(limit=320, batch=10)` 收到 32 個 Batch，`tc = 320`、`r` 遞減到 0、`fs`/`ls` 單調遞減、每則長度前綴對得上；
-  帶 `before = 最後的 ls` 再叫兩窗各 320，第四窗 `tc = 40 < 320`；四窗事件不重複不漏、合起來剛好 1000；`batch=1000` 被夾成 100；沒新事件 → 一個 `bc = 0, r = 0` 的 Batch。
+  帶 `before = 最後的 ls` 再叫兩窗各 320，第四窗 `tc = 40 < 320`；四窗事件不重複不漏、合起來剛好 1000；`batch=1000` 被夾成 100；`limit=10000` 被夾成 500；沒新事件 → 一個 `bc = 0, r = 0` 的 Batch。
 - **first byte**：灌 10000 條，量一窗 320 從送出 `Recent` 到第一個 Batch 的時間，與收完 32 窗的總時間，記進 §6.3。這條是量測不是門檻，數字先看再定門檻。
 - **背壓**：client 送 `Recent` 後停止讀 socket 5 秒，server 的 working set 不隨時間增長（有界佇列擋住了），恢復讀之後串流補完。
 - **順序**：同一連線送 `Recent` 緊接 `Ping`，Pong 在這窗最後一個 Batch **之後**（一次一個 handler）；兩窗之間送 `Ping` 立刻有 Pong。
@@ -326,4 +330,3 @@ wire-format §3.3 已經把 kind 按 Matrix 章節占好號。搬一個端點 = 
   （Seal 大檔）撞到 idle 的定義，再改成「兩個方向都沒動」。
 - **名額表只在記憶體**：多節點部署各自算。這個 fork 單機，先不管。
 - **`Reply` 在 HTTP 上只裝一個 pack** 是用型別擋 handler 的錯，不是功能。將來若真要 HTTP 回多個 pack（body 串接），改 `ReplySink::Http` 一處就好。
-- **視窗大小是 client 選的**：一個 client 硬帶 `limit = 10000` 就把 §6.3 的門檻自己踩回去。`wbf_recent_max_limit` 留 10000 是給腳本與測試的；要不要把上限也壓到幾百，等實測。
