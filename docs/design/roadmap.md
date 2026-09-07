@@ -91,6 +91,13 @@ PR #24 合併後對 main 重看一次，加上 `../external-review` 兩輪（202
 登入本體抽成 service 函式讓 HTTP 與 WS 共用；允許不帶 Bearer 升級但只接受 `Hello`／`Ping`／`Login`／`Refresh`，**未登入 30 秒就斷**（從升級起算，不是 idle）；
 Logout 後直接關線；同一條連線重複 Login 允許；**登入限速預設開**（每秒 1、突發 10），同一個 token bucket 管 HTTP `/login`／`/refresh` 與 WS。排在 `media/upload-lifecycle` 之前。
 
+### 2.8 📄 wbf pack 處理管線：連線即佇列、每 device 4 條、發送 task、`Event/Batch` 串流（提案 [wbf-pack-pipeline.md](wbf-pack-pipeline.md)，2026-09-07）
+
+維護者 2026-09-07 的 checklist：protocol 講了封包與協議，沒講「設計」——一個 pack 從連線進到回應出的整條線，上傳、登入與未來每個 HTTP→WS 都走它。
+定案：client 多連線分工（server 不知道）；每個 (user, device) 最多 4 條 WS，超過踢新的，匿名不算、HTTP 不算；一條連線依序處理、落地才 Ack；
+`Recent` 是 client 拉的視窗（預設 320 條），在 WS 上拆成 `Event/Batch` 串流（meta `{tc, bc, fs, ls, r}`，`tc` 是一窗的條數、`r = 0` 一窗結束），下一窗帶 `before`，HTTP 回 `Unsupported`。
+同支的第二部分是 §2.6 剩下的 `media/upload-lifecycle`（§2.2／2.5／2.8）。
+
 ## 3. 候選（要不要做，由維護者決定）
 
 | 項目 | 一句話 | 前提 / 觸發條件 |
