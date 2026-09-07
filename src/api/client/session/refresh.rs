@@ -20,7 +20,8 @@ pub(crate) async fn refresh_token_route(
 
 	let refreshed = services
 		.users
-		.refresh_session(&body.body.refresh_token)
+		// HTTP has no connection to count.
+		.refresh_session(&body.body.refresh_token, &mut tuwunel_service::users::login::admit_any)
 		.await?;
 
 	Ok(Response {

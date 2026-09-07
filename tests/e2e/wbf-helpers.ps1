@@ -64,6 +64,11 @@ function Read-Pack([byte[]]$b) {
 
 # ---------- HTTP ----------
 Add-Type -AssemblyName System.Net.Http
+# .NET Framework pools HttpWebRequest (Invoke-WebRequest) and ClientWebSocket connections per host through one
+# ServicePoint, default limit 2; raised so scripts that keep several WebSockets open never queue behind them.
+# (Hygiene, not a fix for anything observed: the 2026-09-07 "server did not come up" was a script clobbering $B,
+# see README.)
+[System.Net.ServicePointManager]::DefaultConnectionLimit = 64
 $script:Http = New-Object System.Net.Http.HttpClient
 function Send-Pack([byte[]]$pack, $tok) {
   $req = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::Post, "$B/_wbf/v1/pack")
@@ -98,7 +103,16 @@ function Write-Config([string]$db, [int]$uploadTtl, [long]$maxLen = 0, [long]$da
 }
 function Start-Server([string]$cfg, [string]$tag) {
   $p = Start-Process -FilePath $EXE -ArgumentList @('-c', $cfg) -PassThru -NoNewWindow -RedirectStandardOutput "$OUT\$tag.out" -RedirectStandardError "$OUT\$tag.err"
-  for ($i = 0; $i -lt 40; $i++) { Start-Sleep -Milliseconds 500; try { $null = Invoke-WebRequest -Uri "$B/_matrix/client/versions" -TimeoutSec 2 -UseBasicParsing; return $p } catch {} }
+  $lastError = ''
+  for ($i = 0; $i -lt 40; $i++) {
+    Start-Sleep -Milliseconds 500
+    try { $null = Invoke-WebRequest -Uri "$B/_matrix/client/versions" -TimeoutSec 2 -UseBasicParsing; return $p } catch { $lastError = $_.Exception.Message }
+  }
+  # Before giving up, tell the two failure modes apart: a server that is not there, or this process's HTTP stack
+  # (connection pool, stale keep-alives) refusing to reach a server that is. A fresh HttpClient bypasses the pool.
+  $fresh = New-Object System.Net.Http.HttpClient; $fresh.Timeout = [TimeSpan]::FromSeconds(3)
+  $freshResult = try { "fresh HttpClient -> " + [int]$fresh.GetAsync("$B/_matrix/client/versions").Result.StatusCode } catch { "fresh HttpClient failed too: $($_.Exception.InnerException.Message)" }
+  Log "  !! server probe failed 40 times ($tag): last Invoke-WebRequest error: $lastError; $freshResult; process exited=$($p.HasExited)"
   throw "server did not come up ($tag)"
 }
 function Stop-Server($p) { Start-Sleep -Seconds 3; if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }; Start-Sleep -Seconds 2 }

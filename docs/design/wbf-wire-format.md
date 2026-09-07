@@ -73,7 +73,7 @@ offset  size  欄位          說明
 |---|---|---|---|
 | `0x01 Control` | `0x01 Hello` | `{ "protocol": 1, "client": "…", "features": [...] }` | 無 |
 | | `0x02 Ack` | 各 kind 定的回應內容；`IS_RESPONSE = 1`，`id`、`seq` 抄請求 | 視 kind（`Download/Read` 的回應 data 是讀出的 bytes） |
-| | `0x03 Error` | `{ "code": "…", "message": "…", "expected_seq"?: … }`；code：`UnsupportedVersion` `Corrupt` `UnknownKind` `TooLarge` `Unauthorized` `NotFound` `Conflict` `OutOfOrder` `Internal`；§6.3 加 `Forbidden`（憑證被拒）與 `RateLimited`（`retry_after_ms`） | 無 |
+| | `0x03 Error` | `{ "code": "…", "message": "…", "expected_seq"?: … }`；code：`UnsupportedVersion` `Corrupt` `UnknownKind` `TooLarge` `Unauthorized` `NotFound` `Conflict` `OutOfOrder` `Internal`；§6.3 加 `Forbidden`（憑證被拒）與 `RateLimited`（`retry_after_ms`）；[pack-pipeline](wbf-pack-pipeline.md) 加 `Unsupported`（這個 kind 不走這個傳輸，例：`Recent`／`Session` 走 HTTP）與 `TooManyConnections`（`max_connections`，裝置的 WS 名額滿了，連線隨即被關） | 無 |
 | | `0x04 Ping` / `0x05 Pong` | `{ "nonce": … }` | 無 |
 | `0x02 Stream` | `Open` `Fragment` `Close` `Abandon` | [streaming-messages.md](streaming-messages.md) §4 | 密文本體 |
 | `0x03 Upload` | `Create` `Chunk` `Status` `Seal` `Abort` | [chunked-upload.md](chunked-upload.md) §4 | 塊 bytes（`Chunk`） |
@@ -81,7 +81,8 @@ offset  size  欄位          說明
 | `0x10 Session`（§6.3） | `0x01 Login` | Matrix `/login` 的請求體原樣：`{ "type": "m.login.password" \| "m.login.token", "identifier", "password" \| "token", "device_id"?, "initial_device_display_name"?, "refresh_token"?: bool }`；回應 `{ "user_id", "device_id", "access_token", "refresh_token"?, "expires_in_ms"? }` | 無 |
 | | `0x02 Refresh` | `{ "refresh_token" }`；回應同 `Login` | 無 |
 | | `0x03 Logout` | `{ "all"?: bool }`；回應 `{}`，緊接 server 送 Close 1000 關線 | 無 |
-| `0x14 Event` | `0x01 Recent` | `{ "limit": 10000, "cg_seq": <g_seq>?, "before": <g_seq>? }`；回應 `{ "returned": n, "latest_g_seq": <g_seq>, "complete": bool, "next": <g_seq> 或 null }` | 回應的 data 是事件的 JSON 陣列（含 `room_id`；每則 `unsigned` 帶 `org.wbftw.wbfuwunel.r_seq` 與 `…g_seq`），見 [room-seq-and-recent.md](room-seq-and-recent.md) §2 |
+| `0x14 Event` | `0x01 Recent` | `{ "limit": 320?, "cg_seq": <g_seq>?, "before": <g_seq>?, "batch": 10? }`，**`id` 由 client 選**（回應抄它）；回應是一串 `0x03 Batch`，不是 `Ack`；**只走 WS**，HTTP 回 `Error(Unsupported)` | 無 |
+| `0x14 Event` | `0x03 Batch`（只有 server → client） | `{ "tc", "bc", "fs", "ls", "r" }`：這一窗總則數、這批則數、這批最新／最舊的 g_seq、這批之後還剩幾則；`r = 0` 就是這窗結束。`id` 抄 `Recent`，`seq` 從 0 嚴格 +1 | `bc` 則事件，每則 u32 大端長度 ＋ 事件 JSON（含 `room_id`；`unsigned` 帶 `org.wbftw.wbfuwunel.r_seq` 與 `…g_seq`），新到舊，見 [room-seq-and-recent.md](room-seq-and-recent.md) §2、[wbf-pack-pipeline.md](wbf-pack-pipeline.md) §6 |
 | `0x14 Event` | `0x02 Send` | `{ "room_id", "type", "txn_id", "attachments": [mxc…] }`；回應 `{ "event_id" }` | 事件 content 的 JSON（E2EE 就是 `m.room.encrypted` 的 content）。`attachments` 是 server 讀不到密文時唯一的引用來源，見 [media-attachments.md](media-attachments.md) |
 | 其餘 | — | 拒收並回 `Error(UnknownKind)` | |
 
@@ -148,8 +149,10 @@ WebSocket 本身保證到達順序，所以**順序錯一定是邏輯錯誤**，
   —— **切片指回原緩衝**，沒有複製。接收端要解密就在 `data` 上原地解。
 - **派發**：按 kind 查表（陣列索引，不是 match 字串）交給 handler；有序類先過 `next_seq` 檢查。handler 要送回應就走封裝那條。
 
-**server 端**：一條 WebSocket 連線 = 一個接收 task ＋ 一個發送 task ＋ 一張 `id → 順序狀態` 表；handler 是 `handle_pack(user, PackView) -> Option<Pack>`，
-HTTP 的 `POST /_wbf/v1/pack` 呼叫同一個 handler（一次一 pack，沒有連線狀態，有序類在 HTTP 上仍要 `seq` 正確 —— server 從 DB 讀 `next_seq`）。
+**server 端**（實作見 [wbf-pack-pipeline.md](wbf-pack-pipeline.md)，2026-09-07 起）：一條 WebSocket 連線 = 一個接收 loop ＋ 一個發送 task（有界 `mpsc`，`wbf_ws_send_queue_len`）；
+**沒有**每連線的順序狀態表（有序類由上傳服務從 DB 判，§6.1）。handler 的契約是 `(services, ctx, view, reply) -> Result<SessionChange, Failure>`，
+回應全部經 `Reply` 進發送佇列，可以送 0..n 個 pack（`Recent` 的 Batch 串流就是 n 個）；HTTP 的 `POST /_wbf/v1/pack` 呼叫同一條派發，`Reply` 在 HTTP 上只裝得下一個 pack，
+串流型的 kind 由准入表擋在 HTTP 之外（`Error(Unsupported)`）。有序類在 HTTP 上仍要 `seq` 正確 —— server 從 DB 讀 `next_seq`。
 
 **client 端**（給 SDK 之外的自寫部分）：同一個 `pack.rs`（它在 `core`，純函數、無 tokio 依賴，Android 與 Windows 的 Rust 核心直接編）。
 
@@ -174,7 +177,10 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
   （`Services.connections`），因為 handler 拿的 `State` 是 `Services` 的裸指標，升級後的 socket 活得比 request 久，不等就是 use-after-free。
   等最多 `JOIN_TIMEOUT`（15 秒）：連線的 loop 看到 stopping 就自己結束，會等到超時的只有卡在某個永不返回的呼叫裡的 task，那時 abort 它（drop future 連帶 drop 對 `Services` 的借用），不讓一條連線卡整個關機（review，rumia）。
   已經在關機的 server 拒絕新的升級（503，body 仍是 Error pack）。
-- 之後的 `Login`／`Refresh`／`Logout` subtype（提案待寫）會建在同一個 `Session` 上：Login 就是換掉這條連線的 Session。
+- `Login`／`Refresh`／`Logout` subtype（§6.3）建在同一個 `Session` 上：Login 就是換掉這條連線的 Session。
+- **每個 (user, device) 最多 `wbf_ws_max_connections_per_device` 條 WS**（預設 4；[pack-pipeline](wbf-pack-pipeline.md) §2.1，維護者 2026-09-07 定）：帶 Bearer 升級超過 → **不升級**，429 ＋ `Error(TooManyConnections)`；
+  匿名連線不算，`Login`／`Refresh` 拿到身份那刻才算，超過 → `Error(TooManyConnections)` 然後 Close 1008，**而且不發任何 token**（名額在 users service 寫 token 之前的 `admit` 閘門檢查，被拒的登入不會換掉該裝置其他連線的 token）；
+  同一連線同一裝置再登入不多佔一格；連線結束名額就回來（RAII，`Services.connections` 的 `ConnectionSlot`）。HTTP 不算。踢的永遠是新的那條。
 
 ### 6.2 HTTP（選用，測試與腳本用）
 
@@ -218,6 +224,7 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
    │  升級後 30 秒內沒登入 → Close 1008（Ping 不延長）
    ▼
  Login 失敗 → Error(Forbidden)，連線留著（受 §6.3.4 限速與那 30 秒）
+ Login 時該裝置的 WS 名額已滿 → Error(TooManyConnections)，然後 Close 1008（§6.1；沒發 token）
 ```
 
 - **允許不帶 Bearer 升級**（這是提案裡唯一改升級行為的地方）：Session 是「未登入」，只接受 `Hello`、`Ping`、`Login`、`Refresh`；其他 kind 回 `Error(Unauthorized)`。

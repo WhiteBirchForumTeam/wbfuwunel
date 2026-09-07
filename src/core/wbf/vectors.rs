@@ -24,6 +24,18 @@ const VECTORS: &str = include_str!("../../../docs/design/wbf-vectors.json");
 
 fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() }
 
+/// The data section of an `Event/Batch`: each event as a big-endian u32
+/// length followed by its JSON bytes (pipeline §6.2).
+fn length_prefixed(events: &[&[u8]]) -> Vec<u8> {
+	let mut data = Vec::new();
+	for event in events {
+		let len = u32::try_from(event.len()).expect("vector events are small");
+		data.extend_from_slice(&len.to_be_bytes());
+		data.extend_from_slice(event);
+	}
+	data
+}
+
 fn unhex(text: &str) -> Vec<u8> {
 	(0..text.len())
 		.step_by(2)
@@ -104,10 +116,15 @@ fn current() -> Value {
 			pack("read_by_chunk", Kind::Download, 0x02, Flags::default(), 0, 9, br#"{"mxc":"mxc://localhost/1122334455667788","chunk":2}"#, b""),
 			pack("ack_chunk", Kind::Control, 0x02, Flags::IS_RESPONSE, 0x1122_3344_5566_7788, 0, br#"{"received":1,"chunk_count":3,"total_len":65552,"finished":false,"truncated":false}"#, b""),
 			pack("ack_read", Kind::Control, 0x02, Flags::IS_RESPONSE, 0, 8, br#"{"chunk":2,"pos":131072,"len":5,"chunk_size":65536,"chunk_count":3,"total_len":132104}"#, b"\xde\xad\xbe\xef\x01"),
-			pack("recent_first_start", Kind::Event, 0x01, Flags::default(), 0, 10, br#"{"limit":2}"#, b""),
-			pack("recent_with_cached_g_seq", Kind::Event, 0x01, Flags::default(), 0, 11, br#"{"limit":10000,"cg_seq":4700}"#, b""),
-			pack("recent_older_page", Kind::Event, 0x01, Flags::default(), 0, 12, br#"{"limit":10000,"cg_seq":4700,"before":4711}"#, b""),
-			pack("ack_recent", Kind::Control, 0x02, Flags::IS_RESPONSE, 0, 10, br#"{"complete":false,"latest_g_seq":4712,"next":4711,"returned":2}"#, br#"[{"content":{"body":"b","msgtype":"m.text"},"event_id":"$b:localhost","origin_server_ts":2,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":1,"org.wbftw.wbfuwunel.g_seq":4712,"org.wbftw.wbfuwunel.r_seq":2}},{"content":{"body":"a","msgtype":"m.text"},"event_id":"$a:localhost","origin_server_ts":1,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":2,"org.wbftw.wbfuwunel.g_seq":4711,"org.wbftw.wbfuwunel.r_seq":1}}]"#),
+			pack("recent_first_start", Kind::Event, 0x01, Flags::default(), 10, 0, br#"{"limit":2,"batch":1}"#, b""),
+			pack("recent_with_cached_g_seq", Kind::Event, 0x01, Flags::default(), 11, 0, br#"{"limit":320,"cg_seq":4700,"batch":10}"#, b""),
+			pack("recent_next_window", Kind::Event, 0x01, Flags::default(), 12, 0, br#"{"limit":320,"cg_seq":4700,"before":4711,"batch":10}"#, b""),
+			// The window for `recent_first_start` has two events and a batch of one,
+			// so it comes back as two Batch packs: seq 0 with r=1, seq 1 with r=0.
+			// Each event in data is a big-endian u32 length and then its JSON.
+			pack("batch_first", Kind::Event, 0x03, Flags::IS_RESPONSE, 10, 0, br#"{"bc":1,"fs":4712,"ls":4712,"r":1,"tc":2}"#, &length_prefixed(&[br#"{"content":{"body":"b","msgtype":"m.text"},"event_id":"$b:localhost","origin_server_ts":2,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":1,"org.wbftw.wbfuwunel.g_seq":4712,"org.wbftw.wbfuwunel.r_seq":2}}"#])),
+			pack("batch_last", Kind::Event, 0x03, Flags::IS_RESPONSE, 10, 1, br#"{"bc":1,"fs":4711,"ls":4711,"r":0,"tc":2}"#, &length_prefixed(&[br#"{"content":{"body":"a","msgtype":"m.text"},"event_id":"$a:localhost","origin_server_ts":1,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":2,"org.wbftw.wbfuwunel.g_seq":4711,"org.wbftw.wbfuwunel.r_seq":1}}"#])),
+			pack("batch_empty_window", Kind::Event, 0x03, Flags::IS_RESPONSE, 11, 0, br#"{"bc":0,"fs":0,"ls":0,"r":0,"tc":0}"#, b""),
 			pack("send_encrypted_with_attachments", Kind::Event, 0x02, Flags::default(), 0, 13, br#"{"room_id":"!r:localhost","type":"m.room.encrypted","txn_id":"t1","attachments":["mxc://localhost/1122334455667788"]}"#, br#"{"algorithm":"m.megolm.v1.aes-sha2","ciphertext":"AwgAEnACgAkLmt6qF84IK++J7UDH2Za1YVchHyprqTqsg","device_id":"RJYKSTBOIE","sender_key":"IlRMeOPX2e0MurIyfWEucYBRVOEEUMrOHqn/8mLqMjA","session_id":"X3lUlvLELLYxeTx4yOVu6UDpasGEVO0Jbu+QFnm0cKQ"}"#),
 			pack("ack_send", Kind::Control, 0x02, Flags::IS_RESPONSE, 0, 13, br#"{"event_id":"$Zm9vYmFy:localhost"}"#, b""),
 			pack("login_password", Kind::Session, 0x01, Flags::default(), 0, 14, br#"{"type":"m.login.password","identifier":{"type":"m.id.user","user":"alice"},"password":"correct-horse-battery","initial_device_display_name":"wbf desktop","refresh_token":true}"#, b""),
@@ -117,6 +134,8 @@ fn current() -> Value {
 			pack("logout_all", Kind::Session, 0x03, Flags::default(), 0, 17, br#"{"all":true}"#, b""),
 			pack("error_rate_limited", Kind::Control, 0x03, Flags::IS_RESPONSE, 0, 14, br#"{"code":"RateLimited","message":"M_LIMIT_EXCEEDED: Too many login attempts from this address.","retry_after_ms":700}"#, b""),
 			pack("error_out_of_order", Kind::Control, 0x03, Flags::IS_RESPONSE, 0x1122_3344_5566_7788, 2, br#"{"code":"OutOfOrder","expected_seq":1,"message":"expected chunk 1"}"#, b""),
+			pack("error_unsupported", Kind::Control, 0x03, Flags::IS_RESPONSE, 10, 0, br#"{"code":"Unsupported","message":"this kind is only served over the WebSocket channel; POST /_wbf/v1/pack is for one-pack requests"}"#, b""),
+			pack("error_too_many_connections", Kind::Control, 0x03, Flags::IS_RESPONSE, 0, 14, br#"{"code":"TooManyConnections","max_connections":4,"message":"this device already holds 4 wbf connections; close one before opening another"}"#, b""),
 			pack("empty", Kind::Control, 0x04, Flags::default(), 0, 0, b"", b""),
 		],
 		"rejected": [

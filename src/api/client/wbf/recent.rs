@@ -1,14 +1,20 @@
-//! `Event/Recent`: the events newer than the client's watermark across every
-//! room the user is joined to, newest first, in the order this server
-//! received them.
+//! `Event/Recent`: one window of the events newer than the client's watermark
+//! across every room the user is joined to, newest first, in the order this
+//! server received them, answered as a stream of `Event/Batch` packs.
 //!
 //! There is no global index of events; there does not need to be one. The
 //! global count every event carries is comparable across rooms, so one
 //! reverse stream per joined room merged by count is the global order. That
 //! count is the `g_seq` each served event already carries in its
-//! `unsigned`; the request's `cg_seq` and `before` and the reply's `next` and
-//! `latest_g_seq` are the same number. See
-//! `docs/design/room-seq-and-recent.md` §2.
+//! `unsigned`; the request's `cg_seq` and `before` and the batches' `fs` and
+//! `ls` are the same number. See `docs/design/room-seq-and-recent.md` §2 and
+//! `docs/design/wbf-pack-pipeline.md` §6.
+//!
+//! A window is small (`wbf_recent_max_limit`, hundreds), so it is gathered
+//! whole before the first `Batch` goes out: that is how `tc`, the window's
+//! size, is known in every batch, and the memory it costs is a few hundred
+//! events. The client pulls the next window with `before`; the server keeps
+//! nothing between windows.
 
 use std::{cmp::Ordering, collections::BinaryHeap, pin::Pin};
 
@@ -18,45 +24,70 @@ use serde_json::{Value, json};
 use tuwunel_core::{
 	Result, debug_warn,
 	matrix::{event::Event, pdu::PduCount},
-	wbf::PackView,
+	wbf::{Flags, Kind, PackBuilder, PackError, PackView},
 };
 use tuwunel_service::{Services, rooms::timeline::PdusIterItem};
 
-use super::{Reject, ack};
+use super::{Failure, Reject, Reply, event};
 use crate::client::message::{ignored_filter, visibility_filter};
+
+/// Bytes of length prefix in front of each event in a `Batch`'s data.
+const EVENT_LEN_PREFIX: usize = 4;
 
 /// What the client asks for.
 struct RecentRequest {
-	/// Most events in the reply; clamped to `wbf_recent_max_limit`.
+	/// Most events in this window; clamped to `wbf_recent_max_limit`.
 	limit: usize,
-	/// The newest g_seq the client has cached; the page stops there. Absent or
-	/// 0 means no cache: the newest `limit` events.
+	/// Most events per `Batch`; clamped to `wbf_recent_max_batch`.
+	batch: usize,
+	/// The newest g_seq the client has cached; the window stops there. Absent
+	/// or 0 means no cache: the newest `limit` events.
 	cg_seq: Option<PduCount>,
-	/// Only events older than this g_seq (a `next` from a reply).
+	/// Only events older than this g_seq (the `ls` of the previous window's
+	/// last batch).
 	before: Option<PduCount>,
+}
+
+/// The `Recent` settings from the config, in one place for `parse`.
+struct RecentLimits {
+	default_limit: usize,
+	max_limit: usize,
+	default_batch: usize,
+	max_batch: usize,
 }
 
 impl RecentRequest {
 	/// Args:
-	///     view: the request pack, meta example: `{"limit":100,"cg_seq":4711}`
-	///     max_limit: `wbf_recent_max_limit`, example: 10000
+	///     view: the request pack, meta example: `{"limit":320,"cg_seq":4711,"batch":10}`
+	///     limits: the config's defaults and caps
 	/// Return:
 	///     Result<RecentRequest, Reject>  Conflict when a position is not an
 	///     integer.
-	fn parse(view: &PackView<'_>, max_limit: usize) -> std::result::Result<Self, Reject> {
+	fn parse(view: &PackView<'_>, limits: &RecentLimits) -> std::result::Result<Self, Reject> {
 		let meta = if view.meta.is_empty() { json!({}) } else { view.meta_json()? };
 
-		let limit = meta["limit"]
-			.as_u64()
-			.and_then(|limit| usize::try_from(limit).ok())
-			.map_or(max_limit, |limit| limit.min(max_limit));
-
 		Ok(Self {
-			limit,
+			limit: count_field(&meta, "limit", limits.default_limit, limits.max_limit),
+			batch: count_field(&meta, "batch", limits.default_batch, limits.max_batch).max(1),
 			cg_seq: g_seq_field(&meta, "cg_seq")?.filter(|cached| *cached != PduCount::from_signed(0)),
 			before: g_seq_field(&meta, "before")?,
 		})
 	}
+}
+
+/// Args:
+///     meta: the request meta, example: `{"limit":320}`
+///     name: example: "limit"
+///     default: used when absent or not a number, example: 320
+///     max: example: 500
+/// Return:
+///     usize  the field clamped to `max`; `default` when absent or not a
+///     non-negative integer.
+fn count_field(meta: &Value, name: &str, default: usize, max: usize) -> usize {
+	meta[name]
+		.as_u64()
+		.and_then(|value| usize::try_from(value).ok())
+		.map_or(default, |value| value.min(max))
 }
 
 /// Args:
@@ -96,28 +127,47 @@ impl Ord for Head {
 	fn cmp(&self, other: &Self) -> Ordering { self.count.cmp(&other.count) }
 }
 
-/// Why the page ended.
-#[derive(PartialEq, Eq)]
-enum Stop {
-	/// Every event newer than `cg_seq` (or every event at all) was considered.
-	Complete,
-	/// `limit` or the pack's byte budget ended the page with newer-than-`cg_seq`
-	/// events still unread; `next` points at them.
-	More,
+/// One event of a window, as it will be sent: its `g_seq` and its JSON.
+struct WindowEvent {
+	g_seq: i64,
+	json: Vec<u8>,
 }
 
+/// Args:
+///     user: the requester
+///     view: the `Recent` request
+///     reply: where the `Batch` packs go
+/// Return:
+///     Result<(), Failure>  Ok once the window's last batch is queued (at
+///     least one batch is always sent, empty for an empty window).
 pub(super) async fn handle_event_recent(
 	services: &Services,
 	user: &UserId,
 	view: &PackView<'_>,
-) -> std::result::Result<Vec<u8>, Reject> {
-	let request = RecentRequest::parse(view, services.config.wbf_recent_max_limit)?;
+	reply: &mut Reply,
+) -> std::result::Result<(), Failure> {
+	let limits = RecentLimits {
+		default_limit: services.config.wbf_recent_default_limit,
+		max_limit: services.config.wbf_recent_max_limit,
+		default_batch: services.config.wbf_recent_default_batch,
+		max_batch: services.config.wbf_recent_max_batch,
+	};
+	let request = RecentRequest::parse(view, &limits)?;
 	let data_max = services.config.wbf_data_max_bytes;
 
-	// Read before the merge, so a client that stores it never misses an event
-	// appended while this reply was being built: it will be newer than this.
-	let latest_g_seq = PduCount::Normal(services.globals.current_count()).into_signed();
+	let window = collect_window(services, user, &request, data_max).await;
 
+	for pack in build_batches(view.header.id, &window, request.batch, data_max)? {
+		reply.send(pack).await?;
+	}
+
+	Ok(())
+}
+
+/// The window's events, newest first: at most `limit`, all newer than
+/// `cg_seq` and older than `before`, visible to `user`, and each small enough
+/// for a pack of its own.
+async fn collect_window(services: &Services, user: &UserId, request: &RecentRequest, data_max: usize) -> Vec<WindowEvent> {
 	let rooms: Vec<OwnedRoomId> = services
 		.state_cache
 		.rooms_joined(user)
@@ -147,22 +197,9 @@ pub(super) async fn handle_event_recent(
 		heads.push(head);
 	}
 
-	let mut data = Vec::with_capacity(data_max.min(4 << 20));
-	data.push(b'[');
-	let mut returned: usize = 0;
-	let mut last_count: Option<PduCount> = None;
-	let mut stop = Stop::Complete;
+	let mut window: Vec<WindowEvent> = Vec::with_capacity(request.limit.min(1024));
 
-	loop {
-		if returned >= request.limit {
-			// The page is full; anything still on the heap that is newer than
-			// `cg_seq` is unread.
-			stop = match heap.peek() {
-				| Some(head) if is_newer_than_after(head.count, request.cg_seq) => Stop::More,
-				| _ => Stop::Complete,
-			};
-			break;
-		}
+	while window.len() < request.limit {
 		let Some(Head { count, room }) = heap.pop() else {
 			break;
 		};
@@ -185,56 +222,102 @@ pub(super) async fn handle_event_recent(
 		}
 
 		let Some(item) = ignored_filter(services, item, user).await else {
-			last_count = Some(count);
 			continue;
 		};
 		let Some((_, pdu)) = visibility_filter(services, item, user).await else {
-			last_count = Some(count);
 			continue;
 		};
 
 		let event: Raw<AnyTimelineEvent> = pdu.to_format();
-		let event = event.json().get().as_bytes();
-		let separator = usize::from(returned > 0);
-		if data.len() + separator + event.len() + 1 > data_max {
-			if returned == 0 {
-				// A single event wider than a pack: it can never be served
-				// here, so the cursor steps past it instead of stalling.
-				debug_warn!(event_id = %pdu.event_id(), "Event exceeds wbf_data_max_bytes; skipped by Event/Recent");
-				last_count = Some(count);
-				continue;
-			}
-			// This event leads the next page: the cursor stays at the last
-			// event returned, which is older than nothing on this page.
-			stop = Stop::More;
-			break;
+		let json = event.json().get().as_bytes();
+		if json.len().saturating_add(EVENT_LEN_PREFIX) > data_max {
+			// A single event wider than a pack can never be served here, so
+			// the window steps past it instead of stalling on it.
+			debug_warn!(event_id = %pdu.event_id(), "Event exceeds wbf_data_max_bytes; skipped by Event/Recent");
+			continue;
 		}
 
-		if separator == 1 {
-			data.push(b',');
-		}
-		data.extend_from_slice(event);
-		returned = returned.saturating_add(1);
-		last_count = Some(count);
+		window.push(WindowEvent { g_seq: count.into_signed(), json: json.to_vec() });
 	}
-	data.push(b']');
 
-	let next = (stop == Stop::More)
-		.then_some(last_count)
-		.flatten()
-		.map(PduCount::into_signed);
+	window
+}
 
-	Ok(ack(
-		view.header.id,
-		view.header.seq,
-		json!({
-			"returned": returned,
-			"latest_g_seq": latest_g_seq,
-			"complete": stop == Stop::Complete,
-			"next": next,
-		}),
-		data,
-	))
+/// Cuts a window into `Batch` packs answering request `id`.
+///
+/// Args:
+///     id: the `Recent` request's id, copied into every batch
+///     window: newest first, example: 25 events
+///     batch: most events per pack, example: 10 (then 10, 10, 5)
+///     data_max: `wbf_data_max_bytes`; a batch is also cut when the next
+///         event would not fit
+/// Return:
+///     Result<Vec<Vec<u8>>, PackError>  the packs in order, `seq` 0, 1, 2…;
+///     exactly one (empty) pack for an empty window. Every pack's meta is
+///     `{tc, bc, fs, ls, r}` and the last has `r = 0`.
+fn build_batches(id: u64, window: &[WindowEvent], batch: usize, data_max: usize) -> std::result::Result<Vec<Vec<u8>>, PackError> {
+	let total = window.len();
+	let mut packs = Vec::with_capacity(total.div_ceil(batch.max(1)).max(1));
+
+	if window.is_empty() {
+		packs.push(batch_pack(id, 0, BatchMeta { tc: 0, bc: 0, fs: 0, ls: 0, r: 0 }, &[])?);
+		return Ok(packs);
+	}
+
+	let mut seq: u32 = 0;
+	let mut sent: usize = 0;
+	let mut data: Vec<u8> = Vec::new();
+	let mut in_batch: Vec<&WindowEvent> = Vec::with_capacity(batch);
+
+	for event in window {
+		let event_len = EVENT_LEN_PREFIX + event.json.len();
+		let batch_full = in_batch.len() >= batch;
+		let over_budget = !in_batch.is_empty() && data.len() + event_len > data_max;
+		if batch_full || over_budget {
+			sent += in_batch.len();
+			packs.push(batch_pack(id, seq, meta_for(total, &in_batch, total - sent), &data)?);
+			seq = seq.saturating_add(1);
+			data.clear();
+			in_batch.clear();
+		}
+
+		let len = u32::try_from(event.json.len()).map_err(|_| PackError::SectionTooLarge { len: event.json.len() })?;
+		data.extend_from_slice(&len.to_be_bytes());
+		data.extend_from_slice(&event.json);
+		in_batch.push(event);
+	}
+
+	// The last batch: whatever is left, and `r` is 0 by construction.
+	sent += in_batch.len();
+	packs.push(batch_pack(id, seq, meta_for(total, &in_batch, total - sent), &data)?);
+
+	Ok(packs)
+}
+
+/// The five numbers every `Batch` carries (pipeline §6.2).
+struct BatchMeta {
+	tc: usize,
+	bc: usize,
+	fs: i64,
+	ls: i64,
+	r: usize,
+}
+
+fn meta_for(total: usize, in_batch: &[&WindowEvent], remaining: usize) -> BatchMeta {
+	BatchMeta {
+		tc: total,
+		bc: in_batch.len(),
+		fs: in_batch.first().map_or(0, |event| event.g_seq),
+		ls: in_batch.last().map_or(0, |event| event.g_seq),
+		r: remaining,
+	}
+}
+
+fn batch_pack(id: u64, seq: u32, meta: BatchMeta, data: &[u8]) -> std::result::Result<Vec<u8>, PackError> {
+	Ok(PackBuilder::new(Kind::Event, event::BATCH, Flags::IS_RESPONSE, id, seq)
+		.json_meta(&json!({ "tc": meta.tc, "bc": meta.bc, "fs": meta.fs, "ls": meta.ls, "r": meta.r }))?
+		.data(data)?
+		.finish())
 }
 
 /// Whether an event at `count` is one the client does not have yet.
@@ -247,5 +330,111 @@ async fn next_item(stream: &mut RoomStream<'_>) -> Option<PdusIterItem> {
 			| Ok(item) => return Some(item),
 			| Err(error) => debug_warn!(?error, "Skipping an undecodable timeline row"),
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use serde_json::Value;
+	use tuwunel_core::wbf::{Kind, decode};
+
+	use super::{EVENT_LEN_PREFIX, WindowEvent, build_batches, event};
+
+	fn window(count: usize) -> Vec<WindowEvent> {
+		// Newest first: g_seq 100, 99, 98…
+		(0..count)
+			.map(|position| {
+				let g_seq = 100 - i64::try_from(position).expect("small");
+				WindowEvent { g_seq, json: format!(r#"{{"event_id":"$e{g_seq}","g":{g_seq}}}"#).into_bytes() }
+			})
+			.collect()
+	}
+
+	/// Decodes one pack into (meta, events as JSON strings).
+	fn open(mut pack: Vec<u8>) -> (Value, Vec<String>) {
+		let view = decode(&mut pack).expect("batch decodes");
+		assert_eq!(view.header.kind, Kind::Event);
+		assert_eq!(view.header.subtype, event::BATCH);
+		assert!(view.header.flags.is_response());
+		let meta = view.meta_json().expect("json meta");
+
+		let mut events = Vec::new();
+		let mut at = 0;
+		while at < view.data.len() {
+			let len = u32::from_be_bytes(view.data[at..at + EVENT_LEN_PREFIX].try_into().expect("4 bytes")) as usize;
+			at += EVENT_LEN_PREFIX;
+			events.push(String::from_utf8(view.data[at..at + len].to_vec()).expect("utf8"));
+			at += len;
+		}
+		assert_eq!(at, view.data.len(), "data is exactly the prefixed events");
+
+		(meta, events)
+	}
+
+	#[test]
+	fn a_window_is_cut_into_batches_whose_numbers_add_up() {
+		let packs = build_batches(7, &window(25), 10, 1 << 20).expect("packs");
+		assert_eq!(packs.len(), 3);
+
+		let mut sent = 0;
+		for (position, pack) in packs.into_iter().enumerate() {
+			let (meta, events) = open(pack);
+			assert_eq!(meta["tc"], 25);
+			let bc = meta["bc"].as_u64().expect("bc") as usize;
+			assert_eq!(bc, events.len());
+			assert_eq!(bc, if position < 2 { 10 } else { 5 });
+			sent += bc;
+			assert_eq!(meta["r"].as_u64().expect("r") as usize, 25 - sent, "r is what follows this batch");
+			// fs is the newest of the batch, ls the oldest, both present in the data.
+			assert_eq!(meta["fs"], 100 - (position as i64) * 10);
+			assert_eq!(meta["ls"], 100 - (position as i64) * 10 - (bc as i64 - 1));
+			assert!(events[0].contains(&format!("\"g\":{}", meta["fs"])));
+			assert!(events[bc - 1].contains(&format!("\"g\":{}", meta["ls"])));
+		}
+		assert_eq!(sent, 25);
+	}
+
+	#[test]
+	fn batch_seq_counts_from_zero_and_copies_the_request_id() {
+		let packs = build_batches(0xABCD, &window(3), 1, 1 << 20).expect("packs");
+		for (position, mut pack) in packs.into_iter().enumerate() {
+			let view = decode(&mut pack).expect("decodes");
+			assert_eq!(view.header.id, 0xABCD);
+			assert_eq!(view.header.seq, position as u32);
+		}
+	}
+
+	#[test]
+	fn an_empty_window_is_one_empty_batch() {
+		let packs = build_batches(1, &[], 10, 1 << 20).expect("packs");
+		assert_eq!(packs.len(), 1);
+		let (meta, events) = open(packs.into_iter().next().expect("one"));
+		assert!(events.is_empty());
+		assert_eq!(meta["tc"], 0);
+		assert_eq!(meta["bc"], 0);
+		assert_eq!(meta["r"], 0);
+		assert_eq!(meta["fs"], 0);
+		assert_eq!(meta["ls"], 0);
+	}
+
+	#[test]
+	fn the_byte_budget_cuts_a_batch_before_it_would_overflow() {
+		// Each event is about 30 bytes plus the 4-byte prefix; a budget of 80
+		// holds two, so batches of "10" come out as pairs.
+		let events = window(5);
+		let one = EVENT_LEN_PREFIX + events[0].json.len();
+		let packs = build_batches(1, &events, 10, one * 2 + 1).expect("packs");
+		assert_eq!(packs.len(), 3);
+		let sizes: Vec<usize> = packs.into_iter().map(|pack| open(pack).1.len()).collect();
+		assert_eq!(sizes, vec![2, 2, 1]);
+	}
+
+	#[test]
+	fn the_last_batch_always_has_r_zero_even_when_the_window_divides_evenly() {
+		let packs = build_batches(1, &window(20), 10, 1 << 20).expect("packs");
+		assert_eq!(packs.len(), 2);
+		let (meta, _) = open(packs.into_iter().last().expect("last"));
+		assert_eq!(meta["r"], 0);
+		assert_eq!(meta["bc"], 10);
 	}
 }

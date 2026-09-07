@@ -149,6 +149,8 @@ pub(crate) async fn login_route(
 			body.initial_device_display_name.as_deref(),
 			body.body.refresh_token,
 			Some(client),
+			// HTTP has no connection to count.
+			&mut tuwunel_service::users::login::admit_any,
 		)
 		.await?;
 

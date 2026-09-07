@@ -81,31 +81,42 @@ ruma 的 `redact_in_place` 只留規格允許的 key，`unsigned` 不在裡面�
 
 ### 2.1 wire
 
-kind `0x14 Event`（wire-format §3.3 已分配給 send／messages／context 這個領域），subtype **`0x01 Recent`**。無序類（請求號對回應）。
+kind `0x14 Event`（wire-format §3.3 已分配給 send／messages／context 這個領域），subtype **`0x01 Recent`**。
+回應不是一個 `Ack`，而是**一串 `0x03 Batch`**（server → client），所以請求的 `id` 要由 client 選（Batch 抄它回來、`seq` 給批次用）。
+**只走 WebSocket**；HTTP 回 `Error(Unsupported)`。這一段自 [wbf-pack-pipeline.md](wbf-pack-pipeline.md) §6（維護者 2026-09-07 定）改寫，那份是權威。
 
-請求 meta（JSON，明文，server 要讀）；三個欄位都可省略：
+請求 meta（JSON，明文，server 要讀）；四個欄位都可省略：
 
 ```json
-{ "cg_seq": <g_seq>, "before": <g_seq>, "limit": 10000 }
+{ "cg_seq": <g_seq>, "before": <g_seq>, "limit": 320, "batch": 10 }
 ```
 
 - `cg_seq`（cached g_seq）：client 裝置上存的最新 `g_seq`。server 從最新往舊拿，**碰到它就停**；省略或 0 = 沒有快取，直接拿最新的 `limit` 則。
-- `limit`：這頁最多幾則，預設與上限都是 `wbf_recent_max_limit`（10000）。
-- `before`：只在補洞時用（見下），只要比它舊的。
+- `limit`：**這一窗**最多幾則。預設 `wbf_recent_default_limit`（320），上限 `wbf_recent_max_limit`（500，維護者 2026-09-07 從 10000 壓下來：一窗多大是 client 決定的，不夠就再要一段）。
+- `before`：只要比它舊的；下一窗帶上一窗最後一個 Batch 的 `ls`。
+- `batch`：每個 Batch 幾則。預設 `wbf_recent_default_batch`（10），上限 `wbf_recent_max_batch`（100）。
 
-server 從最新往舊走，收滿 `limit` 就停。差 4000 則就回 4000 則；差 85000 則就回**最新的** 10000 則，中間那段是洞。
-維護者 2026-09-05 定：always 拿一萬本身有問題，client 要帶自己的水位、只取差異。
+一次 `Recent` 是**一窗**：server 只在 `(cg_seq, before)` 之間從最新數 `limit` 則，全部收齊（幾百則，記憶體可忽略）再切成 Batch 送；
+server **不記任何跨請求的狀態**，下一窗是 client 再叫一次 `Recent` 帶 `before`。兩窗之間連線是空的，`Ping` 或別的請求可以插進去。
+差 4000 則就是 13 窗；一萬則由 client 自己累計。維護者 2026-09-05 定：always 拿一萬本身有問題，client 要帶自己的水位、只取差異。
 
-回應 `Ack`（`IS_RESPONSE`，`id`、`seq` 抄請求）：
+回應 **`0x03 Batch`**（`IS_RESPONSE`，`id` 抄請求，`seq` 從 0 嚴格 +1）：
 
-- meta：`{ "returned": n, "latest_g_seq": <g_seq>, "complete": bool, "next": <g_seq> | null }`
-  - `latest_g_seq`：server 此刻最新的全域序號，client 存下來當下次的 `cg_seq`（在合併之前讀，所以合併期間新進的事件一定比它新，不會漏）。
-  - `complete`：`cg_seq` 到 `latest_g_seq` 之間是否全部給了。`false` 表示有洞，`next` 是洞的上緣：client 帶同一個 `cg_seq` 加 `before = next`
-    再問，直到 `complete`。
-- data：**JSON 陣列**，每個元素是完整的事件（`Pdu` 格式，含 `room_id`；`unsigned` 帶 `r_seq`、`g_seq`）。順序新到舊。
+- meta：`{ "tc": 320, "bc": 10, "fs": 20000, "ls": 19991, "r": 310 }`
+  - `tc`（total count）：這一窗總共會送幾則（≤ `limit`），同一窗每個 Batch 都一樣。
+  - `bc`（batch count）：這個 Batch 幾則。
+  - `fs`／`ls`（first／last g_seq）：這批最新與最舊那則的 `g_seq`；最後一個 Batch 的 `ls` 就是下一窗的 `before`。
+  - `r`（remain）：這批之後這一窗還剩幾則；**`r = 0` 就是這一窗結束**，沒有 `IS_LAST`、沒有結束用的 pack。
+  - 不變量：`tc = 已送 + bc + r`。空窗（`tc = 0`）送一個 `bc = 0, r = 0, fs = ls = 0` 的 Batch。
+- data：`bc` 則事件，每則 **u32 大端長度 ＋ 事件 JSON bytes**（不是 JSON 陣列：client 切事件只看四個 byte，不掃逗號、不先 parse 整段），
+  新到舊排。事件是完整的 `Pdu` 格式，含 `room_id`；`unsigned` 帶 `r_seq`、`g_seq`。一個 Batch 的 data 另受 `wbf_data_max_bytes` 限，
+  放不下就提早結束這個 Batch（`bc < batch`）。
 
-data 由 server 填是既有先例（`Download/Read` 的回應 data 是讀出的 bytes）。不另外包 `{room_id, g_seq, event}` —— 事件本身
-已經帶這些欄位，包一層是重複。所有位置都是整數，跟 `unsigned` 裡的一致；client 不解讀、原樣帶回。
+**client 的水位**（server 欄位語意決定的）：一窗走完且 `tc < limit` → 已回到 `cg_seq`，同步結束，`cg_seq` 存成**第一窗第一個 Batch 的 `fs`**；
+`tc == limit` → 可能還有更舊的，帶 `before = 最後的 ls` 再叫一窗，水位不動（剛好沒有更舊的會拿到一個空 Batch，一個來回的代價）；
+中途斷線或收到 `Error` → 已收到的 Batch 有效，從最後的 `ls` 續問，**不要**在中途推水位（回應是新到舊，第一批之後還有比舊水位新的）。
+
+不另外包 `{room_id, g_seq, event}` —— 事件本身已經帶這些欄位，包一層是重複。所有位置都是整數，跟 `unsigned` 裡的一致；client 不解讀、原樣帶回。
 
 ### 2.2 演算法：k 路合併，不加索引
 
@@ -116,8 +127,8 @@ rooms = state_cache.rooms_joined(user)
 每個 room 開 timeline.pdus_rev(Some(user), room, before)   ← 倒序、從 before 往舊（沒給就從最新）
 BinaryHeap 以 count 為鍵，每次彈最大的、再從那條串流補一個
 每彈一個：ignored_filter → visibility_filter（api/client/message.rs 既有的兩個，pub(crate)）
-停：滿 limit，或 data 再放一個就超過 wbf_data_max_bytes（→ complete=false，next=最後一則的 g_seq）；
-    或堆頂的 g_seq 已經 ≤ cg_seq，或全部串流耗盡（→ complete=true，next=null）
+停：滿 limit（這一窗），或堆頂的 g_seq 已經 ≤ cg_seq，或全部串流耗盡
+收齊的窗 → tc = 條數 → 每 batch 條切一個 Batch（data 超過 wbf_data_max_bytes 就提早切），r = tc − 已送
 ```
 
 - 為什麼不加 `count → pduid` 全域索引：那要一張新表、一次遷移、還要每個 append 多一筆寫；而且使用者只在少數 room 裡時，倒著掃全域
@@ -125,19 +136,21 @@ BinaryHeap 以 count 為鍵，每次彈最大的、再從那條串流補一個
 - Backfilled 的事件 count 為負，會排在所有 Normal 之後 —— 它們是「本站知道這個 room 之前」的歷史，排在最舊那邊是對的。
 - 可見性照 `/messages`：`history_visibility`、ignore、離開後看不到之後的，都在那兩個 filter 裡；`rooms_joined` 只給加入中的 room
   （issue 的「加入的所有 room」）。E2EE 密文原樣回。
-- 上限：新 config `wbf_recent_max_limit`（預設 10000），超過 clamp 不報錯；另有 data 的 byte 上限兜底（10000 則 E2EE 事件可能超過
-  16 MiB），所以一次可能回不滿 10000，client 用 `next` 接著翻 —— 這跟「往更舊翻」是同一個動作。
-  被 byte 上限擋下的那一則不算進這頁，游標停在前一則，它成為下一頁的第一則。唯一的例外：**一則事件自己就大於 `wbf_data_max_bytes`**，
-  那它永遠送不出去，游標跨過它（否則 client 會卡在同一頁），server 用 `debug_warn` 記下 event_id。被 ignore／不可見而跳過的事件也推進游標。
-- 程式碼：`src/api/client/wbf/recent.rs`（`handle_event_recent`）；`mod.rs` 的 `event::RECENT` 派發；`Hello` 的 `features` 多了 `recent`、`seq`（feature 旗標用短名，跟 `unsigned` 裡的 `r_seq`／`g_seq` 是兩層）。
+- 上限：`wbf_recent_max_limit`（預設 500）夾 `limit`、`wbf_recent_max_batch`（100）夾 `batch`，超過 clamp 不報錯。data 的 byte 上限只切 Batch，不切窗：
+  一窗的每一則都放得進一個 pack。唯一的例外：**一則事件自己就大於 `wbf_data_max_bytes`**，那它永遠送不出去，收窗時跨過它（否則 client 會卡在同一窗），
+  server 用 `debug_warn` 記下 event_id；它不算進 `tc`。被 ignore／不可見而跳過的事件也推進游標、不算進 `tc`。
+- 程式碼：`src/api/client/wbf/recent.rs`（`handle_event_recent` → `collect_window` → `build_batches`，後者是純函數有單元測試）；`mod.rs` 的准入表與 `event::RECENT` 派發；
+  `Hello` 的 `features` 多了 `recent`、`batch`、`seq`，meta 帶 `recent_default_limit`／`recent_max_limit`／`recent_max_batch`。
 
 ### 2.3 HTTP
 
-`POST /_wbf/v1/pack` 同一個 pack 就能走，不另開 GET。issue 說 GET「也可以」，pack 才是必要的；少一條路徑少一份漂移。
+**不走**：`Recent` 的回應是串流，`POST /_wbf/v1/pack` 一次只回一個 pack，所以回 `Error(Unsupported)`（維護者 2026-09-07 定；HTTP 之後是 debug／fallback 用，WS 才是主力）。
+第一版曾讓 HTTP 回一頁，pipeline §0-5 拿掉。
 
 ### 2.4 規格向量
 
-`wbf-vectors.json` 加一組 `Event/Recent` 請求與回應的外框（header、meta），data 用兩個最小事件。client repo 複製一份寫測試。
+`wbf-vectors.json`：`recent_first_start`（`limit=2, batch=1`）、`recent_with_cached_g_seq`、`recent_next_window`，與它的回應 `batch_first`（`r=1`）、`batch_last`（`r=0`）、
+`batch_empty_window`；data 用兩個最小事件，長度前綴。client repo 複製一份寫測試。
 
 ## 3. 不在這次裡（候選，另開）
 
@@ -153,14 +166,15 @@ BinaryHeap 以 count 為鍵，每次彈最大的、再從那條串流補一個
 - e2e（真伺服器，Windows release build，腳本 `tests/e2e/e2e8.ps1`，2026-09-06 **37 個檢查點全綠**）：
   - `r_seq`：兩個 room 各 1..n 連續、`m.room.create` 是 1、同一事件在 `/event`／`/messages`／`/context`／`/sync` 同號、redact 後不變且
     redaction 事件拿下一號。
-  - `Event/Recent`（WS）：第一頁 3 則新到舊、`g_seq` 遞減、`next` = 頁尾的 `g_seq`；用 `before` 翻到耗盡，總集合＝使用者所有加入 room
-    （含 admin room）的 `/messages` 聯集、無重複、`complete=true`、`next=null`；`cg_seq` 帶第三新的 `g_seq` 只回 2 則且 `complete`；
-    `cg_seq=latest_g_seq` 回 0 則；`cg_seq=0` 等於沒設；`limit=1` 小於差距 → `complete=false`，再帶 `before=next` 補到 `complete`。
+  - `Event/Recent`（WS，2026-09-07 起是 Batch 串流）：`limit=3, batch=1` → 三個 Batch、`tc=3`、`r` 2,1,0、`seq` 0,1,2、每個 `fs=ls=` 該則的 `g_seq`；
+    用最後的 `ls` 當 `before` 翻到 `tc < limit`，總集合＝使用者所有加入 room（含 admin room）的 `/messages` 聯集、無重複；
+    `cg_seq` 帶第三新的 `g_seq` 只回 2 則、一個 Batch；`cg_seq=最新` 回一個空 Batch（`tc=bc=r=0`）；`cg_seq=0` 等於沒設；
+    `limit=1` 小於差距 → `tc==limit`，再帶 `before` 補到 `tc<limit`；空 meta = 預設（320／10）；`batch=1000` 夾成 100；`limit=10000` 夾成 500（`Hello` 說）；兩窗之間 `Ping` 立刻有 `Pong`。
   - 可見性：bob 只拿到自己加入的 room；alice ignore bob 後他的訊息在 `Recent` 與 `/messages` 同樣消失。
-  - HTTP fallback 同結果；`cg_seq` 非整數 → `Error(Conflict)`；空 meta = 預設；未知 subtype → `UnknownKind`。
+  - HTTP → `Error(Unsupported)`；`cg_seq` 非整數 → `Error(Conflict)`；未知 subtype → `UnknownKind`。
   - migration：PR #18 版 binary 建的庫（沒有任何號）換新 binary 啟動 → 每則 1..n 且帶 `g_seq`、下一則接 n+1、第二次啟動不重編。
-  - byte 上限（review 要求的鑑別測試）：`wbf_data_max_bytes = 1500` → 一頁只裝 3 則、`complete=false`；沿 `next` 翻 10 頁後 28 則每則恰一次、順序不亂；
-    `= 200`（沒有任何事件放得下）→ `returned=0`、`complete=true`、`next=null`。
+  - byte 上限（review 要求的鑑別測試）：`wbf_data_max_bytes = 1500` → 一窗裝下全部，切成多個 Batch，每個 data ≤ 1500 B、每則恰一次、跨 Batch 仍新到舊、`fs`／`ls` 對得上 data；
+    `= 200`（沒有任何事件放得下）→ 一個空 Batch（`tc=0`）。
 - 合併後：CHANGELOG 一列、roadmap §2.4 標 ✅（wire-format §3.2、§3.3 已在實作分支同步）。
 
 ## 5. 實作落點（給下一個讀的人）
@@ -173,5 +187,5 @@ BinaryHeap 以 count 為鍵，每次彈最大的、再從那條串流補一個
 | redact 放回 | `timeline/redact.rs` |
 | 聯邦送出剝掉 | `src/core/matrix/pdu/format.rs`（`into_outgoing_federation`）＋ `pdu/tests.rs` |
 | 一次性回填 | `src/service/migrations/backfill_room_seq.rs`，marker `backfill_room_seq` |
-| `Event/Recent` | `src/api/client/wbf/recent.rs`；config `wbf_recent_max_limit` |
-| 規格向量 | `docs/design/wbf-vectors.json`：`recent`、`recent_next_page`、`ack_recent` |
+| `Event/Recent`／`Event/Batch` | `src/api/client/wbf/recent.rs`；config `wbf_recent_default_limit`、`wbf_recent_max_limit`、`wbf_recent_default_batch`、`wbf_recent_max_batch` |
+| 規格向量 | `docs/design/wbf-vectors.json`：`recent_first_start`、`recent_with_cached_g_seq`、`recent_next_window`、`batch_first`、`batch_last`、`batch_empty_window` |

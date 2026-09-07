@@ -1,6 +1,7 @@
 # wbf pack 處理管線：連線就是佇列、handler 的契約、以及 HTTP 一章章搬過來的模子
 
-**狀態**：📄 提案（2026-09-07）。維護者定的決定列在 §0；其餘是照那些決定推出來的做法，等同意再開分支。
+**狀態**：🔧 實作中（分支 `wbf/pack-pipeline`，2026-09-07 維護者核可後開）。維護者定的決定列在 §0；其餘是照那些決定推出來的做法。
+實作跟提案不同的地方標 📎，理由就地寫。
 
 [wbf-wire-format.md](wbf-wire-format.md) 講的是**封包的版面與協議**（header、kind、順序類別、兩種送法）；
 [chunked-upload.md](chunked-upload.md)、[room-seq-and-recent.md](room-seq-and-recent.md)、wire-format §6.3 講的是**各個 kind 的語意**。
@@ -58,7 +59,7 @@ client 那邊「開幾條、哪條走什麼、pending → sending → sent」是
 |---|---|
 | 帶 Bearer 升級 | `authenticate` 過了之後、升級之前，向 `connections` 要一個名額。沒有 → **不升級**，HTTP 回 `429 Too Many Requests`，body 是 `Error(TooManyConnections)`。 |
 | 匿名升級 | 不算名額（沒有身份可算）。它最多活 `wbf_ws_unauthenticated_timeout` 秒，不會被拿來囤。 |
-| `Login`／`Refresh` 拿到新 `Session` | **先要新名額，再放舊的**。要不到 → 回 `Error(TooManyConnections)`，然後 Close 1008；連線上原本的 session（若有）也一起結束。「踢新的」在這裡的意思是：這次登入沒成，這條線走人；別條線不受影響。 |
+| `Login`／`Refresh` 拿到新 `Session` | **先要新名額，再放舊的**。要不到 → 回 `Error(TooManyConnections)`，然後 Close 1008；連線上原本的 session（若有）也一起結束。「踢新的」在這裡的意思是：這次登入沒成，這條線走人；別條線不受影響。📎 **名額要在 users service 寫任何 token 之前拿**：Matrix 語意下同一 device 再登入會換掉它的 access token，若先發 token 再拒，被拒的 Login 已經把該裝置其他連線的 token 廢了。所以 `issue_session`／`refresh_session` 多一個 `admit: &mut dyn FnMut(&UserId, &DeviceId) -> Result` 閘門，在裝置定下來、token 還沒寫時問一次；HTTP 路由傳 `admit_any`。 |
 | `Refresh` 同一個 (user, device) | 名額不動（是同一個）。 |
 | `Logout` | 名額隨連線結束一起放。 |
 | 連線結束（任何原因） | 名額放掉。 |
@@ -68,7 +69,8 @@ client 那邊「開幾條、哪條走什麼、pending → sending → sent」是
 `Login` 換身份時 `Option<ConnectionSlot>` 用 `replace`，舊的在新的拿到之後才 drop。
 
 計數表放 `service/connections.rs`，那裡已經是連線的登記處（`JoinSet` 在那）。表是 `Mutex<HashMap<(OwnedUserId, OwnedDeviceId), u32>>`；
-`take_slot` 在鎖下比較與加一，超過就不加，回 `None`。**沒有第二份計數**：連線數的真相只有這張表。
+`take_slot(user, device, max)` 在鎖下比較與加一，超過就不加，回 `None`；`max = 0` 表示不限、不佔格。**沒有第二份計數**：連線數的真相只有這張表。
+📎 名額掛在 `Session` 上（`Session.slot`），不是 `serve` 的區域變數：session 被換掉時舊名額跟著舊 session 一起放，同裝置再登入時新 session 用 `inherit_slot` 接手舊的。
 
 **為什麼不是 per user**：維護者定 per device。同一個人手機加桌機各兩條就是 4，若算 user 第三台裝置會被擠掉；算 device 則上限幾乎不會撞到，
 它的意義是防**一個 client 失控**（重連風暴、忘了關），不是配額。
@@ -135,6 +137,8 @@ struct PackContext<'a> { session: Option<&'a Session>, client: IpAddr, transport
 - **`ctx.session` 是 `Option`**，只有准入表寫 `anonymous_ok` 的 handler 會拿到 `None`；其他 handler 在派發時已保證 `Some`，用一個小函式
   `ctx.user()?` 取，`None` 就 `Reject(Unauthorized)`——不 `unwrap`（A5）。
 - **`reply` 是唯一出口**：handler 不拿 sink、不拿 `mpsc::Sender`、不知道自己在 WS 還是 HTTP。它只會 `reply.send(pack).await`。
+  📎 實作：一問一答的 handler（`Upload/*`、`Download/*`、`Event/Send`）保留原本 `-> Result<Vec<u8>, Reject>` 的形狀，由派發者 `handle_one_reply` 統一送進 `reply`；
+  只有會送多個 pack 的（`Recent`）與會改 session 的（`Session/*`）拿 `reply`／`ctx`。八個 handler 為了一致改簽名是儀式，出口仍然只有一個。
 - **回 `SessionChange`**：`Keep`（絕大多數）、`Replace(Session)`（`Login`／`Refresh`）、`Close`（`Logout`）。這是 handler 唯一能對連線做的事。
 - **錯就 `Reject`**：一個 code ＋ 一句話，管線包成 `Error` pack、抄請求的 `id`/`seq`。handler 自己不造 `Error` pack。
 
@@ -182,6 +186,8 @@ enum Outgoing { Pack(Bytes), Close(CloseFrame) }
   `Error(Unauthorized)`、最後的 Close 都不會被截掉。這也是為什麼 Close 走佇列而不是直接寫 sink。
 - 關機（`until_shutdown`）：接收 loop 入隊 `Close(1001)` 然後 break；`Services::stop` 的 `close_and_join` 等的是**兩個** task
   （`JoinSet` 裡 `serve` 用 `tokio::join!` 等發送 task）。15 秒的 `JOIN_TIMEOUT` 不變。
+  📎 實作：`serve` 結束時 drop 掉所有 sender，再等發送 task 最多 `DRAIN_TIMEOUT`（5 秒）把佇列寫完；對端不讀就 abort 它、socket 隨之關掉。
+  發送 task 只持有 socket 的 sink，不借 `Services`，所以它比 `serve` 晚一點結束也不會懸空。
 - 現在 `ws.rs` 裡每一處 `sink.send(...)` 都改成入隊。改完 `serve` 裡不該再看得到 `sink`。
 
 ## 6. `Event/Recent` 串流與 `Event/Batch`
@@ -228,18 +234,16 @@ server 在 `(cg_seq, before)` 之間從最新往舊，**只數這一窗**的 `li
 **為什麼不設 `WANT_ACK`**：Batch 是 server 產生的有序串流，順序由 WebSocket 保證，背壓由 §1 的佇列與 TCP 保證。
 **為什麼沒有結束用的 pack**：`tc` 在第一個 Batch 就告訴 client 這窗有幾條，`r = 0` 是尾；再加一個型別是第二個講同一件事的信號。
 
-### 6.3 先數再送，但只數一窗
+### 6.3 先收齊一窗，再切 Batch
 
 `g_seq` 是全站計數器，跨這個人沒加入的房間，`before − cg_seq` 是上界不是條數，準確的 `tc` 得把跨房合併＋可見性過濾走一遍。
-但一窗只有 `limit` 條，數的那趟跟送的那趟同量級：
+📎 提案寫「兩趟：先數再送」；實作改成**一趟收進記憶體再切**：一窗最多 500 則（§0-11），幾百則事件在 RAM 裡是幾百 KB 到幾 MB，
+可忽略；而兩趟要保證「數的規則與送的規則是同一段程式」，多一個會漂移的接縫。收齊之後 `tc` 就是 `window.len()`，第二趟那些「數到的比 `tc` 少怎麼辦」的規則全部消失。
 
 ```
-第一趟：堆合併 → 可見性過濾 → 停在 cg_seq 或 limit → 只數（跳過太寬的事件）      → tc
-第二趟：同一段 stream 再消費一次，每 batch 條 send 一個 Batch，r = tc − 已送
+collect_window：堆合併 → ignored／visibility 過濾 → 停在 cg_seq 或 limit；一則自己就比 pack 大 → 跳過（debug_warn），不算進 tc
+build_batches：每 batch 則切一個 Batch；下一則放不進 wbf_data_max_bytes 也切；r = tc − 已送；空窗一個空 Batch   ← 純函數，單元測試
 ```
-
-兩趟**消費同一個** `recent_events(...) -> impl Stream<Item = Pdu>`，停止與過濾規則只有一份，不然 `tc` 遲早對不上第二趟。
-第二趟數到的比 `tc` 少（兩趟之間被 redact 成不可見）→ 最後一個 Batch 的 `r` 夾成 0，串流一定收得到尾；比 `tc` 多的不送。
 
 **門檻**（§0-10）：client 等不到回應會斷線重連再問，server 又數一次，形成迴圈。所以「一窗 320 條的第一趟」必須遠低於 client 的等待時間；
 驗收（§10）量一窗的 first byte，數字寫回這裡。這也是為什麼預設視窗是 320 而不是 10000：一萬條的一窗，first byte 就是數一萬條。
@@ -317,7 +321,8 @@ wire-format §3.3 已經把 kind 按 Matrix 章節占好號。搬一個端點 = 
 | 名額表、`ConnectionSlot`、`take_slot` | `src/service/connections.rs` |
 | 發送 task、`Outgoing`、接收 loop 改入隊、名額拿放 | `src/api/client/wbf/ws.rs` |
 | `PackContext`、`Reply`、`ReplySink`、准入表 `admission`、`Unsupported`／`TooManyConnections` | `src/api/client/wbf/mod.rs` |
-| `Batch` 編碼、兩趟 `recent_events`、`batch` 欄 | `src/api/client/wbf/recent.rs`（`recent_events` 若超過一屏就抽到 `service/rooms/timeline/recent.rs`） |
+| `Batch` 編碼（`build_batches`，純函數）、`collect_window`、`batch` 欄 | `src/api/client/wbf/recent.rs` |
+| `admit` 閘門（`AdmitSession`、`admit_any`），`issue_session`／`refresh_session` 在寫 token 前問它 | `src/service/users/login.rs`；HTTP 呼叫點 `api/client/session/{mod,refresh}.rs` 傳 `admit_any` |
 | kind 表、Error 列、§5 改成「已實作」、§6.1 補名額 | `docs/design/wbf-wire-format.md` |
 | `Batch` 事件格式、水位規則 | `docs/design/room-seq-and-recent.md` §2 |
 | 向量 `recent_batch`、`batch_first`、`batch_last`、`error_unsupported`、`error_too_many_connections` | `src/core/wbf/vectors.rs`、`docs/design/wbf-vectors.json` |

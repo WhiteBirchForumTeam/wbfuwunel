@@ -436,4 +436,83 @@ Log "[4.8c] Refresh with an unknown token -> $(Describe $r)  (expect Error Forbi
 $null = Api Put "/_synapse/admin/v2/users/$([uri]::EscapeDataString('@carol:localhost'))" '{"locked":false}' $tokA
 Stop-Server $p
 
+# ================= Scenario 5: the per-device connection limit (pack-pipeline 2.1) =================
+# wbf_ws_max_connections_per_device = 2 here. A bearer upgrade past the limit is refused with 429 before any upgrade;
+# a Login over the channel past the limit is refused with TooManyConnections and that connection is closed (1008);
+# other devices are not affected; a closed connection gives its place back; logging in again on the same connection
+# as the same device does not take a second place.
+Log '################ Scenario 5: per-device connection limit ################'
+$db5 = "$S\e2e7db-5"; Remove-Item -Recurse -Force $db5 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db5 | Out-Null
+$cfg5 = "$S\e2e7-5.toml"
+@('[global]','server_name = "localhost"',('database_path = "' + ($db5 -replace '\\','/') + '"'),'port = 8015','address = ["127.0.0.1"]',
+  'allow_registration = true','yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse = true','allow_federation = false',
+  'wbf_ws_idle_timeout = 60','wbf_ws_unauthenticated_timeout = 30','wbf_ws_max_connections_per_device = 2','login_rc_per_second = 5','login_rc_burst_count = 40','log = "info"') -join "`n" | Set-Content -Path $cfg5 -Encoding ascii
+$p = Start-Server $cfg5 's5'
+$null = Api Post '/_matrix/client/v3/register' '{"username":"dave","password":"correct-horse-battery","auth":{"type":"m.login.dummy"}}' $null
+function Login-Device-Http($user, $device) {
+  (Api Post '/_matrix/client/v3/login' (@{ type = 'm.login.password'; identifier = @{ type = 'm.id.user'; user = $user }; password = 'correct-horse-battery'; device_id = $device } | ConvertTo-Json -Compress) $null).access_token
+}
+function Login-Device-Pack($user, $device, [uint32]$seq) {
+  Json-Pack 16 1 0 $seq @{ type = 'm.login.password'; identifier = @{ type = 'm.id.user'; user = $user }; password = 'correct-horse-battery'; device_id = $device } @()
+}
+# Opens with a bearer token; reports 'open' or the refusal the upgrade got.
+function Try-Open($tok) {
+  try { $ws = Ws-Open $tok; @{ ws = $ws; result = 'open' } }
+  catch {
+    # .NET wraps the handshake failure in one or two AggregateExceptions; the status code is in the innermost message.
+    $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }
+    @{ ws = $null; result = "refused: $($e.Message)" }
+  }
+}
+$tokPhone = Login-Device-Http 'dave' 'PHONE'
+$tokDesk = Login-Device-Http 'dave' 'DESK'
+
+# [5.1] two bearer upgrades for the same device are fine; the third is refused before the upgrade (429)
+$c1 = Try-Open $tokPhone; $c2 = Try-Open $tokPhone; $c3 = Try-Open $tokPhone
+Log "[5.1a] PHONE upgrades 1,2,3 -> $($c1.result) / $($c2.result) / $($c3.result)  (expect open / open / refused 429)"
+$r1 = Ws-Call $c1.ws $ping; $r2 = Ws-Call $c2.ws $ping
+Log "[5.1b] the two open ones still answer, Ping -> $(Describe $r1) / $(Describe $r2)  (expect Pong / Pong: the old connections were not the ones turned away)"
+
+# [5.2] another device of the same user has its own count
+$d1 = Try-Open $tokDesk
+Log "[5.2] DESK upgrade while PHONE is full -> $($d1.result)  (expect open)"
+
+# [5.3] a Login over the channel as the full device: Error TooManyConnections, then the server closes that connection (1008)
+$anon5 = Ws-Open $null
+Ws-Send $anon5 (Login-Device-Pack 'dave' 'PHONE' 1)
+$errF = Recv-Frame $anon5 5000; $closeF = Recv-Frame $anon5 5000
+$errDesc = if ($errF.kind -eq 'pack') { Describe $errF.pack } else { $errF.kind }
+Log "[5.3a] anonymous connection, Login as PHONE -> $errDesc then $($closeF.kind) code=$($closeF.code)  (expect Error TooManyConnections max_connections=2, then close PolicyViolation)"
+$r1 = Ws-Call $c1.ws $ping
+Log "[5.3b] the refused login did not touch the token or the other connections, Ping -> $(Describe $r1)  (expect Pong)"
+$r = Send-Pack $ping $tokPhone
+Log "[5.3c] PHONE's token over HTTP is not counted and still works -> $(Describe $r)  (expect http=200 Pong)"
+
+# [5.4] closing one gives its place back; a Login on an anonymous connection then succeeds
+try { $c2.ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, 'bye', [Threading.CancellationToken]::None).Wait(3000) | Out-Null } catch {}
+Start-Sleep -Milliseconds 800
+$anon5b = Ws-Open $null
+$r = Ws-Call $anon5b (Login-Device-Pack 'dave' 'PHONE' 1)
+Log "[5.4a] after closing one PHONE connection, Login as PHONE on a fresh connection -> $(Describe $r)  (expect Ack device_id=PHONE)"
+
+# [5.5] logging in again on the same connection as the same device keeps its one place: a further PHONE login is still refused.
+# (Each password login as PHONE replaces PHONE's access token, Matrix semantics, so the old bearer token is not reused here;
+# the count is probed with logins on fresh anonymous connections instead.)
+$r = Ws-Call $anon5b (Login-Device-Pack 'dave' 'PHONE' 2)
+Log "[5.5a] the same connection logs in again as PHONE -> $(Describe $r)  (expect Ack: same device, same place)"
+$anon5c = Ws-Open $null
+Ws-Send $anon5c (Login-Device-Pack 'dave' 'PHONE' 1)
+$errF = Recv-Frame $anon5c 5000; $closeF = Recv-Frame $anon5c 5000
+$errDesc = if ($errF.kind -eq 'pack') { Describe $errF.pack } else { $errF.kind }
+Log "[5.5b] a third PHONE login right after -> $errDesc then $($closeF.kind)  (expect Error TooManyConnections then close: re-login did not take a second place)"
+
+# [5.6] Logout closes the connection and frees the place
+Ws-Send $anon5b (Json-Pack 16 3 0 3 @{} @())
+$ackF = Recv-Frame $anon5b 5000; $closeF = Recv-Frame $anon5b 5000
+Start-Sleep -Milliseconds 800
+$anon5d = Ws-Open $null
+$r = Ws-Call $anon5d (Login-Device-Pack 'dave' 'PHONE' 1)
+Log "[5.6] after Logout ($($ackF.kind) then $($closeF.kind)) on one PHONE connection, a PHONE login -> $(Describe $r)  (expect Ack: the place came back)"
+Stop-Server $p
+
 Log ''; Log 'DONE'
