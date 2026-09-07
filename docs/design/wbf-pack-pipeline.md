@@ -20,9 +20,11 @@
 | 3 | 一條連線就是一個 queue：收到的 pack **依序**處理；Ack 是**真的落地**（DB 交易執行完）才回。 |
 | 4 | `Event/Recent` **不能一包回一萬條**：first byte 會很久，client 會卡在 DB 同步。WS 上要拆成**很多小 pack** 串流回去，新的 pack 格式 `Event/Batch`（§6）。 |
 | 5 | `Recent` 走 HTTP 回 `Error(Unsupported)`。 |
-| 6 | `Batch` 的 meta 是 `{ tc, bc, fs, ls, r }`；**`r = 0` 就是結束**，不用 `IS_LAST`。`tc` 要準（先數再送，§6.3），效能實測再說：常態同步 `tc` 很低，只有久未同步才付那筆延遲。 |
+| 6 | `Batch` 的 meta 是 `{ tc, bc, fs, ls, r }`；**`r = 0` 就是這一窗結束**，不用 `IS_LAST`、不另做結束用的 pack（先想過一個「蓋子」subtype，後定省掉：`tc` 一開始就給了，尾巴不需要第二個信號）。 |
 | 7 | client 在同步中**不能中止**串流，也收不到新訊息（那條連線被佇列佔著）；要就再開一條。這是 client 的事，server 不做取消指令。 |
 | 8 | 這條 checklist 的範圍是**整條 pack 處理流程**，不只上傳下載：登入登出、以及未來每個 HTTP→WS 的新功能都走它。 |
+| 9 | **同步是 client 拉的視窗**（維護者 2026-09-07 晚）：一次 `Recent` 只拿 `limit` 條（例 320 = 32 個 pack × 10 條），server 只數這一窗、`tc` 是這一窗的條數；client 收完一窗再帶 `before` 叫下一窗，一萬條由 client 自己累計。server **不記串流狀態**、不另起 `Continue` subtype：`before` 游標本來就是 continue。節流完全在 client。 |
+| 10 | client 約定：送出 `Recent` 後若一段時間沒收到回應就自己斷線重連（第一窗可以等長一點，例 60 秒，之後例 10 秒）。**server 不做事**，但這給 first byte 立了門檻（§6.3）。 |
 
 ## 1. 模型：一條連線就是一個佇列
 
@@ -181,61 +183,70 @@ enum Outgoing { Pack(Bytes), Close(CloseFrame) }
 
 ## 6. `Event/Recent` 串流與 `Event/Batch`
 
-### 6.1 格式
+### 6.1 一次 `Recent` 是一窗
+
+client 送 `Recent { limit, cg_seq, before?, batch? }`：
+
+| 欄 | 意思 | 預設／上限 |
+|---|---|---|
+| `limit` | **這一窗**最多幾條 | 沒帶 `wbf_recent_default_limit`（320）；上限 `wbf_recent_max_limit`（10000，現有） |
+| `cg_seq` | client 已有的最新 `g_seq`，這窗不會回到它或比它舊 | 沒帶或 0 = 沒有快取 |
+| `before` | 只要比這個舊的（上一窗最後一條的 `ls`） | 沒帶 = 從最新開始 |
+| `batch` | 每個 Batch 幾條 | 預設 `wbf_recent_default_batch`（10）；上限 `wbf_recent_max_batch`（100），超過夾 |
+
+server 在 `(cg_seq, before)` 之間從最新往舊，**只數這一窗**的 `limit` 條（§6.3），然後每 `batch` 條送一個 `Batch`。
+下一窗由 client 帶 `before = 這窗最後一個 Batch 的 ls` 再叫一次 `Recent`；server 不記任何跨請求的狀態，`id` 由 client 決定要不要沿用。
+兩窗之間那條連線是空的，`Ping` 或別的請求可以插進去 —— 這是拉式視窗換來的，也是 §4.3-5「一次一個 handler」不會餓死別人的原因。
+
+### 6.2 `Event/Batch`
 
 **`0x14 Event / 0x03 Batch`**，只有 server → client，是 `Recent` 的回應（`Recent` 不再用 `Ack` 回）。
 
 | 欄位 | 內容 |
 |---|---|
-| header | `IS_RESPONSE = 1`；`id` 抄請求；`seq` 從 0 起嚴格 +1；**沒有 `IS_LAST`**（§0-6） |
-| meta | `{ "tc": 10000, "bc": 10, "fs": 1243, "ls": 1234, "r": 9990 }` |
+| header | `IS_RESPONSE = 1`；`id` 抄請求；`seq` 從 0 起嚴格 +1；沒有 `IS_LAST` |
+| meta | `{ "tc": 320, "bc": 10, "fs": 20000, "ls": 19991, "r": 310 }` |
 | data | `bc` 則事件，每則 **u32 大端長度 ＋ 事件 JSON bytes**，新到舊排（`fs ≥ ls`） |
 
 | meta 欄 | 意思 |
 |---|---|
-| `tc` | total count：這一輪（這個請求）**總共會送**幾條。每個 Batch 都一樣 |
+| `tc` | total count：**這一窗**總共會送幾條（≤ `limit`）。同一窗每個 Batch 都一樣 |
 | `bc` | batch count：這個 Batch 幾條 |
 | `fs` | first g_seq：這批第一條（最新那條）的 `g_seq` |
-| `ls` | last g_seq：這批最後一條（最舊那條）的 `g_seq` |
-| `r` | remain：**這批之後**還剩幾條。`r = 0` → 這輪結束，client 不會再收到這個 `id` 的 Batch |
+| `ls` | last g_seq：這批最後一條（最舊那條）的 `g_seq`；最後一個 Batch 的 `ls` 就是下一窗的 `before` |
+| `r` | remain：這批之後這一窗還剩幾條。**`r = 0` 就是這一窗結束** |
 
-不變量：每個 Batch `tc = 已送 + bc + r`；最後一個 Batch `r = 0`；`tc = 0` 時送一個 `bc = 0, r = 0` 的 Batch（`fs`、`ls` 為 0）。
-事件的 JSON 跟現在一樣（含 `room_id`，`unsigned` 帶 `org.wbftw.wbfuwunel.r_seq`／`g_seq`），見 room-seq-and-recent.md §2。
+不變量：每個 Batch `tc = 已送 + bc + r`；最後一個 `r = 0`；**空窗**（`tc = 0`）送一個 `bc = 0, r = 0, fs = ls = 0` 的 Batch。
+事件 JSON 跟現在一樣（含 `room_id`，`unsigned` 帶 `org.wbftw.wbfuwunel.r_seq`／`g_seq`），見 room-seq-and-recent.md §2。
+一個 Batch 的 data 另受 `wbf_data_max_bytes` 限：放不下第 n 條就提早結束這個 Batch（`bc < batch`），那條進下一個；**單一事件比 pack 還大**照現在跳過並 `debug_warn!`，
+數的那趟也跳過它，`tc` 才對得上。
 
-**為什麼長度前綴不用 JSON 陣列**：client 切事件只看四個 byte，不掃逗號、不先 parse 整段；收一個 Batch 寫一次 DB，同步一條條前進。
-**為什麼不設 `WANT_ACK`**：Batch 是 server 產生的有序串流，順序由 WebSocket 保證，背壓由 §1 的佇列與 TCP 保證。client 不回 Ack，server 不等。
+**為什麼長度前綴不用 JSON 陣列**：client 切事件只看四個 byte，不掃逗號、不先 parse 整段；收一個 Batch 寫一次 DB。
+**為什麼不設 `WANT_ACK`**：Batch 是 server 產生的有序串流，順序由 WebSocket 保證，背壓由 §1 的佇列與 TCP 保證。
+**為什麼沒有結束用的 pack**：`tc` 在第一個 Batch 就告訴 client 這窗有幾條，`r = 0` 是尾；再加一個型別是第二個講同一件事的信號。
 
-### 6.2 `Recent` 請求
+### 6.3 先數再送，但只數一窗
 
-meta 多一個 `batch`：每個 Batch 幾條，預設 `wbf_recent_default_batch`（10）、上限 `wbf_recent_max_batch`（100），超過夾。
-`limit`（總上限，預設與上限 `wbf_recent_max_limit` = 10000）、`cg_seq`、`before` 語意不變。一個 Batch 的 data 另外受 `wbf_data_max_bytes` 限：
-放不下第 n 條就提早結束這個 Batch（`bc < batch`），那條進下一個 Batch；**單一事件比 pack 還大**照現在的做法跳過並 `debug_warn!`，
-而且**數的那趟也跳過它**，不然 `tc` 對不上。
-
-### 6.3 兩趟：先數再送（維護者定 `tc` 要準）
-
-`g_seq` 是全站計數器，跨這個人沒加入的房間，`latest − cg_seq` 是上界不是條數；準確的 `tc` 只能把跨房合併＋可見性過濾走一遍。
+`g_seq` 是全站計數器，跨這個人沒加入的房間，`before − cg_seq` 是上界不是條數，準確的 `tc` 得把跨房合併＋可見性過濾走一遍。
+但一窗只有 `limit` 條，數的那趟跟送的那趟同量級：
 
 ```
-latest = 現在的全站計數（合併前讀，兩趟共用；之後 append 的事件不在這輪，下輪 cg_seq 會涵蓋）
-第一趟：同一個堆合併、同一個可見性過濾、同一個 limit 與 cg_seq 停止條件、同一個「太寬就跳過」規則 —— 只數，不序列化   → tc
-第二趟：再跑一次，每 batch 條 send 一個 Batch，r = tc − 已送
+第一趟：堆合併 → 可見性過濾 → 停在 cg_seq 或 limit → 只數（跳過太寬的事件）      → tc
+第二趟：同一段 stream 再消費一次，每 batch 條 send 一個 Batch，r = tc − 已送
 ```
 
-兩趟的**停止條件與過濾規則是同一段程式**（一個 `recent_events(...) -> impl Stream<Item = Pdu>`，兩趟各消費一次），不然 `tc` 遲早跟第二趟對不上。
-第二趟數到的若比 `tc` 少（中間被 redact 成不可見之類），最後一個 Batch 的 `r` 仍要是 0：`r = max(tc − 已送, 0)`，寧可 `tc` 高估、串流一定收得到尾。
-多出來的（第二趟比 `tc` 多）不送，`limit` 已經夾住。
+兩趟**消費同一個** `recent_events(...) -> impl Stream<Item = Pdu>`，停止與過濾規則只有一份，不然 `tc` 遲早對不上第二趟。
+第二趟數到的比 `tc` 少（兩趟之間被 redact 成不可見）→ 最後一個 Batch 的 `r` 夾成 0，串流一定收得到尾；比 `tc` 多的不送。
 
-**效能**：維護者定「先實測再說」。常態同步 `tc` 個位數到幾十，第一趟可忽略；久未同步一萬條，第一趟讀的 key 第二趟大多命中 RocksDB 快取。
-驗收（§10）要量 first byte 與整輪時間，數字寫回這一節。
+**門檻**（§0-10）：client 等不到回應會斷線重連再問，server 又數一次，形成迴圈。所以「一窗 320 條的第一趟」必須遠低於 client 的等待時間；
+驗收（§10）量一窗的 first byte，數字寫回這裡。這也是為什麼預設視窗是 320 而不是 10000：一萬條的一窗，first byte 就是數一萬條。
 
-### 6.4 client 的水位（寫在這裡是因為 server 的欄位語意決定了它）
+### 6.4 client 的水位（server 欄位語意決定的，寫在這裡）
 
-- 串流走完（`r = 0`）而且沒撞到 `limit`（`tc < limit`）：把 `cg_seq` 存成**第一個 Batch 的 `fs`**——這輪最新的一條；比它新的下輪會來。
-- 撞到 `limit`（`tc == limit`）：**`cg_seq` 不動**，拿最後一個 Batch 的 `ls` 當 `before` 再問一輪；一路問到某輪 `tc < limit` 才推水位。
-  `tc` 剛好等於 `limit` 又剛好沒有更舊的，多問一輪會拿到 `tc = 0`，一個來回的代價，不另加欄位。
-- 串流中途斷線或收到 `Error`：已收到的 Batch 有效；用最後一個 Batch 的 `ls` 當 `before` 續問，不必重來。**不要**在中途推水位：
-  回應是新到舊，第一批之後還有比舊 `cg_seq` 新的事件沒到。
+- 一窗收完（`r = 0`）且 `tc < limit`：這窗已經回到 `cg_seq`，同步結束；把 `cg_seq` 存成**第一窗第一個 Batch 的 `fs`**（這輪最新的一條；比它新的下輪會來）。
+- `tc == limit`：可能還有更舊的，帶 `before = 最後的 ls` 再叫一窗；**水位不動**。剛好沒有更舊的會拿到一個空 Batch，一個來回的代價。
+- 中途斷線或收到 `Error`：已收到的 Batch 有效；從最後一個 `ls` 續問。**不要**在中途推水位：回應是新到舊，第一批之後還有比舊 `cg_seq` 新的。
+- 總數（一萬）是 client 自己累計的；server 每窗只知道自己的 `tc`。
 
 ### 6.5 HTTP
 
@@ -279,18 +290,18 @@ wire-format §3.3 已經把 kind 按 Matrix 章節占好號。搬一個端點 = 
 | `Session/*` 走 HTTP 的錯碼由 `Conflict` 改 `Unsupported` | 錯碼改變；`Unsupported` 是新碼，語意「這個 kind 不走這個傳輸」 |
 
 新錯碼兩個：`Unsupported`、`TooManyConnections`（wire-format §3.2 Error 那列補）。
-新 config 四個：`wbf_ws_max_connections_per_device`（4）、`wbf_ws_send_queue_len`（32）、`wbf_recent_default_batch`（10）、`wbf_recent_max_batch`（100）。
+新 config 五個：`wbf_ws_max_connections_per_device`（4）、`wbf_ws_send_queue_len`（32）、`wbf_recent_default_limit`（320）、`wbf_recent_default_batch`（10）、`wbf_recent_max_batch`（100）。
 
 ## 10. 驗收（e2e7 加情境 5、e2e9 改）
 
 - **名額**：同一 device 開 4 條 WS 都活；第 5 條升級 429 ＋ `Error(TooManyConnections)`；關一條再開就成；另一個 device 不受影響；
   匿名開 5 條都活，第 5 條 `Login` 回 `TooManyConnections` 並被 Close 1008，其他四條的 session 正常。
 - **名額回收**：4 條全關再開 4 條成功（RAII 有放）；一條在上傳中被 server 關機關掉，重啟後名額是 0（表在記憶體，重啟即清）。
-- **串流**：灌 100 條 → `Recent(batch=10)` 收到 10 個 Batch，`tc = 100`、`r` 遞減到 0、`fs`/`ls` 單調遞減、每則事件長度前綴對得上；
-  `batch=1000` 被夾成 100；`limit=30` → `tc = 30`；沒新事件 → 一個 `bc = 0, r = 0`。
-- **first byte**：灌 10000 條，量「送出 `Recent` 到收到第一個 Batch」與「到 `r = 0`」的時間，記進 §6.3。這條是量測不是門檻，數字先看再定門檻。
+- **視窗**：灌 1000 條 → `Recent(limit=320, batch=10)` 收到 32 個 Batch，`tc = 320`、`r` 遞減到 0、`fs`/`ls` 單調遞減、每則長度前綴對得上；
+  帶 `before = 最後的 ls` 再叫兩窗各 320，第四窗 `tc = 40 < 320`；四窗事件不重複不漏、合起來剛好 1000；`batch=1000` 被夾成 100；沒新事件 → 一個 `bc = 0, r = 0` 的 Batch。
+- **first byte**：灌 10000 條，量一窗 320 從送出 `Recent` 到第一個 Batch 的時間，與收完 32 窗的總時間，記進 §6.3。這條是量測不是門檻，數字先看再定門檻。
 - **背壓**：client 送 `Recent` 後停止讀 socket 5 秒，server 的 working set 不隨時間增長（有界佇列擋住了），恢復讀之後串流補完。
-- **順序**：同一連線送 `Recent` 緊接 `Ping`，Pong 在最後一個 Batch **之後**（一次一個 handler）。
+- **順序**：同一連線送 `Recent` 緊接 `Ping`，Pong 在這窗最後一個 Batch **之後**（一次一個 handler）；兩窗之間送 `Ping` 立刻有 Pong。
 - **HTTP**：`Recent`、`Login` 打 `/pack` 都回 `Unsupported`。
 - **關機**：一條連線在收 Batch 中途 `!admin server shutdown`，client 收到的最後一個 frame 是 Close 1001，程序乾淨退出。
 - 第二部分照 review-followups §2.2／2.5／2.8 各自的驗收。
@@ -310,9 +321,9 @@ wire-format §3.3 已經把 kind 按 Matrix 章節占好號。搬一個端點 = 
 
 ## 12. 我不滿意或想再談的
 
-- **`tc` 高估時的尾巴**：§6.3 的 `r = max(tc − 已送, 0)` 保證串流收得到尾，但 client 會看到進度條在 `r > 0` 時突然結束（最後一個 Batch `bc` 小、`r` 直接 0）。
-  發生條件是兩趟之間有事件變不可見，很少；接受。
-- **一條連線一次一個 handler** 讓 `Recent` 一萬條期間那條連線連 `Ping` 都不回。維護者定這是 client 用多連線解的事。若之後 idle timeout 因此誤殺
-  （Batch 一直在送，接收方向卻 300 秒沒東西），要把 idle 的定義改成「兩個方向都沒動」——現在先不改，等實測。
+- **`tc` 高估時的尾巴**：兩趟之間有事件變不可見時，最後一個 Batch `bc` 偏小、`r` 直接 0。一窗只有幾百條、兩趟間隔毫秒級，極少；接受。
+- **一條連線一次一個 handler**：一窗期間那條連線不回 `Ping`；視窗 320 條是幾十毫秒的事，兩窗之間就空了，所以 idle timeout 不會被 Batch 串流誤殺。若之後有別的慢 handler
+  （Seal 大檔）撞到 idle 的定義，再改成「兩個方向都沒動」。
 - **名額表只在記憶體**：多節點部署各自算。這個 fork 單機，先不管。
 - **`Reply` 在 HTTP 上只裝一個 pack** 是用型別擋 handler 的錯，不是功能。將來若真要 HTTP 回多個 pack（body 串接），改 `ReplySink::Http` 一處就好。
+- **視窗大小是 client 選的**：一個 client 硬帶 `limit = 10000` 就把 §6.3 的門檻自己踩回去。`wbf_recent_max_limit` 留 10000 是給腳本與測試的；要不要把上限也壓到幾百，等實測。

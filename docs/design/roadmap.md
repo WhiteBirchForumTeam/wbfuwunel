@@ -95,7 +95,7 @@ Logout 後直接關線；同一條連線重複 Login 允許；**登入限速預�
 
 維護者 2026-09-07 的 checklist：protocol 講了封包與協議，沒講「設計」——一個 pack 從連線進到回應出的整條線，上傳、登入與未來每個 HTTP→WS 都走它。
 定案：client 多連線分工（server 不知道）；每個 (user, device) 最多 4 條 WS，超過踢新的，匿名不算、HTTP 不算；一條連線依序處理、落地才 Ack；
-`Recent` 在 WS 上拆成 `Event/Batch` 串流（meta `{tc, bc, fs, ls, r}`，`r = 0` 結束，`tc` 先數再送、效能實測），HTTP 回 `Unsupported`。
+`Recent` 是 client 拉的視窗（預設 320 條），在 WS 上拆成 `Event/Batch` 串流（meta `{tc, bc, fs, ls, r}`，`tc` 是一窗的條數、`r = 0` 一窗結束），下一窗帶 `before`，HTTP 回 `Unsupported`。
 同支的第二部分是 §2.6 剩下的 `media/upload-lifecycle`（§2.2／2.5／2.8）。
 
 ## 3. 候選（要不要做，由維護者決定）
