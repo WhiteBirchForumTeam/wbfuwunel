@@ -14,9 +14,11 @@ use tuwunel_service::Services;
 use super::TOKEN_LENGTH;
 use crate::{ClientIp, Ruma, router::auth_uiaa};
 
-pub(super) async fn handle_login(
+/// Resolves a one-time login token (the last step of an SSO flow) to its
+/// user. Shared by `POST /login` and the wbf channel's `Login` pack.
+pub(crate) async fn handle_login(
 	services: &Services,
-	_body: &Ruma<Request>,
+	_request: &Request,
 	info: &Token,
 ) -> Result<OwnedUserId> {
 	let Token { token } = info;

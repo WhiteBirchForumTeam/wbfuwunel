@@ -73,14 +73,14 @@ offset  size  欄位          說明
 |---|---|---|---|
 | `0x01 Control` | `0x01 Hello` | `{ "protocol": 1, "client": "…", "features": [...] }` | 無 |
 | | `0x02 Ack` | 各 kind 定的回應內容；`IS_RESPONSE = 1`，`id`、`seq` 抄請求 | 視 kind（`Download/Read` 的回應 data 是讀出的 bytes） |
-| | `0x03 Error` | `{ "code": "…", "message": "…", "expected_seq"?: … }`；code：`UnsupportedVersion` `Corrupt` `UnknownKind` `TooLarge` `Unauthorized` `NotFound` `Conflict` `OutOfOrder` `Internal`；📄 §6.3 提案再加 `Forbidden`（憑證被拒）與 `RateLimited`（`retry_after_ms`） | 無 |
+| | `0x03 Error` | `{ "code": "…", "message": "…", "expected_seq"?: … }`；code：`UnsupportedVersion` `Corrupt` `UnknownKind` `TooLarge` `Unauthorized` `NotFound` `Conflict` `OutOfOrder` `Internal`；§6.3 加 `Forbidden`（憑證被拒）與 `RateLimited`（`retry_after_ms`） | 無 |
 | | `0x04 Ping` / `0x05 Pong` | `{ "nonce": … }` | 無 |
 | `0x02 Stream` | `Open` `Fragment` `Close` `Abandon` | [streaming-messages.md](streaming-messages.md) §4 | 密文本體 |
 | `0x03 Upload` | `Create` `Chunk` `Status` `Seal` `Abort` | [chunked-upload.md](chunked-upload.md) §4 | 塊 bytes（`Chunk`） |
 | `0x04 Download` | `Info` `Read` | [chunked-upload.md](chunked-upload.md) §5 | 回應的 data 是讀出的 bytes |
-| `0x10 Session`（📄 提案，§6.3） | `0x01 Login` | Matrix `/login` 的請求體原樣：`{ "type": "m.login.password" \| "m.login.token", "identifier", "password" \| "token", "device_id"?, "initial_device_display_name"?, "refresh_token"?: bool }`；回應 `{ "user_id", "device_id", "access_token", "refresh_token"?, "expires_in_ms"? }` | 無 |
+| `0x10 Session`（§6.3） | `0x01 Login` | Matrix `/login` 的請求體原樣：`{ "type": "m.login.password" \| "m.login.token", "identifier", "password" \| "token", "device_id"?, "initial_device_display_name"?, "refresh_token"?: bool }`；回應 `{ "user_id", "device_id", "access_token", "refresh_token"?, "expires_in_ms"? }` | 無 |
 | | `0x02 Refresh` | `{ "refresh_token" }`；回應同 `Login` | 無 |
-| | `0x03 Logout` | `{ "all"?: bool }`；回應 `{}`，之後這條連線回到未登入 | 無 |
+| | `0x03 Logout` | `{ "all"?: bool }`；回應 `{}`，緊接 server 送 Close 1000 關線 | 無 |
 | `0x14 Event` | `0x01 Recent` | `{ "limit": 10000, "cg_seq": <g_seq>?, "before": <g_seq>? }`；回應 `{ "returned": n, "latest_g_seq": <g_seq>, "complete": bool, "next": <g_seq> 或 null }` | 回應的 data 是事件的 JSON 陣列（含 `room_id`；每則 `unsigned` 帶 `org.wbftw.wbfuwunel.r_seq` 與 `…g_seq`），見 [room-seq-and-recent.md](room-seq-and-recent.md) §2 |
 | `0x14 Event` | `0x02 Send` | `{ "room_id", "type", "txn_id", "attachments": [mxc…] }`；回應 `{ "event_id" }` | 事件 content 的 JSON（E2EE 就是 `m.room.encrypted` 的 content）。`attachments` 是 server 讀不到密文時唯一的引用來源，見 [media-attachments.md](media-attachments.md) |
 | 其餘 | — | 拒收並回 `Error(UnknownKind)` | |
@@ -98,7 +98,7 @@ offset  size  欄位          說明
 | `0x03` | Upload | 分塊上傳（fork 自己的） |
 | `0x04` | Download | 分塊下載（fork 自己的） |
 | `0x05`–`0x0F` | 保留給 fork 自己的新功能 | |
-| `0x10` | Session | login、logout、refresh、register（`session/`、`register/`）；📄 §6.3 提案先占 `0x01 Login`、`0x02 Refresh`、`0x03 Logout` |
+| `0x10` | Session | login、logout、refresh、register（`session/`、`register/`）；§6.3 已佔 `0x01 Login`、`0x02 Refresh`、`0x03 Logout` |
 | `0x11` | Account | account data、profile、3pid、password（`account/`、`account_data/`、`profile.rs`） |
 | `0x12` | Sync | sync、filter（`sync/`、`filter.rs`） |
 | `0x13` | Room | create、join、leave、invite、kick、ban、alias、directory、space（`room/`、`membership/`、`alias/`、`directory.rs`、`space.rs`） |
@@ -182,7 +182,7 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 一個請求一個 pack；`id` 由 server 在 `Upload/Create` 的回應裡發，之後帶著它。它存在的理由是 curl 就能測；效能不是它的目標。
 `Stream` kind 走 HTTP 沒意義（沒人連著收），回 `Error(Conflict)`。`Session` kind（§6.3）也不走 HTTP pack：它的語意是「換這條連線的 Session」，HTTP 沒有連線可換，回 `Error(Conflict)`；HTTP 登入照舊用 `/login`。
 
-### 6.3 📄 提案：`Login`／`Refresh`／`Logout` —— 在通道上取得與放掉 session
+### 6.3 `Login`／`Refresh`／`Logout` —— 在通道上取得與放掉 session
 
 > 狀態：✅ 維護者 2026-09-07 同意（§6.3.9 的點都已定），實作分支 `wbf/session-login`。起因：維護者 2026-09-06 提出「登入應該有 WS 專用的 pack 格式；升級帶 Bearer 可以留著」。
 > 建在 PR #28 的 `Session` 上（§6.1「連線背後的 session」）：Login 就是**換掉這條連線的 Session**，其餘機制（每個 message 重驗、關機 join）不變。
@@ -200,7 +200,7 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 | subtype | meta（明文） | 成功的 Ack | 失敗 |
 |---|---|---|---|
 | `0x01 Login` | **Matrix `/login` 的請求體原樣**：`type`（`m.login.password` 或 `m.login.token`）、`identifier`、`password` 或 `token`、`device_id`?、`initial_device_display_name`?、`refresh_token`?: bool | `/login` 回應的欄位原樣：`user_id`、`device_id`、`access_token`、`refresh_token`?、`expires_in_ms`? | `Error(Forbidden)`（憑證錯、帳號停用；message 帶 Matrix errcode）、`Error(Unauthorized)`（帳號被鎖 `M_USER_LOCKED`）、`Error(RateLimited)` |
-| `0x02 Refresh` | `{ "refresh_token" }` | 同 Login | `Error(Unauthorized)`（refresh token 不認、已用過、硬登出）、`Error(RateLimited)` |
+| `0x02 Refresh` | `{ "refresh_token" }` | 同 Login | `Error(Unauthorized)`（到期、重放、帳號被鎖；帶 Matrix 的 `soft_logout` 旗標）、`Error(Forbidden)`（格式錯或不認得）、`Error(RateLimited)` |
 | `0x03 Logout` | `{ "all"?: bool }`（`all` = 撤這個 user 的全部 device，對應 `/logout/all`） | `{}`，緊接 Close `1000` 關線 | `Error(Unauthorized)`（這條連線本來就沒登入） |
 
 **不自己發明欄位**：meta 直接餵給既有的 login／refresh／logout 邏輯，client 不用學第二套；server 端要做的是把 `login_route` 的本體（驗證 → 發 token → 建或更新 device）
@@ -243,6 +243,9 @@ HTTP `/login` 現在**沒有**限速（只有 OIDC 端點有 `oidc_rc_per_second
 - 預設值（維護者 2026-09-07 同意）：`login_rc_per_second = 1`、`login_rc_burst_count = 10`，**預設開**。OIDC 那組預設 0（關）是「保留開放存取」；
   登入不同：一個人手打密碼打不到這個速度，NAT 後面十個人同時登入也剛好夠。
 - 超過回 `Error(RateLimited)`，meta 多 `retry_after_ms`；HTTP 側回 429 `M_LIMIT_EXCEEDED`（Matrix 既有）。
+- **限速先於憑證檢查**：洪水不該還花一次 DB 查找。所以 bucket 空時，鎖定帳號的 Login 也回 `RateLimited` 而不是 `M_USER_LOCKED`。
+- ⚠️ **限速的 key 是 client IP，它的效力前提是那個 IP 可信**（review，rumia／salvia）。沒設 `ip_source` 時 `ClientIp` 先讀 `X-Forwarded-For` 等 header 才退回 socket 位址，攻擊者每次換 header 就拿到一個新 bucket。
+  **部署須知**：直接向公網的伺服器要設 `ip_source`（`rightmost` 加受信代理 subnet），或者確定反向代理覆寫 XFF。這是 OIDC 限速既有的前提，登入限速預設開、所以要講明。
 - 🚫 不做「連錯 N 次鎖帳號」：那是讓攻擊者能鎖住別人帳號的 DoS 入口。
 
 #### 6.3.5 `Hello`

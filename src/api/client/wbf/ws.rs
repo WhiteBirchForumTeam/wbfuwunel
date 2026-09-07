@@ -1,8 +1,15 @@
 //! `GET /_wbf/v1/ws`: the WebSocket channel, one pack per binary message.
 //!
-//! The connection is authenticated at the upgrade and again before every
-//! pack (`revalidate`): a token that was logged out, revoked, expired or
+//! A connection may be upgraded with a bearer token (then it is that session
+//! from the start) or without one (then it has `wbf_ws_unauthenticated_timeout`
+//! seconds to `Login`, and until it does only `Hello`, `Ping`, `Login` and
+//! `Refresh` are answered). A logged-in session is checked again before every
+//! message (`revalidate`): a token that was logged out, revoked, expired or
 //! whose account was locked stops working at the next message, not never.
+//! `Login` and `Refresh` replace the connection's session; `Logout` ends it
+//! and the connection is closed. See `docs/design/wbf-wire-format.md` §6.1
+//! and §6.3.
+//!
 //! Each binary message is decoded and handed to the same `handle_pack` the
 //! HTTP transport uses, and its reply goes back as one binary message. Many
 //! uploads may interleave on one connection; the pack header's `id` tells
@@ -21,26 +28,28 @@
 //! could disagree with the row after an idempotent resend or a chunk sent
 //! over another transport, and refuse chunks the row would take.)
 
-use std::time::Duration;
+use std::{net::IpAddr, time::Duration};
 
 use axum::{
 	extract::{
 		State,
 		ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
 	},
-	http::{HeaderMap, StatusCode},
+	http::{HeaderMap, StatusCode, header},
 	response::Response,
 };
 use futures::{SinkExt, StreamExt};
+use tokio::time::Instant;
 use tuwunel_core::{
 	debug,
 	wbf::{HEADER_LEN, PackError, decode},
 };
 
 use super::{
-	Session, authenticate, error_pack, handle_pack, header_id_seq, pack_error_code, pack_response,
-	revalidate,
+	Session, SessionChange, Transport, authenticate, error_pack, handle_pack, header_id_seq,
+	pack_error_code, pack_response, revalidate,
 };
+use crate::ClientIp;
 
 /// Bytes a pack carries besides its header, meta and data: `meta_len`,
 /// `meta_crc`, `data_len`, `data_crc` (4 each, 16 in all), doubled to leave
@@ -49,11 +58,14 @@ const FRAME_SLACK: usize = 2 * 4 * 4;
 
 /// # `GET /_wbf/v1/ws`
 ///
-/// Bearer token at the upgrade, as for every other client endpoint; a bad
-/// token answers 401 with an `Error` pack in the body, before any upgrade.
+/// With a bearer token the connection is that session from the upgrade on; a
+/// bad token answers 401 with an `Error` pack in the body, before any
+/// upgrade. Without an `Authorization` header the connection is upgraded
+/// unauthenticated and has to `Login` within `wbf_ws_unauthenticated_timeout`.
 /// A server that is shutting down answers 503 the same way.
 pub(crate) async fn ws_route(
 	State(services): State<crate::State>,
+	ClientIp(client): ClientIp,
 	headers: HeaderMap,
 	upgrade: WebSocketUpgrade,
 ) -> Response {
@@ -64,12 +76,18 @@ pub(crate) async fn ws_route(
 		return pack_response(StatusCode::SERVICE_UNAVAILABLE, reply);
 	}
 
-	let session = match authenticate(&services, &headers).await {
-		| Ok(session) => session,
-		| Err(error) => {
-			let reply = error_pack(0, 0, "Unauthorized", &error.to_string());
-			return pack_response(StatusCode::UNAUTHORIZED, reply);
-		},
+	// A header that is there must be right; only its absence means "log in
+	// over the channel". A wrong token is refused, not downgraded.
+	let session = if headers.contains_key(header::AUTHORIZATION) {
+		match authenticate(&services, &headers).await {
+			| Ok(session) => Some(session),
+			| Err(error) => {
+				let reply = error_pack(0, 0, "Unauthorized", &error.to_string());
+				return pack_response(StatusCode::UNAUTHORIZED, reply);
+			},
+		}
+	} else {
+		None
 	};
 
 	// One pack is at most the configured meta and data plus the frame around
@@ -93,7 +111,7 @@ pub(crate) async fn ws_route(
 			// socket is then dropped, which closes it.
 			if !services
 				.connections
-				.spawn(serve(services, session, socket))
+				.spawn(serve(services, client, session, socket))
 			{
 				debug!("wbf WebSocket refused: server is shutting down");
 			}
@@ -101,18 +119,23 @@ pub(crate) async fn ws_route(
 }
 
 /// Runs one connection to its end: read a message, check the session, answer
-/// the message, repeat.
+/// the message, apply what the answer did to the session, repeat.
 ///
 /// Messages are handled one at a time in arrival order, which is what keeps
 /// the ordered kinds ordered; a client that wants more in flight sends more
 /// without waiting for acks, and gets the acks back in the same order. The
 /// loop ends when the client closes, when the connection stays silent for
-/// `wbf_ws_idle_timeout`, when the session no longer checks out, or when the
-/// server starts shutting down.
-async fn serve(services: crate::State, session: Session, socket: WebSocket) {
+/// `wbf_ws_idle_timeout`, when an unauthenticated connection has not logged
+/// in by `wbf_ws_unauthenticated_timeout` after the upgrade, when the session
+/// no longer checks out, when the client logs out, or when the server starts
+/// shutting down.
+async fn serve(services: crate::State, client: IpAddr, session: Option<Session>, socket: WebSocket) {
 	let idle_timeout = Duration::from_secs(services.config.wbf_ws_idle_timeout);
+	// Counted from the upgrade, not from the last message: a connection that
+	// pings but never logs in still goes at the deadline.
+	let login_deadline = Instant::now() + Duration::from_secs(services.config.wbf_ws_unauthenticated_timeout);
 	let server = services.server.clone();
-	let user = &session.user;
+	let mut session = session;
 	let (mut sink, mut stream) = socket.split();
 
 	// One subscription for the life of the connection, polled from every
@@ -126,12 +149,18 @@ async fn serve(services: crate::State, session: Session, socket: WebSocket) {
 				| Ok(Some(message)) => message,
 				| Ok(None) => break,
 				| Err(_elapsed) => {
-					debug!(%user, "wbf WebSocket connection idle; closing");
+					debug!(user = user_label(session.as_ref()), "wbf WebSocket connection idle; closing");
 					break;
 				},
 			},
+			() = tokio::time::sleep_until(login_deadline), if session.is_none() => {
+				debug!("wbf WebSocket connection did not log in in time; closing");
+				let frame = CloseFrame { code: close_code::POLICY, reason: "not logged in in time".into() };
+				let _closing = sink.send(Message::Close(Some(frame))).await;
+				break;
+			},
 			() = &mut shutdown => {
-				debug!(%user, "wbf WebSocket connection closing: server shutting down");
+				debug!(user = user_label(session.as_ref()), "wbf WebSocket connection closing: server shutting down");
 				// 1001 (going away) rather than 1012 (service restart): the
 				// former is in RFC 6455 itself and every client library
 				// accepts it; .NET's ClientWebSocket, for one, treats 1012 as
@@ -156,14 +185,17 @@ async fn serve(services: crate::State, session: Session, socket: WebSocket) {
 			},
 		};
 
-		// The token was good at the upgrade; is it still? Asked before the
-		// bytes are even decoded, so a session that is gone cannot keep the
-		// connection alive by sending malformed packs either. One point read
-		// per message, the same order of cost as the message itself. Not
-		// cached by time: a cache would be one more copy of the truth that
-		// can go stale.
-		if let Err(error) = revalidate(&services, &session).await {
-			debug!(%user, ?error, "wbf WebSocket session no longer valid; closing");
+		// The token was good when this session began; is it still? Asked
+		// before the bytes are even decoded, so a session that is gone cannot
+		// keep the connection alive by sending malformed packs either. One
+		// point read per message, the same order of cost as the message
+		// itself. Not cached by time: a cache would be one more copy of the
+		// truth that can go stale. An unauthenticated connection has nothing
+		// to check; the kind whitelist in `handle_pack` is its whole guard.
+		if let Some(current) = &session
+			&& let Err(error) = revalidate(&services, current).await
+		{
+			debug!(user = %current.user, ?error, "wbf WebSocket session no longer valid; closing");
 			// Header fields read without any CRC check: they only address the
 			// refusal, they decide nothing.
 			let (id, seq) = header_id_seq(&bytes);
@@ -190,12 +222,30 @@ async fn serve(services: crate::State, session: Session, socket: WebSocket) {
 			},
 		};
 
-		let reply = handle_pack(&services, user, view).await;
-		if sink.send(Message::Binary(reply.into())).await.is_err() {
+		let handled = handle_pack(&services, session.as_ref(), client, Transport::WebSocket, view).await;
+		if sink.send(Message::Binary(handled.reply.into())).await.is_err() {
 			break;
+		}
+
+		match handled.change {
+			| SessionChange::Keep => {},
+			| SessionChange::Replace(new_session) => session = Some(new_session),
+			| SessionChange::Close => {
+				// Logged out: the maintainer chose to close rather than fall
+				// back to unauthenticated; a client switching accounts opens
+				// a new connection (or logs in again without logging out).
+				let frame = CloseFrame { code: close_code::NORMAL, reason: "logged out".into() };
+				let _closing = sink.send(Message::Close(Some(frame))).await;
+				break;
+			},
 		}
 	}
 
 	let _closed = sink.close().await;
-	debug!(%user, "wbf WebSocket connection closed");
+	debug!(user = user_label(session.as_ref()), "wbf WebSocket connection closed");
+}
+
+/// Who a connection is, for its log lines.
+fn user_label(session: Option<&Session>) -> &str {
+	session.map_or("(not logged in)", |session| session.user.as_str())
 }

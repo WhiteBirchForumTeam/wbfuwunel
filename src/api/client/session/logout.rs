@@ -1,5 +1,4 @@
 use axum::extract::State;
-use futures::StreamExt;
 use ruma::api::client::session::{logout, logout_all};
 use tuwunel_core::Result;
 
@@ -22,7 +21,7 @@ pub(crate) async fn logout_route(
 ) -> Result<logout::v3::Response> {
 	services
 		.users
-		.remove_device(body.sender_user(), body.sender_device()?)
+		.end_session(body.sender_user(), body.sender_device()?, false)
 		.await;
 
 	Ok(logout::v3::Response::new())
@@ -33,8 +32,8 @@ pub(crate) async fn logout_route(
 /// Log out all devices of this user.
 ///
 /// - Invalidates all access tokens
-/// - Deletes all device metadata (device id, device display name, last seen ip,
-///   last seen ts)
+/// - Deletes all device metadata (device id, device display name, last seen
+///   ip, last seen ts)
 /// - Forgets all to-device events
 /// - Triggers device list updates
 ///
@@ -49,12 +48,7 @@ pub(crate) async fn logout_all_route(
 ) -> Result<logout_all::v3::Response> {
 	services
 		.users
-		.all_device_ids(body.sender_user())
-		.for_each(|device_id| {
-			services
-				.users
-				.remove_device(body.sender_user(), device_id)
-		})
+		.end_session(body.sender_user(), body.sender_device()?, true)
 		.await;
 
 	Ok(logout_all::v3::Response::new())

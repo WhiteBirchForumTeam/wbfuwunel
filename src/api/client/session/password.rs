@@ -10,11 +10,13 @@ use tuwunel_core::{Err, Result, debug_error, err, utils::hash};
 use tuwunel_service::Services;
 
 use super::ldap_login;
-use crate::Ruma;
 
-pub(super) async fn handle_login(
+/// Resolves a password login to the user it names and checks the password.
+/// Shared by `POST /login` and the wbf channel's `Login` pack; `request` is
+/// only read for the error's log line.
+pub(crate) async fn handle_login(
 	services: &Services,
-	body: &Ruma<Request>,
+	request: &Request,
 	info: &Password,
 ) -> Result<OwnedUserId> {
 	#[expect(deprecated)]
@@ -30,7 +32,7 @@ pub(super) async fn handle_login(
 		UserId::parse_with_server_name(user, &services.config.server_name)
 	} else {
 		return Err!(Request(Unknown(debug_warn!(
-			?body.login_info,
+			?request.login_info,
 			"Valid identifier or username was not provided (invalid or unsupported login type?)"
 		))));
 	}

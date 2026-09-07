@@ -6,6 +6,8 @@
 //! semantics. Neither transport looks inside `data`; the only meta the server
 //! reads is the plaintext meta of kinds it has to act on.
 
+use std::net::IpAddr;
+
 use axum::{
 	body::Bytes,
 	extract::State,
@@ -28,9 +30,11 @@ use tuwunel_service::{
 
 mod recent;
 mod send;
+mod session;
 mod ws;
 
 pub(crate) use self::ws::ws_route;
+use crate::ClientIp;
 
 /// `Control` subtypes.
 mod control {
@@ -69,6 +73,7 @@ mod event {
 /// undecodable request still answers with a pack, so a client has one parser.
 pub(crate) async fn pack_route(
 	State(services): State<crate::State>,
+	ClientIp(client): ClientIp,
 	headers: HeaderMap,
 	body: Bytes,
 ) -> Result<Response> {
@@ -82,7 +87,10 @@ pub(crate) async fn pack_route(
 
 	let mut body = body.to_vec();
 	let reply = match decode(&mut body) {
-		| Ok(view) => handle_pack(&services, &session.user, view).await,
+		| Ok(view) =>
+			handle_pack(&services, Some(&session), client, Transport::Http, view)
+				.await
+				.reply,
 		| Err(error) => {
 			debug!(?error, "Rejected pack");
 			// Only a data CRC failure leaves the header trustworthy (the meta
@@ -100,9 +108,9 @@ pub(crate) async fn pack_route(
 
 /// What a bearer token resolved to, kept so a long-lived connection can ask
 /// again later whether it is still good (`revalidate`).
-pub(super) struct Session {
-	pub(super) user: OwnedUserId,
-	pub(super) device: OwnedDeviceId,
+pub(crate) struct Session {
+	pub(crate) user: OwnedUserId,
+	pub(crate) device: OwnedDeviceId,
 	token: String,
 }
 
@@ -156,37 +164,90 @@ fn unknown_token(soft_logout: bool, message: &'static str) -> Error {
 	)
 }
 
-/// Dispatches one decoded pack to its handler and returns the reply pack.
+/// Which transport a pack arrived on. `Session` packs change a connection's
+/// session, so they only make sense where there is a connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Transport {
+	Http,
+	WebSocket,
+}
+
+/// What a handled pack does to the connection's session, besides replying.
+pub(crate) enum SessionChange {
+	/// Nothing: the usual case.
+	Keep,
+	/// `Login` or `Refresh` succeeded: the connection is this session from now on.
+	Replace(Session),
+	/// `Logout` succeeded: the caller closes the connection after the reply.
+	Close,
+}
+
+/// A handled pack: the reply to send and the session change to apply.
+pub(crate) struct Handled {
+	pub(crate) reply: Vec<u8>,
+	pub(crate) change: SessionChange,
+}
+
+impl Handled {
+	fn reply(reply: Vec<u8>) -> Self { Self { reply, change: SessionChange::Keep } }
+}
+
+/// Dispatches one decoded pack to its handler.
 ///
-/// Both transports call this. `Stream` has no meaning on HTTP and no
-/// implementation yet on either; it answers `Conflict`.
-pub(crate) async fn handle_pack(services: &Services, user: &UserId, view: PackView<'_>) -> Vec<u8> {
+/// Both transports call this. Without a session only `Hello`, `Ping`, `Login`
+/// and `Refresh` are answered; everything else is `Unauthorized`. `Stream`
+/// has no meaning on HTTP and no implementation yet on either, and `Session`
+/// has no meaning on HTTP; both answer `Conflict` there.
+pub(crate) async fn handle_pack(
+	services: &Services,
+	session: Option<&Session>,
+	client: IpAddr,
+	transport: Transport,
+	view: PackView<'_>,
+) -> Handled {
 	let header = view.header;
 	let limits_ok = view.meta.len() <= services.config.wbf_meta_max_bytes
 		&& view.data.len() <= services.config.wbf_data_max_bytes;
 	if !limits_ok {
-		return error_pack(header.id, header.seq, "TooLarge", "meta or data exceeds the configured limit");
+		return Handled::reply(error_pack(header.id, header.seq, "TooLarge", "meta or data exceeds the configured limit"));
 	}
 
 	let result = match (header.kind, header.subtype) {
-		| (Kind::Control, control::HELLO) => Ok(hello(services, &view)),
-		| (Kind::Control, control::PING) => Ok(pong(&view)),
-		| (Kind::Upload, upload::CREATE) => handle_upload_create(services, user, &view).await,
-		| (Kind::Upload, upload::CHUNK) => handle_upload_chunk(services, user, &view).await,
-		| (Kind::Upload, upload::STATUS) => handle_upload_status(services, user, &view).await,
-		| (Kind::Upload, upload::SEAL) => handle_upload_seal(services, user, &view).await,
-		| (Kind::Upload, upload::ABORT) => handle_upload_abort(services, user, &view).await,
-		| (Kind::Download, download::INFO) => handle_download_info(services, &view).await,
-		| (Kind::Download, download::READ) => handle_download_read(services, &view).await,
-		| (Kind::Event, event::RECENT) => recent::handle_event_recent(services, user, &view).await,
-		| (Kind::Event, event::SEND) => send::handle_event_send(services, user, &view).await,
-		| (Kind::Stream, _) => Err(Reject::code("Conflict", "streams need the WebSocket channel")),
-		| _ => Err(Reject::code("UnknownKind", "no handler for this kind and subtype")),
+		| (Kind::Control, control::HELLO) => Ok(Handled::reply(hello(services, &view))),
+		| (Kind::Control, control::PING) => Ok(Handled::reply(pong(&view))),
+		| (Kind::Session, _) if transport == Transport::Http => Err(Reject::code(
+			"Conflict",
+			"Session packs change a connection's session and need the WebSocket channel; over HTTP use /login",
+		)),
+		| (Kind::Session, subtype) => session::handle(services, session, client, subtype, &view).await,
+		| _ => match session {
+			| None => Err(Reject::code("Unauthorized", "log in first: this connection has no session")),
+			| Some(session) => handle_authenticated_pack(services, &session.user, &view)
+				.await
+				.map(Handled::reply),
+		},
 	};
 
 	match result {
-		| Ok(reply) => reply,
-		| Err(reject) => reject.into_pack(header.id, header.seq),
+		| Ok(handled) => handled,
+		| Err(reject) => Handled::reply(reject.into_pack(header.id, header.seq)),
+	}
+}
+
+/// The kinds that need a logged-in user.
+async fn handle_authenticated_pack(services: &Services, user: &UserId, view: &PackView<'_>) -> Result<Vec<u8>, Reject> {
+	match (view.header.kind, view.header.subtype) {
+		| (Kind::Upload, upload::CREATE) => handle_upload_create(services, user, view).await,
+		| (Kind::Upload, upload::CHUNK) => handle_upload_chunk(services, user, view).await,
+		| (Kind::Upload, upload::STATUS) => handle_upload_status(services, user, view).await,
+		| (Kind::Upload, upload::SEAL) => handle_upload_seal(services, user, view).await,
+		| (Kind::Upload, upload::ABORT) => handle_upload_abort(services, user, view).await,
+		| (Kind::Download, download::INFO) => handle_download_info(services, view).await,
+		| (Kind::Download, download::READ) => handle_download_read(services, view).await,
+		| (Kind::Event, event::RECENT) => recent::handle_event_recent(services, user, view).await,
+		| (Kind::Event, event::SEND) => send::handle_event_send(services, user, view).await,
+		| (Kind::Stream, _) => Err(Reject::code("Conflict", "streams need the WebSocket channel")),
+		| _ => Err(Reject::code("UnknownKind", "no handler for this kind and subtype")),
 	}
 }
 
@@ -439,7 +500,7 @@ fn hello(services: &Services, view: &PackView<'_>) -> Vec<u8> {
 			"server": services.globals.server_name(),
 			"engine": tuwunel_core::version::name(),
 			"engine_version": tuwunel_core::version::version(),
-			"features": ["upload", "download", "recent", "seq", "attachments"],
+			"features": ["upload", "download", "recent", "seq", "attachments", "login"],
 			"chunk_size_default": services.config.media_chunk_size_default,
 			"chunk_size_large": services.config.media_chunk_size_large,
 			"data_max_bytes": services.config.wbf_data_max_bytes,

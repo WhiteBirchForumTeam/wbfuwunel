@@ -18,6 +18,7 @@ pub mod math;
 pub mod mutex_map;
 pub mod option;
 pub mod rand;
+pub mod rate_limit;
 pub mod result;
 pub mod secret;
 pub mod set;

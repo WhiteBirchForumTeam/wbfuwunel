@@ -4,29 +4,25 @@ pub mod sessions;
 pub mod token_response;
 pub mod user_info;
 
-use std::{
-	collections::HashMap,
-	net::IpAddr,
-	sync::{Arc, Mutex},
-	time::Instant,
-};
+use std::{net::IpAddr, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as b64encode};
 use futures::{Stream, StreamExt, TryStreamExt};
-use http::StatusCode;
 use reqwest::{
 	Method,
 	header::{ACCEPT, CONTENT_TYPE},
 };
-use ruma::{
-	UserId,
-	api::error::{ErrorKind, LimitExceededErrorData},
-};
+use ruma::UserId;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use tuwunel_core::{
-	Err, Error, Result, err, implement,
-	utils::{hash::sha256, result::LogErr, stream::ReadyExt},
+	Err, Result, err, implement,
+	utils::{
+		hash::sha256,
+		rate_limit::{IpTokenBuckets, limit_exceeded},
+		result::LogErr,
+		stream::ReadyExt,
+	},
 	warn,
 };
 use url::Url;
@@ -41,16 +37,13 @@ pub use self::{
 };
 use crate::{SelfServices, client::read_response_capped};
 
-/// Per-client-IP token-bucket table: last-refill instant and remaining tokens.
-type Ratelimiter = Mutex<HashMap<IpAddr, (Instant, f64)>>;
-
 pub struct Service {
 	services: SelfServices,
 	pub providers: Arc<Providers>,
 	pub sessions: Arc<Sessions>,
 	pub server: Option<Arc<Server>>,
-	ratelimiter: Ratelimiter,
-	device_ratelimiter: Ratelimiter,
+	ratelimiter: IpTokenBuckets,
+	device_ratelimiter: IpTokenBuckets,
 }
 
 impl crate::Service for Service {
@@ -64,8 +57,8 @@ impl crate::Service for Service {
 			sessions,
 			providers,
 			server,
-			ratelimiter: Mutex::new(HashMap::new()),
-			device_ratelimiter: Mutex::new(HashMap::new()),
+			ratelimiter: IpTokenBuckets::new(),
+			device_ratelimiter: IpTokenBuckets::new(),
 		}))
 	}
 
@@ -79,9 +72,6 @@ pub fn get_server(&self) -> Result<&Server> {
 		.as_deref()
 		.ok_or_else(|| err!(Request(Unrecognized("OIDC server not configured"))))
 }
-
-/// Cap on the rate-limit table; fully refilled buckets are pruned past it.
-const RATELIMIT_MAP_CAP: usize = 1 << 16;
 
 /// Always-on throttle for the RFC 8628 device user-code endpoints. The
 /// `user_code` is low-entropy by design (§6.1), so §5.1 requires bounding
@@ -98,58 +88,18 @@ pub fn check_rate_limit(&self, client: IpAddr) -> Result {
 	let rate = f64::from(config.oidc_rc_per_second);
 	let burst = f64::from(config.oidc_rc_burst_count);
 
-	if rate <= 0.0 || burst <= 0.0 {
-		return Ok(());
-	}
-
-	check_bucket(&self.ratelimiter, client, rate, burst)
+	self.ratelimiter
+		.take(client, rate, burst)
+		.map_err(|retry_after| limit_exceeded("Too many OIDC requests.", retry_after))
 }
 
 /// Always-on anti-brute-force throttle for the device user-code endpoints
 /// (RFC 8628 §5.1), independent of the optional `oidc_rc_*` knobs.
 #[implement(Service)]
 pub fn check_device_rate_limit(&self, client: IpAddr) -> Result {
-	check_bucket(&self.device_ratelimiter, client, DEVICE_RC_PER_SECOND, DEVICE_RC_BURST)
-}
-
-fn check_bucket(table: &Ratelimiter, client: IpAddr, rate: f64, burst: f64) -> Result {
-	let now = Instant::now();
-	let mut buckets = table.lock()?;
-
-	// A fully refilled bucket equals an absent one; prune those past the cap so
-	// a source-address spray cannot grow the table without bound.
-	if buckets.len() >= RATELIMIT_MAP_CAP {
-		buckets.retain(|_, bucket| {
-			let (last, toks) = *bucket;
-			now.duration_since(last)
-				.as_secs_f64()
-				.mul_add(rate, toks)
-				< burst
-		});
-	}
-
-	let (last_time, tokens) = buckets
-		.entry(client)
-		.or_insert_with(|| (now, burst));
-
-	let new_tokens = now
-		.duration_since(*last_time)
-		.as_secs_f64()
-		.mul_add(rate, *tokens)
-		.min(burst);
-
-	if new_tokens < 1.0 {
-		return Err(Error::Request(
-			ErrorKind::LimitExceeded(LimitExceededErrorData { retry_after: None }),
-			"Too many OIDC requests.".into(),
-			StatusCode::TOO_MANY_REQUESTS,
-		));
-	}
-
-	*last_time = now;
-	*tokens = new_tokens - 1.0;
-
-	Ok(())
+	self.device_ratelimiter
+		.take(client, DEVICE_RC_PER_SECOND, DEVICE_RC_BURST)
+		.map_err(|retry_after| limit_exceeded("Too many OIDC requests.", retry_after))
 }
 
 /// Remove all session state for a user. For debug and developer use only;
