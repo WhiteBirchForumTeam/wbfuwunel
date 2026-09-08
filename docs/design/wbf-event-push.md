@@ -68,7 +68,10 @@ registry（純記憶體，`Services.channels`）
    └─ join(user, room)             → channels::follow(user, room)：by_user[user] 裡 account_wide 的訂閱者加進 channels[room]
 ```
 
-- **`Subscribe`**：點名的房逐一 `is_joined`，是成員才進 channel，不是的列進 Ack 的 `skipped`；沒點名 = 掃 `userroomid_joined` 全部進、標 `account_wide`。同一訂閱者進同一 channel 兩次是 HashSet 的 no-op。
+- **`Subscribe`**：點名的房逐一 `is_joined`，是成員才進 channel，不是的列進 Ack 的 `skipped`；沒點名 = 帳號層：掃 `userroomid_joined` 的前綴 `(user, *)`（`Recent` 每次掃的同一張表，
+  幾十到幾百個房，一次前綴讀），每個房把這個訂閱者放進 `channels[room]`，並標 `account_wide`——這個旗標只做一件事：之後這個帳號 join 新房時，join hook 把它加進新房的 channel。
+  **順序：先登記 `subscribers`／`by_user`（含 `account_wide`），再掃表加 channel。** 反過來的話，掃到一半發生的 join 其 hook 找不到這個訂閱者就漏了；先登記則最多重複加一次，HashSet 的 no-op。
+  同一訂閱者進同一 channel 兩次永遠是 no-op。
 - **`Unsubscribe`**：從點名的 channel 拿掉，不在裡面就 no-op；沒點名 = 全退並拿掉 `account_wide`。
 - **on disconnect**：`Subscription` 是 RAII（跟 `ConnectionSlot` 同形），drop 就把這個訂閱者從它在的每個 channel、`by_user`、`subscribers` 拿掉；不靠 loop 記得。
 - **真相在哪**：誰能收的真相是 DB 的成員表；channel 是它的記憶體投影，靠接點 2 保持一致。漂移只可能來自漏接 hook 的新 join／leave 路徑，而那只有 `state_cache` 一組；重啟就清空，安全方向是「少推」，`Recent` 補得回來。
