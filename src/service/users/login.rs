@@ -22,7 +22,7 @@ use tuwunel_core::{
 	},
 };
 
-use super::device::{RefreshToken, generate_refresh_token};
+use super::device::{RefreshToken, generate_refresh_token, resolve_device_id};
 
 /// What a successful login hands the client: the fields of the Matrix
 /// `/login` response that name the session.
@@ -62,6 +62,16 @@ pub fn check_login_rate(&self, client: IpAddr) -> Result {
 		.map_err(|retry_after| limit_exceeded("Too many login attempts from this address.", retry_after))
 }
 
+/// The caller's last word on whether a session may be issued to this user
+/// on this device, asked once the device is known and before any token is
+/// written. An `Err` refuses the login with no token minted or replaced, so
+/// the device's existing sessions are untouched. The wbf channel uses it for
+/// its per-device connection limit; HTTP passes `admit_any`.
+pub type AdmitSession<'a> = &'a mut (dyn FnMut(&UserId, &DeviceId) -> Result + Send);
+
+/// The gate that refuses nobody, for callers without a connection to count.
+pub fn admit_any(_user_id: &UserId, _device_id: &DeviceId) -> Result { Ok(()) }
+
 /// Gives an authenticated user a session on a device: a new access token
 /// (and refresh token when asked), on the named device if the user has it
 /// or on a newly created one otherwise. The caller has already checked the
@@ -73,8 +83,11 @@ pub fn check_login_rate(&self, client: IpAddr) -> Result {
 ///     initial_device_display_name: example: Some("wbf desktop")
 ///     want_refresh_token: the request's `refresh_token: true`
 ///     client_ip: recorded as the new device's last seen address
+///     admit: asked with the final (user, device) before any token is
+///         written, example: `&mut admit_any`
 /// Return:
-///     Result<IssuedSession>  Err 401 `M_USER_LOCKED` for a locked account.
+///     Result<IssuedSession>  Err 401 `M_USER_LOCKED` for a locked account;
+///     `admit`'s own Err, unchanged, when it refuses.
 #[implement(super::Service)]
 pub async fn issue_session(
 	&self,
@@ -83,26 +96,40 @@ pub async fn issue_session(
 	initial_device_display_name: Option<&str>,
 	want_refresh_token: bool,
 	client_ip: Option<IpAddr>,
+	admit: AdmitSession<'_>,
 ) -> Result<IssuedSession> {
 	self.locked_check(user_id).await?;
+
+	let existing_device = match device_id {
+		| Some(device_id)
+			if self
+				.all_device_ids(user_id)
+				.ready_any(|known| known == device_id)
+				.await =>
+			Some(device_id.to_owned()),
+		| _ => None,
+	};
+	// A device the user does not have yet is created under the id the client
+	// asked for, or a fresh one (`resolve_device_id`, the same choice
+	// `create_device` makes); either way that is the device the session will
+	// be on, so that is what the gate is asked about.
+	let final_device_id: OwnedDeviceId = existing_device
+		.clone()
+		.unwrap_or_else(|| resolve_device_id(device_id));
+	admit(user_id, &final_device_id)?;
 
 	let (access_token, expires_in) = self.generate_access_token(want_refresh_token);
 	let refresh_token = expires_in.is_some().then(generate_refresh_token);
 
-	let device_id = if let Some(device_id) = device_id
-		&& self
-			.all_device_ids(user_id)
-			.ready_any(|known| known == device_id)
-			.await
-	{
-		self.set_access_token(user_id, device_id, &access_token, expires_in, refresh_token.as_deref())
+	let device_id = if existing_device.is_some() {
+		self.set_access_token(user_id, &final_device_id, &access_token, expires_in, refresh_token.as_deref())
 			.await?;
 
-		device_id.to_owned()
+		final_device_id
 	} else {
 		self.create_device(
 			user_id,
-			device_id,
+			Some(&final_device_id),
 			(Some(&access_token), expires_in),
 			refresh_token.as_deref(),
 			initial_device_display_name,
@@ -127,14 +154,18 @@ pub async fn issue_session(
 ///
 /// Args:
 ///     presented: the client's refresh token, example: "refresh_..."
+///     admit: asked with the token's (user, device) before anything is
+///         rotated or written, example: `&mut admit_any`
 /// Return:
 ///     Result<RefreshedSession>  Err 403 for a malformed or unknown token;
 ///     Err 401 `M_UNKNOWN_TOKEN` for an expired one or a replay after
 ///     rotation (the device is removed when the configuration says so);
 ///     Err 401 `M_USER_LOCKED` for a locked account, which may not mint
-///     tokens either (review of PR #30: the old `/refresh` skipped this).
+///     tokens either (review of PR #30: the old `/refresh` skipped this);
+///     `admit`'s own Err, unchanged, when it refuses (the presented token
+///     is then still current and usable elsewhere).
 #[implement(super::Service)]
-pub async fn refresh_session(&self, presented: &str) -> Result<RefreshedSession> {
+pub async fn refresh_session(&self, presented: &str, admit: AdmitSession<'_>) -> Result<RefreshedSession> {
 	if !presented.starts_with("refresh_") {
 		return Err!(Request(Forbidden("Refresh token is malformed.")));
 	}
@@ -158,6 +189,7 @@ pub async fn refresh_session(&self, presented: &str) -> Result<RefreshedSession>
 			}
 
 			self.locked_check(&user_id).await?;
+			admit(&user_id, &device_id)?;
 
 			let refresh_token = Some(generate_refresh_token());
 			let (access_token, expires_in) = self.generate_access_token(true);
@@ -173,6 +205,7 @@ pub async fn refresh_session(&self, presented: &str) -> Result<RefreshedSession>
 			// Benign double-submit: re-issue an access token for the unchanged
 			// refresh token rather than rotating it.
 			self.locked_check(&user_id).await?;
+			admit(&user_id, &device_id)?;
 
 			let (access_token, expires_in) = self.generate_access_token(true);
 			self.set_access_token(&user_id, &device_id, &access_token, expires_in, None)

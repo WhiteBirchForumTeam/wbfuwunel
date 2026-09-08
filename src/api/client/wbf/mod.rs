@@ -1,30 +1,38 @@
-//! The wbf pack endpoints: one pack in, one pack out.
+//! The wbf pack endpoints and the line a pack travels from a transport to
+//! its handler and back (`docs/design/wbf-pack-pipeline.md`).
 //!
-//! `POST /_wbf/v1/pack` is the HTTP transport, one pack per request.
-//! `GET /_wbf/v1/ws` (`ws.rs`) is the WebSocket channel, one pack per binary
-//! message; it calls the same `handle_pack`, so there is one set of
-//! semantics. Neither transport looks inside `data`; the only meta the server
-//! reads is the plaintext meta of kinds it has to act on.
+//! `POST /_wbf/v1/pack` is the HTTP transport, one pack per request, meant for
+//! debugging and scripts. `GET /_wbf/v1/ws` (`ws.rs`) is the WebSocket channel
+//! and the main road. Both call the same `handle_pack`, so there is one set of
+//! semantics; the differences between them are held in exactly two places:
+//! the admission table (`admission`: which kinds a transport, or a connection
+//! that has not logged in, may use at all) and `Reply` (where a handler's
+//! packs go). Handlers see neither.
+//!
+//! Neither transport looks inside `data`; the only meta the server reads is
+//! the plaintext meta of kinds it has to act on.
 
 use std::net::IpAddr;
 
 use axum::{
 	body::Bytes,
-	extract::State,
+	extract::{State, ws::CloseFrame},
 	http::{HeaderMap, StatusCode, header},
 	response::{IntoResponse, Response},
 };
 use ruma::{
-	Mxc, OwnedDeviceId, OwnedUserId, UserId,
+	DeviceId, Mxc, OwnedDeviceId, OwnedUserId, UserId,
 	api::error::{ErrorKind, UnknownTokenErrorData},
 };
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 use tuwunel_core::{
-	Error, Result, debug, err,
+	Error, Result, debug, err, error,
 	wbf::{EncryptedFileInfo, Flags, Kind, PackBuilder, PackError, PackView, decode},
 };
 use tuwunel_service::{
 	Services,
+	connections::ConnectionSlot,
 	media::{UploadError, UploadRequest},
 };
 
@@ -64,6 +72,8 @@ mod download {
 mod event {
 	pub(super) const RECENT: u8 = 0x01;
 	pub(super) const SEND: u8 = 0x02;
+	/// Server to client only: one slice of a `Recent` window.
+	pub(super) const BATCH: u8 = 0x03;
 }
 
 /// # `POST /_wbf/v1/pack`
@@ -71,6 +81,8 @@ mod event {
 /// Body is one pack; response body is one pack. The access token comes as a
 /// bearer header like every other client endpoint. An unauthenticated or
 /// undecodable request still answers with a pack, so a client has one parser.
+/// Kinds whose reply is a stream, or that change a connection's session, are
+/// not admitted here and answer `Error(Unsupported)`.
 pub(crate) async fn pack_route(
 	State(services): State<crate::State>,
 	ClientIp(client): ClientIp,
@@ -87,10 +99,21 @@ pub(crate) async fn pack_route(
 
 	let mut body = body.to_vec();
 	let reply = match decode(&mut body) {
-		| Ok(view) =>
-			handle_pack(&services, Some(&session), client, Transport::Http, view)
-				.await
-				.reply,
+		| Ok(view) => {
+			let (id, seq) = (view.header.id, view.header.seq);
+			let ctx = PackContext { session: Some(&session), client, transport: Transport::Http };
+			let mut reply = Reply::for_http();
+			// The session change is dropped: no kind admitted on HTTP makes one.
+			match handle_pack(&services, &ctx, view, &mut reply).await {
+				| Ok(_change) => reply
+					.into_http_pack()
+					.unwrap_or_else(|| error_pack(id, seq, "Internal", "the handler produced no reply")),
+				| Err(failure) => {
+					error!(?failure, "wbf handler misbehaved on the HTTP transport");
+					error_pack(id, seq, "Internal", "the handler could not reply on this transport")
+				},
+			}
+		},
 		| Err(error) => {
 			debug!(?error, "Rejected pack");
 			// Only a data CRC failure leaves the header trustworthy (the meta
@@ -107,16 +130,93 @@ pub(crate) async fn pack_route(
 }
 
 /// What a bearer token resolved to, kept so a long-lived connection can ask
-/// again later whether it is still good (`revalidate`).
+/// again later whether it is still good (`revalidate`), and the connection's
+/// place in its device's connection count while it is this session.
 pub(crate) struct Session {
 	pub(crate) user: OwnedUserId,
 	pub(crate) device: OwnedDeviceId,
 	token: String,
+	/// `Some` on a counted WebSocket connection; `None` on HTTP, when the
+	/// limit is off, or for a session made only to compare (`revalidate`).
+	slot: Option<ConnectionSlot>,
+}
+
+impl Session {
+	/// A session with no place in any connection count: HTTP, or a session made
+	/// only to compare against.
+	fn new(user: OwnedUserId, device: OwnedDeviceId, token: String) -> Self { Self { user, device, token, slot: None } }
+
+	/// A session on a counted WebSocket connection; `slot` is what
+	/// `reserve_connection_slot` gave for it.
+	fn with_slot(user: OwnedUserId, device: OwnedDeviceId, token: String, slot: Option<ConnectionSlot>) -> Self {
+		Self { user, device, token, slot }
+	}
+
+	/// Whether `other` is the same user on the same device: the unit the
+	/// connection limit counts.
+	fn is_same_device(&self, other: &Self) -> bool { self.user == other.user && self.device == other.device }
+
+	/// Whether this session is `user` on `device`.
+	fn is_device(&self, user: &UserId, device: &DeviceId) -> bool { self.user == user && self.device == device }
+
+	/// Carries the connection's place in the count over from the session it
+	/// replaces, when that session was the same device and this one took no
+	/// place of its own (`take_connection_slot` left it to be inherited).
+	pub(crate) fn inherit_slot(&mut self, previous: &mut Self) {
+		if self.slot.is_none()
+			&& previous
+				.slot
+				.as_ref()
+				.is_some_and(|slot| slot.is_for(&self.user, &self.device))
+		{
+			self.slot = previous.slot.take();
+		}
+	}
+}
+
+/// Reserves a place in `device`'s connection count for a connection that is
+/// about to be `user` on `device`, where the transport counts connections
+/// (only WebSocket does). Called before any token is minted, so a refusal
+/// leaves the device's existing sessions exactly as they were.
+///
+/// Args:
+///     current: the connection's session so far, example: None on a fresh
+///         upgrade; Some(bob's session) when bob logs in again on the same
+///         connection (then no second place is taken: the new session
+///         inherits the old one's, see `Session::inherit_slot`)
+///     user, device: who the connection is about to be
+/// Return:
+///     Result<Option<ConnectionSlot>, Reject>  Ok(None) when nothing is
+///     counted (HTTP, limit off, or inherited); Ok(Some) the place to keep
+///     for the connection's life; Err(TooManyConnections) when the device is
+///     at `wbf_ws_max_connections_per_device`, and the caller closes the
+///     connection.
+fn reserve_connection_slot(
+	services: &Services,
+	transport: Transport,
+	current: Option<&Session>,
+	user: &UserId,
+	device: &DeviceId,
+) -> Result<Option<ConnectionSlot>, Reject> {
+	if transport != Transport::WebSocket {
+		return Ok(None);
+	}
+	if current.is_some_and(|current| current.is_device(user, device) && current.slot.is_some()) {
+		return Ok(None);
+	}
+
+	let max = services.config.wbf_ws_max_connections_per_device;
+	services
+		.connections
+		.take_slot(user, device, max)
+		.ok_or_else(|| Reject::too_many_connections(max))
 }
 
 /// Resolves the bearer header to a session, failing closed on anything else:
 /// no header, unknown or expired token, or a locked account (MSC3939, the
-/// same check every standard client route runs).
+/// same check every standard client route runs). The session holds no
+/// connection slot yet; a WebSocket reserves one with
+/// `reserve_connection_slot` before upgrading.
 async fn authenticate(services: &Services, headers: &HeaderMap) -> Result<Session> {
 	let token = headers
 		.get(header::AUTHORIZATION)
@@ -133,7 +233,7 @@ async fn authenticate(services: &Services, headers: &HeaderMap) -> Result<Sessio
 /// connection's authority at the next message instead of never.
 pub(super) async fn revalidate(services: &Services, session: &Session) -> Result {
 	let current = check_token(services, &session.token).await?;
-	if current.user != session.user || current.device != session.device {
+	if !current.is_same_device(session) {
 		return Err(unknown_token(false, "Access token now belongs to another session."));
 	}
 
@@ -153,7 +253,7 @@ async fn check_token(services: &Services, token: &str) -> Result<Session> {
 
 	services.users.locked_check(&user).await?;
 
-	Ok(Session { user, device, token: token.to_owned() })
+	Ok(Session::new(user, device, token.to_owned()))
 }
 
 fn unknown_token(soft_logout: bool, message: &'static str) -> Error {
@@ -164,12 +264,46 @@ fn unknown_token(soft_logout: bool, message: &'static str) -> Error {
 	)
 }
 
-/// Which transport a pack arrived on. `Session` packs change a connection's
-/// session, so they only make sense where there is a connection.
+/// Which transport a pack arrived on. Read by the admission table and by
+/// `Session::take_connection_slot`; no handler reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Transport {
 	Http,
 	WebSocket,
+}
+
+/// Who a pack is from and how it arrived: everything a handler may know about
+/// the connection.
+pub(crate) struct PackContext<'a> {
+	/// `None` only for a WebSocket that has not logged in; the admission table
+	/// lets such a connection reach only the handlers that expect it.
+	pub(crate) session: Option<&'a Session>,
+	/// The peer address, for throttles and the device's last-seen ip.
+	pub(crate) client: IpAddr,
+	pub(crate) transport: Transport,
+}
+
+impl PackContext<'_> {
+	/// Return:
+	///     Result<&UserId, Reject>  Unauthorized when the connection has no
+	///     session. Handlers that need a user call this instead of unwrapping:
+	///     the admission table already refused anonymous packs to them, and
+	///     this is the check that does not trust the table alone.
+	fn user(&self) -> Result<&UserId, Reject> {
+		self.session
+			.map(|session| session.user.as_ref())
+			.ok_or_else(|| Reject::code("Unauthorized", "log in first: this connection has no session"))
+	}
+}
+
+/// Why a connection is closed after a pack was handled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloseReason {
+	/// `Logout` succeeded: 1000, the client asked for it.
+	LoggedOut,
+	/// The pack was refused in a way that ends the connection (`Login` on a
+	/// device at its connection limit): 1008.
+	Refused,
 }
 
 /// What a handled pack does to the connection's session, besides replying.
@@ -178,64 +312,224 @@ pub(crate) enum SessionChange {
 	Keep,
 	/// `Login` or `Refresh` succeeded: the connection is this session from now on.
 	Replace(Session),
-	/// `Logout` succeeded: the caller closes the connection after the reply.
-	Close,
+	/// The caller closes the connection after the replies already queued.
+	Close(CloseReason),
 }
 
-/// A handled pack: the reply to send and the session change to apply.
-pub(crate) struct Handled {
-	pub(crate) reply: Vec<u8>,
-	pub(crate) change: SessionChange,
+/// Something queued for a WebSocket connection's send task: a pack, or the
+/// close frame that ends the connection after everything queued before it.
+pub(crate) enum Outgoing {
+	Pack(Vec<u8>),
+	Close(CloseFrame),
 }
 
-impl Handled {
-	fn reply(reply: Vec<u8>) -> Self { Self { reply, change: SessionChange::Keep } }
-}
-
-/// Dispatches one decoded pack to its handler.
+/// Where a handler's packs go: the only way a handler sends anything.
 ///
-/// Both transports call this. Without a session only `Hello`, `Ping`, `Login`
-/// and `Refresh` are answered; everything else is `Unauthorized`. `Stream`
-/// has no meaning on HTTP and no implementation yet on either, and `Session`
-/// has no meaning on HTTP; both answer `Conflict` there.
+/// On a WebSocket every pack joins the connection's bounded send queue, and
+/// `send` waits when the queue is full (that wait is the backpressure a slow
+/// reader exerts on the handler). On HTTP the reply is the one response body,
+/// so a second pack is refused: a handler that streams must not be admitted
+/// on HTTP, and this is what catches it if the admission table is wrong.
+pub(crate) struct Reply {
+	sink: ReplySink,
+}
+
+enum ReplySink {
+	WebSocket(mpsc::Sender<Outgoing>),
+	/// `Some` once the one pack has been sent.
+	Http(Option<Vec<u8>>),
+}
+
+/// Why `Reply::send` could not take a pack. Neither is the client's fault,
+/// so neither becomes an `Error` pack to it.
+#[derive(Debug)]
+pub(crate) enum ReplyError {
+	/// The connection's send task is gone (the peer closed); the handler stops.
+	ConnectionGone,
+	/// A second pack on the HTTP transport: a handler that streams was
+	/// admitted where it must not be.
+	HttpSinglePack,
+}
+
+impl Reply {
+	pub(crate) fn for_websocket(queue: mpsc::Sender<Outgoing>) -> Self { Self { sink: ReplySink::WebSocket(queue) } }
+
+	fn for_http() -> Self { Self { sink: ReplySink::Http(None) } }
+
+	/// Args:
+	///     pack: one finished pack, example: the Ack for a Chunk
+	/// Return:
+	///     Result<(), ReplyError>  Ok once queued (WebSocket) or held (HTTP).
+	pub(crate) async fn send(&mut self, pack: Vec<u8>) -> Result<(), ReplyError> {
+		match &mut self.sink {
+			| ReplySink::WebSocket(queue) => queue
+				.send(Outgoing::Pack(pack))
+				.await
+				.map_err(|_| ReplyError::ConnectionGone),
+			| ReplySink::Http(held) => {
+				if held.is_some() {
+					return Err(ReplyError::HttpSinglePack);
+				}
+				*held = Some(pack);
+				Ok(())
+			},
+		}
+	}
+
+	/// Return:
+	///     Option<Vec<u8>>  the one pack an HTTP handler sent; None when it
+	///     sent nothing (a handler bug) or this is a WebSocket reply.
+	fn into_http_pack(self) -> Option<Vec<u8>> {
+		match self.sink {
+			| ReplySink::Http(held) => held,
+			| ReplySink::WebSocket(_) => None,
+		}
+	}
+}
+
+/// Where a `(kind, subtype)` may come from. Anything not in the table is not
+/// handled at all (`UnknownKind`): the table is the whole list of what this
+/// server speaks, and a new kind is admitted by adding its row here first.
+struct Admission {
+	/// A WebSocket that has not logged in may send it.
+	anonymous_ok: bool,
+	/// It may come over `POST /_wbf/v1/pack`. Off for kinds whose reply is a
+	/// stream and for kinds that change a connection's session.
+	http_ok: bool,
+}
+
+/// Args:
+///     kind: example: Kind::Event
+///     subtype: example: event::RECENT
+/// Return:
+///     Option<Admission>  None for a pair this server does not handle.
+const fn admission(kind: Kind, subtype: u8) -> Option<Admission> {
+	let logged_in_any_transport = Admission { anonymous_ok: false, http_ok: true };
+	let logged_in_websocket_only = Admission { anonymous_ok: false, http_ok: false };
+	let anyone_websocket_only = Admission { anonymous_ok: true, http_ok: false };
+	let anyone_any_transport = Admission { anonymous_ok: true, http_ok: true };
+
+	match (kind, subtype) {
+		| (Kind::Control, control::HELLO | control::PING) => Some(anyone_any_transport),
+		| (Kind::Session, session::LOGIN | session::REFRESH) => Some(anyone_websocket_only),
+		| (Kind::Session, session::LOGOUT) => Some(logged_in_websocket_only),
+		| (Kind::Upload, upload::CREATE | upload::CHUNK | upload::STATUS | upload::SEAL | upload::ABORT) =>
+			Some(logged_in_any_transport),
+		| (Kind::Download, download::INFO | download::READ) => Some(logged_in_any_transport),
+		| (Kind::Event, event::SEND) => Some(logged_in_any_transport),
+		// Its reply is a stream of `Batch` packs: WebSocket only.
+		| (Kind::Event, event::RECENT) => Some(logged_in_websocket_only),
+		| _ => None,
+	}
+}
+
+/// Why a pack could not be handled to completion: the client's request was
+/// refused (an `Error` pack goes back), or the reply could not be sent.
+#[derive(Debug)]
+pub(crate) enum Failure {
+	Reject(Reject),
+	Reply(ReplyError),
+}
+
+impl From<Reject> for Failure {
+	fn from(reject: Reject) -> Self { Self::Reject(reject) }
+}
+
+impl From<ReplyError> for Failure {
+	fn from(error: ReplyError) -> Self { Self::Reply(error) }
+}
+
+impl From<UploadError> for Failure {
+	fn from(error: UploadError) -> Self { Self::Reject(error.into()) }
+}
+
+impl From<Error> for Failure {
+	fn from(error: Error) -> Self { Self::Reject(error.into()) }
+}
+
+impl From<PackError> for Failure {
+	fn from(error: PackError) -> Self { Self::Reject(error.into()) }
+}
+
+/// Runs one decoded pack through the last gates (size, admission) and its
+/// handler, sending every reply through `reply`.
+///
+/// Args:
+///     ctx: who sent it and how
+///     view: the decoded pack
+///     reply: where its replies go
+/// Return:
+///     Result<SessionChange, ReplyError>  what the connection does next;
+///     Err only when a reply could not be sent, which ends the connection.
 pub(crate) async fn handle_pack(
 	services: &Services,
-	session: Option<&Session>,
-	client: IpAddr,
-	transport: Transport,
+	ctx: &PackContext<'_>,
 	view: PackView<'_>,
-) -> Handled {
+	reply: &mut Reply,
+) -> Result<SessionChange, ReplyError> {
+	let (id, seq) = (view.header.id, view.header.seq);
+	match dispatch(services, ctx, &view, reply).await {
+		| Ok(change) => Ok(change),
+		| Err(Failure::Reply(error)) => Err(error),
+		| Err(Failure::Reject(reject)) => {
+			let closes_connection = reject.closes_connection;
+			reply.send(reject.into_pack(id, seq)).await?;
+			Ok(if closes_connection { SessionChange::Close(CloseReason::Refused) } else { SessionChange::Keep })
+		},
+	}
+}
+
+async fn dispatch(
+	services: &Services,
+	ctx: &PackContext<'_>,
+	view: &PackView<'_>,
+	reply: &mut Reply,
+) -> Result<SessionChange, Failure> {
 	let header = view.header;
 	let limits_ok = view.meta.len() <= services.config.wbf_meta_max_bytes
 		&& view.data.len() <= services.config.wbf_data_max_bytes;
 	if !limits_ok {
-		return Handled::reply(error_pack(header.id, header.seq, "TooLarge", "meta or data exceeds the configured limit"));
+		return Err(Reject::code("TooLarge", "meta or data exceeds the configured limit").into());
 	}
 
-	let result = match (header.kind, header.subtype) {
-		| (Kind::Control, control::HELLO) => Ok(Handled::reply(hello(services, &view))),
-		| (Kind::Control, control::PING) => Ok(Handled::reply(pong(&view))),
-		| (Kind::Session, _) if transport == Transport::Http => Err(Reject::code(
-			"Conflict",
-			"Session packs change a connection's session and need the WebSocket channel; over HTTP use /login",
-		)),
-		| (Kind::Session, subtype) => session::handle(services, session, client, subtype, &view).await,
-		| _ => match session {
-			| None => Err(Reject::code("Unauthorized", "log in first: this connection has no session")),
-			| Some(session) => handle_authenticated_pack(services, &session.user, &view)
-				.await
-				.map(Handled::reply),
-		},
+	let Some(admission) = admission(header.kind, header.subtype) else {
+		return Err(Reject::code("UnknownKind", "no handler for this kind and subtype").into());
 	};
+	if ctx.transport == Transport::Http && !admission.http_ok {
+		return Err(Reject::code(
+			"Unsupported",
+			"this kind is only served over the WebSocket channel; POST /_wbf/v1/pack is for one-pack requests",
+		)
+		.into());
+	}
+	if ctx.session.is_none() && !admission.anonymous_ok {
+		return Err(Reject::code("Unauthorized", "log in first: this connection has no session").into());
+	}
 
-	match result {
-		| Ok(handled) => handled,
-		| Err(reject) => Handled::reply(reject.into_pack(header.id, header.seq)),
+	match (header.kind, header.subtype) {
+		| (Kind::Control, control::HELLO) => {
+			reply.send(hello(services, view)).await?;
+			Ok(SessionChange::Keep)
+		},
+		| (Kind::Control, control::PING) => {
+			reply.send(pong(view)).await?;
+			Ok(SessionChange::Keep)
+		},
+		| (Kind::Session, subtype) => session::handle(services, ctx, subtype, view, reply).await,
+		| (Kind::Event, event::RECENT) => {
+			recent::handle_event_recent(services, ctx.user()?, view, reply).await?;
+			Ok(SessionChange::Keep)
+		},
+		| _ => {
+			let pack = handle_one_reply(services, ctx.user()?, view).await?;
+			reply.send(pack).await?;
+			Ok(SessionChange::Keep)
+		},
 	}
 }
 
-/// The kinds that need a logged-in user.
-async fn handle_authenticated_pack(services: &Services, user: &UserId, view: &PackView<'_>) -> Result<Vec<u8>, Reject> {
+/// The kinds whose reply is exactly one pack; the dispatcher sends it.
+async fn handle_one_reply(services: &Services, user: &UserId, view: &PackView<'_>) -> Result<Vec<u8>, Reject> {
 	match (view.header.kind, view.header.subtype) {
 		| (Kind::Upload, upload::CREATE) => handle_upload_create(services, user, view).await,
 		| (Kind::Upload, upload::CHUNK) => handle_upload_chunk(services, user, view).await,
@@ -244,26 +538,44 @@ async fn handle_authenticated_pack(services: &Services, user: &UserId, view: &Pa
 		| (Kind::Upload, upload::ABORT) => handle_upload_abort(services, user, view).await,
 		| (Kind::Download, download::INFO) => handle_download_info(services, view).await,
 		| (Kind::Download, download::READ) => handle_download_read(services, view).await,
-		| (Kind::Event, event::RECENT) => recent::handle_event_recent(services, user, view).await,
 		| (Kind::Event, event::SEND) => send::handle_event_send(services, user, view).await,
-		| (Kind::Stream, _) => Err(Reject::code("Conflict", "streams need the WebSocket channel")),
+		// Admitted by the table but not routed here: the table and this match
+		// disagree, which is a bug, but it fails closed.
 		| _ => Err(Reject::code("UnknownKind", "no handler for this kind and subtype")),
 	}
 }
 
 /// A refused request, in the vocabulary of the wire format's error codes.
-struct Reject {
+#[derive(Debug)]
+pub(crate) struct Reject {
 	code: &'static str,
 	message: String,
 	extra: Value,
+	/// The connection is closed (1008) after this error is sent.
+	closes_connection: bool,
 }
 
 impl Reject {
 	fn code(code: &'static str, message: impl Into<String>) -> Self {
-		Self { code, message: message.into(), extra: Value::Null }
+		Self { code, message: message.into(), extra: Value::Null, closes_connection: false }
 	}
 
-	fn into_pack(self, id: u64, seq: u32) -> Vec<u8> {
+	fn with_extra(code: &'static str, message: impl Into<String>, extra: Value) -> Self {
+		Self { code, message: message.into(), extra, closes_connection: false }
+	}
+
+	/// The device already holds `max` connections; this one is turned away
+	/// and, on a WebSocket, closed.
+	fn too_many_connections(max: u32) -> Self {
+		Self {
+			code: "TooManyConnections",
+			message: format!("this device already holds {max} wbf connections; close one before opening another"),
+			extra: json!({ "max_connections": max }),
+			closes_connection: true,
+		}
+	}
+
+	pub(crate) fn into_pack(self, id: u64, seq: u32) -> Vec<u8> {
 		let mut meta = json!({ "code": self.code, "message": self.message });
 		if let (Value::Object(target), Value::Object(extra)) = (&mut meta, self.extra) {
 			target.extend(extra);
@@ -282,24 +594,21 @@ impl From<UploadError> for Reject {
 			| UploadError::NotFound => Self::code("NotFound", "no such upload"),
 			| UploadError::Conflict(message) => Self::code("Conflict", message),
 			| UploadError::TooLarge(message) => Self::code("TooLarge", message),
-			| UploadError::Truncated(stored) => Self {
-				code: "Truncated",
-				message: format!(
+			| UploadError::Truncated(stored) => Self::with_extra(
+				"Truncated",
+				format!(
 					"upload hit the size limit after {} chunks, {} bytes; it is finished as incomplete and may be sealed",
 					stored.received_count, stored.total_len
 				),
-				extra: json!({
+				json!({
 					"received": stored.received_count,
 					"total_len": stored.total_len,
 					"finished": stored.finished,
 					"truncated": stored.truncated,
 				}),
-			},
-			| UploadError::OutOfOrder { expected } => Self {
-				code: "OutOfOrder",
-				message: format!("expected chunk {expected}"),
-				extra: json!({ "expected_seq": expected }),
-			},
+			),
+			| UploadError::OutOfOrder { expected } =>
+				Self::with_extra("OutOfOrder", format!("expected chunk {expected}"), json!({ "expected_seq": expected })),
 			| UploadError::Internal(error) => Self::code("Internal", error.to_string()),
 		}
 	}
@@ -500,7 +809,12 @@ fn hello(services: &Services, view: &PackView<'_>) -> Vec<u8> {
 			"server": services.globals.server_name(),
 			"engine": tuwunel_core::version::name(),
 			"engine_version": tuwunel_core::version::version(),
-			"features": ["upload", "download", "recent", "seq", "attachments", "login"],
+			"features": ["upload", "download", "recent", "batch", "seq", "attachments", "login"],
+			"recent_default_limit": services.config.wbf_recent_default_limit,
+			"recent_max_limit": services.config.wbf_recent_max_limit,
+			"recent_default_batch": services.config.wbf_recent_default_batch,
+			"recent_max_batch": services.config.wbf_recent_max_batch,
+			"max_connections_per_device": services.config.wbf_ws_max_connections_per_device,
 			"chunk_size_default": services.config.media_chunk_size_default,
 			"chunk_size_large": services.config.media_chunk_size_large,
 			"data_max_bytes": services.config.wbf_data_max_bytes,

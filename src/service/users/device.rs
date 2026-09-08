@@ -65,7 +65,7 @@ pub async fn create_device(
 	Ok(device_id)
 }
 
-fn resolve_device_id(device_id: Option<&DeviceId>) -> OwnedDeviceId {
+pub(super) fn resolve_device_id(device_id: Option<&DeviceId>) -> OwnedDeviceId {
 	// Treat an empty device_id ("") as unspecified.
 	device_id
 		.filter(|device_id| !device_id.as_str().is_empty())

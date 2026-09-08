@@ -20,16 +20,57 @@ function Room-Messages($room, $tok, $dir = 'b', $limit = 100) {
 function Get-Event($room, $eid, $tok) {
   Api Get "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($room))/event/$([uri]::EscapeDataString($eid))" $null $tok
 }
-function Recent-Ws($ws, [uint32]$seq, $limit, $after, $before) {
-  $meta = @{}; if ($null -ne $limit) { $meta.limit = $limit }; if ($null -ne $after) { $meta.cg_seq = $after }; if ($null -ne $before) { $meta.before = $before }
-  $p = Ws-Call $ws (Json-Pack 0x14 1 0 $seq $meta $null)
-  $p.events = if ($p.data.Length -gt 0) { [Text.Encoding]::UTF8.GetString([byte[]]$p.data) | ConvertFrom-Json } else { @() }
-  $p
+# Ws-Recv with a deadline: a server that never answers fails the run instead of hanging it. A close frame throws too.
+function Ws-Recv-Bounded($ws, [int]$ms) {
+  $stream = New-Object System.IO.MemoryStream; $buf = New-Object byte[] 262144
+  do {
+    $t = $ws.ReceiveAsync([ArraySegment[byte]]$buf, [Threading.CancellationToken]::None)
+    if (-not $t.Wait($ms)) { throw "no WebSocket frame within $ms ms (state=$($ws.State))" }
+    $r = $t.Result
+    if ($r.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close) { throw "server closed the connection: $($r.CloseStatus) $($r.CloseStatusDescription)" }
+    $stream.Write($buf, 0, $r.Count)
+  } while (-not $r.EndOfMessage)
+  $p = Read-Pack ($stream.ToArray()); $p.http = 'ws'; $p
 }
-function Recent-Http($tok, [uint32]$seq, $limit, $after, $before) {
+# Splits a Batch's data (u32 big-endian length + JSON, repeated) into events.
+function Batch-Events([byte[]]$data) {
+  $events = @(); $at = 0
+  while ($at + 4 -le $data.Length) {
+    $len = [int](RdBE32 $data $at); $at += 4
+    $events += ,([Text.Encoding]::UTF8.GetString($data, $at, $len) | ConvertFrom-Json); $at += $len
+  }
+  if ($at -ne $data.Length) { throw "Batch data has $($data.Length - $at) trailing bytes" }
+  $events
+}
+# One Recent window over WS: sends the request with `id` = $id and collects Batch packs until r = 0
+# (pipeline 6.1). Returns the last pack, plus:
+#   .events   every event of the window, newest first
+#   .batches  the Batch packs in order
+#   .meta     the last Batch's meta (tc, bc, fs, ls, r) plus, derived the way a client would:
+#             returned = tc; complete = (tc < limit asked); next = ls of the last batch when not complete, else $null
+# An Error pack ends the collection at once and comes back as-is (subtype 3, .events empty).
+function Recent-Ws($ws, [uint32]$id, $limit, $after, $before, $batch) {
+  $meta = @{}; if ($null -ne $limit) { $meta.limit = $limit }; if ($null -ne $after) { $meta.cg_seq = $after }; if ($null -ne $before) { $meta.before = $before }; if ($null -ne $batch) { $meta.batch = $batch }
+  Ws-Send $ws (Json-Pack 0x14 1 $id 0 $meta $null)
+  $batches = @(); $events = @()
+  do {
+    $p = Ws-Recv-Bounded $ws 15000
+    if ($p.subtype -ne 3 -or $p.kind -ne 0x14) { $p.events = @(); $p.batches = @(); return $p }
+    $batches += ,$p
+    $events += @(Batch-Events ([byte[]]$p.data))
+  } while ($p.meta.r -ne 0)
+  $askedLimit = if ($null -ne $limit) { [int]$limit } else { 320 }
+  $last = $batches[-1]
+  $last.events = $events; $last.batches = $batches
+  $last.meta | Add-Member -NotePropertyName returned -NotePropertyValue ([int]$last.meta.tc) -Force
+  $last.meta | Add-Member -NotePropertyName complete -NotePropertyValue ([int]$last.meta.tc -lt $askedLimit) -Force
+  $last.meta | Add-Member -NotePropertyName next -NotePropertyValue $(if ([int]$last.meta.tc -lt $askedLimit) { $null } else { [int64]$last.meta.ls }) -Force
+  $last
+}
+function Recent-Http($tok, [uint32]$id, $limit, $after, $before) {
   $meta = @{}; if ($null -ne $limit) { $meta.limit = $limit }; if ($null -ne $after) { $meta.cg_seq = $after }; if ($null -ne $before) { $meta.before = $before }
-  $p = Send-Pack (Json-Pack 0x14 1 0 $seq $meta $null) $tok
-  $p.events = if ($p.data.Length -gt 0) { [Text.Encoding]::UTF8.GetString([byte[]]$p.data) | ConvertFrom-Json } else { @() }
+  $p = Send-Pack (Json-Pack 0x14 1 $id 0 $meta $null) $tok
+  $p.events = @()
   $p
 }
 function Is-DescendingTs($events) {
@@ -104,18 +145,19 @@ Check '[1.4b] redaction event itself got the next seq' ($seqsAfter.Count -eq $se
 $ws = Ws-Open $tokA
 $hello = Ws-Call $ws (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e8'; features = @() } $null)
 $feat = @($hello.meta.features)
-Check '[1.5] Hello features include recent and seq' (($feat -contains 'recent') -and ($feat -contains 'seq')) "features=$($feat -join ',')"
+Check '[1.5] Hello features include recent, batch and seq' (($feat -contains 'recent') -and ($feat -contains 'batch') -and ($feat -contains 'seq')) "features=$($feat -join ',')"
 
 # [1.6] Event/Recent over WS: newest first, paged by cursor to exhaustion, union equals both rooms
 # alice is the first user, so she is also in the admin room: expect the union over every joined room
 $joined = @((Api Get '/_matrix/client/v3/joined_rooms' $null $tokA).joined_rooms)
 $allAlice = @(); foreach ($jr in $joined) { $allAlice += @((Room-Messages $jr $tokA 'f' 500).chunk) }
 Log "  alice joined rooms = $($joined.Count) events = $($allAlice.Count)"
-$page1 = Recent-Ws $ws 2 3 $null $null
-Check '[1.6] first page: Ack, 3 events, complete=false, next and latest_g_seq set' ($page1.subtype -eq 2 -and $page1.meta.returned -eq 3 -and $page1.events.Count -eq 3 -and $null -ne $page1.meta.next -and $page1.meta.complete -eq $false -and $page1.meta.latest_g_seq -gt 0) (Describe $page1)
-$latest1 = [int64]$page1.meta.latest_g_seq
-Check '[1.6a] g_seq of the newest event is at most latest_g_seq and descends' (((GSeqOf $page1.events[0]) -le $latest1) -and ((GSeqOf $page1.events[0]) -gt (GSeqOf $page1.events[1])) -and ((GSeqOf $page1.events[1]) -gt (GSeqOf $page1.events[2]))) "g=$(($page1.events | ForEach-Object { GSeqOf $_ }) -join ',') latest=$latest1"
-Check '[1.6g] next equals g_seq of the last event on the page' ([int64]$page1.meta.next -eq (GSeqOf $page1.events[2])) "next=$($page1.meta.next)"
+# limit 3 with batch 1: three Batch packs (r = 2, 1, 0), tc = 3 on every one, fs/ls are the events' own g_seq
+$page1 = Recent-Ws $ws 2 3 $null $null 1
+Check '[1.6] first window: 3 Batch packs of 1, tc=3 on each, r counts 2,1,0, seq 0,1,2' ($page1.subtype -eq 3 -and $page1.batches.Count -eq 3 -and $page1.events.Count -eq 3 -and (($page1.batches | ForEach-Object { $_.meta.tc }) -join ',') -eq '3,3,3' -and (($page1.batches | ForEach-Object { $_.meta.r }) -join ',') -eq '2,1,0' -and (($page1.batches | ForEach-Object { $_.seq }) -join ',') -eq '0,1,2' -and (($page1.batches | ForEach-Object { $_.id }) -join ',') -eq '2,2,2') (Describe $page1)
+$latest1 = GSeqOf $page1.events[0]
+Check '[1.6a] g_seq descends across the window' (((GSeqOf $page1.events[0]) -gt (GSeqOf $page1.events[1])) -and ((GSeqOf $page1.events[1]) -gt (GSeqOf $page1.events[2]))) "g=$(($page1.events | ForEach-Object { GSeqOf $_ }) -join ',')"
+Check '[1.6g] each batch fs/ls equal its one event g_seq; the last ls is the next cursor' ((0..2 | ForEach-Object { ([int64]$page1.batches[$_].meta.fs -eq (GSeqOf $page1.events[$_])) -and ([int64]$page1.batches[$_].meta.ls -eq (GSeqOf $page1.events[$_])) }) -notcontains $false -and [int64]$page1.meta.next -eq (GSeqOf $page1.events[2])) "next=$($page1.meta.next)"
 Check '[1.6b] first page newest first' ((Is-DescendingTs $page1.events) -and $page1.events[0].event_id -ne $m1) "ids=$(($page1.events | ForEach-Object { $_.event_id.Substring(0,8) }) -join ' ')"
 Check '[1.6c] events carry room_id, r_seq and g_seq' (@($page1.events | Where-Object { $_.room_id -and (SeqOf $_) -ne $null -and (GSeqOf $_) -ne $null }).Count -eq 3) "rooms=$(($page1.events | ForEach-Object { $_.room_id }) -join ' ')"
 $collected = @($page1.events); $cursor = $page1.meta.next; $pages = 1
@@ -136,9 +178,9 @@ Check '[1.6f] last page has next=null and complete=true' ($null -eq $cursor -and
 $mark = GSeqOf $collected[2]
 $diff = Recent-Ws $ws 30 100 $mark $null
 $expectDiff = @($collected | Where-Object { (GSeqOf $_) -gt $mark }).Count
-Check '[1.6h] cg_seq=<g_seq of 3rd newest> returns exactly the 2 newer, complete' ($diff.meta.returned -eq 2 -and $diff.events.Count -eq $expectDiff -and $diff.meta.complete -eq $true -and $null -eq $diff.meta.next) (Describe $diff)
+Check '[1.6h] cg_seq=<g_seq of 3rd newest> returns exactly the 2 newer in one batch, complete' ($diff.meta.returned -eq 2 -and $diff.events.Count -eq $expectDiff -and $diff.batches.Count -eq 1 -and $diff.meta.complete -eq $true -and $null -eq $diff.meta.next) (Describe $diff)
 $none = Recent-Ws $ws 31 100 $latest1 $null
-Check '[1.6i] cg_seq=latest returns nothing, complete' ($none.meta.returned -eq 0 -and $none.meta.complete -eq $true -and $none.events.Count -eq 0) (Describe $none)
+Check '[1.6i] cg_seq=newest returns one empty Batch: tc=0 bc=0 r=0 fs=ls=0' ($none.subtype -eq 3 -and $none.batches.Count -eq 1 -and $none.meta.tc -eq 0 -and $none.meta.bc -eq 0 -and $none.meta.fs -eq 0 -and $none.meta.ls -eq 0 -and $none.events.Count -eq 0) (Describe $none)
 $zero = Recent-Ws $ws 34 3 0 $null
 Check '[1.6k] cg_seq=0 behaves like no cache' ($zero.meta.returned -eq 3 -and $zero.events[0].event_id -eq $page1.events[0].event_id) (Describe $zero)
 # [1.6j] a hole: cg_seq=mark but limit=1 -> newest only, complete=false, next; then before=next fills the hole
@@ -161,13 +203,20 @@ $msgsIgn = Room-Messages $r1 $tokA 'f' 100
 $hasBobMsgs = @($msgsIgn.chunk | Where-Object { $_.event_id -eq $mB }).Count
 Check '[1.8] ignored sender absent from Recent and /messages alike' ($hasBob -eq 0 -and $hasBobMsgs -eq 0) "recent=$hasBob messages=$hasBobMsgs"
 
-# [1.9] HTTP fallback and bad cursor
+# [1.9] HTTP is not a transport for Recent (its reply streams); bad cursor; defaults; batch clamping
 $http1 = Recent-Http $tokA 5 2 $null $null
-Check '[1.9] HTTP pack gives the same first two' ($http1.subtype -eq 2 -and $http1.events.Count -eq 2 -and $http1.events[0].event_id -eq $pageIgn.events[0].event_id) (Describe $http1)
+Check '[1.9] Recent over HTTP -> Error Unsupported, id copied' ($http1.subtype -eq 3 -and $http1.kind -eq 1 -and $http1.meta.code -eq 'Unsupported' -and $http1.id -eq 5) (Describe $http1)
 $bad = Recent-Ws $ws 6 2 'not-a-number' $null
-Check '[1.9b] non-integer after -> Error Conflict' ($bad.subtype -eq 3 -and $bad.meta.code -eq 'Conflict') (Describe $bad)
-$noMeta = Ws-Call $ws (New-Pack 0x14 1 0 0 7 @() @())
-Check '[1.9c] empty meta = defaults' ($noMeta.subtype -eq 2 -and $noMeta.meta.returned -gt 0) (Describe $noMeta)
+Check '[1.9b] non-integer after -> Error Conflict' ($bad.subtype -eq 3 -and $bad.kind -eq 1 -and $bad.meta.code -eq 'Conflict') (Describe $bad)
+$noMeta = Recent-Ws $ws 7 $null $null $null
+Check '[1.9c] empty meta = defaults (window 320, batch 10): one window, batches of at most 10' ($noMeta.subtype -eq 3 -and $noMeta.meta.tc -gt 0 -and $noMeta.meta.tc -lt 320 -and (@($noMeta.batches | Where-Object { $_.meta.bc -gt 10 }).Count -eq 0) -and $noMeta.batches.Count -eq [math]::Ceiling($noMeta.meta.tc / 10)) (Describe $noMeta)
+$big = Recent-Ws $ws 9 500 $null $null 1000
+Check '[1.9e] batch=1000 is clamped to 100: everything in one batch when tc <= 100' ($big.subtype -eq 3 -and $big.meta.tc -eq $noMeta.meta.tc -and $big.batches.Count -eq [math]::Ceiling($big.meta.tc / 100)) (Describe $big)
+$clamp = Recent-Ws $ws 10 10000 $null $null 100
+Check '[1.9f] limit=10000 is accepted and clamped (Hello says recent_max_limit=500); the window still ends' ($clamp.subtype -eq 3 -and $clamp.meta.tc -eq $noMeta.meta.tc -and $clamp.meta.r -eq 0 -and $hello.meta.recent_max_limit -eq 500 -and $hello.meta.recent_default_limit -eq 320) (Describe $clamp)
+# two windows leave the connection free in between: a Ping between them is answered at once
+$pong = Ws-Call $ws (New-Pack 1 4 0 0 99 ([Text.Encoding]::UTF8.GetBytes('{"nonce":7}')) @())
+Check '[1.9g] Ping between two windows -> Pong' ($pong.subtype -eq 5) (Describe $pong)
 try {
   $unknown = Ws-Call $ws (New-Pack 0x14 0x7f 0 0 8 @() @())
   Check '[1.9d] unknown Event subtype -> UnknownKind' ($unknown.subtype -eq 3 -and $unknown.meta.code -eq 'UnknownKind') (Describe $unknown)
@@ -228,14 +277,15 @@ $rC = (Api Post '/_matrix/client/v3/createRoom' '{"preset":"private_chat","name"
 $joinedC = @((Api Get '/_matrix/client/v3/joined_rooms' $null $tokC).joined_rooms)
 $allC = @(); foreach ($jr in $joinedC) { $allC += @((Room-Messages $jr $tokC 'f' 500).chunk) }
 $wsC = Ws-Open $tokC
-$pg = Recent-Ws $wsC 1 100 $null $null
-Check '[3.1] budget of 1500 B cuts the page short: complete=false, next set, fewer than all' ($pg.subtype -eq 2 -and $pg.meta.complete -eq $false -and $null -ne $pg.meta.next -and $pg.meta.returned -gt 0 -and $pg.meta.returned -lt $allC.Count -and $pg.data.Length -le 1500) (Describe $pg)
-$got = @($pg.events); $cur = $pg.meta.next; $n = 1
-while ($null -ne $cur -and $n -lt 100) { $q = Recent-Ws $wsC (1 + $n) 100 $null $cur; $got += @($q.events); $cur = $q.meta.next; $n++ }
+# The byte budget cuts batches, not the window: one window holds every event (each fits alone), in more
+# batches than `batch` alone would make, none over 1500 B of data.
+$pg = Recent-Ws $wsC 1 100 $null $null 100
+Check '[3.1] budget of 1500 B: one window with every event, cut into several batches, each data <= 1500 B' ($pg.subtype -eq 3 -and $pg.meta.complete -eq $true -and $pg.meta.tc -eq $allC.Count -and $pg.batches.Count -gt 1 -and (@($pg.batches | Where-Object { $_.data.Length -gt 1500 }).Count -eq 0)) "batches=$($pg.batches.Count) tc=$($pg.meta.tc) want=$($allC.Count) sizes=$(($pg.batches | ForEach-Object { $_.data.Length }) -join ',')"
+$got = @($pg.events)
 $gotIds = @($got | ForEach-Object { $_.event_id } | Sort-Object); $wantIds = @($allC | ForEach-Object { $_.event_id } | Sort-Object)
 $dup = $gotIds.Count - @($gotIds | Select-Object -Unique).Count
-Check '[3.2] following next across byte-cut pages yields every event once' (($gotIds -join ',') -eq ($wantIds -join ',') -and $dup -eq 0) "pages=$n got=$($gotIds.Count) want=$($wantIds.Count) dupes=$dup"
-Check '[3.3] pages are contiguous: each page starts right below the previous next' ((Is-DescendingTs $got)) ''
+Check '[3.2] the batches together hold every event exactly once' (($gotIds -join ',') -eq ($wantIds -join ',') -and $dup -eq 0) "got=$($gotIds.Count) want=$($wantIds.Count) dupes=$dup"
+Check '[3.3] batches are contiguous: newest first across batch boundaries, fs/ls match the data' ((Is-DescendingTs $got) -and ((0..($pg.batches.Count - 1) | ForEach-Object { $bt = $pg.batches[$_]; $evs = @(Batch-Events ([byte[]]$bt.data)); ([int64]$bt.meta.fs -eq (GSeqOf $evs[0])) -and ([int64]$bt.meta.ls -eq (GSeqOf $evs[-1])) }) -notcontains $false)) ''
 $wsC.Dispose()
 Stop-Server $p
 
@@ -244,8 +294,44 @@ $cfg3b = Write-Config $db3 86400 0 200
 $p = Start-Server $cfg3b 's3b'
 $wsC = Ws-Open $tokC
 $empty = Recent-Ws $wsC 1 100 $null $null
-Check '[3.4] budget smaller than any event: returned=0, complete=true, next=null' ($empty.subtype -eq 2 -and $empty.meta.returned -eq 0 -and $empty.meta.complete -eq $true -and $null -eq $empty.meta.next) (Describe $empty)
+Check '[3.4] budget smaller than any event: every event skipped, one empty Batch (tc=0)' ($empty.subtype -eq 3 -and $empty.batches.Count -eq 1 -and $empty.meta.tc -eq 0 -and $empty.meta.complete -eq $true -and $null -eq $empty.meta.next) (Describe $empty)
 $wsC.Dispose()
+Stop-Server $p
+
+# ================= Scenario 4: first byte of a window over many rooms (pack-pipeline 6.3 / 10: a measurement, not a gate) =================
+# One user in 30 rooms with 10 messages each (plus each room's state events): a window of 320 fans out over every
+# joined room. Logged: time from sending Recent to the first Batch, and to r = 0; cold (first ask) and warm (second).
+Log '################ Scenario 4: first-byte measurement ################'
+$db4 = "$S\e2e8db-4"; Remove-Item -Recurse -Force $db4 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db4 | Out-Null
+$cfg4 = Write-Config $db4 86400
+$p = Start-Server $cfg4 's4'
+$regE = Api Post '/_matrix/client/v3/register' '{"username":"erin","password":"pw-pw-pw-pw","auth":{"type":"m.login.dummy"}}' $null
+$tokE = $regE.access_token
+$roomsE = @()
+1..30 | ForEach-Object {
+  $rid = (Api Post '/_matrix/client/v3/createRoom' ('{"preset":"private_chat","name":"fanout ' + $_ + '"}') $tokE).room_id
+  $roomsE += $rid
+  1..10 | ForEach-Object { $null = Send-Msg $rid "fanout message $_ with enough padding to look like a real line of chat" $tokE }
+}
+$allE = @(); foreach ($jr in $roomsE) { $allE += @((Room-Messages $jr $tokE 'f' 500).chunk) }
+Log "  erin: $($roomsE.Count) rooms, $($allE.Count) events"
+$wsE = Ws-Open $tokE
+function Time-Window($ws, [uint32]$id, $limit, $batch) {
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  Ws-Send $ws (Json-Pack 0x14 1 $id 0 @{ limit = $limit; batch = $batch } $null)
+  $first = $null; $n = 0
+  do { $pk = Ws-Recv-Bounded $ws 30000; if ($null -eq $first) { $first = $sw.Elapsed.TotalMilliseconds }; $n++ } while ($pk.meta.r -ne 0)
+  @{ first_ms = [math]::Round($first, 1); total_ms = [math]::Round($sw.Elapsed.TotalMilliseconds, 1); batches = $n; tc = $pk.meta.tc }
+}
+$cold = Time-Window $wsE 1 320 10
+$warm = Time-Window $wsE 2 320 10
+$big = Time-Window $wsE 3 500 100
+Log "  [4.1] window 320/10 cold: first batch $($cold.first_ms) ms, r=0 at $($cold.total_ms) ms, $($cold.batches) batches, tc=$($cold.tc)"
+Log "  [4.2] window 320/10 warm: first batch $($warm.first_ms) ms, r=0 at $($warm.total_ms) ms, $($warm.batches) batches, tc=$($warm.tc)"
+Log "  [4.3] window 500/100 warm: first batch $($big.first_ms) ms, r=0 at $($big.total_ms) ms, $($big.batches) batches, tc=$($big.tc)"
+Check '[4.4] the 320 window over 30 rooms is full and consistent' ($cold.tc -eq 320 -and $cold.batches -eq 32 -and $warm.tc -eq 320) "cold=$($cold.tc) warm=$($warm.tc)"
+Check '[4.5] first byte of a 320 window over 30 rooms is well under the client reconnect budget (10 s)' ($cold.first_ms -lt 2000) "cold first=$($cold.first_ms) ms"
+$wsE.Dispose()
 Stop-Server $p
 
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"

@@ -6,8 +6,8 @@
 | 腳本 | 驗什麼 | 設計文件 |
 |---|---|---|
 | `e2e6.ps1` | 分塊上傳／下載（HTTP 一包一請求）：Create、有序塊、續傳、Seal、截斷、串流模式、按塊與明文位置讀、Abort、sweeper。**舊式**：每行印預期值，沒有 pass／fail 總結，看 `results.txt` | [chunked-upload-spec.md](../../docs/design/chunked-upload-spec.md) |
-| `e2e7.ps1` | WebSocket 通道：Hello、Ping、一 message 一 pack、HTTP 與 WS 交錯續傳、idle 關線；情境 3：鎖定帳號兩個傳輸都拒、登出後下一個 pack 被拒並關線、連線開著時 `!admin server shutdown` 正常退出無 dangling；情境 4（Session kind）：匿名升級只能 Hello／Ping、3 秒沒登入被關、`Login`／`Refresh`／`Logout`、錯密碼、HTTP 與 channel 共用的登入限速、同一連線換帳號、logout-all 關掉另一條、鎖定帳號不能登入。舊式同上 | [wbf-wire-format.md](../../docs/design/wbf-wire-format.md) §6.1、§6.3、[review-followups-2026-09-06.md](../../docs/design/review-followups-2026-09-06.md) §2.3／2.4 |
-| `e2e8.ps1` | 每房 `r_seq`、全域 `g_seq`、`Event/Recent`（`cg_seq`／`before`／byte 上限）、舊庫啟動的一次性編號 | [room-seq-and-recent.md](../../docs/design/room-seq-and-recent.md) |
+| `e2e7.ps1` | WebSocket 通道：Hello、Ping、一 message 一 pack、HTTP 與 WS 交錯續傳、idle 關線；情境 3：鎖定帳號兩個傳輸都拒、登出後下一個 pack 被拒並關線、連線開著時 `!admin server shutdown` 正常退出無 dangling；情境 4（Session kind）：匿名升級只能 Hello／Ping、3 秒沒登入被關、`Login`／`Refresh`／`Logout`、錯密碼、HTTP 與 channel 共用的登入限速、同一連線換帳號、logout-all 關掉另一條、鎖定帳號不能登入；情境 5（每 device 連線上限，設 2）：第三條 Bearer 升級 429、另一 device 不受影響、匿名 Login 滿了回 `TooManyConnections` 並被關且**不發 token**（原連線的 token 仍可用）、關一條後名額回來、同連線再登入不多佔、Logout 放回名額。舊式同上 | [wbf-wire-format.md](../../docs/design/wbf-wire-format.md) §6.1、§6.3、[review-followups-2026-09-06.md](../../docs/design/review-followups-2026-09-06.md) §2.3／2.4 |
+| `e2e8.ps1` | 每房 `r_seq`、全域 `g_seq`、`Event/Recent` 的 `Batch` 串流（一窗、`tc`／`bc`／`fs`／`ls`／`r`、`cg_seq`／`before` 翻窗、`batch`／`limit` 夾值、byte 上限切 Batch、HTTP 回 `Unsupported`、兩窗之間 Ping）、舊庫啟動的一次性編號；情境 4：30 個房間的一窗 first byte 量測（冷／暖，門檻只有「冷 < 2 秒」） | [room-seq-and-recent.md](../../docs/design/room-seq-and-recent.md) |
 | `e2e9.ps1` | 附件宣告（header 與 `Event/Send`）、四種拒送、共用附件、明文 fallback、bot 一次性警告、redact 保留備份後 purge、掃描不碰新上傳 | [media-attachments.md](../../docs/design/media-attachments.md) |
 | `e2e10.ps1` | 媒體持有者集合：刪房／redact 保留備份／備份到期／頭像／purge 範圍／重複操作、`WBFUWUNEL_MEDIA_GRACE_SECONDS` 下的掃描；情境 4（要 `E2E_OLD_EXE`）：既存媒體被生成縮圖後仍不受管、不被掃 | [media-holders.md](../../docs/design/media-holders.md)、[review-followups-2026-09-06.md](../../docs/design/review-followups-2026-09-06.md) §2.1 |
 | `wbf-helpers.ps1` | 共用：pack 編解碼（CRC-32C）、HTTP／WS 傳輸、起停 server、寫設定檔。不是測試 | [wbf-wire-format.md](../../docs/design/wbf-wire-format.md) |
@@ -36,3 +36,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\e2e\e2e10.ps1
 - ⚠️ 字串裡變數後面接 `?` 要寫 `${id}?width=…`：5.1 把 `$id?` 當成一個叫 `id?` 的變數（問號是合法名字元），URL 會少一段、server 回 400。
 - ⚠️ 中文不要寫進 `.ps1` 字面值（5.1 讀無 BOM 檔案當 ANSI 會變亂碼）；訊息用英文。
 - helper 只放真的共用的東西；腳本專用的函式留在腳本裡（`Room-Messages` 之類），不然沒定義時只在 console 印例外，`results.txt` 看不到。
+- ⚠️ 大小寫那條的實例（2026-09-07）：檢查式裡寫 `$b = $pg.batches[$_]` 就把 helpers 的 `$B`（base URL）蓋成 Hashtable，之後每個 HTTP 呼叫都失敗，
+  server 重啟看起來像「server did not come up」。`Start-Server` 放棄前現在會印最後一個錯誤與一個新 HttpClient 的結果，把「server 沒起來」和「這個 process 的 HTTP 壞了」分開。
+  helpers 另外把 ServicePoint 的 `DefaultConnectionLimit` 拉到 64（預設 2，留幾條 WS 就排隊），用完的 WS 還是要 `Dispose()`。
+- ⚠️ 等 server 回應的接收要有時限（e2e8 的 `Ws-Recv-Bounded`；e2e7 的 `Recv-Frame`）：`ReceiveAsync().Result` 沒時限，server 不回就整支腳本卡住、沒有任何輸出。

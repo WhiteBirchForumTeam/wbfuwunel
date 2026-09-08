@@ -1,24 +1,27 @@
 //! `GET /_wbf/v1/ws`: the WebSocket channel, one pack per binary message.
 //!
-//! A connection may be upgraded with a bearer token (then it is that session
-//! from the start) or without one (then it has `wbf_ws_unauthenticated_timeout`
-//! seconds to `Login`, and until it does only `Hello`, `Ping`, `Login` and
-//! `Refresh` are answered). A logged-in session is checked again before every
-//! message (`revalidate`): a token that was logged out, revoked, expired or
-//! whose account was locked stops working at the next message, not never.
-//! `Login` and `Refresh` replace the connection's session; `Logout` ends it
-//! and the connection is closed. See `docs/design/wbf-wire-format.md` §6.1
-//! and §6.3.
+//! A connection is a queue (`docs/design/wbf-pack-pipeline.md` §1): one
+//! receive loop that takes messages in arrival order and runs one handler at
+//! a time, and one send task that writes everything queued for the peer, in
+//! order, from a bounded channel. Handlers reach the peer only through that
+//! channel (`Reply`); the close frame goes through it too, so it always
+//! follows the replies queued before it.
 //!
-//! Each binary message is decoded and handed to the same `handle_pack` the
-//! HTTP transport uses, and its reply goes back as one binary message. Many
-//! uploads may interleave on one connection; the pack header's `id` tells
-//! them apart.
+//! A connection may be upgraded with a bearer token (then it is that session
+//! from the start and takes its device's connection slot before the upgrade)
+//! or without one (then it has `wbf_ws_unauthenticated_timeout` seconds to
+//! `Login`, and until it does only `Hello`, `Ping`, `Login` and `Refresh` are
+//! answered). A logged-in session is checked again before every message
+//! (`revalidate`): a token that was logged out, revoked, expired or whose
+//! account was locked stops working at the next message, not never. `Login`
+//! and `Refresh` replace the connection's session; `Logout` ends it and the
+//! connection is closed. See `docs/design/wbf-wire-format.md` §6.1 and §6.3.
 //!
 //! The task serving a socket outlives the request that upgraded it, so it is
 //! spawned through `services.connections`, which `Services::stop` joins:
 //! `State` is a raw pointer to `Services` and must not be dereferenced after
-//! shutdown. The loop itself ends when the server starts stopping.
+//! shutdown. The loop itself ends when the server starts stopping. The send
+//! task holds only the socket, never `Services`.
 //!
 //! The connection keeps no upload state of its own. The database row is the
 //! only truth about where an upload stands, so a chunk that arrives out of
@@ -39,15 +42,15 @@ use axum::{
 	response::Response,
 };
 use futures::{SinkExt, StreamExt};
-use tokio::time::Instant;
+use tokio::{sync::mpsc, time::Instant};
 use tuwunel_core::{
 	debug,
 	wbf::{HEADER_LEN, PackError, decode},
 };
 
 use super::{
-	Session, SessionChange, Transport, authenticate, error_pack, handle_pack, header_id_seq,
-	pack_error_code, pack_response, revalidate,
+	CloseReason, Outgoing, PackContext, Reply, Session, SessionChange, Transport, authenticate, error_pack,
+	handle_pack, header_id_seq, pack_error_code, pack_response, reserve_connection_slot, revalidate,
 };
 use crate::ClientIp;
 
@@ -56,13 +59,20 @@ use crate::ClientIp;
 /// room for the WebSocket layer's own framing on top.
 const FRAME_SLACK: usize = 2 * 4 * 4;
 
+/// How long the receive loop, once it has ended, waits for the send task to
+/// write out what is still queued (the last Ack, the close frame) before
+/// giving up on a peer that has stopped reading.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// # `GET /_wbf/v1/ws`
 ///
 /// With a bearer token the connection is that session from the upgrade on; a
-/// bad token answers 401 with an `Error` pack in the body, before any
-/// upgrade. Without an `Authorization` header the connection is upgraded
-/// unauthenticated and has to `Login` within `wbf_ws_unauthenticated_timeout`.
-/// A server that is shutting down answers 503 the same way.
+/// bad token answers 401 with an `Error` pack in the body, and a device
+/// already at `wbf_ws_max_connections_per_device` answers 429 with
+/// `Error(TooManyConnections)`, both before any upgrade. Without an
+/// `Authorization` header the connection is upgraded unauthenticated and has
+/// to `Login` within `wbf_ws_unauthenticated_timeout`. A server that is
+/// shutting down answers 503 the same way.
 pub(crate) async fn ws_route(
 	State(services): State<crate::State>,
 	ClientIp(client): ClientIp,
@@ -79,13 +89,20 @@ pub(crate) async fn ws_route(
 	// A header that is there must be right; only its absence means "log in
 	// over the channel". A wrong token is refused, not downgraded.
 	let session = if headers.contains_key(header::AUTHORIZATION) {
-		match authenticate(&services, &headers).await {
-			| Ok(session) => Some(session),
+		let mut session = match authenticate(&services, &headers).await {
+			| Ok(session) => session,
 			| Err(error) => {
 				let reply = error_pack(0, 0, "Unauthorized", &error.to_string());
 				return pack_response(StatusCode::UNAUTHORIZED, reply);
 			},
+		};
+		// The device's slot is taken before the upgrade, so a refused
+		// connection never exists; the new one is turned away, never an old.
+		match reserve_connection_slot(&services, Transport::WebSocket, None, &session.user, &session.device) {
+			| Ok(slot) => session.slot = slot,
+			| Err(refused) => return pack_response(StatusCode::TOO_MANY_REQUESTS, refused.into_pack(0, 0)),
 		}
+		Some(session)
 	} else {
 		None
 	};
@@ -108,7 +125,8 @@ pub(crate) async fn ws_route(
 			// axum runs this callback on its own task, which ends at once;
 			// the serving loop runs on a tracked task instead. Refused only
 			// when shutdown began between the check above and here: the
-			// socket is then dropped, which closes it.
+			// socket is then dropped, which closes it (and the session with
+			// its slot is dropped with it).
 			if !services
 				.connections
 				.spawn(serve(services, client, session, socket))
@@ -118,8 +136,9 @@ pub(crate) async fn ws_route(
 		})
 }
 
-/// Runs one connection to its end: read a message, check the session, answer
-/// the message, apply what the answer did to the session, repeat.
+/// Runs one connection to its end: read a message, check the session, run
+/// its handler (whose replies join the send queue), apply what the handler
+/// did to the session, repeat.
 ///
 /// Messages are handled one at a time in arrival order, which is what keeps
 /// the ordered kinds ordered; a client that wants more in flight sends more
@@ -127,8 +146,9 @@ pub(crate) async fn ws_route(
 /// loop ends when the client closes, when the connection stays silent for
 /// `wbf_ws_idle_timeout`, when an unauthenticated connection has not logged
 /// in by `wbf_ws_unauthenticated_timeout` after the upgrade, when the session
-/// no longer checks out, when the client logs out, or when the server starts
-/// shutting down.
+/// no longer checks out, when the client logs out, when a `Login` is refused
+/// for the device's connection limit, when the peer stops taking replies, or
+/// when the server starts shutting down.
 async fn serve(services: crate::State, client: IpAddr, session: Option<Session>, socket: WebSocket) {
 	let idle_timeout = Duration::from_secs(services.config.wbf_ws_idle_timeout);
 	// Counted from the upgrade, not from the last message: a connection that
@@ -136,7 +156,15 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 	let login_deadline = Instant::now() + Duration::from_secs(services.config.wbf_ws_unauthenticated_timeout);
 	let server = services.server.clone();
 	let mut session = session;
-	let (mut sink, mut stream) = socket.split();
+	let (sink, mut stream) = socket.split();
+
+	// The send queue and its task. Bounded: a handler that produces faster
+	// than the peer reads waits in `Reply::send`, and with it the receive
+	// loop, and with that the peer's own sending. Memory per connection is
+	// bounded by the queue length times a pack's size limit.
+	let (queue, outgoing) = mpsc::channel::<Outgoing>(services.config.wbf_ws_send_queue_len.max(1));
+	let mut send_task = tokio::spawn(send_queued(sink, outgoing));
+	let mut reply = Reply::for_websocket(queue.clone());
 
 	// One subscription for the life of the connection, polled from every
 	// turn of the loop, rather than a fresh one per message.
@@ -155,8 +183,7 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 			},
 			() = tokio::time::sleep_until(login_deadline), if session.is_none() => {
 				debug!("wbf WebSocket connection did not log in in time; closing");
-				let frame = CloseFrame { code: close_code::POLICY, reason: "not logged in in time".into() };
-				let _closing = sink.send(Message::Close(Some(frame))).await;
+				enqueue_close(&queue, close(close_code::POLICY, "not logged in in time")).await;
 				break;
 			},
 			() = &mut shutdown => {
@@ -165,8 +192,7 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 				// former is in RFC 6455 itself and every client library
 				// accepts it; .NET's ClientWebSocket, for one, treats 1012 as
 				// a protocol error and drops the connection instead.
-				let frame = CloseFrame { code: close_code::AWAY, reason: "server shutting down".into() };
-				let _closing = sink.send(Message::Close(Some(frame))).await;
+				enqueue_close(&queue, close(close_code::AWAY, "server shutting down")).await;
 				break;
 			},
 		};
@@ -177,8 +203,8 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 			// Control frames are answered by the WebSocket layer itself.
 			| Ok(Message::Ping(_) | Message::Pong(_)) => continue,
 			| Ok(Message::Text(_)) => {
-				let reply = error_pack(0, 0, "Corrupt", "text frames are not packs; send one pack per binary frame");
-				if sink.send(Message::Binary(reply.into())).await.is_err() {
+				let refused = error_pack(0, 0, "Corrupt", "text frames are not packs; send one pack per binary frame");
+				if queue.send(Outgoing::Pack(refused)).await.is_err() {
 					break;
 				}
 				continue;
@@ -191,7 +217,7 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 		// point read per message, the same order of cost as the message
 		// itself. Not cached by time: a cache would be one more copy of the
 		// truth that can go stale. An unauthenticated connection has nothing
-		// to check; the kind whitelist in `handle_pack` is its whole guard.
+		// to check; the admission table in `handle_pack` is its whole guard.
 		if let Some(current) = &session
 			&& let Err(error) = revalidate(&services, current).await
 		{
@@ -199,10 +225,13 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 			// Header fields read without any CRC check: they only address the
 			// refusal, they decide nothing.
 			let (id, seq) = header_id_seq(&bytes);
-			let reply = error_pack(id, seq, "Unauthorized", &error.to_string());
-			let _refused = sink.send(Message::Binary(reply.into())).await;
-			let frame = CloseFrame { code: close_code::POLICY, reason: "session no longer valid".into() };
-			let _closing = sink.send(Message::Close(Some(frame))).await;
+			let refused = error_pack(id, seq, "Unauthorized", &error.to_string());
+			if queue.try_send(Outgoing::Pack(refused)).is_err() {
+				// A full queue means a peer that is not reading; the close
+				// frame matters more than the explanation.
+				debug!("wbf WebSocket send queue full; the Unauthorized reply is dropped");
+			}
+			enqueue_close(&queue, close(close_code::POLICY, "session no longer valid")).await;
 			break;
 		}
 
@@ -214,35 +243,100 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 					| PackError::DataCrc { .. } => header_id_seq(&bytes),
 					| _ => (0, 0),
 				};
-				let reply = error_pack(id, seq, pack_error_code(error), &error.to_string());
-				if sink.send(Message::Binary(reply.into())).await.is_err() {
+				let refused = error_pack(id, seq, pack_error_code(error), &error.to_string());
+				if queue.send(Outgoing::Pack(refused)).await.is_err() {
 					break;
 				}
 				continue;
 			},
 		};
 
-		let handled = handle_pack(&services, session.as_ref(), client, Transport::WebSocket, view).await;
-		if sink.send(Message::Binary(handled.reply.into())).await.is_err() {
-			break;
-		}
+		let ctx = PackContext { session: session.as_ref(), client, transport: Transport::WebSocket };
+		let change = match handle_pack(&services, &ctx, view, &mut reply).await {
+			| Ok(change) => change,
+			// The send task is gone: the peer closed while a reply was on
+			// its way. Nothing left to tell anyone.
+			| Err(error) => {
+				debug!(user = user_label(session.as_ref()), ?error, "wbf WebSocket reply could not be queued; closing");
+				break;
+			},
+		};
 
-		match handled.change {
+		match change {
 			| SessionChange::Keep => {},
-			| SessionChange::Replace(new_session) => session = Some(new_session),
-			| SessionChange::Close => {
-				// Logged out: the maintainer chose to close rather than fall
-				// back to unauthenticated; a client switching accounts opens
-				// a new connection (or logs in again without logging out).
-				let frame = CloseFrame { code: close_code::NORMAL, reason: "logged out".into() };
-				let _closing = sink.send(Message::Close(Some(frame))).await;
+			| SessionChange::Replace(mut new_session) => {
+				// Same device logging in again keeps its place in the count;
+				// a different device brought its own, and the old place is
+				// given back when the old session drops here.
+				if let Some(old_session) = session.as_mut() {
+					new_session.inherit_slot(old_session);
+				}
+				session = Some(new_session);
+			},
+			| SessionChange::Close(reason) => {
+				let frame = match reason {
+					// Logged out: the maintainer chose to close rather than
+					// fall back to unauthenticated; a client switching accounts
+					// opens a new connection (or logs in again without logging
+					// out).
+					| CloseReason::LoggedOut => close(close_code::NORMAL, "logged out"),
+					| CloseReason::Refused => close(close_code::POLICY, "refused"),
+				};
+				enqueue_close(&queue, frame).await;
 				break;
 			},
 		}
 	}
 
-	let _closed = sink.close().await;
+	// Let the send task write out what is still queued: the last reply and
+	// the close frame. Dropping every sender is what tells it the queue is
+	// complete. A peer that has stopped reading cannot hold this task past
+	// the drain timeout; the socket is then dropped, which closes it.
+	drop(reply);
+	drop(queue);
+	if tokio::time::timeout(DRAIN_TIMEOUT, &mut send_task).await.is_err() {
+		debug!(user = user_label(session.as_ref()), "wbf WebSocket peer did not take the last frames; dropping the socket");
+		send_task.abort();
+	}
 	debug!(user = user_label(session.as_ref()), "wbf WebSocket connection closed");
+}
+
+/// The send task: writes everything queued to the socket, in queue order, and
+/// ends after a close frame, when the queue is complete (every sender gone),
+/// or when the socket refuses a write. Holds the socket's sink and nothing
+/// else, so it may outlive the receive loop for the drain and is never a
+/// borrow of `Services`.
+async fn send_queued(mut sink: futures::stream::SplitSink<WebSocket, Message>, mut outgoing: mpsc::Receiver<Outgoing>) {
+	while let Some(item) = outgoing.recv().await {
+		match item {
+			| Outgoing::Pack(pack) =>
+				if sink.send(Message::Binary(pack.into())).await.is_err() {
+					break;
+				},
+			| Outgoing::Close(frame) => {
+				let _closing = sink.send(Message::Close(Some(frame))).await;
+				break;
+			},
+		}
+	}
+	let _closed = sink.close().await;
+}
+
+fn close(code: u16, reason: &'static str) -> Outgoing { Outgoing::Close(CloseFrame { code, reason: reason.into() }) }
+
+/// Queues the close frame, waiting at most `DRAIN_TIMEOUT` for room. A peer
+/// that has stopped reading keeps the queue full; then the frame is not worth
+/// waiting for: the receive loop ends, the drain below times out too, and the
+/// socket is dropped, which closes it (review of PR #33, rumia: without this
+/// bound a stopped reader could hold the loop, and its queue's memory, for
+/// as long as it liked).
+async fn enqueue_close(queue: &mpsc::Sender<Outgoing>, frame: Outgoing) {
+	if tokio::time::timeout(DRAIN_TIMEOUT, queue.send(frame))
+		.await
+		.is_err()
+	{
+		debug!("wbf WebSocket send queue stayed full; closing without a close frame");
+	}
 }
 
 /// Who a connection is, for its log lines.

@@ -3167,13 +3167,52 @@
 #
 #wbf_ws_unauthenticated_timeout = 30
 
-# Most events one `Event/Recent` pack returns: the newest events across
-# all of a user's joined rooms, for a client mounting its cache on first
-# start. A larger `limit` in the request is clamped to this. The reply is
-# also cut at `wbf_data_max_bytes`, so a page may be shorter; the client
-# follows `next` either way.
+# How many wbf WebSocket connections one device of one user may hold at
+# once. A connection that would exceed it is refused (the new one, never
+# an existing one): a bearer upgrade answers 429, a `Login` over the
+# channel is refused and that connection closed. Connections that have
+# not logged in are not counted; they live at most
+# `wbf_ws_unauthenticated_timeout` seconds. HTTP requests are not counted.
+# A client is expected to open a few (one for events, one for media);
+# this guards against a client that leaks them. 0 disables the limit.
 #
-#wbf_recent_max_limit = 10000
+#wbf_ws_max_connections_per_device = 4
+
+# How many outgoing packs one wbf WebSocket connection may have queued
+# for sending before the handler producing them waits. Bounds the memory
+# a slow reader can pin on the server to this many packs of at most
+# `wbf_data_max_bytes` each; the connection stalls instead of growing.
+# Worst case per connection is therefore this times `wbf_data_max_bytes`
+# (32 x 16 MiB = 512 MiB at the defaults, only if a peer stops reading
+# in the middle of a stream of maximal packs), times
+# `wbf_ws_max_connections_per_device` per device. Lower it on a small
+# host; `Recent` batches are a few KiB each, so 8 is plenty for events.
+#
+#wbf_ws_send_queue_len = 32
+
+# How many events one `Event/Recent` request (one window) returns when the
+# request does not say. A client pages with `before` for more.
+#
+#wbf_recent_default_limit = 320
+
+# Most events one `Event/Recent` request (one window) may return; a
+# larger `limit` is clamped to this. Kept small on purpose: the whole
+# window is gathered before the first `Batch` goes out, so this bounds the
+# time to the first byte. A client that wants more asks again with
+# `before`.
+#
+#wbf_recent_max_limit = 500
+
+# How many events one `Event/Batch` pack carries when the `Recent`
+# request does not say. A client writes one batch to its database at a
+# time, so this is the granularity of its progress.
+#
+#wbf_recent_default_batch = 10
+
+# Most events one `Event/Batch` pack may carry; a larger `batch` in the
+# request is clamped to this. A batch is also cut at `wbf_data_max_bytes`.
+#
+#wbf_recent_max_batch = 100
 
 # Allows users with `redact` power level to request unredacted events with
 # MSC2815.
