@@ -51,10 +51,10 @@ Draft 進來（已登入、准入表過、meta 是 {room_id, full}）
    ├─ sender 是 room_id 的成員嗎？不是 → Error(Forbidden)
    ├─ 限速：每 (sender, device) 每秒 wbf_stream_drafts_per_second（預設 30，突發 60）→ 超過 Error(RateLimited)，這片丟
    ├─ 大小：data ≤ wbf_stream_max_draft_bytes（預設 64 KiB）→ 超過 Error(TooLarge)
-   └─ push::relay(room_id, sender, device, pack')   ← pack' = 原 pack 加 sender/device 進 meta；對每個訂閱者 try_send，滿了就丟（不記 gap：草稿沒有洞的概念）
+   └─ channels::relay(room_id, sender, device, pack')   ← pack' = 原 pack 加 sender/device 進 meta；對每個訂閱者 try_send，滿了就丟（不記 gap：草稿沒有洞的概念）
 ```
 
-- **不記任何 stream 狀態**：沒有 `next_seq`、沒有 open 表、沒有 TTL 清理。第二版那張 `room → Vec<connection>` 表就是推送的 registry，不另建。
+- **不記任何 stream 狀態**：沒有 `next_seq`、沒有 open 表、沒有 TTL 清理。第二版那張 `room → Vec<connection>` 表就是推送的 channel（一房一個），不另建。
 - **不驗 `seq`**：TCP 保證同一連線內的順序；接收者只接受比目前大的 `seq`，其餘丟。發送者換連線續發同一個 `draft_id`：允許，`seq` 自己接上就好。
 - **發送者自己的其他裝置也收到**（跟 `Push` 一樣）；發送這片的那條連線也會收到自己的轉發——client 用 `(sender, device)` 是自己就忽略。不做特例。
 - **不推給沒訂閱的**：沒訂閱的連線收不到草稿，也收不到 `Push`，一致。
@@ -63,7 +63,7 @@ Draft 進來（已登入、准入表過、meta 是 {room_id, full}）
 
 | 共用 | 在哪 |
 |---|---|
-| 訂閱 registry（`user → 連線`）、`try_send`、掉了就掉 | `Services.push`（[wbf-event-push.md](wbf-event-push.md) §3） |
+| 訂閱 registry（`user → 連線`）、`try_send`、掉了就掉 | `Services.channels`（[wbf-event-push.md](wbf-event-push.md) §3：一房一個 channel） |
 | 發送佇列與發送 task | pipeline §1 |
 | 「後加入者零殘影、歷史單一版本、容量有界、不污染 sync token、server 不碰明文」五條 | 第二版 §9，仍全部成立；容量有界現在是「零」 |
 
