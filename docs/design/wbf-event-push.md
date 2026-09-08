@@ -1,6 +1,6 @@
 # WS 訂閱與推送：連線訂閱自己的帳號，server 把新事件推過來
 
-**狀態**：📄 草案（2026-09-08），等維護者同意。這是維護者 2026-09-08 說的「工作 2」：WS 訂閱自己帳號的 event，在的任何房間的新事件自然推過來。
+**狀態**：🔧 實作中（分支 `wbf/channels`，提案 PR #35 2026-09-08 核可）。這是維護者 2026-09-08 說的「工作 2」：WS 訂閱自己帳號的 event，在的任何房間的新事件自然推過來。
 [streaming-messages.md](streaming-messages.md)（工作 3）坐在這份之上；工作 1（一般訊息走 WS）已經是 `Event/Send`（PR #24）。
 
 **這份改的是什麼**：到 PR #33 為止，WS 只有 client 問、server 答；[wbf-pack-pipeline.md](wbf-pack-pipeline.md) §1 留了發送 task 與有界佇列，就是給這裡用的：

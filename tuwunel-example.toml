@@ -3214,6 +3214,12 @@
 #
 #wbf_recent_max_batch = 100
 
+# Most events one `Event/Push` pack carries. A new event is pushed on
+# its own; this bounds the packs a `Subscribe` with `cg_seq` uses to
+# catch the client up. A pack is also cut at `wbf_data_max_bytes`.
+#
+#wbf_push_max_events_per_pack = 10
+
 # Allows users with `redact` power level to request unredacted events with
 # MSC2815.
 #

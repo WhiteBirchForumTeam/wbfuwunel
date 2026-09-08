@@ -1,9 +1,9 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use ruma::{
-	CanonicalJsonObject, CanonicalJsonValue, EventId, UserId,
+	CanonicalJsonObject, CanonicalJsonValue, EventId, RoomId, UserId,
 	events::{
-		TimelineEventType,
+		AnyTimelineEvent, TimelineEventType,
 		receipt::ReceiptThread,
 		relation::RelationType,
 		room::{
@@ -11,9 +11,10 @@ use ruma::{
 			member::{MembershipState, RoomMemberEventContent},
 		},
 	},
+	serde::Raw,
 };
 use tuwunel_core::{
-	Result, err, error, implement,
+	Result, debug_warn, err, error, implement,
 	matrix::{
 		event::Event,
 		pdu::{
@@ -28,6 +29,7 @@ use tuwunel_core::{
 use tuwunel_database::Json;
 
 use super::{ExtractBody, ExtractRelatesTo, ExtractRelatesToEventId, RoomMutexGuard, bias_count};
+use crate::channels::PushedEvent;
 use crate::media_refs::Holder;
 use crate::rooms::{
 	read_receipt::PrivateRead, short::ShortRoomId, state_accessor::plain_text_topic,
@@ -237,6 +239,12 @@ where
 	drop(media_held);
 	drop(insert_lock);
 
+	// The event is committed: anyone listening to this room over a wbf
+	// WebSocket gets it now (docs/design/wbf-event-push.md 3). Never blocks:
+	// a full queue drops the push and the client fills in with Recent.
+	self.publish_to_channels(pdu.room_id(), pdu.sender(), &pdu_id)
+		.await;
+
 	// Only local senders can own pushers.
 	if self.services.globals.user_is_local(pdu.sender()) {
 		self.services
@@ -267,6 +275,40 @@ where
 		.ok();
 
 	Ok(pdu_id)
+}
+
+/// Pushes the event just stored at `pdu_id` to the room's channel, minus
+/// listeners who ignore `sender`. The served form (positions in `unsigned`,
+/// the same bytes `Recent` returns) is read back from the row so the two
+/// never differ.
+#[implement(super::Service)]
+async fn publish_to_channels(&self, room_id: &RoomId, sender: &UserId, pdu_id: &RawPduId) {
+	if !self.services.channels.is_listened(room_id) {
+		return;
+	}
+
+	let listeners = self.services.channels.listeners(room_id);
+	let mut recipients = Vec::with_capacity(listeners.len());
+	for (connection, user) in listeners {
+		if !self.services.users.user_is_ignored(sender, &user).await {
+			recipients.push(connection);
+		}
+	}
+	if recipients.is_empty() {
+		return;
+	}
+
+	let Ok(pdu) = self.get_pdu_from_id(pdu_id).await else {
+		debug_warn!(?pdu_id, "Event just appended could not be read back for pushing");
+		return;
+	};
+	let g_seq = pdu_id.pdu_count().into_signed();
+	let event: Raw<AnyTimelineEvent> = pdu.to_format();
+	let json = event.json().get().as_bytes();
+
+	self.services
+		.channels
+		.push(&recipients, &[PushedEvent { g_seq, json }]);
 }
 
 #[implement(super::Service)]

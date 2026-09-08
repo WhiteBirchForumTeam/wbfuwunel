@@ -24,16 +24,10 @@ const VECTORS: &str = include_str!("../../../docs/design/wbf-vectors.json");
 
 fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() }
 
-/// The data section of an `Event/Batch`: each event as a big-endian u32
-/// length followed by its JSON bytes (pipeline §6.2).
+/// The data section of an `Event/Batch` or `Event/Push`: the crate's own
+/// encoder, so the vectors and the server cannot disagree on the prefix.
 fn length_prefixed(events: &[&[u8]]) -> Vec<u8> {
-	let mut data = Vec::new();
-	for event in events {
-		let len = u32::try_from(event.len()).expect("vector events are small");
-		data.extend_from_slice(&len.to_be_bytes());
-		data.extend_from_slice(event);
-	}
-	data
+	super::events::length_prefixed(events.iter().copied()).expect("vector events are small")
 }
 
 fn unhex(text: &str) -> Vec<u8> {
@@ -125,6 +119,14 @@ fn current() -> Value {
 			pack("batch_first", Kind::Event, 0x03, Flags::IS_RESPONSE, 10, 0, br#"{"bc":1,"fs":4712,"ls":4712,"r":1,"tc":2}"#, &length_prefixed(&[br#"{"content":{"body":"b","msgtype":"m.text"},"event_id":"$b:localhost","origin_server_ts":2,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":1,"org.wbftw.wbfuwunel.g_seq":4712,"org.wbftw.wbfuwunel.r_seq":2}}"#])),
 			pack("batch_last", Kind::Event, 0x03, Flags::IS_RESPONSE, 10, 1, br#"{"bc":1,"fs":4711,"ls":4711,"r":0,"tc":2}"#, &length_prefixed(&[br#"{"content":{"body":"a","msgtype":"m.text"},"event_id":"$a:localhost","origin_server_ts":1,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":2,"org.wbftw.wbfuwunel.g_seq":4711,"org.wbftw.wbfuwunel.r_seq":1}}"#])),
 			pack("batch_empty_window", Kind::Event, 0x03, Flags::IS_RESPONSE, 11, 0, br#"{"bc":0,"fs":0,"ls":0,"r":0,"tc":0}"#, b""),
+			pack("subscribe_account_wide", Kind::Event, 0x04, Flags::default(), 20, 0, br#"{"cg_seq":4700}"#, b""),
+			pack("subscribe_rooms", Kind::Event, 0x04, Flags::default(), 21, 0, br#"{"rooms":["!r:localhost"]}"#, b""),
+			pack("ack_subscribe", Kind::Control, 0x02, Flags::IS_RESPONSE, 20, 0, br#"{"joined":3,"latest_g_seq":4712,"skipped":[]}"#, b""),
+			pack("unsubscribe_all", Kind::Event, 0x05, Flags::default(), 20, 1, b"", b""),
+			// A pushed event: id copies the Subscribe, seq counts pushes; the data
+			// layout is Batch's. gap=true says a push was dropped before this one.
+			pack("push_one", Kind::Event, 0x06, Flags::IS_RESPONSE, 20, 0, br#"{"bc":1,"fs":4712,"gap":false,"ls":4712}"#, &length_prefixed(&[br#"{"content":{"body":"b","msgtype":"m.text"},"event_id":"$b:localhost","origin_server_ts":2,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":1,"org.wbftw.wbfuwunel.g_seq":4712,"org.wbftw.wbfuwunel.r_seq":2}}"#])),
+			pack("push_gap", Kind::Event, 0x06, Flags::IS_RESPONSE, 20, 3, br#"{"bc":1,"fs":4720,"gap":true,"ls":4720}"#, &length_prefixed(&[br#"{"content":{"body":"c","msgtype":"m.text"},"event_id":"$c:localhost","origin_server_ts":3,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":1,"org.wbftw.wbfuwunel.g_seq":4720,"org.wbftw.wbfuwunel.r_seq":3}}"#])),
 			pack("send_encrypted_with_attachments", Kind::Event, 0x02, Flags::default(), 0, 13, br#"{"room_id":"!r:localhost","type":"m.room.encrypted","txn_id":"t1","attachments":["mxc://localhost/1122334455667788"]}"#, br#"{"algorithm":"m.megolm.v1.aes-sha2","ciphertext":"AwgAEnACgAkLmt6qF84IK++J7UDH2Za1YVchHyprqTqsg","device_id":"RJYKSTBOIE","sender_key":"IlRMeOPX2e0MurIyfWEucYBRVOEEUMrOHqn/8mLqMjA","session_id":"X3lUlvLELLYxeTx4yOVu6UDpasGEVO0Jbu+QFnm0cKQ"}"#),
 			pack("ack_send", Kind::Control, 0x02, Flags::IS_RESPONSE, 0, 13, br#"{"event_id":"$Zm9vYmFy:localhost"}"#, b""),
 			pack("login_password", Kind::Session, 0x01, Flags::default(), 0, 14, br#"{"type":"m.login.password","identifier":{"type":"m.id.user","user":"alice"},"password":"correct-horse-battery","initial_device_display_name":"wbf desktop","refresh_token":true}"#, b""),

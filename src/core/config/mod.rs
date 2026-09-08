@@ -3698,6 +3698,14 @@ pub struct Config {
 	#[serde(default = "default_wbf_recent_max_batch")]
 	pub wbf_recent_max_batch: usize,
 
+	/// Most events one `Event/Push` pack carries. A new event is pushed on
+	/// its own; this bounds the packs a `Subscribe` with `cg_seq` uses to
+	/// catch the client up. A pack is also cut at `wbf_data_max_bytes`.
+	///
+	/// default: 10
+	#[serde(default = "default_wbf_push_max_events_per_pack")]
+	pub wbf_push_max_events_per_pack: usize,
+
 	/// Allows users with `redact` power level to request unredacted events with
 	/// MSC2815.
 	///
@@ -5974,6 +5982,8 @@ fn default_wbf_recent_max_limit() -> usize { 500 }
 fn default_wbf_recent_default_batch() -> usize { 10 }
 
 fn default_wbf_recent_max_batch() -> usize { 100 }
+
+fn default_wbf_push_max_events_per_pack() -> usize { 10 }
 
 fn default_media_storage_providers() -> BTreeSet<String> { ["media".to_owned()].into() }
 

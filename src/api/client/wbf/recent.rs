@@ -24,15 +24,15 @@ use serde_json::{Value, json};
 use tuwunel_core::{
 	Result, debug_warn,
 	matrix::{event::Event, pdu::PduCount},
-	wbf::{Flags, Kind, PackBuilder, PackError, PackView},
+	wbf::{
+		Flags, Kind, PackBuilder, PackError, PackView,
+		events::{EVENT_LEN_PREFIX, framed_len, length_prefixed},
+	},
 };
 use tuwunel_service::{Services, rooms::timeline::PdusIterItem};
 
 use super::{Failure, Reject, Reply, event};
 use crate::client::message::{ignored_filter, visibility_filter};
-
-/// Bytes of length prefix in front of each event in a `Batch`'s data.
-const EVENT_LEN_PREFIX: usize = 4;
 
 /// What the client asks for.
 struct RecentRequest {
@@ -131,9 +131,20 @@ impl Ord for Head {
 }
 
 /// One event of a window, as it will be sent: its `g_seq` and its JSON.
-struct WindowEvent {
-	g_seq: i64,
-	json: Vec<u8>,
+pub(super) struct WindowEvent {
+	pub(super) g_seq: i64,
+	pub(super) json: Vec<u8>,
+}
+
+/// The events newer than `cg_seq`, newest first, at most `limit`: what a
+/// `Subscribe` that asks to be caught up pushes before the live events.
+///
+/// Args:
+///     cg_seq: the client's watermark, example: Some(4711); None = the newest `limit`
+///     limit: example: `wbf_recent_max_limit`
+pub(super) async fn window_after(services: &Services, user: &UserId, cg_seq: Option<PduCount>, limit: usize) -> Vec<WindowEvent> {
+	let request = RecentRequest { limit, batch: 1, cg_seq, before: None };
+	collect_window(services, user, &request, services.config.wbf_data_max_bytes).await
 }
 
 /// Args:
@@ -233,7 +244,7 @@ async fn collect_window(services: &Services, user: &UserId, request: &RecentRequ
 
 		let event: Raw<AnyTimelineEvent> = pdu.to_format();
 		let json = event.json().get().as_bytes();
-		if json.len().saturating_add(EVENT_LEN_PREFIX) > data_max {
+		if framed_len(json.len()) > data_max {
 			// A single event wider than a pack can never be served here, so
 			// the window steps past it instead of stalling on it.
 			debug_warn!(event_id = %pdu.event_id(), "Event exceeds wbf_data_max_bytes; skipped by Event/Recent");
@@ -266,33 +277,31 @@ fn build_batches(id: u64, window: &[WindowEvent], batch: usize, data_max: usize)
 		packs.push(batch_pack(id, 0, BatchMeta { tc: 0, bc: 0, fs: 0, ls: 0, r: 0 }, &[])?);
 		return Ok(packs);
 	}
+	debug_assert!(EVENT_LEN_PREFIX == 4, "the wire prefix is four bytes");
 
 	let mut seq: u32 = 0;
 	let mut sent: usize = 0;
-	let mut data: Vec<u8> = Vec::new();
+	let mut data_len: usize = 0;
 	let mut in_batch: Vec<&WindowEvent> = Vec::with_capacity(batch);
 
 	for event in window {
-		let event_len = EVENT_LEN_PREFIX + event.json.len();
 		let batch_full = in_batch.len() >= batch;
-		let over_budget = !in_batch.is_empty() && data.len() + event_len > data_max;
+		let over_budget = !in_batch.is_empty() && data_len + framed_len(event.json.len()) > data_max;
 		if batch_full || over_budget {
 			sent += in_batch.len();
-			packs.push(batch_pack(id, seq, meta_for(total, &in_batch, total - sent), &data)?);
+			packs.push(batch_pack(id, seq, meta_for(total, &in_batch, total - sent), &in_batch)?);
 			seq = seq.saturating_add(1);
-			data.clear();
+			data_len = 0;
 			in_batch.clear();
 		}
 
-		let len = u32::try_from(event.json.len()).map_err(|_| PackError::SectionTooLarge { len: event.json.len() })?;
-		data.extend_from_slice(&len.to_be_bytes());
-		data.extend_from_slice(&event.json);
+		data_len += framed_len(event.json.len());
 		in_batch.push(event);
 	}
 
 	// The last batch: whatever is left, and `r` is 0 by construction.
 	sent += in_batch.len();
-	packs.push(batch_pack(id, seq, meta_for(total, &in_batch, total - sent), &data)?);
+	packs.push(batch_pack(id, seq, meta_for(total, &in_batch, total - sent), &in_batch)?);
 
 	Ok(packs)
 }
@@ -316,10 +325,11 @@ fn meta_for(total: usize, in_batch: &[&WindowEvent], remaining: usize) -> BatchM
 	}
 }
 
-fn batch_pack(id: u64, seq: u32, meta: BatchMeta, data: &[u8]) -> std::result::Result<Vec<u8>, PackError> {
+fn batch_pack(id: u64, seq: u32, meta: BatchMeta, events: &[&WindowEvent]) -> std::result::Result<Vec<u8>, PackError> {
+	let data = length_prefixed(events.iter().map(|event| event.json.as_slice()))?;
 	Ok(PackBuilder::new(Kind::Event, event::BATCH, Flags::IS_RESPONSE, id, seq)
 		.json_meta(&json!({ "tc": meta.tc, "bc": meta.bc, "fs": meta.fs, "ls": meta.ls, "r": meta.r }))?
-		.data(data)?
+		.data(&data)?
 		.finish())
 }
 

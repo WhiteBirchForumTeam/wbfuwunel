@@ -16,7 +16,7 @@ use std::net::IpAddr;
 
 use axum::{
 	body::Bytes,
-	extract::{State, ws::CloseFrame},
+	extract::State,
 	http::{HeaderMap, StatusCode, header},
 	response::{IntoResponse, Response},
 };
@@ -32,6 +32,7 @@ use tuwunel_core::{
 };
 use tuwunel_service::{
 	Services,
+	channels::{ConnectionId, Outgoing},
 	connections::ConnectionSlot,
 	media::{UploadError, UploadRequest},
 };
@@ -39,6 +40,7 @@ use tuwunel_service::{
 mod recent;
 mod send;
 mod session;
+mod subscribe;
 mod ws;
 
 pub(crate) use self::ws::ws_route;
@@ -74,6 +76,9 @@ mod event {
 	pub(super) const SEND: u8 = 0x02;
 	/// Server to client only: one slice of a `Recent` window.
 	pub(super) const BATCH: u8 = 0x03;
+	pub(super) const SUBSCRIBE: u8 = 0x04;
+	pub(super) const UNSUBSCRIBE: u8 = 0x05;
+	// 0x06 Push is server to client only: `channels::EVENT_PUSH_SUBTYPE`.
 }
 
 /// # `POST /_wbf/v1/pack`
@@ -101,7 +106,7 @@ pub(crate) async fn pack_route(
 	let reply = match decode(&mut body) {
 		| Ok(view) => {
 			let (id, seq) = (view.header.id, view.header.seq);
-			let ctx = PackContext { session: Some(&session), client, transport: Transport::Http };
+			let ctx = PackContext { session: Some(&session), client, transport: Transport::Http, connection: 0 };
 			let mut reply = Reply::for_http();
 			// The session change is dropped: no kind admitted on HTTP makes one.
 			match handle_pack(&services, &ctx, view, &mut reply).await {
@@ -281,6 +286,9 @@ pub(crate) struct PackContext<'a> {
 	/// The peer address, for throttles and the device's last-seen ip.
 	pub(crate) client: IpAddr,
 	pub(crate) transport: Transport,
+	/// The WebSocket connection's number (`Channels::next_connection_id`);
+	/// 0 on HTTP, which has no connection to subscribe.
+	pub(crate) connection: ConnectionId,
 }
 
 impl PackContext<'_> {
@@ -314,13 +322,6 @@ pub(crate) enum SessionChange {
 	Replace(Session),
 	/// The caller closes the connection after the replies already queued.
 	Close(CloseReason),
-}
-
-/// Something queued for a WebSocket connection's send task: a pack, or the
-/// close frame that ends the connection after everything queued before it.
-pub(crate) enum Outgoing {
-	Pack(Vec<u8>),
-	Close(CloseFrame),
 }
 
 /// Where a handler's packs go: the only way a handler sends anything.
@@ -376,6 +377,15 @@ impl Reply {
 		}
 	}
 
+	/// The connection's send queue, for a handler that registers it with the
+	/// channels; None on HTTP, where there is no connection to push to.
+	fn websocket_queue(&self) -> Option<mpsc::Sender<Outgoing>> {
+		match &self.sink {
+			| ReplySink::WebSocket(queue) => Some(queue.clone()),
+			| ReplySink::Http(_) => None,
+		}
+	}
+
 	/// Return:
 	///     Option<Vec<u8>>  the one pack an HTTP handler sent; None when it
 	///     sent nothing (a handler bug) or this is a WebSocket reply.
@@ -419,6 +429,8 @@ const fn admission(kind: Kind, subtype: u8) -> Option<Admission> {
 		| (Kind::Event, event::SEND) => Some(logged_in_any_transport),
 		// Its reply is a stream of `Batch` packs: WebSocket only.
 		| (Kind::Event, event::RECENT) => Some(logged_in_websocket_only),
+		// They change what a connection listens to: WebSocket only.
+		| (Kind::Event, event::SUBSCRIBE | event::UNSUBSCRIBE) => Some(logged_in_websocket_only),
 		| _ => None,
 	}
 }
@@ -508,7 +520,7 @@ async fn dispatch(
 
 	match (header.kind, header.subtype) {
 		| (Kind::Control, control::HELLO) => {
-			reply.send(hello(services, view)).await?;
+			reply.send(hello(services, ctx, view)).await?;
 			Ok(SessionChange::Keep)
 		},
 		| (Kind::Control, control::PING) => {
@@ -518,6 +530,14 @@ async fn dispatch(
 		| (Kind::Session, subtype) => session::handle(services, ctx, subtype, view, reply).await,
 		| (Kind::Event, event::RECENT) => {
 			recent::handle_event_recent(services, ctx.user()?, view, reply).await?;
+			Ok(SessionChange::Keep)
+		},
+		| (Kind::Event, event::SUBSCRIBE) => {
+			subscribe::handle_subscribe(services, ctx, view, reply).await?;
+			Ok(SessionChange::Keep)
+		},
+		| (Kind::Event, event::UNSUBSCRIBE) => {
+			subscribe::handle_unsubscribe(services, ctx, view, reply).await?;
 			Ok(SessionChange::Keep)
 		},
 		| _ => {
@@ -800,7 +820,7 @@ fn mxc_from_meta(meta: &Value) -> std::result::Result<String, Reject> {
 
 /// The answer to `Hello`: what this server speaks. The client's own meta
 /// (its name, its feature list) is not read; nothing here depends on it yet.
-fn hello(services: &Services, view: &PackView<'_>) -> Vec<u8> {
+fn hello(services: &Services, ctx: &PackContext<'_>, view: &PackView<'_>) -> Vec<u8> {
 	ack(
 		view.header.id,
 		view.header.seq,
@@ -809,7 +829,9 @@ fn hello(services: &Services, view: &PackView<'_>) -> Vec<u8> {
 			"server": services.globals.server_name(),
 			"engine": tuwunel_core::version::name(),
 			"engine_version": tuwunel_core::version::version(),
-			"features": ["upload", "download", "recent", "batch", "seq", "attachments", "login"],
+			"features": ["upload", "download", "recent", "batch", "seq", "attachments", "login", "push"],
+			// For debugging; 0 over HTTP. A client need not use it.
+			"connection_id": ctx.connection,
 			"recent_default_limit": services.config.wbf_recent_default_limit,
 			"recent_max_limit": services.config.wbf_recent_max_limit,
 			"recent_default_batch": services.config.wbf_recent_default_batch,
