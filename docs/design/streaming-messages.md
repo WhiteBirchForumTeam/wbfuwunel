@@ -22,9 +22,10 @@
 
 ## 3. pack
 
-kind `0x02 Stream`。**所有 subtype 的 meta 都是明文 JSON `{ "room_id", "g_seq" }`**（`Draft` 沒有 `g_seq`，它還沒拿到）；data 是密文（E2EE 房）或明文，server 不讀。
+kind `0x02 Stream`。**所有 subtype 的 meta 都是明文的 `room_id` 字串本身**（UTF-8，不是 JSON；維護者 2026-09-08：`g_seq` 已經有 header `id` 那格，meta 只剩房間）；
+data 是密文（E2EE 房）或明文，server 不讀。server 轉發時 **pack 原樣送**，不加 `sender`／`device`：接收者用 `g_seq` 找到佔位事件，作者就在它的 `sender` 裡；哪台裝置在寫，接收者不需要知道。
 
-header：`id`（8 byte）填 `g_seq`（`Draft` 填 0），server 驗它跟 meta 的 `g_seq` 相等；meta 是給人讀與對帳的、`id` 是跟其他 kind 一致的「這個 pack 屬於哪件事」。
+header：`id`（8 byte）填 `g_seq`（`Draft` 填 0），它就是「這個 pack 屬於哪則草稿」。
 **`seq`（4 byte）在這個 kind 用不到**（維護者 2026-09-08）：作者→server、server→每個接收者各是一條 TCP，順序本來就保住；掉片的補救是 `Demand`＋`Keypoint`，不靠序號。
 發送者隨便填（0 可以），server 不看、接收者不依賴；`Draft`／`Abandon`／`Demand` 的 `seq` 照無序類規則當請求號，Ack 抄回。
 
@@ -42,7 +43,7 @@ header：`id`（8 byte）填 `g_seq`（`Draft` 填 0），server 驗它跟 meta 
 - **只走 WS**；HTTP 一律 `Unsupported`。
 - **廣播對象**：房間 channel 裡的所有訂閱者，**不含發送這片的那條連線**（作者的其他裝置照收——它們是 Demand 的收件人「作者帳號組」，本來就要跟得上）。
 - **`Keypoint`／`Delta`／`Append` 不回 Ack**：盡快語意。`Draft`／`Abandon` 回 Ack 是因為它們寫了庫。`Demand` 不回 Ack：要的東西是之後的 `Keypoint`，等不到是 client 的 timeout。
-- **廣播時 server 在 meta 加 `"sender"`、`"device"`**（跟 `Push` 一樣，接收者要知道是誰的哪台裝置）。
+- **接收端可以把草稿的目前內容寫進自己的資料庫**（維護者）：UI 收到 Stream pack 就更新佔位訊息的顯示，要落地也無妨——它是揮發的，下次再收到就再更新，server 是權威。server 這邊仍然不存。
 
 ### 3.1 佔位事件長什麼樣
 
@@ -71,14 +72,13 @@ header：`id`（8 byte）填 `g_seq`（`Draft` 填 0），server 驗它跟 meta 
 ## 4. 誰能發什麼：每次從錨讀
 
 ```
-Stream pack 進來（已登入、准入表過、meta 有 room_id、header id = g_seq）
+Stream pack 進來（已登入、准入表過、meta 是合法的 room_id、header id = g_seq）
    ├─ 從 pduid_pdu 讀 (room_id 的短號, g_seq)                    ← 一次點讀；沒有 → Error(NotFound)
    ├─ 它是 org.wbftw.draft、沒被 redact                            ← 否則 Error(Conflict "not an open draft")
-   ├─ header id == meta.g_seq                                          ← 否則 Error(Conflict)
    ├─ Keypoint／Delta／Append／Abandon：sender == 這條連線的 user         ← 否則 Error(Forbidden "not the author")
    ├─ Demand：這條連線的 user 是 room_id 的成員                      ← 否則 Error(Forbidden)
    ├─ 限速（§7）、大小（§7）
-   └─ 廣播：channels::relay(room_id, 除發送連線外)；Demand 改成 channels::relay_to_user(room_id, 作者, …)
+   └─ 廣播：channels::relay(room_id, 除發送連線外, 原 pack)；Demand 改成 channels::relay_to_user(room_id, 作者, 原 pack)：作者帳號的每台裝置都收到，**正在寫這則草稿的那台才回** Keypoint（其他台沒有它的內容，不回）
 ```
 
 沒有 `g_seq → 事件` 的全站索引，所以 **`room_id` 是必填**：事件的 key 是 `(房間, g_seq)`，帶了 `room_id` 就是一次點讀。這是每片一次 DB 讀，
@@ -125,7 +125,7 @@ server 讀 123 → 作者是 A → 只送給 A 訂閱中的連線。A 廣播 `Ke
 
 - alice、bob 訂閱；alice `Draft` → Ack 有 `event_id`、`g_seq`；bob 收到 `Push`，事件 type 是 `org.wbftw.draft`；alice 自己也 `Push` 到。
 - alice `Append`、`Delta`、`Keypoint`（`seq` 全填 0）→ bob 依序收到三個，meta 多了 `sender`／`device`，data 原樣；alice 發送那條連線**沒有**收到自己的；alice 的第二條訂閱連線收到。
-- `Keypoint` data 10241 bytes → `TooLarge`；10240 → 過。header `id` 與 meta `g_seq` 不一致 → `Conflict`。
+- `Keypoint` data 10241 bytes → `TooLarge`；10240 → 過。meta 不是合法 room id → `Conflict`。
 - carol 沒訂閱 → 什麼都收不到；carol 訂閱後送 `Demand(id)` → 只有 alice 的連線收到、bob 沒收到；alice 回 `Keypoint` → carol、bob 都收到。
 - bob（非作者）送 `Append(id)` → `Forbidden`；不存在的 `id` → `NotFound`；HTTP → `Unsupported`；連送 100 片 → 一部分 `RateLimited`。
 - 定案：alice `Event/Send` 帶 `draft_id` → bob 收到兩個 `Push`：正式訊息（`unsigned.draft_id` = id）與佔位的 redaction；之後對 id 送 `Append` → `Conflict`。
@@ -133,12 +133,15 @@ server 讀 123 → 作者是 A → 只送給 A 訂閱中的連線。A 廣播 `Ke
 - bob 停止讀 socket、alice 送 50 片 → alice 一片都沒被擋、bob 恢復後收到的是後面的片。
 - 關機中連線收到 Close 1001。
 
-## 9. 開放問題
+## 9. 維護者 2026-09-08 定的（原開放問題）
 
-1. **定案用 redact 佔位（草案）還是 `m.replace` 去 edit 它**：edit 少一個 redaction 事件，但 Matrix 的 edit 要同 type，E2EE 下是密文 edit 明文，相容 client 顯示會怪；redact 乾淨。
-2. **佔位事件要不要帶作者的裝置**（`content.device_id`）：Demand 只送作者帳號的訂閱中連線，多裝置時每台都收到、都可能回 `Keypoint`。帶了 device 就只送那台；但那台下線草稿就死了。草案：不帶，多台都回也無害（接收者只換狀態）。
-3. **作者離線、草稿永遠是佔位**：server 要不要有 TTL 把太久的佔位 redact 掉？草案：不做，client 顯示「草稿（作者離線）」；要的話是 sweeper 一條，之後再說。
-4. **`g_seq` 的型別**：`PduCount` 是有號的（backfill 的事件為負），但佔位事件是本站新寫的、永遠正，所以塔進 u64 的 header `id` 沒問題；server 對負值回 `NotFound`。
+1. **定案用 redact**：正式版直接再發一則新訊息，佔位直接剥除；不用 `m.replace`。
+2. **佔位不帶 device**：`Demand` 是去跟發文者的**帳號**要，他的每台裝置都收到，正在寫草稿的那台才回。
+3. **佔位永不過期**：沒有 TTL，永遠可用。
+4. **meta 不用 JSON**：直接放 `room_id`，`g_seq` 在 header `id`。
+5. **接收端可以落地**草稿內容（§3），server 是權威。
+
+剩下的小事：`g_seq` 的型別——`PduCount` 是有號的（backfill 的事件為負），但佔位事件是本站新寫的、永遠正，塔進 u64 的 header `id` 沒問題；server 對讀不到的回 `NotFound`。
 
 ## 10. 這份文件的查證範圍
 
