@@ -99,6 +99,13 @@ Logout 後直接關線；同一條連線重複 Login 允許；**登入限速預�
 第一部分（§1–§6）已合併；三處跟提案不同（名額在發 token 前拿、一趟收齊一窗、一問一答 handler 保留簽名）在文件裡標 📎。
 **第二部分**（§8：review-followups §2.5 → §2.2 → §2.8，上傳生命週期）🔲 未開，順序與同支／另開由維護者定。client 端要跟的東西：wbf-matrix-client #15。
 
+### 2.9 📄 WS 訂閱與推送 ＋ 流式訊息第三版（草案 [wbf-event-push.md](wbf-event-push.md)、[streaming-messages.md](streaming-messages.md)，2026-09-08）
+
+維護者 2026-09-08 定方向：先做重點功能，`media/upload-lifecycle` 晚點。三件工作：(1) 一般訊息走 WS——已是 `Event/Send`；(2) 連線訂閱自己的帳號，
+在的任何房間的新事件推過來——`Event/Subscribe`／`Unsubscribe`／`Push`，接在 `append_pdu` 提交後，registry `user → 連線`，`try_send` 掉了記 `gap` 用 `Recent` 補；
+(3) 流式訊息坐在推送上——草稿是暫態（記憶體與 TCP），`draft_id` 從頭到尾不變，全文或 delta（client 算、server 只看 `full` 旗標），定案是一則帶 `draft_id` 的正常 `Event/Send`；server 對草稿零狀態。
+第二版草案（`Open`／`Fragment`／`Close`、server 發 id）作廢。
+
 ## 3. 候選（要不要做，由維護者決定）
 
 | 項目 | 一句話 | 前提 / 觸發條件 |

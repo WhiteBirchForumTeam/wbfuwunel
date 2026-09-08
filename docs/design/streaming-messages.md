@@ -1,142 +1,100 @@
-# 流式訊息（Streaming Messages）設計草案，第二版
+# 流式訊息（Streaming Messages）設計草案，第三版
 
-> **狀態：草案，等維護者同意。** 對應核心設計 [why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md) §5.3。
-> 第二版依維護者 2026-09-03 的指示改：**走 WebSocket over TLS 的二進位通道**，每一片是一個 pack
-> （[wbf-wire-format.md](wbf-wire-format.md)：標頭＋密文 meta＋密文 data），不定長、不需要 seek；
-> 預設**沒收到就丟**，需要時用標頭的 `WANT_ACK` 與 `seq` 做 Ack 與重送。第一版「分片走 sync ephemeral」降為**退化路徑**（§6）。
->
-> 撰寫日期：2026-09-01；第二版 2026-09-03。**尚未實作**，同意前不動 `src/`。
+> **狀態：📄 草案，等維護者同意。** 第三版依維護者 2026-09-08 的方向重寫：草稿是**暫態**，只在記憶體與 TCP 上，可以丟；
+> 一則草稿從頭到尾改同一個暫時 id；可以送**全文**也可以送 **delta**；最後不改了就送一則**正常訊息**持久化，取代草稿。
+> 走 [wbf-event-push.md](wbf-event-push.md) 的訂閱與推送（工作 2），這份是工作 3。
+> 第二版（2026-09-03，`Open`／`Fragment`／`Close`／`Abandon`、server 發 stream id）作廢：它要 server 發 id、記 stream 狀態、管 `next_seq`，
+> 第三版全部拿掉——server 對草稿**零狀態**。
 
 ## 1. 這是什麼、不是什麼
 
-「流式訊息」是**文字／token 的串流**：一段訊息還在長，就把已經有的部分送給在線的人看，講完了才收成一個正式訊息。
-對標情境：LLM 回覆逐字吐出、長訊息分段輸入。
+「流式訊息」是一則**還在長**的訊息：LLM 逐字吐、長訊息分段打、或改自己剛送的東西。在線的人看著它變，講完了它變成一則正常訊息。
 
-它跟分塊上傳（[chunked-upload.md](chunked-upload.md)）**共用通道與外框**，但語意相反：
-上傳的塊是定長、要落盤、要 seek；流的分片是不定長、不落盤、能用多少就多少。太長的東西就不是流，是檔案。
+它跟分塊上傳共用通道與外框，語意相反：上傳的塊要落盤、要 seek；草稿不落盤、掉了就掉。太長的東西不是流，是檔案。
+它也**不是** Matrix 的 `m.replace`（edit）：edit 每改一次一個永久事件；草稿一個都不進歷史。edit 不受影響、照舊。
 
-### 1.1 為什麼不用 Matrix 現成的那條
+## 2. 三個規則
 
-`m.replace` 每更新一次發一個完整的新事件進歷史；LLM 每吐幾個字就一個永久事件，歷史被殘影填滿。
-我們不與 Matrix 規格相容（核心設計 §1），所以要的是乾淨的流式語意。
+1. **草稿是暫態**：server 不存、不重送、後加入者永遠看不到；只有當下訂閱著（[wbf-event-push.md](wbf-event-push.md)）的人收到。
+2. **一則草稿一個暫時 id，從頭到尾不變**：`draft_id` 由發送者選（pack header 的 `id`），作用域是 `(sender, device)`；接收者用 `(sender, device, draft_id)` 認它。
+3. **定案是一則正常訊息**：`Event/Send` 的 meta 多帶 `draft_id`，server 照常 append、照常推（`Push`），接收者把那個草稿的顯示換成這則事件。草稿到此結束。
 
-## 2. 核心決定：分兩層
+## 3. pack
 
-> **分片不落盤、不進歷史；講完了才寫一個正式事件定案。**
+kind `0x02 Stream`（§3.3 早留的），兩個 subtype：
 
-| 層 | 性質 | 存哪 | 誰看到 |
-|---|---|---|---|
-| **分片（fragment）** | 短暫，帶 `stream_id` ＋ `seq` | 記憶體（同 typing） | 只有當下連著通道的 client |
-| **定案事件** | 正式 timeline 事件 | RocksDB（既有事件路徑） | 所有人，含之後加入的 |
+| subtype | 誰發 | header | meta（**明文**，server 要讀） | data |
+|---|---|---|---|---|
+| `0x01 Draft` | 發送者 → server → 訂閱者 | `id` = `draft_id`；`seq` 每片 +1（發送者自己遞增） | `{ "room_id", "full": bool }`；server 轉發時**加上** `"sender"`、`"device"` | **密文**（E2EE 房）或明文：`full: true` 是全文；`full: false` 是相對於**上一片**的 delta |
+| `0x02 Abandon` | 發送者 → server → 訂閱者 | `id` = `draft_id` | `{ "room_id" }`；轉發時加 `sender`、`device` | 無 |
 
-中途加入的 client 永遠收不到分片，等定案事件就好；歷史只有一個版本。
+- **只走 WS**；HTTP 回 `Unsupported`（草稿沒有訂閱者就沒有意義）。
+- **`Draft` 不回 Ack、不回 Error**（除了准入與大小關卡的錯）：它是「盡快」語意，跟 `Push` 一樣。發送者送完就送下一片。
+- **定案**：`Event/Send` meta `{ ..., "draft_id": <u64> }`。server 把它寫進事件的 `unsigned["org.wbftw.wbfuwunel.draft_id"]`
+  （`unsigned` 不進雜湊、不進聯邦、跟 `r_seq`／`g_seq` 同一個位置），所以連 `Push` 推來的事件都帶得到，接收者不需要另一個「Sealed」包。
+- **`Abandon`** = 撤回草稿，不定案。發送者的連線斷了、沒 `Abandon` 也沒定案：接收者自己在 `wbf_stream_draft_ttl`（client 端建議 30 秒）沒新片就把草稿收掉。server 不管。
 
-## 3. 傳輸：WebSocket 二進位通道
+## 4. 全文與 delta：server 不懂、接收者自保
 
-分片走 [wbf-wire-format.md](wbf-wire-format.md) 的通道，kind = `Stream`。**不走 sync**：sync 的模型是「有變化就 wake、wake 後重拉」，
-token 頻率（每 10–50 ms 一片）會把它打爆；一條長連線推分片，開銷是 32 bytes 的外框。
+E2EE 房間裡 server 讀不到本文，所以 **delta 是 client 算的、client 套的**，server 只轉發。server 唯一讀的是明文 `full`：
 
-**加密**：一片就是一個 pack。server 只讀明文標頭（`kind`、`subtype`、`id` = stream id、`seq`、`flags`）；
-**meta 與 data 都是密文**（`META_ENCRYPTED = 1`），server 原樣轉給同房間、連著通道的其他 client。
-它驗的是順序與存在，不是內容。一個欄位一個職權：meta 放這一片的語意（JSON），data 放本文本體。
+- **第一片建議 `full: true`**（維護者：也可以是只有 + 的 delta，接收者從空字串套起）。
+- **delta 是相對於上一片**（`seq − 1`）的。接收者只在「上一片有收到」時套 delta；漏了一片就把這則草稿標成「等全文」，收到下一個 `full: true` 再顯示。
+- **發送者要定期送全文**（client 政策，建議每 2 秒或每 20 片一次），讓漏片的人與中途訂閱的人接得回來。server 不強制、不檢查。
+- delta 的內部格式是 client 的事（在密文裡）。建議最簡單的 `{ "ops": [["=", n], ["+", "text"], ["-", n]] }`，server 永遠不看。
+- 為什麼 delta 值得做：LLM 逐 token 吐、每 50 ms 一片，全文重送是 O(長度²) 的頻寬；delta 是 O(長度)。維護者要 delta，這裡就給 delta，但**全文永遠是後路**。
 
-## 4. 訊框（kind = `Stream`）
+## 5. server 端：轉發，零狀態
 
-標頭：`id` = stream id（`Open` 時 0，server 在 `Ack` 的 meta 發），`seq` = 片序號（`Open` 是 0，`Fragment` 從 1 起遞增）。
-除了 `Open` 的請求 meta（server 要知道房間），其餘 meta 與 data 都是密文。
-
-| subtype | 誰發 | meta | data |
-|---|---|---|---|
-| `Open` | 發送者 | **明文** `{ "room": "!…", "device": "…", "ack": bool }`（server 要查房間成員） | 無。server 回 `Ack`，meta `{ "id": <stream id> }` |
-| `Fragment` | 發送者 → server → 接收者 | 密文 JSON `{ "done": false }` —— 這一片的語意，有需要再加欄位 | 密文：到目前為止的**全文**（UTF-8） |
-| `Close` | 發送者 | 密文 `{ "event_id": "$…" }`（定案事件，§5） | 無。接收者收到就把該 stream 的顯示換成正式事件 |
-| `Abandon` | 發送者或 server | server 發的是明文 `{ "reason": "timeout" }`；發送者發的可密文 | 無 |
-
-`Fragment` 的 meta 與 data 各自 AEAD（`key_stream`，`nonce = base ‖ seq ‖ 段號`），發送者加密完**直接寫進 pack 的 slot**，接收者在拆包回來的切片上原地解；pack 本身不碰加密。
-
-**順序**（[wbf-wire-format.md](wbf-wire-format.md) §4）：發送者 → server 這段，`Fragment` 是**有序類**，同一個 stream 的 `seq` 必須遞增，
-server 記 `next_seq`，錯了回 `Error(OutOfOrder)`。server → 接收者這段是**事件驅動**，接收者不守順序：收到就顯示、只接受比目前大的 `seq`，
-舊的丟掉（全量分片讓這件事安全）。`Open`、`Close`、`Abandon` 是無序類一問一答。
-
-- **`text` 是全量不是 delta**：接收者永遠只顯示最後一片，掉一片不會亂。代價是頻寬隨長度線性長，
-  對一則訊息的長度來說可忽略；真的長到在乎，那是檔案（§1）。
-- 不定長，能塞多少塞多少；外框有 `wbf_meta_max_bytes`、`wbf_data_max_bytes` 擋極端值。
-
-## 5. 送達語意：預設丟，選用 Ack
-
-- **預設（`ack: false`，也就是標頭不帶 `WANT_ACK`）**：server 收到 `Fragment` 就轉發，不存、不重送。接收者掉了一片，下一片是全量、自然補上。
-  這跟 typing 一樣是「最新狀態」語意，不是「每一片都要到」。
-- **選用（`Open` 時 `ack: true`，之後每片帶 `WANT_ACK`）**：server 對每片回 `Ack`（標頭抄回同一組 `id`、`seq`，不用讀 meta）；發送者沒在 `T_ack`（client 端自訂，建議 1 s）內收到就重送。
-  server 端對接收者也一樣：接收者可以回 `Ack`，server 據此重送給沒收到的接收者（保留最後 N 片在記憶體，`N = wbf_stream_replay_depth`，預設 8）。
-  這是給「一片都不能掉」的場合（例如流的內容不是純顯示、接收端要逐片處理）。
-- **定案永遠可靠**：`Close` 帶 `event_id`，定案事件走既有 append 路徑進 RocksDB、進 sync。分片掉光了也沒關係，
-  正式事件一定到。這就是為什麼預設可以丟：可靠性放在定案，不放在分片。
-
-## 6. 退化路徑：沒有通道的 client
-
-沒連 WebSocket 的 client（舊 client、或還沒實作通道的）**只會**在 sync 裡看到定案事件，分片一片都看不到。
-這是設計上接受的：它們少的只是「看著它長出來」的體驗，內容一個字不少。
-
-第一版提的「分片走 sync ephemeral」**不做**：它的價值是零新傳輸，但通道為了分塊上傳反正要做，沒理由再養一條。
-
-## 7. 程式碼落點
-
-| 東西 | 落點 | 參考 |
-|---|---|---|
-| 通道與外框 | `src/api/client/wbf/ws.rs`，axum `ws` feature（目前沒開） | [wbf-wire-format.md](wbf-wire-format.md) §5 |
-| stream 狀態（記憶體） | `src/service/rooms/streaming/`（新增，仿 `typing/`） | `typing/mod.rs` 的 `RwLock<BTreeMap<RoomId, …>>`、超時清理 |
-| 轉發 | streaming service 對每個房間維護「連著通道的 client」清單；`Fragment` 進來就對清單裡除發送者外的每個 sender 推 | 需要一張 `room → Vec<connection>` 表，連線斷就移除 |
-| 定案 | `src/service/rooms/timeline/append.rs` 既有路徑，內容 = 最後一片的全文，欄位帶 `stream_id` | 落地後被 `pduid_pdu` watcher 撈到，自然進 sync |
-| 誰有資格收 | 房間成員判斷走既有的 `state_cache.is_joined` | 加入通道時綁定 user，`Open` 時查房間成員 |
-
-**不新增 column family**：分片永不落盤。
-
-## 8. 資料模型
-
-```text
-Stream {
-    id:         u64（server 發，連線內唯一即可；跨連線不需要）
-    room_id, sender: UserId, device: DeviceId
-    seq:        u64（起 0，每片 +1；接收者只接受遞增）
-    ack:        bool
-    state:      Open | Closed | Abandoned
-    created_at / last_fragment_at
-    recent:     VecDeque<Fragment>（只在 ack=true 時保留，長度 ≤ wbf_stream_replay_depth）
-}
+```
+Draft 進來（已登入、准入表過、meta 是 {room_id, full}）
+   ├─ sender 是 room_id 的成員嗎？不是 → Error(Forbidden)
+   ├─ 限速：每 (sender, device) 每秒 wbf_stream_drafts_per_second（預設 30，突發 60）→ 超過 Error(RateLimited)，這片丟
+   ├─ 大小：data ≤ wbf_stream_max_draft_bytes（預設 64 KiB）→ 超過 Error(TooLarge)
+   └─ push::relay(room_id, sender, device, pack')   ← pack' = 原 pack 加 sender/device 進 meta；對每個訂閱者 try_send，滿了就丟（不記 gap：草稿沒有洞的概念）
 ```
 
-上限（config）：`wbf_stream_timeout`（預設 30 s 沒新片就 Abandon）、`wbf_stream_max_per_room`（預設 16）、
-`wbf_stream_max_fragment_bytes`（預設 64 KiB，同時受 pack 的 `wbf_data_max_bytes` 管）。全部記憶體、全部有上限、全部有超時 —— 呼應核心設計 §1 的「容量有界」。
+- **不記任何 stream 狀態**：沒有 `next_seq`、沒有 open 表、沒有 TTL 清理。第二版那張 `room → Vec<connection>` 表就是推送的 registry，不另建。
+- **不驗 `seq`**：TCP 保證同一連線內的順序；接收者只接受比目前大的 `seq`，其餘丟。發送者換連線續發同一個 `draft_id`：允許，`seq` 自己接上就好。
+- **發送者自己的其他裝置也收到**（跟 `Push` 一樣）；發送這片的那條連線也會收到自己的轉發——client 用 `(sender, device)` 是自己就忽略。不做特例。
+- **不推給沒訂閱的**：沒訂閱的連線收不到草稿，也收不到 `Push`，一致。
 
-## 9. 必須守住的語意（驗收條件）
+## 6. 跟 `Push` 共用什麼
 
-1. **後加入者零殘影**：只看到定案事件。
-2. **歷史單一版本**：定案前事件層沒有半成品。
-3. **容量有界**：分片全記憶體、有上限、有超時。
-4. **不污染 `next_batch`**：分片不走 sync，自然不推進 timeline token；只有定案事件推進。
-5. **E2EE 下 server 不碰明文**：server 只看 pack 的明文標頭，meta 與 data 原樣轉發。
-6. **通道斷了不丟定案**：發送者重連後仍能 `Close`（stream 還在 `wbf_stream_timeout` 內）或重發定案事件。
+| 共用 | 在哪 |
+|---|---|
+| 訂閱 registry（`user → 連線`）、`try_send`、掉了就掉 | `Services.push`（[wbf-event-push.md](wbf-event-push.md) §3） |
+| 發送佇列與發送 task | pipeline §1 |
+| 「後加入者零殘影、歷史單一版本、容量有界、不污染 sync token、server 不碰明文」五條 | 第二版 §9，仍全部成立；容量有界現在是「零」 |
 
-## 10. 開放問題
+## 7. 上限（config）
 
-1. **stream 的金鑰**（核心設計 §7 待驗 4）：一個 stream 一把短期金鑰（`Open` 時透過既有的 to-device 金鑰分發送給房間成員），
-   還是沿用該房間當下的 Megolm session。建議**沿用 Megolm session**：分片本來就是「這則訊息的中間狀態」，
-   跟定案事件同一把，接收者不用多一次交換。待驗的是 Megolm 對高頻小訊息的 ratchet 成本。
-2. **同房間多 stream 交錯**：per-stream `seq` 各自遞增，跨 stream 不保證全序，client 依 `id` 分流。需確認接受。
-3. **跨裝置**：同一使用者兩台裝置各自是獨立的接收者；發送者只能是一台。不做跨裝置續發。
-4. **串流中撤回**：`Abandon` 就是撤回，不定案；已定案走既有 redact。不做部分編輯。
-5. **分片頻率**：client 端決定（建議每 50–100 ms 或每 N 個 token 合併一片），server 不限制頻率、只限制大小與並行數。
+| 名字 | 預設 | 管什麼 |
+|---|---|---|
+| `wbf_stream_drafts_per_second`／`wbf_stream_drafts_burst` | 30／60 | 每 (sender, device) 的 `Draft` 頻率（`IpTokenBuckets` 同款，key 換成 device） |
+| `wbf_stream_max_draft_bytes` | 65536 | 一片的 data 上限（同時受 `wbf_data_max_bytes`） |
 
-## 11. 這份文件的查證範圍
+沒有「每房幾條 stream」的上限：server 不知道有幾條（零狀態）；頻率與大小限住了流量，這就夠。
 
-**在程式碼裡讀過（2026-09-01，`main` == 上游 v1.9.0-91；2026-09-03 再確認）**
+## 8. 驗收（e2e11，接在推送的情境後面）
 
-- `src/service/rooms/typing/mod.rs`：記憶體狀態 ＋ 超時清理的形狀，流式照搬。
-- `src/service/sync/watch.rs`、`src/api/client/sync/v3.rs`：第一版曾打算掛在這裡；第二版不走 sync，只有定案事件經過它。
-- `src/service/rooms/timeline/append.rs`：定案事件的入口。
-- `src/router/`、`src/api/`：**沒有任何 WebSocket 或 SSE**，axum 的 `ws` feature 沒開；通道要從零加。
+- alice 訂閱；bob 送 `Draft(seq 0, full)`、`Draft(1, delta)`、`Draft(2, delta)` → alice 依序收到三個 `Draft`，meta 多了 `sender`／`device`，data 原樣（server 不動 bytes）。
+- bob 定案：`Event/Send` 帶 `draft_id` → alice 收到 `Push`，事件 `unsigned` 帶 `org.wbftw.wbfuwunel.draft_id` = 那個 id；bob 自己收到 `Ack` 與 `Push`。
+- bob `Abandon` → alice 收到；沒有事件。
+- 沒訂閱的連線收不到 `Draft`；非成員送 `Draft` → `Forbidden`；HTTP 送 → `Unsupported`；超過 64 KiB → `TooLarge`；連送 100 片 → 一部分 `RateLimited`。
+- alice 停止讀 socket、bob 送 50 片 → bob 一片都沒被擋（沒有背壓回到發送者）、alice 恢復後收到的是後面的片、沒有 `gap`。
+- 關機中連線收到 Close 1001。
 
-**純粹是判斷，不是事實**
+## 9. 開放問題
 
-- 「sync 在 token 頻率下會是負擔」—— 依 wake-and-repull 模型推的，沒實測；但第二版不靠這個判斷，通道反正要做。
-- 「全量分片的頻寬可忽略」—— 對一則訊息的長度而言；要是有人拿它傳長文，那是用錯工具。
+1. **delta 的內部格式要不要定在 spec 裡**：server 不看，但兩個 client 實作要一致。建議定在 client 的 `wbf-client-convention`，server 這邊只定 `full` 旗標。
+2. **`draft_id` 進 `unsigned`**：好處是一個包解決定案對應；代價是持久化一個只對「當時在線的人」有意義的數字（8 byte）。維護者若不要，改成 server 推一個 `Stream/Sealed { draft_id, event_id }`，多一個 subtype、多一次推。
+3. **草稿要不要限成員數**：幾千人的房間一片草稿就是幾千次 `try_send`。`Push` 有同樣的問題（event-push §9），一起看。
+4. **同一 (sender, device) 同時多則草稿**：允許（不同 `draft_id`），server 不限；client 自己決定要不要。
+
+## 10. 這份文件的查證範圍
+
+- `src/api/client/wbf/{mod,ws,send}.rs`（PR #33 的樣子）：發送佇列、准入表、`Event/Send` 的 meta 解析與 `send_message_event`。
+- `src/service/rooms/typing/mod.rs`：第二版打算仿的記憶體狀態，第三版不需要了。
+- `src/service/rooms/timeline/append.rs`、`src/core/matrix/pdu/seq.rs`：`unsigned` 裡放 server 欄位的既有做法（`r_seq`／`g_seq`）。
+- 沒實測：delta 對 LLM token 頻率的實際節省、大房間轉發的成本。
