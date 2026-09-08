@@ -22,17 +22,20 @@
 
 ## 3. pack
 
-kind `0x02 Stream`。**所有 subtype 的 meta 都是明文 JSON `{ "room_id", "g_seq" }`**（`Draft` 沒有 `g_seq`，它還沒拿到）；header `id` 也填 `g_seq`，server 驗兩者一致；
-data 是密文（E2EE 房）或明文，server 不讀。
+kind `0x02 Stream`。**所有 subtype 的 meta 都是明文 JSON `{ "room_id", "g_seq" }`**（`Draft` 沒有 `g_seq`，它還沒拿到）；data 是密文（E2EE 房）或明文，server 不讀。
 
-| subtype | 誰發 | 進庫？ | header `seq` | data |
-|---|---|---|---|---|
-| `0x01 Draft` | 作者 | **是**：佔位事件 | 請求號 | 無。回 `Ack` `{ "event_id", "g_seq" }` |
-| `0x02 Abandon` | 作者 | **是**：redact 佔位事件 | 請求號 | 無。回 `Ack` `{ "redaction_event_id" }`；訂閱者從 `Push` 收到 redaction |
-| `0x03 Keypoint` | 作者 | 否 | 作者遞增的片序號 | **完整字段**：接收者把這則草稿的 buffer 整個清空換成它。明文上限 **8 KiB**（client 約定），server 對 data 的 hard limit **10 KiB**（密文，含加密外框） |
-| `0x04 Delta` | 作者 | 否 | 片序號 | 相對於接收者目前狀態的差異（格式是 client 約定，§5） |
-| `0x05 Append` | 作者 | 否 | 片序號 | 直接接在末尾的文字 |
-| `0x10 Demand` | **任何成員** | 否 | 請求號 | 無。server 只送給**作者帳號**訂閱中的連線；作者回應是廣播一次 `Keypoint`（太長就再跟 `Append`） |
+header：`id`（8 byte）填 `g_seq`（`Draft` 填 0），server 驗它跟 meta 的 `g_seq` 相等；meta 是給人讀與對帳的、`id` 是跟其他 kind 一致的「這個 pack 屬於哪件事」。
+**`seq`（4 byte）在這個 kind 用不到**（維護者 2026-09-08）：作者→server、server→每個接收者各是一條 TCP，順序本來就保住；掉片的補救是 `Demand`＋`Keypoint`，不靠序號。
+發送者隨便填（0 可以），server 不看、接收者不依賴；`Draft`／`Abandon`／`Demand` 的 `seq` 照無序類規則當請求號，Ack 抄回。
+
+| subtype | 誰發 | 進庫？ | data |
+|---|---|---|---|
+| `0x01 Draft` | 作者 | **是**：佔位事件 | 無。回 `Ack` `{ "event_id", "g_seq" }` |
+| `0x02 Abandon` | 作者 | **是**：redact 佔位事件 | 無。回 `Ack` `{ "redaction_event_id" }`；訂閱者從 `Push` 收到 redaction |
+| `0x03 Keypoint` | 作者 | 否 | **完整字段**：接收者把這則草稿的 buffer 整個清空換成它。明文上限 **8 KiB**（client 約定），server 對 data 的 hard limit **10 KiB**（密文，含加密外框） |
+| `0x04 Delta` | 作者 | 否 | 相對於接收者目前狀態的差異（格式是 client 約定，§5） |
+| `0x05 Append` | 作者 | 否 | 直接接在末尾的文字 |
+| `0x10 Demand` | **任何成員** | 否 | 無。server 只送給**作者帳號**訂閱中的連線；作者回應是廣播一次 `Keypoint`（太長就再跟 `Append`） |
 
 - **沒有 `Chunk`**（維護者 2026-09-08：多餘）。長於 8 KiB 的草稿 = 一個 `Keypoint`（前 8 KiB）＋若干個 `Append`；接收者的 buffer 先被削成 8 KiB、再長回來。
   這跟塊等效，少一個型別、少一套塊索引與 join 規則。
@@ -89,7 +92,7 @@ Stream pack 進來（已登入、准入表過、meta 有 room_id、header id = g
   例如 12 KiB 的草稿，有人 `Demand`，所有人的 buffer 先被削成 8 KiB、接著收到 4 KiB 的 `Append` 回到 12 KiB。這就是「塊」，不需要另一個型別。
 - **`Delta`**：相對於接收者目前狀態的差異；接收者只在「有狀態」時套（收過 `Keypoint`，或從空字串開始且沒漏過片），不然等下一個 `Keypoint`（或自己 `Demand`）。
 - **`Append`**：接在末尾。最常見的 LLM 情境，一片就是幾個 token。
-- **片序號**（`Keypoint`／`Delta`／`Append` 的 `seq`）由作者對每則草稿遞增；接收者只接受比目前大的，舊的丟。server 不驗。
+- **沒有片序號**：順序由 TCP 保（§3），接收者照到達順序套。作者換連線續發：先送一個 `Keypoint` 對齊再續，不靠序號接。
 - **第一片**可以是 `Keypoint`、也可以是從空字串起的 `Delta`／`Append`——都允許，client 決定。
 - **delta 的內部格式**（密文裡）定在 client 的約定，server spec 只定「有這三種」與它們的語意。
 
@@ -121,7 +124,7 @@ server 讀 123 → 作者是 A → 只送給 A 訂閱中的連線。A 廣播 `Ke
 ## 8. 驗收（e2e11，接在 channel 的情境後面）
 
 - alice、bob 訂閱；alice `Draft` → Ack 有 `event_id`、`g_seq`；bob 收到 `Push`，事件 type 是 `org.wbftw.draft`；alice 自己也 `Push` 到。
-- alice `Append(seq 0)`、`Delta(1)`、`Keypoint(2)` → bob 依序收到三個，meta 多了 `sender`／`device`，data 原樣；alice 發送那條連線**沒有**收到自己的；alice 的第二條訂閱連線收到。
+- alice `Append`、`Delta`、`Keypoint`（`seq` 全填 0）→ bob 依序收到三個，meta 多了 `sender`／`device`，data 原樣；alice 發送那條連線**沒有**收到自己的；alice 的第二條訂閱連線收到。
 - `Keypoint` data 10241 bytes → `TooLarge`；10240 → 過。header `id` 與 meta `g_seq` 不一致 → `Conflict`。
 - carol 沒訂閱 → 什麼都收不到；carol 訂閱後送 `Demand(id)` → 只有 alice 的連線收到、bob 沒收到；alice 回 `Keypoint` → carol、bob 都收到。
 - bob（非作者）送 `Append(id)` → `Forbidden`；不存在的 `id` → `NotFound`；HTTP → `Unsupported`；連送 100 片 → 一部分 `RateLimited`。
@@ -135,7 +138,7 @@ server 讀 123 → 作者是 A → 只送給 A 訂閱中的連線。A 廣播 `Ke
 1. **定案用 redact 佔位（草案）還是 `m.replace` 去 edit 它**：edit 少一個 redaction 事件，但 Matrix 的 edit 要同 type，E2EE 下是密文 edit 明文，相容 client 顯示會怪；redact 乾淨。
 2. **佔位事件要不要帶作者的裝置**（`content.device_id`）：Demand 只送作者帳號的訂閱中連線，多裝置時每台都收到、都可能回 `Keypoint`。帶了 device 就只送那台；但那台下線草稿就死了。草案：不帶，多台都回也無害（接收者只換狀態）。
 3. **作者離線、草稿永遠是佔位**：server 要不要有 TTL 把太久的佔位 redact 掉？草案：不做，client 顯示「草稿（作者離線）」；要的話是 sweeper 一條，之後再說。
-4. **meta 裡的 `g_seq` 跟 header `id` 重複**：維護者定 meta 只放 `room_id`、`g_seq`；header `id` 也填同一個值是為了跟其他 kind 一致（`id` 就是「這個 pack 屬於哪一件事」），server 驗兩者相等。若維護者要只留一邊，留 meta。
+4. **`g_seq` 的型別**：`PduCount` 是有號的（backfill 的事件為負），但佔位事件是本站新寫的、永遠正，所以塔進 u64 的 header `id` 沒問題；server 對負值回 `NotFound`。
 
 ## 10. 這份文件的查證範圍
 
