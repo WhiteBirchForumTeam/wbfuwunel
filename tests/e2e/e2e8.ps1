@@ -298,4 +298,40 @@ Check '[3.4] budget smaller than any event: every event skipped, one empty Batch
 $wsC.Dispose()
 Stop-Server $p
 
+# ================= Scenario 4: first byte of a window over many rooms (pack-pipeline 6.3 / 10: a measurement, not a gate) =================
+# One user in 30 rooms with 10 messages each (plus each room's state events): a window of 320 fans out over every
+# joined room. Logged: time from sending Recent to the first Batch, and to r = 0; cold (first ask) and warm (second).
+Log '################ Scenario 4: first-byte measurement ################'
+$db4 = "$S\e2e8db-4"; Remove-Item -Recurse -Force $db4 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db4 | Out-Null
+$cfg4 = Write-Config $db4 86400
+$p = Start-Server $cfg4 's4'
+$regE = Api Post '/_matrix/client/v3/register' '{"username":"erin","password":"pw-pw-pw-pw","auth":{"type":"m.login.dummy"}}' $null
+$tokE = $regE.access_token
+$roomsE = @()
+1..30 | ForEach-Object {
+  $rid = (Api Post '/_matrix/client/v3/createRoom' ('{"preset":"private_chat","name":"fanout ' + $_ + '"}') $tokE).room_id
+  $roomsE += $rid
+  1..10 | ForEach-Object { $null = Send-Msg $rid "fanout message $_ with enough padding to look like a real line of chat" $tokE }
+}
+$allE = @(); foreach ($jr in $roomsE) { $allE += @((Room-Messages $jr $tokE 'f' 500).chunk) }
+Log "  erin: $($roomsE.Count) rooms, $($allE.Count) events"
+$wsE = Ws-Open $tokE
+function Time-Window($ws, [uint32]$id, $limit, $batch) {
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  Ws-Send $ws (Json-Pack 0x14 1 $id 0 @{ limit = $limit; batch = $batch } $null)
+  $first = $null; $n = 0
+  do { $pk = Ws-Recv-Bounded $ws 30000; if ($null -eq $first) { $first = $sw.Elapsed.TotalMilliseconds }; $n++ } while ($pk.meta.r -ne 0)
+  @{ first_ms = [math]::Round($first, 1); total_ms = [math]::Round($sw.Elapsed.TotalMilliseconds, 1); batches = $n; tc = $pk.meta.tc }
+}
+$cold = Time-Window $wsE 1 320 10
+$warm = Time-Window $wsE 2 320 10
+$big = Time-Window $wsE 3 500 100
+Log "  [4.1] window 320/10 cold: first batch $($cold.first_ms) ms, r=0 at $($cold.total_ms) ms, $($cold.batches) batches, tc=$($cold.tc)"
+Log "  [4.2] window 320/10 warm: first batch $($warm.first_ms) ms, r=0 at $($warm.total_ms) ms, $($warm.batches) batches, tc=$($warm.tc)"
+Log "  [4.3] window 500/100 warm: first batch $($big.first_ms) ms, r=0 at $($big.total_ms) ms, $($big.batches) batches, tc=$($big.tc)"
+Check '[4.4] the 320 window over 30 rooms is full and consistent' ($cold.tc -eq 320 -and $cold.batches -eq 32 -and $warm.tc -eq 320) "cold=$($cold.tc) warm=$($warm.tc)"
+Check '[4.5] first byte of a 320 window over 30 rooms is well under the client reconnect budget (10 s)' ($cold.first_ms -lt 2000) "cold first=$($cold.first_ms) ms"
+$wsE.Dispose()
+Stop-Server $p
+
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"

@@ -188,6 +188,8 @@ enum Outgoing { Pack(Bytes), Close(CloseFrame) }
   （`JoinSet` 裡 `serve` 用 `tokio::join!` 等發送 task）。15 秒的 `JOIN_TIMEOUT` 不變。
   📎 實作：`serve` 結束時 drop 掉所有 sender，再等發送 task 最多 `DRAIN_TIMEOUT`（5 秒）把佇列寫完；對端不讀就 abort 它、socket 隨之關掉。
   發送 task 只持有 socket 的 sink，不借 `Services`，所以它比 `serve` 晚一點結束也不會懸空。
+  📎 Close frame 入隊也有同一個上限（`enqueue_close`，PR #33 review，rumia）：佇列滿且對端不讀時，接收 loop 不會為了送 Close 永遠等，5 秒後直接結束、socket drop。
+  最壞的記憶體界：一條連線 `wbf_ws_send_queue_len × wbf_data_max_bytes`（預設 32 × 16 MiB），只有對端在一串最大 pack 中途停讀才達得到；寫在 config 說明裡，小機器把佇列壓小。
 - 現在 `ws.rs` 裡每一處 `sink.send(...)` 都改成入隊。改完 `serve` 裡不該再看得到 `sink`。
 
 ## 6. `Event/Recent` 串流與 `Event/Batch`
@@ -248,6 +250,17 @@ build_batches：每 batch 則切一個 Batch；下一則放不進 wbf_data_max_b
 **門檻**（§0-10）：client 等不到回應會斷線重連再問，server 又數一次，形成迴圈。所以「一窗 320 條的第一趟」必須遠低於 client 的等待時間；
 驗收（§10）量一窗的 first byte，數字寫回這裡。這也是為什麼預設視窗是 320 而不是 10000：一萬條的一窗，first byte 就是數一萬條。
 
+**實測（2026-09-08，e2e8 情境 4，Windows e2e build，同一台機器上的 PowerShell client；一個人 30 個房間各 10 則 ＋ state 事件）**：
+
+| 窗 | first byte | `r = 0` | Batch 數 |
+|---|---|---|---|
+| 320／10，冷 | 25 ms | 691 ms | 32 |
+| 320／10，暖 | 106 ms | 459 ms | 32 |
+| 500／100，暖 | 112 ms | 457 ms | 5 |
+
+first byte 是 30 房間的堆合併＋可見性過濾＋收齊 320 則的時間，離 client 的 10 秒預算兩個數量級；`r = 0` 的時間大半是 PowerShell 端逐包收與解析（32 包 vs 5 包差不多，
+說明瓶頸不在 server 切片）。門檻定「冷 < 2 秒」，只擋回歸。
+
 ### 6.4 client 的水位（server 欄位語意決定的，寫在這裡）
 
 - 一窗收完（`r = 0`）且 `tc < limit`：這窗已經回到 `cg_seq`，同步結束；把 `cg_seq` 存成**第一窗第一個 Batch 的 `fs`**（這輪最新的一條；比它新的下輪會來）。
@@ -307,7 +320,8 @@ wire-format §3.3 已經把 kind 按 Matrix 章節占好號。搬一個端點 = 
 - **名額回收**：4 條全關再開 4 條成功（RAII 有放）；一條在上傳中被 server 關機關掉，重啟後名額是 0（表在記憶體，重啟即清）。
 - **視窗**：灌 1000 條 → `Recent(limit=320, batch=10)` 收到 32 個 Batch，`tc = 320`、`r` 遞減到 0、`fs`/`ls` 單調遞減、每則長度前綴對得上；
   帶 `before = 最後的 ls` 再叫兩窗各 320，第四窗 `tc = 40 < 320`；四窗事件不重複不漏、合起來剛好 1000；`batch=1000` 被夾成 100；`limit=10000` 被夾成 500；沒新事件 → 一個 `bc = 0, r = 0` 的 Batch。
-- **first byte**：灌 10000 條，量一窗 320 從送出 `Recent` 到第一個 Batch 的時間，與收完 32 窗的總時間，記進 §6.3。這條是量測不是門檻，數字先看再定門檻。
+- **first byte**（e2e8 情境 4）：一個人 30 個房間各 10 則，量一窗 320 從送出 `Recent` 到第一個 Batch、到 `r = 0` 的時間（冷／暖，另量 500/100），數字記進 §6.3。
+  唯一的門檻是「冷的 first byte < 2 秒」，遠低於 client 的 10 秒重連預算（§0-10）。
 - **背壓**：client 送 `Recent` 後停止讀 socket 5 秒，server 的 working set 不隨時間增長（有界佇列擋住了），恢復讀之後串流補完。
 - **順序**：同一連線送 `Recent` 緊接 `Ping`，Pong 在這窗最後一個 Batch **之後**（一次一個 handler）；兩窗之間送 `Ping` 立刻有 Pong。
 - **HTTP**：`Recent`、`Login` 打 `/pack` 都回 `Unsupported`。

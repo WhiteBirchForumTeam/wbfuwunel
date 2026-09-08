@@ -3656,6 +3656,11 @@ pub struct Config {
 	/// for sending before the handler producing them waits. Bounds the memory
 	/// a slow reader can pin on the server to this many packs of at most
 	/// `wbf_data_max_bytes` each; the connection stalls instead of growing.
+	/// Worst case per connection is therefore this times `wbf_data_max_bytes`
+	/// (32 x 16 MiB = 512 MiB at the defaults, only if a peer stops reading
+	/// in the middle of a stream of maximal packs), times
+	/// `wbf_ws_max_connections_per_device` per device. Lower it on a small
+	/// host; `Recent` batches are a few KiB each, so 8 is plenty for events.
 	///
 	/// default: 32
 	#[serde(default = "default_wbf_ws_send_queue_len")]

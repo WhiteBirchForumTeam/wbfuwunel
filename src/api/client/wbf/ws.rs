@@ -183,7 +183,7 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 			},
 			() = tokio::time::sleep_until(login_deadline), if session.is_none() => {
 				debug!("wbf WebSocket connection did not log in in time; closing");
-				let _closing = queue.send(close(close_code::POLICY, "not logged in in time")).await;
+				enqueue_close(&queue, close(close_code::POLICY, "not logged in in time")).await;
 				break;
 			},
 			() = &mut shutdown => {
@@ -192,7 +192,7 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 				// former is in RFC 6455 itself and every client library
 				// accepts it; .NET's ClientWebSocket, for one, treats 1012 as
 				// a protocol error and drops the connection instead.
-				let _closing = queue.send(close(close_code::AWAY, "server shutting down")).await;
+				enqueue_close(&queue, close(close_code::AWAY, "server shutting down")).await;
 				break;
 			},
 		};
@@ -226,8 +226,12 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 			// refusal, they decide nothing.
 			let (id, seq) = header_id_seq(&bytes);
 			let refused = error_pack(id, seq, "Unauthorized", &error.to_string());
-			let _refused = queue.send(Outgoing::Pack(refused)).await;
-			let _closing = queue.send(close(close_code::POLICY, "session no longer valid")).await;
+			if queue.try_send(Outgoing::Pack(refused)).is_err() {
+				// A full queue means a peer that is not reading; the close
+				// frame matters more than the explanation.
+				debug!("wbf WebSocket send queue full; the Unauthorized reply is dropped");
+			}
+			enqueue_close(&queue, close(close_code::POLICY, "session no longer valid")).await;
 			break;
 		}
 
@@ -278,7 +282,7 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 					| CloseReason::LoggedOut => close(close_code::NORMAL, "logged out"),
 					| CloseReason::Refused => close(close_code::POLICY, "refused"),
 				};
-				let _closing = queue.send(frame).await;
+				enqueue_close(&queue, frame).await;
 				break;
 			},
 		}
@@ -319,6 +323,21 @@ async fn send_queued(mut sink: futures::stream::SplitSink<WebSocket, Message>, m
 }
 
 fn close(code: u16, reason: &'static str) -> Outgoing { Outgoing::Close(CloseFrame { code, reason: reason.into() }) }
+
+/// Queues the close frame, waiting at most `DRAIN_TIMEOUT` for room. A peer
+/// that has stopped reading keeps the queue full; then the frame is not worth
+/// waiting for: the receive loop ends, the drain below times out too, and the
+/// socket is dropped, which closes it (review of PR #33, rumia: without this
+/// bound a stopped reader could hold the loop, and its queue's memory, for
+/// as long as it liked).
+async fn enqueue_close(queue: &mpsc::Sender<Outgoing>, frame: Outgoing) {
+	if tokio::time::timeout(DRAIN_TIMEOUT, queue.send(frame))
+		.await
+		.is_err()
+	{
+		debug!("wbf WebSocket send queue stayed full; closing without a close frame");
+	}
+}
 
 /// Who a connection is, for its log lines.
 fn user_label(session: Option<&Session>) -> &str {

@@ -812,6 +812,7 @@ fn hello(services: &Services, view: &PackView<'_>) -> Vec<u8> {
 			"features": ["upload", "download", "recent", "batch", "seq", "attachments", "login"],
 			"recent_default_limit": services.config.wbf_recent_default_limit,
 			"recent_max_limit": services.config.wbf_recent_max_limit,
+			"recent_default_batch": services.config.wbf_recent_default_batch,
 			"recent_max_batch": services.config.wbf_recent_max_batch,
 			"max_connections_per_device": services.config.wbf_ws_max_connections_per_device,
 			"chunk_size_default": services.config.media_chunk_size_default,

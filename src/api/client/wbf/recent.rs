@@ -68,6 +68,9 @@ impl RecentRequest {
 
 		Ok(Self {
 			limit: count_field(&meta, "limit", limits.default_limit, limits.max_limit),
+			// A client that asks for batches of 0 gets batches of 1 (a negative
+			// or non-numeric `batch` falls to the default instead): a window
+			// is never cut into nothing.
 			batch: count_field(&meta, "batch", limits.default_batch, limits.max_batch).max(1),
 			cg_seq: g_seq_field(&meta, "cg_seq")?.filter(|cached| *cached != PduCount::from_signed(0)),
 			before: g_seq_field(&meta, "before")?,
