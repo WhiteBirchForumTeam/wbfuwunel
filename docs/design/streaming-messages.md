@@ -50,7 +50,7 @@ header：`id`（8 byte）填 `g_seq`（`Draft` 填 0），它就是「這個 pac
 明文、自訂 type、內容幾乎是空的：
 
 ```json
-{ "type": "org.wbftw.draft", "content": { "msgtype": "org.wbftw.draft", "body": "(draft)" }, "sender": "@a:…", … }
+{ "type": "org.wbftw.wbfuwunel.draft", "content": { "msgtype": "org.wbftw.wbfuwunel.draft", "body": "(draft)" }, "sender": "@a:…", … }
 ```
 
 - **不用 `m.room.message`**：E2EE 房間裡一則明文 `m.room.message` 會讓相容 client 顯示「未加密」警告；自訂 type 它們直接不顯示。
@@ -62,7 +62,7 @@ header：`id`（8 byte）填 `g_seq`（`Draft` 填 0），它就是「這個 pac
 
 `Event/Send` 的 meta 多帶 `"draft_id": <g_seq>`。server：
 
-1. 從 `(room_id, g_seq)` 讀佔位事件；`sender` 必須是這條連線的使用者、type 必須是 `org.wbftw.draft`、沒被 redact → 否則 `Conflict`。
+1. 從 `(room_id, g_seq)` 讀佔位事件；`sender` 必須是這條連線的使用者、type 必須是 `org.wbftw.wbfuwunel.draft`、沒被 redact → 否則 `Conflict`。
 2. 照常 append 正式訊息，`unsigned["org.wbftw.wbfuwunel.draft_id"] = g_seq`（跟 `r_seq`／`g_seq` 同一個位置，不進雜湊、不進聯邦）。
 3. redact 佔位事件（作者自己的事件，權限一定夠）。
 
@@ -74,7 +74,7 @@ header：`id`（8 byte）填 `g_seq`（`Draft` 填 0），它就是「這個 pac
 ```
 Stream pack 進來（已登入、准入表過、meta 是合法的 room_id、header id = g_seq）
    ├─ 從 pduid_pdu 讀 (room_id 的短號, g_seq)                    ← 一次點讀；沒有 → Error(NotFound)
-   ├─ 它是 org.wbftw.draft、沒被 redact                            ← 否則 Error(Conflict "not an open draft")
+   ├─ 它是 org.wbftw.wbfuwunel.draft、沒被 redact                            ← 否則 Error(Conflict "not an open draft")
    ├─ Keypoint／Delta／Append／Abandon：sender == 這條連線的 user         ← 否則 Error(Forbidden "not the author")
    ├─ Demand：這條連線的 user 是 room_id 的成員                      ← 否則 Error(Forbidden)
    ├─ 限速（§7）、大小（§7）
@@ -123,7 +123,7 @@ server 讀 123 → 作者是 A → 只送給 A 訂閱中的連線。A 廣播 `Ke
 
 ## 8. 驗收（e2e11，接在 channel 的情境後面）
 
-- alice、bob 訂閱；alice `Draft` → Ack 有 `event_id`、`g_seq`；bob 收到 `Push`，事件 type 是 `org.wbftw.draft`；alice 自己也 `Push` 到。
+- alice、bob 訂閱；alice `Draft` → Ack 有 `event_id`、`g_seq`；bob 收到 `Push`，事件 type 是 `org.wbftw.wbfuwunel.draft`；alice 自己也 `Push` 到。
 - alice `Append`、`Delta`、`Keypoint`（`seq` 全填 0）→ bob 依序收到三個，pack 原樣（meta 是 room id、data 一個 byte 不差）；alice 發送那條連線**沒有**收到自己的；alice 的第二條訂閱連線收到。
 - `Keypoint` data 10241 bytes → `TooLarge`；10240 → 過。meta 不是合法 room id → `Conflict`。
 - carol 沒訂閱 → 什麼都收不到；carol 訂閱後送 `Demand(id)` → 只有 alice 的連線收到、bob 沒收到；alice 回 `Keypoint` → carol、bob 都收到。
