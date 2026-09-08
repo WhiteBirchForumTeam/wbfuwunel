@@ -128,7 +128,7 @@ server 讀 123 → 作者是 A → 只送給 A 訂閱中的連線。A 廣播 `Ke
 ## 8. 驗收（e2e11，接在 channel 的情境後面）
 
 - alice、bob 訂閱；alice `Draft` → Ack 有 `event_id`、`g_seq`；bob 收到 `Push`，事件 type 是 `org.wbftw.wbfuwunel.draft`；alice 自己也 `Push` 到。
-- alice `Append`、`Delta`、`Keypoint`（`seq` 全填 0）→ bob 依序收到三個，pack 原樣（meta 是 room id、data 一個 byte 不差）；alice 發送那條連線**沒有**收到自己的；alice 的第二條訂閱連線收到。
+- alice `Append`（`seq` 0）、`Delta`（1）、`Keypoint`（2）→ bob 依序收到三個，pack 原樣（meta 是 room id、data 一個 byte 不差）；alice 發送那條連線**沒有**收到自己的；alice 的第二條訂閱連線收到。
 - `Keypoint` data 10241 bytes → `TooLarge`；10240 → 過。meta 不是合法 room id → `Conflict`。
 - carol 沒訂閱 → 什麼都收不到；carol 訂閱後送 `Demand(id)` → alice 與 bob 都收到（廣播）、carol 自己那條沒收到；alice 回 `Keypoint` → carol、bob 都收到。
 - 片計數：alice 送 `seq` 5、6、8 → bob 在 8 看到跳號（e2e 只驗它原樣到達；跳號→Demand 是 client 的事）。
