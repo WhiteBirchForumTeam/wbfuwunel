@@ -1,7 +1,7 @@
 # wbf pack 處理管線：連線就是佇列、handler 的契約、以及 HTTP 一章章搬過來的模子
 
-**狀態**：🔧 實作中（分支 `wbf/pack-pipeline`，2026-09-07 維護者核可後開）。維護者定的決定列在 §0；其餘是照那些決定推出來的做法。
-實作跟提案不同的地方標 📎，理由就地寫。
+**狀態**：§1–§6 ✅ 已實作（PR #33，2026-09-08 合併）；§8 第二部分 🔲 未開。維護者定的決定列在 §0；其餘是照那些決定推出來的做法。
+實作跟提案不同的地方標 📎，理由就地寫。client 端要跟的東西開在 wbf-matrix-client #15。
 
 [wbf-wire-format.md](wbf-wire-format.md) 講的是**封包的版面與協議**（header、kind、順序類別、兩種送法）；
 [chunked-upload.md](chunked-upload.md)、[room-seq-and-recent.md](room-seq-and-recent.md)、wire-format §6.3 講的是**各個 kind 的語意**。
