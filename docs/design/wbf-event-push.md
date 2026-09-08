@@ -100,7 +100,7 @@ registry（純記憶體，`Services.channels`）
 | typing、receipts、presence | **這版不推**（§6）。 |
 | E2EE | 事件本來就是密文，推的是 `pduid_pdu` 裡的 JSON，server 不多讀任何東西。 |
 | 聯邦 | 不相干：聯邦進來的事件走同一個 `append_pdu`，一樣推。 |
-| [streaming-messages.md](streaming-messages.md) | 草稿走同一個 channel、同一條佇列，`channels::relay(room, sender, pack)`。 |
+| [streaming-messages.md](streaming-messages.md) | 草稿走同一個 channel、同一條佇列，`channels::relay(room, except_connection, pack)`。 |
 
 ## 6. 不做的
 

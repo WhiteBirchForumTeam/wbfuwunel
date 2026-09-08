@@ -26,8 +26,10 @@ kind `0x02 Stream`。**所有 subtype 的 meta 都是明文的 `room_id` 字串�
 data 是密文（E2EE 房）或明文，server 不讀。server 轉發時 **pack 原樣送**，不加 `sender`／`device`：接收者用 `g_seq` 找到佔位事件，作者就在它的 `sender` 裡；哪台裝置在寫，接收者不需要知道。
 
 header：`id`（8 byte）填 `g_seq`（`Draft` 填 0），它就是「這個 pack 屬於哪則草稿」。
-**`seq`（4 byte）在這個 kind 用不到**（維護者 2026-09-08）：作者→server、server→每個接收者各是一條 TCP，順序本來就保住；掉片的補救是 `Demand`＋`Keypoint`，不靠序號。
-發送者隨便填（0 可以），server 不看、接收者不依賴；`Draft`／`Abandon`／`Demand` 的 `seq` 照無序類規則當請求號，Ack 抄回。
+**`seq`（4 byte）= 作者對這則草稿遞增的片計數**（`Keypoint`／`Delta`／`Append`；同一個 `g_seq` 下永遠遞增，維護者 2026-09-08）。
+順序本身由 TCP 保，`seq` 不是拿來排序的，是拿來**發現洞**的：片會掉的地方不是 TCP，是 server 對某一個接收者的發送佇列滿了 `try_send` 丟掉（作者與其他人都不知道），
+沒有計數的話接收者少一段 `Append`、或把 `Delta` 套在錯的基底上，都是默默壞掉。接收者看到跳號就 `Demand`。server 不看 `seq`。
+`Draft`／`Abandon`／`Demand` 的 `seq` 照無序類規則當請求號，Ack 抄回。
 
 | subtype | 誰發 | 進庫？ | data |
 |---|---|---|---|
@@ -36,7 +38,7 @@ header：`id`（8 byte）填 `g_seq`（`Draft` 填 0），它就是「這個 pac
 | `0x03 Keypoint` | 作者 | 否 | **完整字段**：接收者把這則草稿的 buffer 整個清空換成它。明文上限 **8 KiB**（client 約定），server 對 data 的 hard limit **10 KiB**（密文，含加密外框） |
 | `0x04 Delta` | 作者 | 否 | 相對於接收者目前狀態的差異（格式是 client 約定，§5） |
 | `0x05 Append` | 作者 | 否 | 直接接在末尾的文字 |
-| `0x10 Demand` | **任何成員** | 否 | 無。server 只送給**作者帳號**訂閱中的連線；作者回應是廣播一次 `Keypoint`（太長就再跟 `Append`） |
+| `0x10 Demand` | **任何成員** | 否 | 無。跟其他片一樣**廣播給房間 channel 的每個訂閱者**（維護者：不擋、不特別路由，更乾淨）；正在寫這則草稿的那台裝置回一次 `Keypoint`（太長就再跟 `Append`），其他人收到 `Demand` 就忽略 |
 
 - **沒有 `Chunk`**（維護者 2026-09-08：多餘）。長於 8 KiB 的草稿 = 一個 `Keypoint`（前 8 KiB）＋若干個 `Append`；接收者的 buffer 先被削成 8 KiB、再長回來。
   這跟塊等效，少一個型別、少一套塊索引與 join 規則。
@@ -78,7 +80,7 @@ Stream pack 進來（已登入、准入表過、meta 是合法的 room_id、head
    ├─ Keypoint／Delta／Append／Abandon：sender == 這條連線的 user         ← 否則 Error(Forbidden "not the author")
    ├─ Demand：這條連線的 user 是 room_id 的成員                      ← 否則 Error(Forbidden)
    ├─ 限速（§7）、大小（§7）
-   └─ 廣播：channels::relay(room_id, 除發送連線外, 原 pack)；Demand 改成 channels::relay_to_user(room_id, 作者, 原 pack)：作者帳號的每台裝置都收到，**正在寫這則草稿的那台才回** Keypoint（其他台沒有它的內容，不回）
+   └─ 廣播：channels::relay(room_id, 除發送連線外, 原 pack)——Demand 也一樣，沒有特別路由；正在寫這則草稿的那台裝置回 Keypoint，其他人忽略
 ```
 
 沒有 `g_seq → 事件` 的全站索引，所以 **`room_id` 是必填**：事件的 key 是 `(房間, g_seq)`，帶了 `room_id` 就是一次點讀。這是每片一次 DB 讀，
@@ -92,7 +94,7 @@ Stream pack 進來（已登入、准入表過、meta 是合法的 room_id、head
   例如 12 KiB 的草稿，有人 `Demand`，所有人的 buffer 先被削成 8 KiB、接著收到 4 KiB 的 `Append` 回到 12 KiB。這就是「塊」，不需要另一個型別。
 - **`Delta`**：相對於接收者目前狀態的差異；接收者只在「有狀態」時套（收過 `Keypoint`，或從空字串開始且沒漏過片），不然等下一個 `Keypoint`（或自己 `Demand`）。
 - **`Append`**：接在末尾。最常見的 LLM 情境，一片就是幾個 token。
-- **沒有片序號**：順序由 TCP 保（§3），接收者照到達順序套。作者換連線續發：先送一個 `Keypoint` 對齊再續，不靠序號接。
+- **片計數 `seq`**：作者對每則草稿遞增；接收者看到跳號就把這則草稿標成「等全文」並 `Demand`，收到 `Keypoint` 才繼續套。server 不看它。作者換連線續發：計數接著送，或先送一個 `Keypoint` 對齊。
 - **第一片**可以是 `Keypoint`、也可以是從空字串起的 `Delta`／`Append`——都允許，client 決定。
 - **delta 的內部格式**（密文裡）定在 client 的約定，server spec 只定「有這三種」與它們的語意。
 
@@ -107,7 +109,7 @@ server 讀 123 → 作者是 A → 只送給 A 訂閱中的連線。A 廣播 `Ke
 
 | 共用 | 在哪 |
 |---|---|
-| 訂閱 registry、`try_send`、掉了就掉、不含發送連線的廣播、送給某帳號的訂閱中連線 | `Services.channels`（[wbf-event-push.md](wbf-event-push.md) §3）：`relay(room, except_connection, pack)`、`relay_to_user(room, user, pack)` |
+| 訂閱 registry、`try_send`、掉了就掉、不含發送連線的廣播 | `Services.channels`（[wbf-event-push.md](wbf-event-push.md) §3）：`relay(room, except_connection, pack)`，六個 subtype 都只用這一個 |
 | 發送佇列與發送 task | pipeline §1 |
 | 佔位事件的寫入、redact、`Push` | 既有的 `send_message_event`／`redact` 路徑，什麼都不加 |
 
@@ -119,14 +121,18 @@ server 讀 123 → 作者是 A → 只送給 A 訂閱中的連線。A 廣播 `Ke
 | `wbf_draft_max_piece_bytes` | 10240 | 一片的 data 上限（密文；維護者定：明文 8 KiB 是 client 約定，server 寬限到 10 KiB）；三種片同一個上限 |
 | `wbf_draft_demands_per_second` | 1（突發 3） | 每 (user, device) 的 `Demand` 頻率：它會讓作者重送全文，要比片慢得多 |
 
-沒有「每房幾則草稿」的上限：錨是普通事件，受既有的送訊息限速。
+| `wbf_draft_max_room_members` | 10 | **房間加入人數超過這個就不准 `Draft`**（`Conflict "room too large for drafts"`）。維護者：大房間的扇出是 server 不夠有錢的問題不是設計問題，這是 fallback；草稿是給 bot 用的，人類用不上 |
+
+沒有「每房幾則草稿」的上限：錨是普通事件，受既有的送訊息限速。每則草稿三筆持久事件（佔位、正式、redaction）：給 bot 用、已經比 edit 划算很多，不是擔憂。
 
 ## 8. 驗收（e2e11，接在 channel 的情境後面）
 
 - alice、bob 訂閱；alice `Draft` → Ack 有 `event_id`、`g_seq`；bob 收到 `Push`，事件 type 是 `org.wbftw.wbfuwunel.draft`；alice 自己也 `Push` 到。
 - alice `Append`、`Delta`、`Keypoint`（`seq` 全填 0）→ bob 依序收到三個，pack 原樣（meta 是 room id、data 一個 byte 不差）；alice 發送那條連線**沒有**收到自己的；alice 的第二條訂閱連線收到。
 - `Keypoint` data 10241 bytes → `TooLarge`；10240 → 過。meta 不是合法 room id → `Conflict`。
-- carol 沒訂閱 → 什麼都收不到；carol 訂閱後送 `Demand(id)` → 只有 alice 的連線收到、bob 沒收到；alice 回 `Keypoint` → carol、bob 都收到。
+- carol 沒訂閱 → 什麼都收不到；carol 訂閱後送 `Demand(id)` → alice 與 bob 都收到（廣播）、carol 自己那條沒收到；alice 回 `Keypoint` → carol、bob 都收到。
+- 片計數：alice 送 `seq` 5、6、8 → bob 在 8 看到跳號（e2e 只驗它原樣到達；跳號→Demand 是 client 的事）。
+- 房間 11 人（`wbf_draft_max_room_members` 預設 10）→ `Draft` 回 `Conflict`；設成 0 → 不限。
 - bob（非作者）送 `Append(id)` → `Forbidden`；不存在的 `id` → `NotFound`；HTTP → `Unsupported`；連送 100 片 → 一部分 `RateLimited`。
 - 定案：alice `Event/Send` 帶 `draft_id` → bob 收到兩個 `Push`：正式訊息（`unsigned.draft_id` = id）與佔位的 redaction；之後對 id 送 `Append` → `Conflict`。
 - `Abandon` → Ack、bob 收到 redaction 的 `Push`；`Recent` 裡佔位事件已 redact。
@@ -140,6 +146,15 @@ server 讀 123 → 作者是 A → 只送給 A 訂閱中的連線。A 廣播 `Ke
 3. **佔位永不過期**：沒有 TTL，永遠可用。
 4. **meta 不用 JSON**：直接放 `room_id`，`g_seq` 在 header `id`。
 5. **接收端可以落地**草稿內容（§3），server 是權威。
+
+自我審查後維護者再定的（同日）：
+
+6. **`seq` 收回來當片計數**（§3）：片會在 server 的發送佇列被丟，沒計數接收者不知道有洞。
+7. **`Demand` 不特別路由**，跟其他片一樣廣播全房；寫草稿的那台回，其他人忽略。
+8. **`wbf_draft_max_room_members`**（預設 10）：大房間不准開草稿。
+9. **`Demand` 風暴**（很多人同時進來、作者一直重傳）：只在超過 8 KiB 的草稿才痛，client 端加重傳間隔門檻（或禁用重傳）就能解；情境少，先不考慮。
+10. **定案的順序**：先 append 正式訊息、再 redact 佔位。redact 那步失敗（極少）會留下「正式在、佔位仍開著」，那個佔位仍是 open draft，client 之後 `Abandon` 它就好。
+11. **registry 的鎖**是實作細節（`RwLock`，`publish` 拿讀鎖），不進協議。
 
 剩下的小事：`g_seq` 的型別——`PduCount` 是有號的（backfill 的事件為負），但佔位事件是本站新寫的、永遠正，塔進 u64 的 header `id` 沒問題；server 對讀不到的回 `NotFound`。
 
