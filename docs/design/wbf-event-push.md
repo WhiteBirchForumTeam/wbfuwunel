@@ -22,8 +22,8 @@
 | **進得了嗎？** | 在那個房間裡（`state_cache.is_joined`）才進得了；不在 → 那個房跳過（帳號層訂閱）或 `Forbidden`（點名訂那一房）。 |
 | **退房自動退訂** | leave／kick／ban 那一刻（`state_cache` 的寫入點）把這個 user 的所有連線從這個 channel 拿掉。 |
 | **斷線自動退訂** | on disconnect：這條連線持有的所有 channel 全退（RAII，`Subscription` drop）。 |
-| **訂閱者的識別碼是 `(user_id, device_id)`** | 維護者定：不是 `user_id`，否則多裝置只有一台收得到。同一個人的手機與桌機是兩個訂閱者，各自收到每則事件。一個裝置同時只有**一條**連線在收：同裝置另一條連線再 `Subscribe`，訂閱搬到新連線，舊那條不再收（它的 `Subscription` 被新的取代）。 |
-| **冪等** | 重複訂閱自動去重（同一個 `(user, device)` 在同一個 channel 只有一筆）；退訂不存在的 = no-op。 |
+| **訂閱者的識別碼是連線** | 維護者定：不是 `user_id`（多裝置只有一台收得到），也不是 `(user, device)`（一個裝置會開多條連線，哪條處理事件是 client 的事）。WebSocket 本身沒有連線識別碼，server 在升級時發一個 **`connection_id`**（process 內單調遞增的 u64，process 活著期間唯一），跟那條連線的 `Session` 一起活；訂閱者就是它。連線已登入，所以 `connection_id → (user, device)` 由 `Session` 給。 |
+| **冪等** | 重複訂閱自動去重（同一條連線在同一個 channel 只有一筆）；退訂不存在的 = no-op。同裝置兩條連線都訂，兩條都收：server 不裁決，client 自己別這樣做。 |
 
 為什麼這比「每則事件掃房間成員」好：事件到使用者在 DB 裡沒有直接關係，只有事件→房間（`pduid_pdu` 的 key）與房間↔使用者（`roomuserid_joined`／`userroomid_joined`）；
 每則事件掃一次成員是房間人數的成本，而真正在收的人通常是少數。channel 把這件事反過來：每則事件只碰訂閱者，O(訂閱者)。
@@ -54,10 +54,10 @@ kind `0x14 Event`（§3.3 的 Event 章），三個新 subtype：
 
 ```
 registry（純記憶體，`Services.channels`）
-  SubscriberId = (user_id, device_id)                             ← 維護者定：一個裝置一個訂閱者，不是一個使用者一個
-  channels:     HashMap<room_id, HashSet<SubscriberId>>          ← 「channel」本體；空了就 remove
-  subscribers:  HashMap<SubscriberId, Subscriber>                 ← Subscriber { queue: mpsc::Sender<Outgoing>, id, seq, gap, account_wide: bool, generation }
-  by_user:      HashMap<user_id, HashSet<device_id>>              ← 退房 hook 要用：這個人的所有裝置
+  SubscriberId = connection_id (u64)                              ← 維護者定：基於連線，不是使用者、也不是裝置；server 升級時發，AtomicU64 遞增
+  channels:     HashMap<room_id, HashSet<connection_id>>         ← 「channel」本體；空了就 remove
+  subscribers:  HashMap<connection_id, Subscriber>                ← Subscriber { user, device, queue: mpsc::Sender<Outgoing>, id, seq, gap, account_wide: bool }
+  by_user:      HashMap<user_id, HashSet<connection_id>>          ← 退房 hook 要用：這個人的所有訂閱中的連線
 
 接點 1：append_pdu 提交之後
    └─▶ channels::publish(room_id, pdu)
@@ -75,9 +75,9 @@ registry（純記憶體，`Services.channels`）
   **順序：先登記 `subscribers`／`by_user`（含 `account_wide`），再掃表加 channel。** 反過來的話，掃到一半發生的 join 其 hook 找不到這個訂閱者就漏了；先登記則最多重複加一次，HashSet 的 no-op。
   同一訂閱者進同一 channel 兩次永遠是 no-op。
 - **`Unsubscribe`**：從點名的 channel 拿掉，不在裡面就 no-op；沒點名 = 全退並拿掉 `account_wide`。
-- **同裝置換連線**：`(user, device)` 已經在 `subscribers` 裡、又從另一條連線送 `Subscribe` → 整筆換成新連線的 `queue`（channel 成員資格不變，因為是同一個裝置），舊連線的 `Subscription` 作廢。
-  `generation` 計數器讓舊 `Subscription` 的 drop 認得出「這筆已經不是我的」，不會把新連線的訂閱拿掉（A5：不靠「舊連線一定先斷」這種巧合）。
-- **on disconnect**：`Subscription` 是 RAII（跟 `ConnectionSlot` 同形），drop 時若 `generation` 對得上，把這個訂閱者從它在的每個 channel、`by_user`、`subscribers` 拿掉；不靠 loop 記得。
+- **`connection_id`**：`ws_route` 升級時從一個 `AtomicU64` 拿，傳進 `serve`，放進 `PackContext`；`Hello` 的回應多報 `connection_id`（除錯用，client 不必用）。它只在 process 內有意義，不進 DB。
+  `Login` 換帳號時連線號不變，但訂閱**全退**（channel 成員資格是舊帳號的），新帳號要收就再 `Subscribe`。
+- **on disconnect**：`Subscription` 是 RAII（跟 `ConnectionSlot` 同形），drop 就把這個連線號從它在的每個 channel、`by_user`、`subscribers` 拿掉；不靠 loop 記得。
 - **真相在哪**：誰能收的真相是 DB 的成員表；channel 是它的記憶體投影，靠接點 2 保持一致。漂移只可能來自漏接 hook 的新 join／leave 路徑，而那只有 `state_cache` 一組；重啟就清空，安全方向是「少推」，`Recent` 補得回來。
 - **接點 1 只有 `append_pdu` 提交後**：backfill 進來的舊事件不推（不是「新的」，`Recent` 拿得到）；redaction 是一則新事件，照推。
 - **可見性**：新事件對「現在是成員的人」永遠可見（`history_visibility` 管的是加入前的歷史），而能在 channel 裡的一定是成員，所以只做 ignore 過濾。
