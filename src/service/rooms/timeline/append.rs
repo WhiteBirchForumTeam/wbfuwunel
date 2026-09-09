@@ -25,6 +25,7 @@ use tuwunel_core::{
 	},
 	smallvec::SmallVec,
 	utils::{self, result::LogErr},
+	wbf::events::framed_len,
 };
 use tuwunel_database::Json;
 
@@ -305,10 +306,17 @@ async fn publish_to_channels(&self, room_id: &RoomId, sender: &UserId, pdu_id: &
 	let g_seq = pdu_id.pdu_count().into_signed();
 	let event: Raw<AnyTimelineEvent> = pdu.to_format();
 	let json = event.json().get().as_bytes();
+	if framed_len(json.len()) > self.services.config.wbf_data_max_bytes {
+		// `Event/Recent` steps past an event this wide, so pushing it would
+		// hand the client something it could never fetch again — and a pack
+		// that big is past the connection's message size anyway.
+		debug_warn!(event_id = %pdu.event_id(), "Event exceeds wbf_data_max_bytes; not pushed");
+		return;
+	}
 
 	self.services
 		.channels
-		.push(&recipients, &[PushedEvent { g_seq, json }]);
+		.push_to_room(room_id, &recipients, &[PushedEvent { g_seq, json }]);
 }
 
 #[implement(super::Service)]

@@ -174,6 +174,20 @@ impl Channels {
 	) -> Subscribed {
 		let mut registry = self.registry.write().expect("channels lock poisoned");
 
+		// A connection subscribing as somebody else (a `Login` that kept the
+		// connection) starts over: the hooks find subscribers through
+		// `by_user`, so an identity left behind there would push the old
+		// user's rooms to the new one. Not reachable today — `ws.rs` drops
+		// the subscriptions when the session changes device — but that is
+		// two modules agreeing, and this is who-may-read-what.
+		let is_another_identity = registry
+			.subscribers
+			.get(&connection)
+			.is_some_and(|existing| existing.user != *user);
+		if is_another_identity {
+			registry.remove_subscriber(connection);
+		}
+
 		// Register (or refresh) the subscriber before touching any channel.
 		match registry.subscribers.get_mut(&connection) {
 			| Some(existing) => {
@@ -311,7 +325,22 @@ impl Channels {
 	/// Args:
 	///     connections: from `listeners`, minus whoever the caller filtered out
 	///     events: newest first, example: the one event just appended
-	pub fn push(&self, connections: &[ConnectionId], events: &[PushedEvent<'_>]) {
+	pub fn push(&self, connections: &[ConnectionId], events: &[PushedEvent<'_>]) { self.push_inner(None, connections, events); }
+
+	/// `push`, but a connection that has left `room` between the caller's
+	/// `listeners` snapshot and here is dropped: membership is read again
+	/// under the lock, so a kick that lands during the caller's `await` does
+	/// not get one more event through.
+	///
+	/// Args:
+	///     room: the room the events belong to, example: `!r:localhost`
+	///     connections: from `listeners`, minus whoever the caller filtered
+	///     events: newest first
+	pub fn push_to_room(&self, room: &RoomId, connections: &[ConnectionId], events: &[PushedEvent<'_>]) {
+		self.push_inner(Some(room), connections, events);
+	}
+
+	fn push_inner(&self, room: Option<&RoomId>, connections: &[ConnectionId], events: &[PushedEvent<'_>]) {
 		if events.is_empty() {
 			return;
 		}
@@ -326,7 +355,7 @@ impl Channels {
 		let ls = events.last().map_or(0, |event| event.g_seq);
 		let bc = events.len();
 
-		let targets = self.take_targets(connections);
+		let targets = self.take_targets(room, connections);
 		let mut dropped = Vec::new();
 		for target in targets {
 			let pack = match push_pack(target.id, target.seq, bc, fs, ls, target.gap, &data) {
@@ -409,10 +438,27 @@ impl Channels {
 
 	/// Snapshots what each connection's next push needs, advancing its `seq`
 	/// and clearing its `gap`, under the read lock (the counters are atomic).
-	fn take_targets(&self, connections: &[ConnectionId]) -> Vec<Target> {
+	///
+	/// Args:
+	///     room: `Some` to also require current membership of that channel,
+	///         `None` for a push that is not one room's (a `cg_seq` window)
+	///     connections: the candidates, example: a `listeners` snapshot
+	/// Return:
+	///     Vec<Target>  one per connection still registered (and still in
+	///     `room`, when given); an unregistered one is skipped, not queued.
+	fn take_targets(&self, room: Option<&RoomId>, connections: &[ConnectionId]) -> Vec<Target> {
 		let registry = self.registry.read().expect("channels lock poisoned");
+		let is_still_in_room = |connection: &ConnectionId| {
+			room.is_none_or(|room| {
+				registry
+					.channels
+					.get(room)
+					.is_some_and(|channel| channel.contains(connection))
+			})
+		};
 		connections
 			.iter()
+			.filter(|connection| is_still_in_room(connection))
 			.filter_map(|connection| {
 				let subscriber = registry.subscribers.get(connection)?;
 				Some(Target {
@@ -621,6 +667,46 @@ mod tests {
 			.collect();
 		assert_eq!(sizes, vec![2, 2, 1]);
 		assert!(rx.try_recv().is_err(), "nothing more");
+	}
+
+	#[test]
+	fn subscribing_as_another_user_leaves_the_old_identity_behind() {
+		let channels = Channels::new();
+		let alice = user_id!("@alice:localhost");
+		let bob = user_id!("@bob:localhost");
+		let hers = room_id!("!hers:localhost").to_owned();
+		let his = room_id!("!his:localhost").to_owned();
+		let (tx, _rx) = queue(4);
+		channels.subscribe(1, alice, tx.clone(), 1, &[hers.clone()], true);
+
+		// The same connection, now logged in as bob.
+		channels.subscribe(1, bob, tx, 2, &[his.clone()], false);
+
+		assert_eq!(channels.listener_count(&hers), 0, "alice's channel let the connection go");
+		assert_eq!(channels.listener_count(&his), 1);
+		channels.follow(alice, &room_id!("!later:localhost").to_owned());
+		assert_eq!(channels.listener_count(room_id!("!later:localhost")), 0, "alice's join hook no longer finds it");
+		channels.evict(bob, &his);
+		assert_eq!(channels.listener_count(&his), 0, "bob's leave hook does find it");
+	}
+
+	#[test]
+	fn a_push_to_a_room_skips_whoever_left_it_since_the_snapshot() {
+		let channels = Channels::new();
+		let alice = user_id!("@alice:localhost");
+		let room = room_id!("!r:localhost").to_owned();
+		let (tx, mut rx) = queue(4);
+		channels.subscribe(1, alice, tx, 7, &[room.clone()], false);
+		let listeners: Vec<u64> = channels.listeners(&room).into_iter().map(|(c, _)| c).collect();
+
+		// What a kick during the caller's ignore lookup does to the snapshot.
+		channels.evict(alice, &room);
+		channels.push_to_room(&room, &listeners, &[PushedEvent { g_seq: 10, json: b"{}" }]);
+		assert!(rx.try_recv().is_err(), "the event stopped at the channel it had left");
+
+		// The connection is still subscribed, so a push of its own arrives.
+		channels.push(&listeners, &[PushedEvent { g_seq: 11, json: b"{}" }]);
+		assert!(matches!(rx.try_recv(), Ok(Outgoing::Pack(_))));
 	}
 
 	#[test]
