@@ -107,7 +107,12 @@ pub(super) async fn handle_subscribe(
 			.collect();
 		services
 			.channels
-			.push_window(ctx.connection, &events, services.config.wbf_push_max_events_per_pack);
+			.push_window(
+				ctx.connection,
+				&events,
+				services.config.wbf_push_max_events_per_pack,
+				services.config.wbf_data_max_bytes,
+			);
 	}
 
 	Ok(())

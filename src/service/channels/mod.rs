@@ -31,7 +31,10 @@ use serde_json::json;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
 use tuwunel_core::{
 	debug,
-	wbf::{Flags, Kind, PackBuilder, PackError, events::length_prefixed},
+	wbf::{
+		Flags, Kind, PackBuilder, PackError,
+		events::{length_prefixed, list_pack_ranges},
+	},
 };
 
 /// One WebSocket connection, numbered at upgrade; unique for the life of the
@@ -313,7 +316,10 @@ impl Channels {
 			return;
 		}
 		let Ok(data) = length_prefixed(events.iter().map(|event| event.json)) else {
+			// Nobody can be sent this; say so on their next push rather than
+			// dropping it silently, so the client fills in with `Recent`.
 			debug!("wbf push skipped: an event does not fit a length prefix");
+			self.mark_gap(connections);
 			return;
 		};
 		let fs = events.first().map_or(0, |event| event.g_seq);
@@ -327,6 +333,7 @@ impl Channels {
 				| Ok(pack) => pack,
 				| Err(error) => {
 					debug!(?error, "wbf push skipped: could not encode the pack");
+					dropped.push(target.connection);
 					continue;
 				},
 			};
@@ -340,12 +347,19 @@ impl Channels {
 		self.mark_gap(&dropped);
 	}
 
-	/// Pushes a window of events to one connection, `per_pack` events per
-	/// `Push`, for a `Subscribe` that asked to be caught up from `cg_seq`.
-	/// Same drop rule as `push`.
-	pub fn push_window(&self, connection: ConnectionId, events: &[PushedEvent<'_>], per_pack: usize) {
-		for chunk in events.chunks(per_pack.max(1)) {
-			self.push(&[connection], chunk);
+	/// Pushes a window of events to one connection for a `Subscribe` that
+	/// asked to be caught up from `cg_seq`. Same drop rule as `push`.
+	///
+	/// Args:
+	///     connection: the subscriber being caught up
+	///     events: newest first, example: the 25 events after `cg_seq`
+	///     per_pack: `wbf_push_max_events_per_pack`, example: 10
+	///     data_max: `wbf_data_max_bytes`; a pack is cut here too, so a
+	///         window of large events cannot exceed the connection's
+	///         message size
+	pub fn push_window(&self, connection: ConnectionId, events: &[PushedEvent<'_>], per_pack: usize, data_max: usize) {
+		for range in list_pack_ranges(events.iter().map(|event| event.json.len()), per_pack, data_max) {
+			self.push(&[connection], &events[range]);
 		}
 	}
 
@@ -475,7 +489,10 @@ fn push_pack(id: u64, seq: u32, bc: usize, fs: i64, ls: i64, gap: bool, data: &[
 mod tests {
 	use ruma::{room_id, user_id};
 	use tokio::sync::mpsc;
-	use tuwunel_core::wbf::{Kind, decode, events::split_length_prefixed};
+	use tuwunel_core::wbf::{
+		Kind, decode,
+		events::{framed_len, split_length_prefixed},
+	};
 
 	use super::{Channels, EVENT_PUSH_SUBTYPE, Outgoing, PushedEvent};
 
@@ -594,7 +611,7 @@ mod tests {
 		channels.subscribe(1, alice, tx, 1, &[room], false);
 		let events: Vec<PushedEvent<'_>> = (0..5).map(|n| PushedEvent { g_seq: 100 - n, json: b"{}" }).collect();
 
-		channels.push_window(1, &events, 2);
+		channels.push_window(1, &events, 2, 1024);
 		let sizes: Vec<usize> = (0..3)
 			.map(|_| {
 				let mut pack = take_pack(&mut rx);
@@ -604,6 +621,31 @@ mod tests {
 			.collect();
 		assert_eq!(sizes, vec![2, 2, 1]);
 		assert!(rx.try_recv().is_err(), "nothing more");
+	}
+
+	#[test]
+	fn push_window_cuts_by_bytes_before_the_count_cap_is_reached() {
+		let channels = Channels::new();
+		let alice = user_id!("@alice:localhost");
+		let room = room_id!("!r:localhost").to_owned();
+		let (tx, mut rx) = queue(8);
+		channels.subscribe(1, alice, tx, 1, &[room], false);
+		let body = vec![b'x'; 200];
+		let events: Vec<PushedEvent<'_>> = (0..4).map(|n| PushedEvent { g_seq: 100 - n, json: &body }).collect();
+
+		// Room for two events per pack by bytes, while the count cap (10) is
+		// nowhere near: four events must still leave as two packs.
+		let data_max = 2 * framed_len(body.len());
+		channels.push_window(1, &events, 10, data_max);
+
+		for expected_seq in 0..2 {
+			let mut pack = take_pack(&mut rx);
+			let view = decode(&mut pack).expect("decodes");
+			assert_eq!(view.header.seq, expected_seq);
+			assert_eq!(split_length_prefixed(view.data).expect("events").len(), 2);
+			assert!(view.data.len() <= data_max, "a pack stays inside wbf_data_max_bytes");
+		}
+		assert!(rx.try_recv().is_err(), "two packs, not one oversized one");
 	}
 
 	#[test]

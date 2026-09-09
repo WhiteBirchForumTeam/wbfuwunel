@@ -26,7 +26,7 @@ use tuwunel_core::{
 	matrix::{event::Event, pdu::PduCount},
 	wbf::{
 		Flags, Kind, PackBuilder, PackError, PackView,
-		events::{EVENT_LEN_PREFIX, framed_len, length_prefixed},
+		events::{EVENT_LEN_PREFIX, framed_len, length_prefixed, list_pack_ranges},
 	},
 };
 use tuwunel_service::{Services, rooms::timeline::PdusIterItem};
@@ -281,27 +281,14 @@ fn build_batches(id: u64, window: &[WindowEvent], batch: usize, data_max: usize)
 
 	let mut seq: u32 = 0;
 	let mut sent: usize = 0;
-	let mut data_len: usize = 0;
-	let mut in_batch: Vec<&WindowEvent> = Vec::with_capacity(batch);
 
-	for event in window {
-		let batch_full = in_batch.len() >= batch;
-		let over_budget = !in_batch.is_empty() && data_len + framed_len(event.json.len()) > data_max;
-		if batch_full || over_budget {
-			sent += in_batch.len();
-			packs.push(batch_pack(id, seq, meta_for(total, &in_batch, total - sent), &in_batch)?);
-			seq = seq.saturating_add(1);
-			data_len = 0;
-			in_batch.clear();
-		}
-
-		data_len += framed_len(event.json.len());
-		in_batch.push(event);
+	// The last batch's `r` is 0 by construction: the ranges cover the window.
+	for range in list_pack_ranges(window.iter().map(|event| event.json.len()), batch, data_max) {
+		let in_batch: Vec<&WindowEvent> = window[range].iter().collect();
+		sent += in_batch.len();
+		packs.push(batch_pack(id, seq, meta_for(total, &in_batch, total - sent), &in_batch)?);
+		seq = seq.saturating_add(1);
 	}
-
-	// The last batch: whatever is left, and `r` is 0 by construction.
-	sent += in_batch.len();
-	packs.push(batch_pack(id, seq, meta_for(total, &in_batch, total - sent), &in_batch)?);
 
 	Ok(packs)
 }

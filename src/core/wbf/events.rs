@@ -4,6 +4,8 @@
 //! §2. Each event is a big-endian u32 length followed by its JSON bytes, so a
 //! receiver slices by length and never scans for separators.
 
+use std::ops::Range;
+
 use super::PackError;
 
 /// Bytes of length prefix in front of each event.
@@ -35,6 +37,51 @@ where
 #[must_use]
 pub const fn framed_len(event_len: usize) -> usize { EVENT_LEN_PREFIX.saturating_add(event_len) }
 
+/// Cuts a run of events into packs under both caps at once, the one rule
+/// `Event/Batch` and `Event/Push` share: a pack ends when it holds
+/// `count_max` events or when the next event would take it past `data_max`.
+///
+/// Args:
+///     event_lens: each event's JSON length, in wire order, example: [7, 4096]
+///     count_max: most events in one pack, example: 10 (0 is read as 1)
+///     data_max: `wbf_data_max_bytes`, example: 16777216
+/// Return:
+///     Vec<Range<usize>>  one range per pack, in order, together covering
+///     every event; empty when there are no events. An event that alone is
+///     over `data_max` gets a pack of its own — callers drop those before
+///     they get here.
+#[must_use]
+pub fn list_pack_ranges<I>(event_lens: I, count_max: usize, data_max: usize) -> Vec<Range<usize>>
+where
+	I: IntoIterator<Item = usize>,
+{
+	let count_max = count_max.max(1);
+	let mut ranges = Vec::new();
+	let mut start: usize = 0;
+	let mut count: usize = 0;
+	let mut data_len: usize = 0;
+
+	for (position, event_len) in event_lens.into_iter().enumerate() {
+		let framed = framed_len(event_len);
+		let is_count_full = count >= count_max;
+		let is_over_budget = count > 0 && data_len.saturating_add(framed) > data_max;
+		if is_count_full || is_over_budget {
+			ranges.push(start..position);
+			start = position;
+			count = 0;
+			data_len = 0;
+		}
+
+		data_len = data_len.saturating_add(framed);
+		count += 1;
+	}
+	if count > 0 {
+		ranges.push(start..start + count);
+	}
+
+	ranges
+}
+
 /// The inverse, for tests and tooling.
 ///
 /// Args:
@@ -63,7 +110,7 @@ pub fn split_length_prefixed(data: &[u8]) -> Result<Vec<&[u8]>, PackError> {
 
 #[cfg(test)]
 mod tests {
-	use super::{length_prefixed, split_length_prefixed};
+	use super::{framed_len, length_prefixed, list_pack_ranges, split_length_prefixed};
 
 	#[test]
 	fn round_trips_and_keeps_order() {
@@ -83,5 +130,24 @@ mod tests {
 	#[test]
 	fn empty_data_is_no_events() {
 		assert!(split_length_prefixed(&[]).expect("empty").is_empty());
+	}
+
+	#[test]
+	fn pack_ranges_cut_on_whichever_cap_comes_first() {
+		assert!(list_pack_ranges([], 10, 1024).is_empty(), "no events, no packs");
+		assert_eq!(list_pack_ranges([2, 2, 2, 2, 2], 2, 1024), vec![0..2, 2..4, 4..5], "the count cap");
+
+		// Three events that fit two to a pack by bytes while the count cap
+		// (10) is nowhere near: the byte cap has to be the one that cuts.
+		let data_max = 2 * framed_len(100);
+		assert_eq!(list_pack_ranges([100, 100, 100], 10, data_max), vec![0..2, 2..3]);
+	}
+
+	#[test]
+	fn a_pack_range_holds_one_event_too_big_for_the_budget() {
+		// Callers drop these before they get here; splitting an event across
+		// packs is not on the wire, so it goes out alone rather than with a
+		// neighbour.
+		assert_eq!(list_pack_ranges([4, 9_000, 4], 10, 100), vec![0..1, 1..2, 2..3]);
 	}
 }
