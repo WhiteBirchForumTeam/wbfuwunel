@@ -49,6 +49,8 @@ kind `0x14 Event`（§3.3 的 Event 章），三個新 subtype：
   不帶 `cg_seq` = 只要新的。
 - **`gap: true`**：這條連線在上一個 `Push` 之後**有事件沒推到**（§4）。client 看到就用 `Recent(cg_seq)` 補一窗；補完之後的推送接得上。
 - `Push` 是**事件驅動類**（wire-format §4）：不 Ack、不重送、client 不守順序。`fs`／`ls` 是這一包的最新／最舊 g_seq，只給 client 推水位用。
+- **`seq` 只是這條連線的推送序號，不是計數保證**：丟掉的包（佇列滿、編碼失敗）也佔掉一個號，所以 client 🚫 不要拿 `seq` 的跳號算「少了幾則」。**水位只認 `fs`／`ls`**，少了什麼由 `gap` ＋ `Recent` 補；`seq` 留給除錯與排序。
+- **`Unsubscribe` 退的是當下的 channel，不是黑名單**：帳號層訂閱者點名退掉某房之後再加入那個房，`follow` 會把它加回來（wire-format §3.2 同一句）。要真的不收，就別用帳號層訂閱。
 
 ## 3. server 端：兩張表、兩個接點
 
@@ -89,7 +91,8 @@ registry（純記憶體，`Services.channels`）
 - **推送絕不阻塞 append**：`try_send`，佇列滿就丟並把 `gap` 記起來，下一次推得進去的 `Push` 帶 `gap: true`。append 是所有訊息的路徑，不能被一條讀得慢的連線拖住。
 - **掉了的不重送**：持久化的事件 `Recent` 拿得到；推送的責任是「盡快」不是「一定」。這跟 pipeline §1 的背壓（handler 等佇列）**故意不同**：handler 的回應是 client 問的，等得起；推送是 server 塞的，塞不進就算。
 - **每連線的成本**：訂閱者一筆 ＋ 它在的 channel 數個 HashSet 項；佇列是 pipeline 的那個。**每則事件的成本**：一次 `channels[room]` 查詢＋訂閱者數次 `try_send`；跟房間人數無關。
-- 上限：`wbf_push_max_events_per_pack`（一個 `Push` 最多幾則，預設 10，收 `cg_seq` 那輪用）；其餘沿用 pack 的 byte 上限。
+- **`gap` 掛在「下一次推得進去的 `Push`」上**，所以掉包之後那條連線如果再也沒有新事件可推，這個旗標就永遠不會送達。設計上接受——推送的用途是「不用輪詢」，不是「保證一致」——但 client 🚫 不要把「沒收到 `gap`」讀成「沒漏過」：重新連上、或使用者把 app 切回前景時，照樣 `Recent` 對一次水位。
+- 上限：`wbf_push_max_events_per_pack`（一個 `Push` 最多幾則，預設 10，收 `cg_seq` 那輪用）**與 `wbf_data_max_bytes` 同時生效** —— 兩個條件哪個先滿就切在哪，跟 `Event/Batch` 共用同一個切法（`core::wbf::events::list_pack_ranges`）。一窗大事件因此不會湊出一個超過連線 `max_message_size` 的包。
 
 ## 5. 跟現有東西的關係
 

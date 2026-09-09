@@ -43,5 +43,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\e2e\e2e10.ps1
 - ⚠️ 等 server 回應的接收要有時限（e2e8 的 `Ws-Recv-Bounded`；e2e7 的 `Recv-Frame`）：`ReceiveAsync().Result` 沒時限，server 不回就整支腳本卡住、沒有任何輸出。
 - ⚠️ **超時的 `ReceiveAsync` 不能丟掉**：.NET 的 `ClientWebSocket` 讓它繼續掛著，下一個 frame 會被它吃掉，之後的接收就永遠等不到（e2e11 第一版就這樣卡死）。
   e2e11 的 `Recv-Or-Null` 把還沒完成的 task 按 socket 記著、下次先等它。推送類的腳本（有 server 主動送的 frame）一定會撞到這條。
+- ⚠️ **`gap: true` 是下一個「推得進去」的 `Push` 才帶的**：flood 之後要再送一則訊息才看得到它。推論也成立 —— 掉包之後那個房如果再無新事件，這個旗標**永遠不會到**，所以測試（與 client）都不能把「沒收到 `gap`」當成「沒漏過」。
 - ⚠️ 函式回傳單元素陣列會被攤平成那個元素；呼叫端用 `@()` 包，函式裡**不要**再 `return ,$x`（兩邊都包會變成陣列裡包陣列，`.Count` 是 1、`[0]` 是整個陣列）。
   hashtable 的屬性存了單一物件時 `.Count` 是空的，判斷用 `@($x.events).Count`。
