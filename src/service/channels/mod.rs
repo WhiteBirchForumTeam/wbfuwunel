@@ -233,8 +233,9 @@ impl Channels {
 	}
 
 	/// Takes `connection` out of the channels of `rooms`; rooms it is not in
-	/// are no-ops. The subscriber stays registered (and account-wide, if it
-	/// was) unless it is in no channel afterwards and was not account-wide.
+	/// are no-ops. The subscriber stays registered either way — in no channel
+	/// it simply receives nothing — and keeps `account_wide`; only
+	/// `unsubscribe_all` and dropping the connection forget it.
 	pub fn unsubscribe(&self, connection: ConnectionId, rooms: &[OwnedRoomId]) {
 		let mut registry = self.registry.write().expect("channels lock poisoned");
 		for room in rooms {

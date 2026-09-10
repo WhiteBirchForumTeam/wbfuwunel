@@ -42,7 +42,9 @@ struct UnsubscribeMeta {
 ///         connection's queue as `Push` packs
 /// Return:
 ///     Result<(), Failure>  Ack meta `{latest_g_seq, joined, skipped}`;
-///     `skipped` lists named rooms the user is not in.
+///     `skipped` lists rooms the user is not in — the named ones checked
+///     before subscribing, plus any left between that check and the
+///     registration.
 pub(super) async fn handle_subscribe(
 	services: &Services,
 	ctx: &PackContext<'_>,
@@ -55,7 +57,7 @@ pub(super) async fn handle_subscribe(
 		.ok_or_else(|| Reject::code("Unsupported", "subscriptions need the WebSocket channel"))?;
 	let meta: SubscribeMeta = parse_meta(view, "Subscribe")?;
 
-	let (rooms, skipped, account_wide) = match meta.rooms {
+	let (rooms, mut skipped, account_wide) = match meta.rooms {
 		| Some(named) => {
 			let mut rooms = Vec::with_capacity(named.len());
 			let mut skipped = Vec::new();
@@ -82,6 +84,21 @@ pub(super) async fn handle_subscribe(
 		account_wide,
 	);
 
+	// Registered, so a leave from here on finds a subscriber to evict — but
+	// one that landed between the membership check above and that
+	// registration found none, and nothing would come back for it. Ask the
+	// database again and drop whatever the user is no longer in.
+	let left_since_the_check = list_rooms_no_longer_joined(services, user, &rooms).await;
+	if !left_since_the_check.is_empty() {
+		services
+			.channels
+			.unsubscribe(ctx.connection, &left_since_the_check);
+		skipped.extend(left_since_the_check.iter().cloned());
+	}
+	let joined = subscribed
+		.joined
+		.saturating_sub(left_since_the_check.len());
+
 	// Read before the window, like `Recent`: a client that stores it never
 	// misses an event appended while the window was being read.
 	let latest_g_seq = PduCount::Normal(services.globals.current_count()).into_signed();
@@ -92,7 +109,7 @@ pub(super) async fn handle_subscribe(
 			view.header.seq,
 			json!({
 				"latest_g_seq": latest_g_seq,
-				"joined": subscribed.joined,
+				"joined": joined,
 				"skipped": skipped,
 			}),
 			Vec::new(),
@@ -140,6 +157,33 @@ pub(super) async fn handle_unsubscribe(
 		.await?;
 
 	Ok(())
+}
+
+/// The rooms among `rooms` the user is not in any more, read after the
+/// connection was registered as a subscriber.
+///
+/// A leave (left, kicked, banned) that lands between the membership check and
+/// the registration evicts nobody — the registry has no such subscriber yet —
+/// and nothing brings the hook back, so the channel would push that room to a
+/// non-member until the connection closed. The channels are a projection of
+/// the database's membership, and this is the one place the projection can be
+/// written from stale truth, so the truth is read once more.
+///
+/// Args:
+///     user: who the connection is, example: `@alice:localhost`
+///     rooms: what was just subscribed, example: every joined room
+/// Return:
+///     Vec<OwnedRoomId>  empty in the ordinary case; the rooms to leave again
+///     otherwise.
+async fn list_rooms_no_longer_joined(services: &Services, user: &UserId, rooms: &[OwnedRoomId]) -> Vec<OwnedRoomId> {
+	let mut left = Vec::new();
+	for room in rooms {
+		if !services.state_cache.is_joined(user, room).await {
+			left.push(room.clone());
+		}
+	}
+
+	left
 }
 
 async fn joined_rooms(services: &Services, user: &UserId) -> Vec<OwnedRoomId> {

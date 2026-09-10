@@ -38,7 +38,7 @@ kind `0x14 Event`（§3.3 的 Event 章），三個新 subtype：
 
 | subtype | 誰發 | header | meta | data |
 |---|---|---|---|---|
-| `0x04 Subscribe` | client | `id` 由 client 選（之後每個 `Push` 抄它） | `{ "rooms"?: ["!…"], "cg_seq"?: <g_seq> }`；沒帶 `rooms` = 帳號層（所有加入的房，含之後加入的） | 無。回 `Ack`，meta `{ "latest_g_seq": <g_seq>, "joined": n, "skipped": ["!…"] }`（`skipped` = 點名了但不是成員的房） |
+| `0x04 Subscribe` | client | `id` 由 client 選（之後每個 `Push` 抄它） | `{ "rooms"?: ["!…"], "cg_seq"?: <g_seq> }`；沒帶 `rooms` = 帳號層（所有加入的房，含之後加入的） | 無。回 `Ack`，meta `{ "latest_g_seq": <g_seq>, "joined": n, "skipped": ["!…"] }`（`skipped` = 不是成員的房：點名時就不是的，加上登記後重讀才發現已經離開的） |
 | `0x05 Unsubscribe` | client | 同上 | `{ "rooms"?: ["!…"] }`；沒帶 = 全退 | 無。回 `Ack`；退不存在的是 no-op |
 | `0x06 Push` | **server → client** | `IS_RESPONSE=1`；`id` 抄 `Subscribe`；`seq` 從 0 起每推一次 +1 | `{ "bc": n, "fs", "ls", "gap": bool }` | `bc` 則事件，**u32 大端長度 ＋ 事件 JSON**，跟 `Batch` 同一個切法（room-seq-and-recent §2.1），新到舊 |
 
@@ -87,6 +87,10 @@ registry（純記憶體，`Services.channels`）
   幾十到幾百個房，一次前綴讀），每個房把這個訂閱者放進 `channels[room]`，並標 `account_wide`——這個旗標只做一件事：之後這個帳號 join 新房時，join hook 把它加進新房的 channel。
   **順序：先登記 `subscribers`／`by_user`（含 `account_wide`），再掃表加 channel。** 反過來的話，掃到一半發生的 join 其 hook 找不到這個訂閱者就漏了；先登記則最多重複加一次，HashSet 的 no-op。
   同一訂閱者進同一 channel 兩次永遠是 no-op。
+- ⚠️ **登記完要再讀一次成員資格**（`list_rooms_no_longer_joined`，讀到 false 的房就 `unsubscribe`，並列進 Ack 的 `skipped`）。
+  先登記擋的是**登記之後**的 leave（hook 找得到訂閱者了）；**登記之前**那一小段——成員檢查已經回 true、連線還沒進 registry——發生的 leave／kick／ban，
+  它的 `evict` 在 `by_user` 查無此人、no-op，而且**不會再來一次**：那條連線會留在 channel 裡收那個房之後的每一則事件，直到斷線。
+  ⭐ 兩側都要蓋：登記前的 kick 由這次重讀剔掉，登記後的由 hook 接住。這是 channel 這份投影**唯一**可能從過期的真相寫進去的地方（審查者 rumia／salvia 2026-09-10）。
 - **`Unsubscribe`**：從點名的 channel 拿掉，不在裡面就 no-op；沒點名 = 全退並拿掉 `account_wide`。
 - **`connection_id`**：`ws_route` 升級時從一個 `AtomicU64` 拿，傳進 `serve`，放進 `PackContext`；`Hello` 的回應多報 `connection_id`（除錯用，client 不必用）。它只在 process 內有意義，不進 DB。
   `Login` 換帳號時連線號不變，但訂閱**全退**（channel 成員資格是舊帳號的），新帳號要收就再 `Subscribe`。
