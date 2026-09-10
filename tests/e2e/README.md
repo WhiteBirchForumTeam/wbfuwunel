@@ -10,6 +10,7 @@
 | `e2e8.ps1` | 每房 `r_seq`、全域 `g_seq`、`Event/Recent` 的 `Batch` 串流（一窗、`tc`／`bc`／`fs`／`ls`／`r`、`cg_seq`／`before` 翻窗、`batch`／`limit` 夾值、byte 上限切 Batch、HTTP 回 `Unsupported`、兩窗之間 Ping）、舊庫啟動的一次性編號；情境 4：30 個房間的一窗 first byte 量測（冷／暖，門檻只有「冷 < 2 秒」） | [room-seq-and-recent.md](../../docs/design/room-seq-and-recent.md) |
 | `e2e9.ps1` | 附件宣告（header 與 `Event/Send`）、四種拒送、共用附件、明文 fallback、bot 一次性警告、redact 保留備份後 purge、掃描不碰新上傳 | [media-attachments.md](../../docs/design/media-attachments.md) |
 | `e2e10.ps1` | 媒體持有者集合：刪房／redact 保留備份／備份到期／頭像／purge 範圍／重複操作、`WBFUWUNEL_MEDIA_GRACE_SECONDS` 下的掃描；情境 4（要 `E2E_OLD_EXE`）：既存媒體被生成縮圖後仍不受管、不被掃 | [media-holders.md](../../docs/design/media-holders.md)、[review-followups-2026-09-06.md](../../docs/design/review-followups-2026-09-06.md) §2.1 |
+| `e2e11.ps1` | WS 訂閱與推送（channel）：帳號層 `Subscribe` 只推給訂閱那條、自己送的也推、`cg_seq` 先補再推、新加入的房自動跟（點名訂閱不跟）、離房／被踢停推、ignore 不推、`Unsubscribe` 冪等、HTTP 回 `Unsupported`；情境 2：訂閱者停讀時 40 則送訊息不被擋、恢復後有 `gap: true`、`Recent` 補齊 | [wbf-event-push.md](../../docs/design/wbf-event-push.md) |
 | `wbf-helpers.ps1` | 共用：pack 編解碼（CRC-32C）、HTTP／WS 傳輸、起停 server、寫設定檔。不是測試 | [wbf-wire-format.md](../../docs/design/wbf-wire-format.md) |
 | `build-win.ps1` | 建 e2e profile 的 binary（MSVC 環境、Windows 的 feature 組） | [windows-build.md](../../docs/design/windows-build.md) |
 
@@ -40,3 +41,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\e2e\e2e10.ps1
   server 重啟看起來像「server did not come up」。`Start-Server` 放棄前現在會印最後一個錯誤與一個新 HttpClient 的結果，把「server 沒起來」和「這個 process 的 HTTP 壞了」分開。
   helpers 另外把 ServicePoint 的 `DefaultConnectionLimit` 拉到 64（預設 2，留幾條 WS 就排隊），用完的 WS 還是要 `Dispose()`。
 - ⚠️ 等 server 回應的接收要有時限（e2e8 的 `Ws-Recv-Bounded`；e2e7 的 `Recv-Frame`）：`ReceiveAsync().Result` 沒時限，server 不回就整支腳本卡住、沒有任何輸出。
+- ⚠️ **超時的 `ReceiveAsync` 不能丟掉**：.NET 的 `ClientWebSocket` 讓它繼續掛著，下一個 frame 會被它吃掉，之後的接收就永遠等不到（e2e11 第一版就這樣卡死）。
+  e2e11 的 `Recv-Or-Null` 把還沒完成的 task 按 socket 記著、下次先等它。推送類的腳本（有 server 主動送的 frame）一定會撞到這條。
+- ⚠️ **`gap: true` 是下一個「推得進去」的 `Push` 才帶的**：flood 之後要再送一則訊息才看得到它。推論也成立 —— 掉包之後那個房如果再無新事件，這個旗標**永遠不會到**，所以測試（與 client）都不能把「沒收到 `gap`」當成「沒漏過」。
+- ⚠️ 函式回傳單元素陣列會被攤平成那個元素；呼叫端用 `@()` 包，函式裡**不要**再 `return ,$x`（兩邊都包會變成陣列裡包陣列，`.Count` 是 1、`[0]` 是整個陣列）。
+  hashtable 的屬性存了單一物件時 `.Count` 是空的，判斷用 `@($x.events).Count`。

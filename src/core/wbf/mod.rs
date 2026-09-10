@@ -3,6 +3,7 @@
 //! per HTTP request. The pack neither encrypts nor decrypts; it only knows
 //! its own layout and checksums. See `docs/design/wbf-wire-format.md`.
 
+pub mod events;
 pub mod file_info;
 pub mod pack;
 #[cfg(test)]

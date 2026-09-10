@@ -48,9 +48,11 @@ use tuwunel_core::{
 	wbf::{HEADER_LEN, PackError, decode},
 };
 
+use tuwunel_service::channels::{ConnectionId, Outgoing};
+
 use super::{
-	CloseReason, Outgoing, PackContext, Reply, Session, SessionChange, Transport, authenticate, error_pack,
-	handle_pack, header_id_seq, pack_error_code, pack_response, reserve_connection_slot, revalidate,
+	CloseReason, PackContext, Reply, Session, SessionChange, Transport, authenticate, error_pack, handle_pack,
+	header_id_seq, pack_error_code, pack_response, reserve_connection_slot, revalidate,
 };
 use crate::ClientIp;
 
@@ -158,6 +160,12 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 	let mut session = session;
 	let (sink, mut stream) = socket.split();
 
+	// The connection's number, and the guard that unsubscribes it from every
+	// channel when this task ends, whichever way (pipeline 2.1 shape: RAII,
+	// not a path that remembers to).
+	let connection: ConnectionId = services.channels.next_connection_id();
+	let _channels_guard = services.channels.connection_guard(connection);
+
 	// The send queue and its task. Bounded: a handler that produces faster
 	// than the peer reads waits in `Reply::send`, and with it the receive
 	// loop, and with that the peer's own sending. Memory per connection is
@@ -251,7 +259,7 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 			},
 		};
 
-		let ctx = PackContext { session: session.as_ref(), client, transport: Transport::WebSocket };
+		let ctx = PackContext { session: session.as_ref(), client, transport: Transport::WebSocket, connection };
 		let change = match handle_pack(&services, &ctx, view, &mut reply).await {
 			| Ok(change) => change,
 			// The send task is gone: the peer closed while a reply was on
@@ -270,6 +278,11 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 				// given back when the old session drops here.
 				if let Some(old_session) = session.as_mut() {
 					new_session.inherit_slot(old_session);
+					// Channels were entered as the old identity; a new one
+					// subscribes again if it wants to listen.
+					if !old_session.is_same_device(&new_session) {
+						services.channels.unsubscribe_all(connection);
+					}
 				}
 				session = Some(new_session);
 			},
@@ -313,7 +326,8 @@ async fn send_queued(mut sink: futures::stream::SplitSink<WebSocket, Message>, m
 				if sink.send(Message::Binary(pack.into())).await.is_err() {
 					break;
 				},
-			| Outgoing::Close(frame) => {
+			| Outgoing::Close { code, reason } => {
+				let frame = CloseFrame { code, reason: reason.into() };
 				let _closing = sink.send(Message::Close(Some(frame))).await;
 				break;
 			},
@@ -322,7 +336,7 @@ async fn send_queued(mut sink: futures::stream::SplitSink<WebSocket, Message>, m
 	let _closed = sink.close().await;
 }
 
-fn close(code: u16, reason: &'static str) -> Outgoing { Outgoing::Close(CloseFrame { code, reason: reason.into() }) }
+fn close(code: u16, reason: &'static str) -> Outgoing { Outgoing::Close { code, reason } }
 
 /// Queues the close frame, waiting at most `DRAIN_TIMEOUT` for room. A peer
 /// that has stopped reading keeps the queue full; then the frame is not worth

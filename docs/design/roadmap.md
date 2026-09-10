@@ -103,7 +103,7 @@ Logout 後直接關線；同一條連線重複 Login 允許；**登入限速預�
 
 維護者 2026-09-08 定方向：先做重點功能，`media/upload-lifecycle` 晚點。三件工作：(1) 一般訊息走 WS——已是 `Event/Send`；(2) 連線訂閱自己的帳號，
 在的任何房間的新事件推過來——`Event/Subscribe`／`Unsubscribe`／`Push`，接在 `append_pdu` 提交後，registry `user → 連線`，`try_send` 掉了記 `gap` 用 `Recent` 補；
-(3) Draft Message 坐在 channel 上——`Draft` 寫一則明文佔位事件當錨、`draft_id = g_seq`；`Keypoint`（≤ 8 KiB 明文，整個 buffer 換掉）／`Delta`／`Append` 只廣播不進庫，長文字 = Keypoint ＋ Append，沒有 Chunk；`Demand` 向作者要全文；`Abandon` = redact 佔位；定案 = 正常 `Event/Send` 帶 `draft_id` 並 redact 佔位；server 零記憶體狀態，每片從錨點讀驗作者。
+(3) Draft Message 坐在 channel 上——`Draft` 寫一則明文佔位事件當錨、`draft_id = g_seq`；`Keypoint`（≤ 8 KiB 明文，整個 buffer 換掉）／`Delta`／`Append` 只廣播不進庫，長文字 = Keypoint ＋ Append，沒有 Chunk；`Demand` 向作者要全文；`Abandon` = redact 佔位；收尾是 client 自己 `Abandon` 再送一則正常訊息，server 不做多餘的事；server 零記憶體狀態，每片從錨點讀驗作者。
 第二、三版草案作廢。
 
 ## 3. 候選（要不要做，由維護者決定）

@@ -1,6 +1,6 @@
 # WS 訂閱與推送：連線訂閱自己的帳號，server 把新事件推過來
 
-**狀態**：📄 草案（2026-09-08），等維護者同意。這是維護者 2026-09-08 說的「工作 2」：WS 訂閱自己帳號的 event，在的任何房間的新事件自然推過來。
+**狀態**：🔧 實作中（分支 `wbf/channels`，提案 PR #35 2026-09-08 核可）。這是維護者 2026-09-08 說的「工作 2」：WS 訂閱自己帳號的 event，在的任何房間的新事件自然推過來。
 [streaming-messages.md](streaming-messages.md)（工作 3）坐在這份之上；工作 1（一般訊息走 WS）已經是 `Event/Send`（PR #24）。
 
 **這份改的是什麼**：到 PR #33 為止，WS 只有 client 問、server 答；[wbf-pack-pipeline.md](wbf-pack-pipeline.md) §1 留了發送 task 與有界佇列，就是給這裡用的：
@@ -38,7 +38,7 @@ kind `0x14 Event`（§3.3 的 Event 章），三個新 subtype：
 
 | subtype | 誰發 | header | meta | data |
 |---|---|---|---|---|
-| `0x04 Subscribe` | client | `id` 由 client 選（之後每個 `Push` 抄它） | `{ "rooms"?: ["!…"], "cg_seq"?: <g_seq> }`；沒帶 `rooms` = 帳號層（所有加入的房，含之後加入的） | 無。回 `Ack`，meta `{ "latest_g_seq": <g_seq>, "joined": n, "skipped": ["!…"] }`（`skipped` = 點名了但不是成員的房） |
+| `0x04 Subscribe` | client | `id` 由 client 選（之後每個 `Push` 抄它） | `{ "rooms"?: ["!…"], "cg_seq"?: <g_seq> }`；沒帶 `rooms` = 帳號層（所有加入的房，含之後加入的） | 無。回 `Ack`，meta `{ "latest_g_seq": <g_seq>, "joined": n, "skipped": ["!…"] }`（`skipped` = 不是成員的房：點名時就不是的，加上登記後重讀才發現已經離開的） |
 | `0x05 Unsubscribe` | client | 同上 | `{ "rooms"?: ["!…"] }`；沒帶 = 全退 | 無。回 `Ack`；退不存在的是 no-op |
 | `0x06 Push` | **server → client** | `IS_RESPONSE=1`；`id` 抄 `Subscribe`；`seq` 從 0 起每推一次 +1 | `{ "bc": n, "fs", "ls", "gap": bool }` | `bc` 則事件，**u32 大端長度 ＋ 事件 JSON**，跟 `Batch` 同一個切法（room-seq-and-recent §2.1），新到舊 |
 
@@ -49,6 +49,19 @@ kind `0x14 Event`（§3.3 的 Event 章），三個新 subtype：
   不帶 `cg_seq` = 只要新的。
 - **`gap: true`**：這條連線在上一個 `Push` 之後**有事件沒推到**（§4）。client 看到就用 `Recent(cg_seq)` 補一窗；補完之後的推送接得上。
 - `Push` 是**事件驅動類**（wire-format §4）：不 Ack、不重送、client 不守順序。`fs`／`ls` 是這一包的最新／最舊 g_seq，只給 client 推水位用。
+- **`seq` 只是這條連線的推送序號，不是計數保證**：丟掉的包（佇列滿、編碼失敗）也佔掉一個號，所以 client 🚫 不要拿 `seq` 的跳號算「少了幾則」。**水位只認 `fs`／`ls`**，少了什麼由 `gap` ＋ `Recent` 補；`seq` 留給除錯與排序。
+- **`Unsubscribe` 退的是當下的 channel，不是黑名單**：帳號層訂閱者點名退掉某房之後再加入那個房，`follow` 會把它加回來（wire-format §3.2 同一句）。要真的不收，就別用帳號層訂閱。
+
+### 2.1 client 的責任（推送給的是提示，不是保證）
+
+推送這條路上 server 只承諾「盡快」，所以 client 這三件事要自己做：
+
+1. **每個收到的 `Push` 都推進水位**（`ls`／`fs`，不是 `seq`）並存下來 —— 重連時那個值就是 `Subscribe{cg_seq}`。沒存水位的 client，`gap` 補洞的機制對它是空的。
+2. **`gap` 只對「下一個 `Push`」有意義**：沒收到 `gap` 🚫 不等於沒漏過（§4 的最後一則邊界）。重連、切回前景、離開背景，都要 `Recent` 對一次。
+3. ⚠️ **點名訂閱（`Subscribe{rooms}`）不要拿非訂閱房的事件推進水位。** `cg_seq` 那一輪的補窗走的是 `Recent` 同一個 `collect_window`，
+   而它是**全域的**（該帳號所有加入的房），所以只訂了一部分房的 client 會在補窗裡收到沒訂的房的事件。照單全收又推進水位，之後補訂那些房時 `cg_seq` 已經跨過它們的洞 → 漏事件。
+   ⭐ 兩條路擇一：只用帳號層訂閱，或者**點名訂閱時自己按 `room_id` 過濾補窗、水位分房存**。
+   📎 server 端把補窗改成依 `rooms` 過濾是另一個提案，還沒做（維護者 2026-09-09 記；審查者 rumia R4）。
 
 ## 3. server 端：兩張表、兩個接點
 
@@ -74,9 +87,16 @@ registry（純記憶體，`Services.channels`）
   幾十到幾百個房，一次前綴讀），每個房把這個訂閱者放進 `channels[room]`，並標 `account_wide`——這個旗標只做一件事：之後這個帳號 join 新房時，join hook 把它加進新房的 channel。
   **順序：先登記 `subscribers`／`by_user`（含 `account_wide`），再掃表加 channel。** 反過來的話，掃到一半發生的 join 其 hook 找不到這個訂閱者就漏了；先登記則最多重複加一次，HashSet 的 no-op。
   同一訂閱者進同一 channel 兩次永遠是 no-op。
+- ⚠️ **登記完要再讀一次成員資格**（`list_rooms_no_longer_joined`，讀到 false 的房就 `unsubscribe`，並列進 Ack 的 `skipped`）。
+  先登記擋的是**登記之後**的 leave（hook 找得到訂閱者了）；**登記之前**那一小段——成員檢查已經回 true、連線還沒進 registry——發生的 leave／kick／ban，
+  它的 `evict` 在 `by_user` 查無此人、no-op，而且**不會再來一次**：那條連線會留在 channel 裡收那個房之後的每一則事件，直到斷線。
+  ⭐ 兩側都要蓋：登記前的 kick 由這次重讀剔掉，登記後的由 hook 接住。這是 channel 這份投影**唯一**可能從過期的真相寫進去的地方（審查者 rumia／salvia 2026-09-10）。
 - **`Unsubscribe`**：從點名的 channel 拿掉，不在裡面就 no-op；沒點名 = 全退並拿掉 `account_wide`。
 - **`connection_id`**：`ws_route` 升級時從一個 `AtomicU64` 拿，傳進 `serve`，放進 `PackContext`；`Hello` 的回應多報 `connection_id`（除錯用，client 不必用）。它只在 process 內有意義，不進 DB。
   `Login` 換帳號時連線號不變，但訂閱**全退**（channel 成員資格是舊帳號的），新帳號要收就再 `Subscribe`。
+- **`Subscribe` 換了身分就重來**：`subscribers[connection]` 已經在、但登記的 `user` 跟這次的不同（一條連線上的 `Login` 換了帳號），先 `remove_subscriber` 再重新登記 ——
+  舊身分留在 `by_user` 裡的話，兩個 hook 會按舊帳號的房間動這條連線。今天 `ws.rs` 換裝置時就已經全退，所以走不到；但那是**兩個模組合起來才正確**，
+  而這條線決定誰讀得到什麼，所以在 `subscribe` 自己這裡再問一次（審查者 rumia B1）。
 - **on disconnect**：`Subscription` 是 RAII（跟 `ConnectionSlot` 同形），drop 就把這個連線號從它在的每個 channel、`by_user`、`subscribers` 拿掉；不靠 loop 記得。
 - **真相在哪**：誰能收的真相是 DB 的成員表；channel 是它的記憶體投影，靠接點 2 保持一致。漂移只可能來自漏接 hook 的新 join／leave 路徑，而那只有 `state_cache` 一組；重啟就清空，安全方向是「少推」，`Recent` 補得回來。
 - **接點 1 只有 `append_pdu` 提交後**：backfill 進來的舊事件不推（不是「新的」，`Recent` 拿得到）；redaction 是一則新事件，照推。
@@ -89,7 +109,10 @@ registry（純記憶體，`Services.channels`）
 - **推送絕不阻塞 append**：`try_send`，佇列滿就丟並把 `gap` 記起來，下一次推得進去的 `Push` 帶 `gap: true`。append 是所有訊息的路徑，不能被一條讀得慢的連線拖住。
 - **掉了的不重送**：持久化的事件 `Recent` 拿得到；推送的責任是「盡快」不是「一定」。這跟 pipeline §1 的背壓（handler 等佇列）**故意不同**：handler 的回應是 client 問的，等得起；推送是 server 塞的，塞不進就算。
 - **每連線的成本**：訂閱者一筆 ＋ 它在的 channel 數個 HashSet 項；佇列是 pipeline 的那個。**每則事件的成本**：一次 `channels[room]` 查詢＋訂閱者數次 `try_send`；跟房間人數無關。
-- 上限：`wbf_push_max_events_per_pack`（一個 `Push` 最多幾則，預設 10，收 `cg_seq` 那輪用）；其餘沿用 pack 的 byte 上限。
+- **比 `wbf_data_max_bytes` 還寬的單則事件不推**（跟 `Event/Recent` 的 `collect_window` 同一道過濾，記一行 `debug_warn`）：`Recent` 既然跳過它，推了就是給 client 一個它永遠補不回來的東西，而那一幀本身也已經超過連線的 `max_message_size`。
+- **推之前在鎖內重驗房間成員**：`listeners()` 的快照到 `push` 之間隔著一次 ignore 的 DB 讀，這中間發生的 `evict`（離房／踢／ban）必須算數，所以 live 路徑走 `push_to_room`，在讀鎖內確認連線還在那個 channel 裡。補窗路徑（`push_window`）不帶房，它推的是該帳號的全域視窗。
+- **`gap` 掛在「下一次推得進去的 `Push`」上**，所以掉包之後那條連線如果再也沒有新事件可推，這個旗標就永遠不會送達。設計上接受——推送的用途是「不用輪詢」，不是「保證一致」——但 client 🚫 不要把「沒收到 `gap`」讀成「沒漏過」：重新連上、或使用者把 app 切回前景時，照樣 `Recent` 對一次水位。
+- 上限：`wbf_push_max_events_per_pack`（一個 `Push` 最多幾則，預設 10，收 `cg_seq` 那輪用）**與 `wbf_data_max_bytes` 同時生效** —— 兩個條件哪個先滿就切在哪，跟 `Event/Batch` 共用同一個切法（`core::wbf::events::list_pack_ranges`）。一窗大事件因此不會湊出一個超過連線 `max_message_size` 的包。
 
 ## 5. 跟現有東西的關係
 
