@@ -47,11 +47,50 @@ offset  size  欄位          說明
 - **CRC-32C（Castagnoli）**，不是 zlib 的 CRC-32：x86 的 SSE4.2 與 ARMv8 都有專用指令（`crc32c` crate 自動選），
   軟體 fallback 也有。zlib 那個沒有硬體指令。**這是效能上唯一該挑的點**：CRC 是 pack 處理裡唯一線性的成本。
 - **拒收**：`version ≠ 1`、保留旗標非 0、長度與實際對不上、任一 CRC 不合 → 丟掉，回 `Control/Error`（§3）。
-  同一連線連兩次壞就關連線，讓 client 重連。
+  關不關連線見 §2.1。
 - **上限**：`meta_len ≤ wbf_meta_max_bytes`（預設 64 KiB）、`data_len ≤ wbf_data_max_bytes`（預設 **16 MiB**，要放得下大塊，
   [chunked-upload.md](chunked-upload.md) §2.2）。
-- 📎 **CRC 只抓傳輸損壞，不抓竄改**。竄改由 data 裡的 AEAD 標籤抓，那是收發兩端的事。TLS 之上再算 CRC 有一點重複，
-  留著的理由是：解密前用一條硬體指令先篩掉壞塊，比解密失敗再猜便宜；而且 HTTP 路徑或未來別的傳輸不一定有 TLS 的完整性。
+- 📎 **CRC 不抓竄改**（那是 data 裡的 AEAD 標籤的事），**也不是在替 TLS 補位**。維護者 2026-09-10 問「CRC 對不上的機會有多高」，
+  答案要講清楚，否則下一個人會以為它在防網路雜訊：
+
+  | 情境 | CRC 真的會不合嗎 |
+  |---|---|
+  | TLS 之下的傳輸損壞 | ❌ **實質是零**。TLS 1.2／1.3 是 AEAD，一個位元被改 record 的 tag 就不合，**連線直接斷**，那個 pack 到不了解碼器 |
+  | 明文那一跳（前置代理 → server；TLS 由代理保證，server 自己不檢查） | ⚠️ 極低但非零。TCP 的 checksum 只有 16-bit，弱到有量測（Stone & Partridge 2000）估出每 1600 萬～100 億個封包會漏一個 |
+  | **編碼端的 bug**（`meta_len` 算錯、offset 少一、buffer 被重用、第三方 client 照規格自己實作寫錯） | ✅ **這才是它每天在抓的東西** |
+  | 存下來又讀回去的 pack（向量檔、log 重放、之後的別種傳輸） | ✅ 不在 TLS 的保護範圍裡 |
+
+  ⭐ 所以它是**格式的自我檢查**，不是網路的完整性機制：TLS 保證「你收到的位元組跟對面送出的一樣」，
+  但完全不管對面送出的那串位元組**是不是一個合法的 pack**。少了 CRC，一個算錯的 `meta_len` 會變成拿後面的位元組當長度去讀，
+  而不是一句 `Corrupt`。
+- 📎 **`data_crc` 還有一件只有它能做的事**：E2EE 的塊本身有 AEAD 標籤，但那是**收檔的 client** 驗的，server 解不開也驗不了。
+  沒有 `data_crc`，server 只能把壞掉的密文原樣存起來，等幾個月後有人下載才發現。有它，當下就能拒收那一塊。
+  成本方面不必擔心：硬體指令大約每核 10–20 GB/s，小 pack 是奈秒級，只有 16 MiB 的大塊會到毫秒級。
+
+### 2.1 連線健康計數器：什麼時候關掉一條講不通的連線
+
+（維護者 2026-09-10 指定，取代原本的「連兩次壞就關連線」——⚠️ 那條**從來沒被實作過**，`ws.rs` 只回一個 `Corrupt` 就繼續讀下一個 frame。
+所以這不是改行為，是第一次把行為定下來。）
+
+每條 WS 連線一個計數器，純記憶體、起始 **0**：
+
+| 收到什麼 | 計數器 |
+|---|---|
+| **解不開的框**：CRC 不合、`version` 不對、保留旗標非 0、長度對不上、文字 frame | **−1** |
+| **解得開的 pack** | **歸零** |
+
+`counter ≤ −wbf_ws_corrupt_budget`（預設 **8**）→ 送完最後那個 `Error` 之後 Close **1002**（protocol error）關線。
+
+- ⭐ **只有「框」的錯扣分。** pack 解得開就歸零 —— 即使 handler 之後回 `InvalidRequest`、`Unauthorized`、`NotFound`：
+  那些代表對方**看得懂這個協議**，只是這一個請求不對。計數器量的是「你會不會講這個協議」，不是「你有沒有做錯事」。
+- 📎 **為什麼是 8 而不是 2**：連續 8 個解不開的框，實務上只有兩種可能 —— **對面根本不是在講 wbf**（協議錯、當成別的東西連進來），
+  或者**某一端的編碼有 bug**。正常的 client 認得協議，除非自己壞掉，否則一輩子碰不到這個門檻。
+  2 太嚴苛：一個偶發的壞框（見上面那張表的明文那一跳）就把一條好好的連線踢掉，而重連付的代價比那個壞框大得多。
+- 📎 **為什麼「好的就歸零」而不是慢慢回血**：這個計數器管的是**協議層的認不認得**，不是流量。
+  有人用「7 個壞、1 個好」的節奏繞過它，換到的也只是「每個壞框換一個 `Error` 回應」—— 那是**限速**該管的事（§6.3.4），不是這裡。
+  🚫 不要把兩件事塞進同一個計數器：一個變數同時管兩種閾值，兩邊都會調不準。
+- **HTTP 路徑沒有這個計數器**：一個請求一個 pack、沒有連線可關，壞框就回一個 `Error`（§6.2）。
+- ⏳ **未實作**：`ws.rs` 目前不數。實作連同 §3.4 的 `RejectCode` 一起做，測試要有「8 個壞框關線」與「中間夾一個好 pack 就不關」兩條。
 
 ## 3. kind、subtype、meta
 
@@ -73,7 +112,7 @@ offset  size  欄位          說明
 |---|---|---|---|
 | `0x01 Control` | `0x01 Hello` | `{ "protocol": 1, "client": "…", "features": [...] }` | 無 |
 | | `0x02 Ack` | 各 kind 定的回應內容；`IS_RESPONSE = 1`，`id`、`seq` 抄請求 | 視 kind（`Download/Read` 的回應 data 是讀出的 bytes） |
-| | `0x03 Error` | `{ "code": "…", "message": "…", "expected_seq"?: … }`；code：`UnsupportedVersion` `Corrupt` `UnknownKind` `TooLarge` `Unauthorized` `NotFound` `Conflict` `OutOfOrder` `Internal`；§6.3 加 `Forbidden`（憑證被拒）與 `RateLimited`（`retry_after_ms`）；[pack-pipeline](wbf-pack-pipeline.md) 加 `Unsupported`（這個 kind 不走這個傳輸，例：`Recent`／`Session` 走 HTTP）與 `TooManyConnections`（`max_connections`，裝置的 WS 名額滿了，連線隨即被關） | 無 |
+| | `0x03 Error` | `{ "code_id": <序號>, "code": "…", "message": "…" }` ＋ 該 code 定義的欄位；程式比對 `code_id`，`code` 是它的名字；**完整清單在 §3.4**，那張表是唯一的來源 | 無 |
 | | `0x04 Ping` / `0x05 Pong` | `{ "nonce": … }` | 無 |
 | `0x02 Stream` | `Open` `Fragment` `Close` `Abandon` | [streaming-messages.md](streaming-messages.md) §4 | 密文本體 |
 | `0x03 Upload` | `Create` `Chunk` `Status` `Seal` `Abort` | [chunked-upload.md](chunked-upload.md) §4 | 塊 bytes（`Chunk`） |
@@ -121,6 +160,95 @@ offset  size  欄位          說明
 | `0xF0`–`0xFF` | 實驗用，不保證穩定 | |
 
 遷移時每個操作的 meta 就是它現在的 JSON body（ruma 的 request 型別直接 serde 成 meta），回應同理 —— 所以遷移是換外框，不是重寫語意。
+
+### 3.4 錯誤詞表（`Control/Error` 的 `code`）
+
+`code` 是**給程式讀的**：client 照它決定重試、重登、還是放棄。`message` 是給人讀的，措辭隨時會變，
+🚫 **client 不要 parse `message`**。這張表是唯一的來源。
+
+⏳ **狀態（2026-09-10）**：表是定的，**程式還沒跟上** —— 現在 `Reject::code` 收的是自由字串（`&'static str`），
+所以 code 是在呼叫點現寫的；`code_id` 還沒上線，`InvalidRequest` 也還沒有人發。實作要做四件事：把那個字串換成一個列舉（`RejectCode`），
+讓呼叫點**沒辦法**發明新字；每個 `Error` 的 meta 加上 `code_id`；照下面的分界把現有的 code 歸位；以及 §2.1 的連線健康計數器。
+⭐ 那個列舉就是這張表的閘門 —— 沒有它，表跟程式一定會漂（今天就是這樣漂的）。
+
+每個 code 有一個**序號**（`code_id`）和一個**名字**（`code`），兩個都在線上，一對一，**都不重用**（維護者 2026-09-10 定）。
+序號是給程式比對的（不必比字串、看範圍就知道是哪一家），名字是給人看 log 與向量檔的。
+
+| `code_id` | code | 什麼意思 | 誰產生 | 額外欄位 | client 該怎麼辦 |
+|---|---|---|---|---|---|
+| 1001 | `UnsupportedVersion` | pack 的版本位不是這個 server 支援的 | pack 解碼 | | 升級 client；重試沒有用（這個跟 `Corrupt` 一樣扣 §2.1 的計數器） |
+| 1002 | `Corrupt` | **這個 pack 解不開**：CRC 對不上、被截斷、保留旗標有值、送的是文字 frame | pack 解碼 | | 重連**一次**就好；再來一次就是編碼端的 bug（實務上多半是，見 §2 的 📎），往上報，🚫 不要一直重連 |
+| 1101 | `UnknownKind` | 這個 `(kind, subtype)` 沒有 handler | 准入表 | | 這個 server 不會做這件事；別重試 |
+| 1102 | `Unsupported` | 有 handler，但**不走這個傳輸**（例：`Recent`／`Subscribe`／`Session` 只走 WS） | 准入表 | | 換傳輸（開 WS），不是重試 |
+| 1103 | `TooLarge` | 超過 `wbf_meta_max_bytes`／`wbf_data_max_bytes`，或上傳宣告的大小上限 | 准入表、上傳 | | 切小再送 |
+| 1201 | `InvalidRequest` | pack 解得開，但 **meta／data 不是這個 subtype 要的**：JSON 壞、型別錯、缺欄位、值超出範圍、mxc 解不出來 | 各 handler | | client 的 bug；照 `message` 修，重送同樣的東西一定再錯 |
+| 1301 | `Unauthorized` | 沒登入，或身分**不再**有效（token 到期、被撤、帳號被鎖） | session 閘門 | `soft_logout`?（Refresh） | 重新登入；WS 通常隨即被關（Close 1008） |
+| 1302 | `Forbidden` | 身分驗過了但**不准**：憑證錯、帳號停用、不支援的登入 `type` | 登入 | | 不要自動重試；`message` 帶 Matrix 的 errcode |
+| 1401 | `RateLimited` | 太快了 | 限速閘門 | `retry_after_ms` | 等那麼久再試，🚫 不要立刻重打 |
+| 1402 | `TooManyConnections` | 這個 device 的 WS 名額滿了（`wbf_ws_max_connections_per_device`） | `admit` 閘門 | `max_connections` | 關掉一條舊的再連；這條連線隨即被關 |
+| 1501 | `NotFound` | 指名的東西不存在（上傳 id、媒體） | 各 handler | | 重建那個東西，或放棄 |
+| 1502 | `Conflict` | 請求**合法**，但跟 server 目前的狀態衝突（例：這個上傳已經封存／已經完成） | 上傳等有狀態的 kind | | 先讀狀態（`Upload/Status`）再決定；重送同一個請求還是會衝突 |
+| 1503 | `OutOfOrder` | 有序類的 `seq` 不是接收端等的那個（§4） | 有序類 | `expected_seq` | 從 `expected_seq` 重送，🚫 不要自己重排 |
+| 1504 | `Truncated` | 上傳觸到大小上限，被封成不完整（可以 Seal） | 上傳 | `received`、`total_len`、`finished`、`truncated` | 照那幾個數字決定 Seal 還是 Abort |
+| 1901 | `Internal` | server 自己的錯 | 任何地方 | | 可以退避重試；連續發生就是 server 的 bug |
+
+**序號怎麼編**（新增的照這個範圍放，範圍本身就說了是哪一家）：
+
+| 範圍 | 家族 | 共同點 |
+|---|---|---|
+| 1000–1099 | pack 層 | 框壞了，還沒進到「這是什麼請求」 |
+| 1100–1199 | 路由與准入 | 框好的，但這裡不受理 |
+| 1200–1299 | 請求內容 | 受理了，但內容不對 |
+| 1300–1399 | 身分與權限 | 你是誰、准不准 |
+| 1400–1499 | 節流與名額 | 現在不行，等一下或讓出資源 |
+| 1500–1599 | 狀態 | 請求對，但跟 server 現在的狀態對不上 |
+| 1900–1999 | server 自己的錯 | 不是 client 的問題 |
+
+- 🚫 **`0` 永遠不是合法的 code_id。** 序號從 1000 起就是為了這個：欄位漏了、反序列化拿到預設值的 `0`，
+  必須是「不認得」而不是某個真的碼 —— 佔位值要一眼看得出是佔位值。
+- 🚫 **序號與名字都不重用。** 一個 code 退役就留在表上標 `retired`，號碼不給下一個用；
+  否則舊 client 會拿新語意去套舊行為，而它不會知道。
+
+🚨 **code 一律事先定義**（維護者 2026-09-10 指定）：要發一個新的錯誤，順序是**先在這張表加一列**（序號、名字、意思、client 該怎麼辦），
+再改程式。🚫 呼叫點不准現編一個碼 —— 那正是 `Conflict` 長到 11 個呼叫點、`Corrupt` 被拿去講「JSON 格式錯」的原因：
+沒有人一次看過全部的碼，也就沒有人發現它們在說謊。⭐ 程式那邊的列舉是這條規則的閘門：加不了新變體，就編不出新碼。
+
+🚨 **client 收到不認得的 code：不認得就不認得**（維護者 2026-09-10 指定）——
+當成「這個請求失敗了，而且**不知道**能不能重試」：不重試、往上報，把 `code_id`、`code` 與 `message` 原樣留在 log 裡。
+
+- 🚫 不要落到 `Internal` 那條「退避重試」的路徑 —— 猜錯的方向是對 server 無限重打。
+- 🚫 不要**只**看序號範圍就自己補一套行為。範圍是給人除錯與分類看的，**不是**「同一家就照同一套處理」的授權；
+  真的要照家族處置，那個處置必須先寫進這張表，那它就不是「不認得的 code」了。
+- ⭐ 因此**加新 code 永遠是相容的**：舊 client 會安全地不懂它，而不是誤解它。這也是 `message` 存在的理由 ——
+  不認得 code 的時候它是唯一能給人看的東西，所以 message 要像句人話；但仍然 🚫 不給程式 parse。
+
+⭐ **兩組最容易混的，分界寫在這裡**：
+
+- `Corrupt` vs `InvalidRequest` —— **框壞了**（解不開這個 pack）對上**內容不對**（pack 好好的，裡面的 JSON 不是這個操作要的）。
+  前者 client 沒辦法自己修，後者是 client 的 bug。
+- `InvalidRequest` vs `Conflict` —— **請求本身錯**對上**請求對、但現在不行**。判準：把 server 的狀態換一個，這個請求會不會變成合法的？
+  會 → `Conflict`；不會（怎麼樣都錯）→ `InvalidRequest`。
+
+📎 **`InvalidRequest` 是後來補的**（維護者 2026-09-10 定）：在那之前 meta 解析失敗回的是 `Conflict`（少數幾處回 `Corrupt`），
+兩個都在說謊 —— 一個把 client 的格式錯講成狀態衝突，一個把它講成傳輸壞掉，而 client 對這三種的處置**完全不同**。
+👉 這是 wbf 通道上**看得見的改動**，client 端要跟（見 wbf-matrix-client 的協議同步）。
+
+**要歸位的呼叫點**（實作那支照這張清單走，改完這裡的 ⏳ 一起拿掉）：
+
+| 現在 | 之後 | 哪裡 |
+|---|---|---|
+| `Conflict` | `InvalidRequest` | `parse_meta`（`Subscribe`／`Unsubscribe` 等所有走它的）、`Event/Send` 的 meta 與 data、`Recent` 的 `cg_seq`／`before` 型別與範圍、`Upload/Create` 的 `EncryptedFileInfo` 解碼、`invalid mxc`（兩處）、`chunk index too large`、`position too large`、`mxc is required` |
+| `Corrupt` | `InvalidRequest` | `Session` 的 `Login`／`Refresh`／`Logout` meta 形狀不對（`session.rs` 三處）——**pack 沒壞，是內容不對** |
+| `Conflict` | `InvalidRequest` | `From<Error>` 裡 `StatusCode::BAD_REQUEST` 的那一條 |
+| `Conflict` | 不動 | `UploadError::Conflict`（上傳狀態衝突）——這是這個 code 收窄後**唯一**該留的用法 |
+| `Corrupt` | 不動 | pack 解碼失敗、文字 frame（`ws.rs`）——框壞了 |
+
+⚠️ 實作那支要一起補的測試：**每個 code 至少一條**「這個情境回這個 code」的斷言，加上一條「序號與名字一對一、沒有重複」的表格測試，
+否則下一次歸位又會靠人眼。
+
+⚠️ **向量檔會整批變動**：`code_id` 一加，現有的 `error_rate_limited`／`error_out_of_order`／`error_too_many_connections`／
+`error_unsupported` 的 meta bytes 全部改寫（`wbf-vectors.json` 要重生），`InvalidRequest` 也要加一個。
+👉 這是 client 端**必須同步**的那一刻：舊 client 讀新向量會對不上，而它讀不到 `code_id` 時的行為就是上面那條「不認得就不認得」。
 
 ## 4. 順序守則：依 kind 分兩類
 
@@ -189,7 +317,8 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 
 `POST /_wbf/v1/pack`，`Content-Type: application/octet-stream`，**body 是一個 pack，回應 body 也是一個 pack**。
 一個請求一個 pack；`id` 由 server 在 `Upload/Create` 的回應裡發，之後帶著它。它存在的理由是 curl 就能測；效能不是它的目標。
-`Stream` kind 走 HTTP 沒意義（沒人連著收），回 `Error(Conflict)`。`Session` kind（§6.3）也不走 HTTP pack：它的語意是「換這條連線的 Session」，HTTP 沒有連線可換，回 `Error(Conflict)`；HTTP 登入照舊用 `/login`。
+`Stream` kind 走 HTTP 沒意義（沒人連著收），回 `Error(Unsupported)`。`Session` kind（§6.3）也不走 HTTP pack：它的語意是「換這條連線的 Session」，HTTP 沒有連線可換，回 `Error(Unsupported)`；HTTP 登入照舊用 `/login`。
+（📎 這兩處本來寫的是 `Conflict`，但准入表從 pack-pipeline 那支開始回的就是 `Unsupported` —— 文件停在舊字，程式沒錯。§3.4 的分界：不走這個傳輸是 `Unsupported`。）
 
 ### 6.3 `Login`／`Refresh`／`Logout` —— 在通道上取得與放掉 session
 
