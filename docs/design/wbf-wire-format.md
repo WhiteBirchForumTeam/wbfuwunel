@@ -73,7 +73,7 @@ offset  size  欄位          說明
 |---|---|---|---|
 | `0x01 Control` | `0x01 Hello` | `{ "protocol": 1, "client": "…", "features": [...] }` | 無 |
 | | `0x02 Ack` | 各 kind 定的回應內容；`IS_RESPONSE = 1`，`id`、`seq` 抄請求 | 視 kind（`Download/Read` 的回應 data 是讀出的 bytes） |
-| | `0x03 Error` | `{ "code": "…", "message": "…" }` ＋ 該 code 定義的欄位；**code 的完整清單與意思在 §3.4**，那張表是唯一的來源 | 無 |
+| | `0x03 Error` | `{ "code_id": <序號>, "code": "…", "message": "…" }` ＋ 該 code 定義的欄位；程式比對 `code_id`，`code` 是它的名字；**完整清單在 §3.4**，那張表是唯一的來源 | 無 |
 | | `0x04 Ping` / `0x05 Pong` | `{ "nonce": … }` | 無 |
 | `0x02 Stream` | `Open` `Fragment` `Close` `Abandon` | [streaming-messages.md](streaming-messages.md) §4 | 密文本體 |
 | `0x03 Upload` | `Create` `Chunk` `Status` `Seal` `Abort` | [chunked-upload.md](chunked-upload.md) §4 | 塊 bytes（`Chunk`） |
@@ -125,26 +125,60 @@ offset  size  欄位          說明
 🚫 **client 不要 parse `message`**。這張表是唯一的來源。
 
 ⏳ **狀態（2026-09-10）**：表是定的，**程式還沒跟上** —— 現在 `Reject::code` 收的是自由字串（`&'static str`），
-所以 code 是在呼叫點現寫的，`InvalidRequest` 也還沒有人發。實作要做兩件事：把那個字串換成一個列舉（`RejectCode`），
-讓呼叫點**沒辦法**發明新字；以及照下面的分界把現有的 code 歸位。⭐ 那個列舉就是這張表的閘門 —— 沒有它，表跟程式一定會漂。
+所以 code 是在呼叫點現寫的；`code_id` 還沒上線，`InvalidRequest` 也還沒有人發。實作要做三件事：把那個字串換成一個列舉（`RejectCode`），
+讓呼叫點**沒辦法**發明新字；每個 `Error` 的 meta 加上 `code_id`；以及照下面的分界把現有的 code 歸位。
+⭐ 那個列舉就是這張表的閘門 —— 沒有它，表跟程式一定會漂（今天就是這樣漂的）。
 
-| code | 什麼意思 | 誰產生 | 額外欄位 | client 該怎麼辦 |
-|---|---|---|---|---|
-| `UnsupportedVersion` | pack 的版本位不是這個 server 支援的 | pack 解碼 | | 升級 client；重試沒有用 |
-| `Corrupt` | **這個 pack 解不開**：CRC 對不上、被截斷、保留旗標有值、送的是文字 frame | pack 解碼 | | 是傳輸或編碼壞了；重送同一個 pack 沒有用，重連 |
-| `UnknownKind` | 這個 `(kind, subtype)` 沒有 handler | 准入表 | | 這個 server 不會做這件事；別重試 |
-| `Unsupported` | 有 handler，但**不走這個傳輸**（例：`Recent`／`Subscribe`／`Session` 只走 WS） | 准入表 | | 換傳輸（開 WS），不是重試 |
-| `InvalidRequest` | pack 解得開，但 **meta／data 不是這個 subtype 要的**：JSON 壞、型別錯、缺欄位、值超出範圍、mxc 解不出來 | 各 handler | | client 的 bug；照 `message` 修，重送同樣的東西一定再錯 |
-| `TooLarge` | 超過 `wbf_meta_max_bytes`／`wbf_data_max_bytes`，或上傳宣告的大小上限 | 准入表、上傳 | | 切小再送 |
-| `Unauthorized` | 沒登入，或身分**不再**有效（token 到期、被撤、帳號被鎖） | session 閘門 | `soft_logout`?（Refresh） | 重新登入；WS 通常隨即被關（Close 1008） |
-| `Forbidden` | 身分驗過了但**不准**：憑證錯、帳號停用、不支援的登入 `type` | 登入 | | 不要自動重試；`message` 帶 Matrix 的 errcode |
-| `RateLimited` | 太快了 | 限速閘門 | `retry_after_ms` | 等那麼久再試，🚫 不要立刻重打 |
-| `TooManyConnections` | 這個 device 的 WS 名額滿了（`wbf_ws_max_connections_per_device`） | `admit` 閘門 | | 關掉一條舊的再連；這條連線隨即被關 |
-| `NotFound` | 指名的東西不存在（上傳 id、媒體） | 各 handler | | 重建那個東西，或放棄 |
-| `Conflict` | 請求**合法**，但跟 server 目前的狀態衝突（例：這個上傳已經封存／已經完成） | 上傳等有狀態的 kind | | 先讀狀態（`Upload/Status`）再決定；重送同一個請求還是會衝突 |
-| `OutOfOrder` | 有序類的 `seq` 不是接收端等的那個（§4） | 有序類 | `expected_seq` | 從 `expected_seq` 重送，🚫 不要自己重排 |
-| `Truncated` | 上傳觸到大小上限，被封成不完整（可以 Seal） | 上傳 | `received`、`total_len`、`finished`、`truncated` | 照那幾個數字決定 Seal 還是 Abort |
-| `Internal` | server 自己的錯 | 任何地方 | | 可以退避重試；連續發生就是 server 的 bug |
+每個 code 有一個**序號**（`code_id`）和一個**名字**（`code`），兩個都在線上，一對一，**都不重用**（維護者 2026-09-10 定）。
+序號是給程式比對的（不必比字串、看範圍就知道是哪一家），名字是給人看 log 與向量檔的。
+
+| `code_id` | code | 什麼意思 | 誰產生 | 額外欄位 | client 該怎麼辦 |
+|---|---|---|---|---|---|
+| 1001 | `UnsupportedVersion` | pack 的版本位不是這個 server 支援的 | pack 解碼 | | 升級 client；重試沒有用 |
+| 1002 | `Corrupt` | **這個 pack 解不開**：CRC 對不上、被截斷、保留旗標有值、送的是文字 frame | pack 解碼 | | 是傳輸或編碼壞了；重送同一個 pack 沒有用，重連 |
+| 1101 | `UnknownKind` | 這個 `(kind, subtype)` 沒有 handler | 准入表 | | 這個 server 不會做這件事；別重試 |
+| 1102 | `Unsupported` | 有 handler，但**不走這個傳輸**（例：`Recent`／`Subscribe`／`Session` 只走 WS） | 准入表 | | 換傳輸（開 WS），不是重試 |
+| 1103 | `TooLarge` | 超過 `wbf_meta_max_bytes`／`wbf_data_max_bytes`，或上傳宣告的大小上限 | 准入表、上傳 | | 切小再送 |
+| 1201 | `InvalidRequest` | pack 解得開，但 **meta／data 不是這個 subtype 要的**：JSON 壞、型別錯、缺欄位、值超出範圍、mxc 解不出來 | 各 handler | | client 的 bug；照 `message` 修，重送同樣的東西一定再錯 |
+| 1301 | `Unauthorized` | 沒登入，或身分**不再**有效（token 到期、被撤、帳號被鎖） | session 閘門 | `soft_logout`?（Refresh） | 重新登入；WS 通常隨即被關（Close 1008） |
+| 1302 | `Forbidden` | 身分驗過了但**不准**：憑證錯、帳號停用、不支援的登入 `type` | 登入 | | 不要自動重試；`message` 帶 Matrix 的 errcode |
+| 1401 | `RateLimited` | 太快了 | 限速閘門 | `retry_after_ms` | 等那麼久再試，🚫 不要立刻重打 |
+| 1402 | `TooManyConnections` | 這個 device 的 WS 名額滿了（`wbf_ws_max_connections_per_device`） | `admit` 閘門 | `max_connections` | 關掉一條舊的再連；這條連線隨即被關 |
+| 1501 | `NotFound` | 指名的東西不存在（上傳 id、媒體） | 各 handler | | 重建那個東西，或放棄 |
+| 1502 | `Conflict` | 請求**合法**，但跟 server 目前的狀態衝突（例：這個上傳已經封存／已經完成） | 上傳等有狀態的 kind | | 先讀狀態（`Upload/Status`）再決定；重送同一個請求還是會衝突 |
+| 1503 | `OutOfOrder` | 有序類的 `seq` 不是接收端等的那個（§4） | 有序類 | `expected_seq` | 從 `expected_seq` 重送，🚫 不要自己重排 |
+| 1504 | `Truncated` | 上傳觸到大小上限，被封成不完整（可以 Seal） | 上傳 | `received`、`total_len`、`finished`、`truncated` | 照那幾個數字決定 Seal 還是 Abort |
+| 1901 | `Internal` | server 自己的錯 | 任何地方 | | 可以退避重試；連續發生就是 server 的 bug |
+
+**序號怎麼編**（新增的照這個範圍放，範圍本身就說了是哪一家）：
+
+| 範圍 | 家族 | 共同點 |
+|---|---|---|
+| 1000–1099 | pack 層 | 框壞了，還沒進到「這是什麼請求」 |
+| 1100–1199 | 路由與准入 | 框好的，但這裡不受理 |
+| 1200–1299 | 請求內容 | 受理了，但內容不對 |
+| 1300–1399 | 身分與權限 | 你是誰、准不准 |
+| 1400–1499 | 節流與名額 | 現在不行，等一下或讓出資源 |
+| 1500–1599 | 狀態 | 請求對，但跟 server 現在的狀態對不上 |
+| 1900–1999 | server 自己的錯 | 不是 client 的問題 |
+
+- 🚫 **`0` 永遠不是合法的 code_id。** 序號從 1000 起就是為了這個：欄位漏了、反序列化拿到預設值的 `0`，
+  必須是「不認得」而不是某個真的碼 —— 佔位值要一眼看得出是佔位值。
+- 🚫 **序號與名字都不重用。** 一個 code 退役就留在表上標 `retired`，號碼不給下一個用；
+  否則舊 client 會拿新語意去套舊行為，而它不會知道。
+
+🚨 **code 一律事先定義**（維護者 2026-09-10 指定）：要發一個新的錯誤，順序是**先在這張表加一列**（序號、名字、意思、client 該怎麼辦），
+再改程式。🚫 呼叫點不准現編一個碼 —— 那正是 `Conflict` 長到 11 個呼叫點、`Corrupt` 被拿去講「JSON 格式錯」的原因：
+沒有人一次看過全部的碼，也就沒有人發現它們在說謊。⭐ 程式那邊的列舉是這條規則的閘門：加不了新變體，就編不出新碼。
+
+🚨 **client 收到不認得的 code：不認得就不認得**（維護者 2026-09-10 指定）——
+當成「這個請求失敗了，而且**不知道**能不能重試」：不重試、往上報，把 `code_id`、`code` 與 `message` 原樣留在 log 裡。
+
+- 🚫 不要落到 `Internal` 那條「退避重試」的路徑 —— 猜錯的方向是對 server 無限重打。
+- 🚫 不要**只**看序號範圍就自己補一套行為。範圍是給人除錯與分類看的，**不是**「同一家就照同一套處理」的授權；
+  真的要照家族處置，那個處置必須先寫進這張表，那它就不是「不認得的 code」了。
+- ⭐ 因此**加新 code 永遠是相容的**：舊 client 會安全地不懂它，而不是誤解它。這也是 `message` 存在的理由 ——
+  不認得 code 的時候它是唯一能給人看的東西，所以 message 要像句人話；但仍然 🚫 不給程式 parse。
 
 ⭐ **兩組最容易混的，分界寫在這裡**：
 
@@ -167,8 +201,12 @@ offset  size  欄位          說明
 | `Conflict` | 不動 | `UploadError::Conflict`（上傳狀態衝突）——這是這個 code 收窄後**唯一**該留的用法 |
 | `Corrupt` | 不動 | pack 解碼失敗、文字 frame（`ws.rs`）——框壞了 |
 
-⚠️ 實作那支要一起補的測試：**每個 code 至少一條**「這個情境回這個 code」的斷言，否則下一次歸位又會靠人眼。
-向量檔（`wbf-vectors.json`）現在有 `error_rate_limited`／`error_out_of_order`／`error_too_many_connections`，`InvalidRequest` 也要加一個。
+⚠️ 實作那支要一起補的測試：**每個 code 至少一條**「這個情境回這個 code」的斷言，加上一條「序號與名字一對一、沒有重複」的表格測試，
+否則下一次歸位又會靠人眼。
+
+⚠️ **向量檔會整批變動**：`code_id` 一加，現有的 `error_rate_limited`／`error_out_of_order`／`error_too_many_connections`／
+`error_unsupported` 的 meta bytes 全部改寫（`wbf-vectors.json` 要重生），`InvalidRequest` 也要加一個。
+👉 這是 client 端**必須同步**的那一刻：舊 client 讀新向量會對不上，而它讀不到 `code_id` 時的行為就是上面那條「不認得就不認得」。
 
 ## 4. 順序守則：依 kind 分兩類
 
