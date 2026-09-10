@@ -245,6 +245,8 @@ offset  size  欄位          說明
 
 ✅ **測試**：`error_code.rs` 有「序號與名字一對一、沒有重複」與「沒有一個序號小到會跟預設值撞」兩條表格測試；
 `mod.rs` 有「解不開的 pack 是 `Corrupt`、格式錯的請求是 `InvalidRequest`」的分界斷言；e2e8／e2e9 各有一條線上實測。
+⚠️ **不是每個 code 都有專屬的情境斷言**（`UnsupportedVersion`、`Truncated`、`Internal` 沒有）——
+這裡本來寫著「每個 code 至少一條」，那句話當時就寫得比做得到的滿；缺口留著，不要把它讀成已經蓋滿。
 
 ✅ **向量檔已整批重生**：`error_rate_limited`／`error_out_of_order`／`error_unsupported`／`error_too_many_connections`
 的 meta 都多了 `code_id`，並新增 `error_invalid_request`。
