@@ -76,13 +76,18 @@ offset  size  欄位          說明
 
 | 收到什麼 | 計數器 |
 |---|---|
-| **解不開的框**：CRC 不合、`version` 不對、保留旗標非 0、長度對不上、文字 frame | **−1** |
+| **解不開的框**：CRC 不合、`version` 不對、保留旗標非 0、長度對不上、文字 frame（即 `Corrupt` 與 `UnsupportedVersion`） | **−1** |
 | **解得開的 pack** | **歸零** |
+| ⚠️ **`decode` 拒掉、但框本身是好的**：kind 位未分配（`UnknownKind`）、區段長度超上限（`TooLarge`） | **歸零**（跟解得開的 pack 同一邊） |
 
 `counter ≤ −wbf_ws_corrupt_budget`（預設 **8**）→ 送完最後那個 `Error` 之後 Close **1002**（protocol error）關線。
 
 - ⭐ **只有「框」的錯扣分。** pack 解得開就歸零 —— 即使 handler 之後回 `InvalidRequest`、`Unauthorized`、`NotFound`：
   那些代表對方**看得懂這個協議**，只是這一個請求不對。計數器量的是「你會不會講這個協議」，不是「你有沒有做錯事」。
+- ⚠️ **「被 `decode` 拒掉」不等於「框壞了」**：`decode` 是先讀 kind 位再驗 CRC（`pack.rs`），
+  所以一個**結構完好、CRC 正確、只是 kind 未分配**的 pack 也會從 `decode` 出來帶著錯。它的發信方**會講 wbf**，
+  扣它的分等於把一個正常的 client 送了八個新 kind 就關掉。⭐ **實作上一律拿 `RejectCode::for_pack_error(&error).is_undecodable_frame()` 當閘門**，
+  不要在計數點再寫一份「哪些算框錯」的列表（審查者 cirno／ rumia／salvia 2026-09-10：PR #38 的第一版就是漏了這道閘門）。
 - 📎 **為什麼是 8 而不是 2**：連續 8 個解不開的框，實務上只有兩種可能 —— **對面根本不是在講 wbf**（協議錯、當成別的東西連進來），
   或者**某一端的編碼有 bug**。正常的 client 認得協議，除非自己壞掉，否則一輩子碰不到這個門檻。
   2 太嚴苛：一個偶發的壞框（見上面那張表的明文那一跳）就把一條好好的連線踢掉，而重連付的代價比那個壞框大得多。
@@ -178,7 +183,7 @@ offset  size  欄位          說明
 |---|---|---|---|---|---|
 | 1001 | `UnsupportedVersion` | pack 的版本位不是這個 server 支援的 | pack 解碼 | | 升級 client；重試沒有用（這個跟 `Corrupt` 一樣扣 §2.1 的計數器） |
 | 1002 | `Corrupt` | **這個 pack 解不開**：CRC 對不上、被截斷、保留旗標有值、送的是文字 frame | pack 解碼 | | 重連**一次**就好；再來一次就是編碼端的 bug（實務上多半是，見 §2 的 📎），往上報，🚫 不要一直重連 |
-| 1101 | `UnknownKind` | 這個 `(kind, subtype)` 沒有 handler | 准入表 | | 這個 server 不會做這件事；別重試 |
+| 1101 | `UnknownKind` | 這個 `(kind, subtype)` 沒有 handler | pack 解碼（kind 位未分配）或准入表（subtype 沒 handler） | | 這個 server 不會做這件事；別重試。📎 兩條路都**不**扣 §2.1 的計數器 —— 框是好的 |
 | 1102 | `Unsupported` | 有 handler，但**不走這個傳輸**（例：`Recent`／`Subscribe`／`Session` 只走 WS） | 准入表 | | 換傳輸（開 WS），不是重試 |
 | 1103 | `TooLarge` | 超過 `wbf_meta_max_bytes`／`wbf_data_max_bytes`，或上傳宣告的大小上限 | 准入表、上傳 | | 切小再送 |
 | 1201 | `InvalidRequest` | pack 解得開，但 **meta／data 不是這個 subtype 要的**：JSON 壞、型別錯、缺欄位、值超出範圍、mxc 解不出來 | 各 handler | | client 的 bug；照 `message` 修，重送同樣的東西一定再錯 |

@@ -43,6 +43,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\e2e\e2e10.ps1
 - ⚠️ 等 server 回應的接收要有時限（e2e8 的 `Ws-Recv-Bounded`；e2e7 的 `Recv-Frame`）：`ReceiveAsync().Result` 沒時限，server 不回就整支腳本卡住、沒有任何輸出。
 - ⚠️ **超時的 `ReceiveAsync` 不能丟掉**：.NET 的 `ClientWebSocket` 讓它繼續掛著，下一個 frame 會被它吃掉，之後的接收就永遠等不到（e2e11 第一版就這樣卡死）。
   e2e11 的 `Recv-Or-Null` 把還沒完成的 task 按 socket 記著、下次先等它。推送類的腳本（有 server 主動送的 frame）一定會撞到這條。
+- 🚨 **build 之前也要先殺乾淨**：還在跑的 `tuwunel.exe` 鎖著 `target/e2e/tuwunel.exe`，linker 覆蓋不了就
+  `存取被拒。(os error 5)`。⚠️ 更糟的是**接著跑的 e2e 會用舊的 binary**，看起來一切正常 —— 2026-09-10 的紅燈驗證就這樣白做了一輪。
+  順序寫死：**殺乾淨 → build → 跑**。
 - 🚨 **一次只跑一支，起跑前先確認沒有殘留的 `tuwunel` 進程**（`Get-Process tuwunel`）。每支腳本用**同一個 port**，
   所以前一支沒收乾淨的 server 會讓下一支看起來「卡住不動」或「大量 `Unauthorized`」——2026-09-10 兩種都踩到了，
   而且第二種**不會失敗、會假裝通過**。⚠️ 卡住時先看 `target/e2e-runs/<腳本>-out/results.txt`（它寫到哪一步），

@@ -264,10 +264,17 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 				// A peer whose frames stop decoding is not speaking this
 				// protocol (wire-format §2.1); one bad frame is not worth a
 				// reconnect, a run of them is all this connection is doing.
-				health.record_undecodable_frame();
-				if health.is_spent() {
-					enqueue_close(&queue, close(close_code::PROTOCOL, "too many packs that do not decode")).await;
-					break;
+				// Not every refusal from `decode` is that: a pack whose kind
+				// byte is simply unassigned is framed perfectly, and its
+				// sender is speaking wbf. The code decides, in one place.
+				if RejectCode::for_pack_error(&error).is_undecodable_frame() {
+					health.record_undecodable_frame();
+					if health.is_spent() {
+						enqueue_close(&queue, close(close_code::PROTOCOL, "too many packs that do not decode")).await;
+						break;
+					}
+				} else {
+					health.record_decoded_pack();
 				}
 				continue;
 			},

@@ -172,6 +172,27 @@ mod tests {
 	}
 
 	#[test]
+	fn a_pack_refused_for_its_kind_is_not_a_broken_frame() {
+		use super::PackError;
+
+		// `decode` reads the kind byte before it checks the checksums, so an
+		// unassigned kind is refused by a pack that is framed perfectly —
+		// its sender speaks wbf. Counting it against the connection's health
+		// (wire-format §2.1) would close a working client after eight of
+		// them; PR #38 did exactly that until cirno caught it.
+		assert!(!RejectCode::for_pack_error(&PackError::UnknownKind(0x7f)).is_undecodable_frame());
+		assert!(!RejectCode::for_pack_error(&PackError::SectionTooLarge { len: 1 << 33 }).is_undecodable_frame());
+
+		// These are the frame itself failing.
+		assert!(RejectCode::for_pack_error(&PackError::MetaCrc { expected: 1, actual: 2 }).is_undecodable_frame());
+		assert!(RejectCode::for_pack_error(&PackError::DataCrc { expected: 1, actual: 2 }).is_undecodable_frame());
+		assert!(RejectCode::for_pack_error(&PackError::UnsupportedVersion(0)).is_undecodable_frame());
+		assert!(RejectCode::for_pack_error(&PackError::ReservedFlags(0b1111_0000)).is_undecodable_frame());
+		assert!(RejectCode::for_pack_error(&PackError::TooShort { len: 4 }).is_undecodable_frame());
+		assert!(RejectCode::for_pack_error(&PackError::Truncated { needed: 40, len: 12 }).is_undecodable_frame());
+	}
+
+	#[test]
 	fn only_the_frame_level_codes_count_against_the_connection() {
 		assert!(RejectCode::Corrupt.is_undecodable_frame());
 		assert!(RejectCode::UnsupportedVersion.is_undecodable_frame());
