@@ -116,7 +116,7 @@ $null = Redact $rE $ackD.meta.event_id $tokA
 Check '[1.5c] redacting the pack-sent event frees the declared media' ((Download-Status $upD.mxc $tokA) -eq 410) ''
 $sendMeta2 = @{ room_id = $rE; type = 'm.room.encrypted'; txn_id = [guid]::NewGuid().ToString('N'); attachments = @($upD.mxc) }
 $rej = Ws-Call $ws (Json-Pack 0x14 2 0 3 $sendMeta2 $content)
-Check '[1.5d] Event/Send declaring removed media -> Error Conflict' ($rej.subtype -eq 3 -and $rej.meta.code -eq 'Conflict') (Describe $rej)
+Check '[1.5d] Event/Send declaring removed media -> Error InvalidRequest' ($rej.subtype -eq 3 -and $rej.meta.code -eq 'InvalidRequest') (Describe $rej)
 $sendMeta3 = @{ room_id = $rE; type = 'm.room.encrypted'; txn_id = 'dup-txn'; attachments = @() }
 $first = Ws-Call $ws (Json-Pack 0x14 2 0 4 $sendMeta3 $content)
 $second = Ws-Call $ws (Json-Pack 0x14 2 0 5 $sendMeta3 $content)

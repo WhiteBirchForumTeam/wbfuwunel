@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tuwunel_core::{
 	Error, Result, debug, err, error,
-	wbf::{EncryptedFileInfo, Flags, Kind, PackBuilder, PackError, PackView, decode},
+	wbf::{EncryptedFileInfo, Flags, Kind, PackBuilder, PackError, PackView, RejectCode, decode},
 };
 use tuwunel_service::{
 	Services,
@@ -97,7 +97,7 @@ pub(crate) async fn pack_route(
 	let session = match authenticate(&services, &headers).await {
 		| Ok(session) => session,
 		| Err(error) => {
-			let reply = error_pack(0, 0, "Unauthorized", &error.to_string());
+			let reply = error_pack(0, 0, RejectCode::Unauthorized, &error.to_string());
 			return Ok(pack_response(StatusCode::UNAUTHORIZED, reply));
 		},
 	};
@@ -112,10 +112,10 @@ pub(crate) async fn pack_route(
 			match handle_pack(&services, &ctx, view, &mut reply).await {
 				| Ok(_change) => reply
 					.into_http_pack()
-					.unwrap_or_else(|| error_pack(id, seq, "Internal", "the handler produced no reply")),
+					.unwrap_or_else(|| error_pack(id, seq, RejectCode::Internal, "the handler produced no reply")),
 				| Err(failure) => {
 					error!(?failure, "wbf handler misbehaved on the HTTP transport");
-					error_pack(id, seq, "Internal", "the handler could not reply on this transport")
+					error_pack(id, seq, RejectCode::Internal, "the handler could not reply on this transport")
 				},
 			}
 		},
@@ -127,7 +127,7 @@ pub(crate) async fn pack_route(
 				| PackError::DataCrc { .. } => header_id_seq(&body),
 				| _ => (0, 0),
 			};
-			error_pack(id, seq, pack_error_code(error), &error.to_string())
+			error_pack(id, seq, RejectCode::for_pack_error(&error), &error.to_string())
 		},
 	};
 
@@ -300,7 +300,7 @@ impl PackContext<'_> {
 	fn user(&self) -> Result<&UserId, Reject> {
 		self.session
 			.map(|session| session.user.as_ref())
-			.ok_or_else(|| Reject::code("Unauthorized", "log in first: this connection has no session"))
+			.ok_or_else(|| Reject::code(RejectCode::Unauthorized, "log in first: this connection has no session"))
 	}
 }
 
@@ -501,21 +501,21 @@ async fn dispatch(
 	let limits_ok = view.meta.len() <= services.config.wbf_meta_max_bytes
 		&& view.data.len() <= services.config.wbf_data_max_bytes;
 	if !limits_ok {
-		return Err(Reject::code("TooLarge", "meta or data exceeds the configured limit").into());
+		return Err(Reject::code(RejectCode::TooLarge, "meta or data exceeds the configured limit").into());
 	}
 
 	let Some(admission) = admission(header.kind, header.subtype) else {
-		return Err(Reject::code("UnknownKind", "no handler for this kind and subtype").into());
+		return Err(Reject::code(RejectCode::UnknownKind, "no handler for this kind and subtype").into());
 	};
 	if ctx.transport == Transport::Http && !admission.http_ok {
 		return Err(Reject::code(
-			"Unsupported",
+			RejectCode::Unsupported,
 			"this kind is only served over the WebSocket channel; POST /_wbf/v1/pack is for one-pack requests",
 		)
 		.into());
 	}
 	if ctx.session.is_none() && !admission.anonymous_ok {
-		return Err(Reject::code("Unauthorized", "log in first: this connection has no session").into());
+		return Err(Reject::code(RejectCode::Unauthorized, "log in first: this connection has no session").into());
 	}
 
 	match (header.kind, header.subtype) {
@@ -561,14 +561,14 @@ async fn handle_one_reply(services: &Services, user: &UserId, view: &PackView<'_
 		| (Kind::Event, event::SEND) => send::handle_event_send(services, user, view).await,
 		// Admitted by the table but not routed here: the table and this match
 		// disagree, which is a bug, but it fails closed.
-		| _ => Err(Reject::code("UnknownKind", "no handler for this kind and subtype")),
+		| _ => Err(Reject::code(RejectCode::UnknownKind, "no handler for this kind and subtype")),
 	}
 }
 
 /// A refused request, in the vocabulary of the wire format's error codes.
 #[derive(Debug)]
 pub(crate) struct Reject {
-	code: &'static str,
+	code: RejectCode,
 	message: String,
 	extra: Value,
 	/// The connection is closed (1008) after this error is sent.
@@ -576,11 +576,11 @@ pub(crate) struct Reject {
 }
 
 impl Reject {
-	fn code(code: &'static str, message: impl Into<String>) -> Self {
+	fn code(code: RejectCode, message: impl Into<String>) -> Self {
 		Self { code, message: message.into(), extra: Value::Null, closes_connection: false }
 	}
 
-	fn with_extra(code: &'static str, message: impl Into<String>, extra: Value) -> Self {
+	fn with_extra(code: RejectCode, message: impl Into<String>, extra: Value) -> Self {
 		Self { code, message: message.into(), extra, closes_connection: false }
 	}
 
@@ -588,7 +588,7 @@ impl Reject {
 	/// and, on a WebSocket, closed.
 	fn too_many_connections(max: u32) -> Self {
 		Self {
-			code: "TooManyConnections",
+			code: RejectCode::TooManyConnections,
 			message: format!("this device already holds {max} wbf connections; close one before opening another"),
 			extra: json!({ "max_connections": max }),
 			closes_connection: true,
@@ -596,7 +596,7 @@ impl Reject {
 	}
 
 	pub(crate) fn into_pack(self, id: u64, seq: u32) -> Vec<u8> {
-		let mut meta = json!({ "code": self.code, "message": self.message });
+		let mut meta = json!({ "code_id": self.code.id(), "code": self.code.name(), "message": self.message });
 		if let (Value::Object(target), Value::Object(extra)) = (&mut meta, self.extra) {
 			target.extend(extra);
 		}
@@ -604,18 +604,18 @@ impl Reject {
 		PackBuilder::new(Kind::Control, control::ERROR, Flags::IS_RESPONSE, id, seq)
 			.json_meta(&meta)
 			.map(PackBuilder::finish)
-			.unwrap_or_else(|_| error_pack(id, seq, "Internal", "could not encode the error"))
+			.unwrap_or_else(|_| error_pack(id, seq, RejectCode::Internal, "could not encode the error"))
 	}
 }
 
 impl From<UploadError> for Reject {
 	fn from(error: UploadError) -> Self {
 		match error {
-			| UploadError::NotFound => Self::code("NotFound", "no such upload"),
-			| UploadError::Conflict(message) => Self::code("Conflict", message),
-			| UploadError::TooLarge(message) => Self::code("TooLarge", message),
+			| UploadError::NotFound => Self::code(RejectCode::NotFound, "no such upload"),
+			| UploadError::Conflict(message) => Self::code(RejectCode::Conflict, message),
+			| UploadError::TooLarge(message) => Self::code(RejectCode::TooLarge, message),
 			| UploadError::Truncated(stored) => Self::with_extra(
-				"Truncated",
+				RejectCode::Truncated,
 				format!(
 					"upload hit the size limit after {} chunks, {} bytes; it is finished as incomplete and may be sealed",
 					stored.received_count, stored.total_len
@@ -628,8 +628,8 @@ impl From<UploadError> for Reject {
 				}),
 			),
 			| UploadError::OutOfOrder { expected } =>
-				Self::with_extra("OutOfOrder", format!("expected chunk {expected}"), json!({ "expected_seq": expected })),
-			| UploadError::Internal(error) => Self::code("Internal", error.to_string()),
+				Self::with_extra(RejectCode::OutOfOrder, format!("expected chunk {expected}"), json!({ "expected_seq": expected })),
+			| UploadError::Internal(error) => Self::code(RejectCode::Internal, error.to_string()),
 		}
 	}
 }
@@ -637,10 +637,12 @@ impl From<UploadError> for Reject {
 impl From<Error> for Reject {
 	fn from(error: Error) -> Self {
 		let code = match error.status_code() {
-			| StatusCode::NOT_FOUND | StatusCode::GONE => "NotFound",
-			| StatusCode::BAD_REQUEST => "Conflict",
-			| StatusCode::PAYLOAD_TOO_LARGE => "TooLarge",
-			| _ => "Internal",
+			| StatusCode::NOT_FOUND | StatusCode::GONE => RejectCode::NotFound,
+			// A 400 from the Matrix layer is a request this server cannot
+			// accept as written, not a state conflict (wire-format 3.4).
+			| StatusCode::BAD_REQUEST => RejectCode::InvalidRequest,
+			| StatusCode::PAYLOAD_TOO_LARGE => RejectCode::TooLarge,
+			| _ => RejectCode::Internal,
 		};
 
 		Self::code(code, error.to_string())
@@ -648,12 +650,12 @@ impl From<Error> for Reject {
 }
 
 impl From<PackError> for Reject {
-	fn from(error: PackError) -> Self { Self::code(pack_error_code(error), error.to_string()) }
+	fn from(error: PackError) -> Self { Self::code(RejectCode::for_pack_error(&error), error.to_string()) }
 }
 
 async fn handle_upload_create(services: &Services, user: &UserId, view: &PackView<'_>) -> std::result::Result<Vec<u8>, Reject> {
 	// meta is the 16-byte EncryptedFileInfo, not JSON: plaintext facts only.
-	let info = EncryptedFileInfo::decode(view.meta).map_err(|e| Reject::code("Conflict", e.to_string()))?;
+	let info = EncryptedFileInfo::decode(view.meta).map_err(|e| Reject::code(RejectCode::InvalidRequest, e.to_string()))?;
 	let request = UploadRequest {
 		file_size: info.file_size,
 		chunk_size: (info.chunk_size != 0).then_some(info.chunk_size),
@@ -739,7 +741,7 @@ async fn handle_upload_abort(services: &Services, user: &UserId, view: &PackView
 async fn handle_download_info(services: &Services, view: &PackView<'_>) -> std::result::Result<Vec<u8>, Reject> {
 	let meta = view.meta_json()?;
 	let mxc = mxc_from_meta(&meta)?;
-	let info = services.media.media_info(&mxc.as_str().try_into().map_err(|_| Reject::code("Conflict", "invalid mxc"))?).await?;
+	let info = services.media.media_info(&mxc.as_str().try_into().map_err(|_| Reject::code(RejectCode::InvalidRequest, "invalid mxc"))?).await?;
 
 	Ok(ack(
 		0,
@@ -766,14 +768,14 @@ async fn handle_download_info(services: &Services, view: &PackView<'_>) -> std::
 async fn handle_download_read(services: &Services, view: &PackView<'_>) -> std::result::Result<Vec<u8>, Reject> {
 	let meta = view.meta_json()?;
 	let mxc = mxc_from_meta(&meta)?;
-	let mxc: Mxc<'_> = mxc.as_str().try_into().map_err(|_| Reject::code("Conflict", "invalid mxc"))?;
+	let mxc: Mxc<'_> = mxc.as_str().try_into().map_err(|_| Reject::code(RejectCode::InvalidRequest, "invalid mxc"))?;
 	let pos = meta["pos"].as_u64().unwrap_or(0);
 
 	if let Some(chunked) = services.media.chunked_shape(&mxc).await {
 		let index = match meta["chunk"].as_u64() {
-			| Some(index) => u32::try_from(index).map_err(|_| Reject::code("Conflict", "chunk index too large"))?,
+			| Some(index) => u32::try_from(index).map_err(|_| Reject::code(RejectCode::InvalidRequest, "chunk index too large"))?,
 			| None => u32::try_from(pos / u64::from(chunked.chunk_size.max(1)))
-				.map_err(|_| Reject::code("Conflict", "position too large"))?,
+				.map_err(|_| Reject::code(RejectCode::InvalidRequest, "position too large"))?,
 		};
 		let read = services.media.read_chunk(&mxc, index).await?;
 
@@ -815,7 +817,7 @@ fn mxc_from_meta(meta: &Value) -> std::result::Result<String, Reject> {
 	meta["mxc"]
 		.as_str()
 		.map(ToOwned::to_owned)
-		.ok_or_else(|| Reject::code("Conflict", "mxc is required"))
+		.ok_or_else(|| Reject::code(RejectCode::InvalidRequest, "mxc is required"))
 }
 
 /// The answer to `Hello`: what this server speaks. The client's own meta
@@ -850,7 +852,7 @@ fn pong(view: &PackView<'_>) -> Vec<u8> {
 	PackBuilder::new(Kind::Control, control::PONG, Flags::IS_RESPONSE, view.header.id, view.header.seq)
 		.meta(view.meta)
 		.map(PackBuilder::finish)
-		.unwrap_or_else(|_| error_pack(view.header.id, view.header.seq, "Internal", "could not encode pong"))
+		.unwrap_or_else(|_| error_pack(view.header.id, view.header.seq, RejectCode::Internal, "could not encode pong"))
 }
 
 /// An `Ack` answering `(id, seq)` with `meta` and, for reads, `data`.
@@ -859,12 +861,12 @@ fn ack(id: u64, seq: u32, meta: Value, data: Vec<u8>) -> Vec<u8> {
 		.json_meta(&meta)
 		.and_then(|builder| builder.data(&data))
 		.map(PackBuilder::finish)
-		.unwrap_or_else(|_| error_pack(id, seq, "Internal", "could not encode the reply"))
+		.unwrap_or_else(|_| error_pack(id, seq, RejectCode::Internal, "could not encode the reply"))
 }
 
-fn error_pack(id: u64, seq: u32, code: &str, message: &str) -> Vec<u8> {
+fn error_pack(id: u64, seq: u32, code: RejectCode, message: &str) -> Vec<u8> {
 	PackBuilder::new(Kind::Control, control::ERROR, Flags::IS_RESPONSE, id, seq)
-		.json_meta(&json!({ "code": code, "message": message }))
+		.json_meta(&json!({ "code_id": code.id(), "code": code.name(), "message": message }))
 		.map(PackBuilder::finish)
 		.unwrap_or_else(|_| PackBuilder::new(Kind::Control, control::ERROR, Flags::IS_RESPONSE, id, seq).finish())
 }
@@ -881,28 +883,19 @@ fn header_id_seq(bytes: &[u8]) -> (u64, u32) {
 	(id, seq)
 }
 
-fn pack_error_code(error: PackError) -> &'static str {
-	match error {
-		| PackError::UnsupportedVersion(_) => "UnsupportedVersion",
-		| PackError::UnknownKind(_) => "UnknownKind",
-		| PackError::SectionTooLarge { .. } => "TooLarge",
-		| _ => "Corrupt",
-	}
-}
-
 fn pack_response(status: StatusCode, pack: Vec<u8>) -> Response {
 	(status, [(header::CONTENT_TYPE, "application/octet-stream")], pack).into_response()
 }
 
 #[cfg(test)]
 mod tests {
-	use tuwunel_core::wbf::{Kind, decode};
+	use tuwunel_core::wbf::{Kind, RejectCode, decode};
 
 	use super::{Reject, control};
 
 	#[test]
 	fn a_reject_becomes_an_error_pack_answering_the_request() {
-		let mut pack = Reject::code("NotFound", "no such upload").into_pack(42, 7);
+		let mut pack = Reject::code(RejectCode::NotFound, "no such upload").into_pack(42, 7);
 		let view = decode(&mut pack).expect("error pack decodes");
 
 		assert_eq!(view.header.kind, Kind::Control);
@@ -910,7 +903,27 @@ mod tests {
 		assert!(view.header.flags.is_response());
 		assert_eq!(view.header.id, 42);
 		assert_eq!(view.header.seq, 7);
-		assert_eq!(view.meta_json().expect("json")["code"], "NotFound");
+		let meta = view.meta_json().expect("json");
+		assert_eq!(meta["code"], "NotFound");
+		// Both go on the wire: the number is what a program compares
+		// (wire-format §3.4), the name is what a person reads.
+		assert_eq!(meta["code_id"], 1501);
+	}
+
+	#[test]
+	fn a_malformed_request_is_not_reported_as_a_state_conflict() {
+		// The border in wire-format §3.4: content the handler cannot accept
+		// however the server is feeling is InvalidRequest, and a Conflict is
+		// reserved for a request the current state refuses.
+		let mut pack = Reject::from(tuwunel_core::wbf::PackError::TooShort { len: 4 }).into_pack(0, 0);
+		let view = decode(&mut pack).expect("error pack decodes");
+		assert_eq!(view.meta_json().expect("json")["code_id"], 1002, "a pack that will not decode is Corrupt");
+
+		let mut pack = Reject::code(RejectCode::InvalidRequest, "Subscribe meta: expected a sequence").into_pack(3, 1);
+		let view = decode(&mut pack).expect("error pack decodes");
+		let meta = view.meta_json().expect("json");
+		assert_eq!(meta["code"], "InvalidRequest");
+		assert_eq!(meta["code_id"], 1201);
 	}
 
 	#[test]

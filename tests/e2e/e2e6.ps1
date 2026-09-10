@@ -166,9 +166,9 @@ $r = Send-Pack (Json-Pack 4 2 0 10 @{ mxc = $mxc; pos = (2*65536 + 7) } @()) $to
 $seg = [Linq.Enumerable]::SequenceEqual([byte[]]$r.data, [byte[]]$file[(2*$wire)..($total-1)])
 Log "[1.13] Read plaintext pos=2*64KiB+7 (seek) -> $(Describe $r) identical=$seg  (expect chunk=2 pos=131072 len=1000, True)"
 $r = Send-Pack (Json-Pack 4 2 0 11 @{ mxc = $mxc; pos = (3*65536) } @()) $tok
-Log "[1.14] Read plaintext pos=3*64KiB (past last chunk) -> $(Describe $r)  (expect Error Conflict)"
+Log "[1.14] Read plaintext pos=3*64KiB (past last chunk) -> $(Describe $r)  (expect Error InvalidRequest)"
 $r = Send-Pack (Json-Pack 4 2 0 13 @{ mxc = $mxc; chunk = 3 } @()) $tok
-Log "[1.14b] Read chunk=3 -> $(Describe $r)  (expect Error Conflict: past last chunk)"
+Log "[1.14b] Read chunk=3 -> $(Describe $r)  (expect Error InvalidRequest: past last chunk)"
 $r = Send-Pack (New-Pack 3 3 0 $id 12 @() @()) $tok
 Log "[1.15] Status after seal -> $(Describe $r)  (expect Error NotFound: row gone)"
 Stop-Server $p
@@ -204,7 +204,7 @@ Stop-Server $p
 $cfg = Write-Config $db1 86400
 $p = Start-Server $cfg 's3'
 $r = Send-Pack (New-Pack 3 1 0 0 1 (New-Object byte[] 15) @()) $tok
-Log "[3.0] Create with a 15-byte meta -> $(Describe $r)  (expect Error Conflict: EncryptedFileInfo is 16 bytes)"
+Log "[3.0] Create with a 15-byte meta -> $(Describe $r)  (expect Error InvalidRequest: EncryptedFileInfo is 16 bytes)"
 $r = Send-Pack (Create-Pack 1 4096 1024 4 @()) $tok
 Log "[3.1] Create chunk_size=1024 (below min 4 KiB) -> $(Describe $r)  (expect Error Conflict)"
 $r = Send-Pack (Create-Pack 1 65550 16384 4 @()) $tok

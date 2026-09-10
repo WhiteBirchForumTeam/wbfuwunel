@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tuwunel_core::{
 	matrix::pdu::PduCount,
-	wbf::PackView,
+	wbf::{PackView, RejectCode},
 };
 use tuwunel_service::{Services, channels::PushedEvent};
 
@@ -54,7 +54,7 @@ pub(super) async fn handle_subscribe(
 	let user = ctx.user()?;
 	let queue = reply
 		.websocket_queue()
-		.ok_or_else(|| Reject::code("Unsupported", "subscriptions need the WebSocket channel"))?;
+		.ok_or_else(|| Reject::code(RejectCode::Unsupported, "subscriptions need the WebSocket channel"))?;
 	let meta: SubscribeMeta = parse_meta(view, "Subscribe")?;
 
 	let (rooms, mut skipped, account_wide) = match meta.rooms {
@@ -201,5 +201,5 @@ fn parse_meta<T: Default + for<'de> Deserialize<'de>>(view: &PackView<'_>, what:
 	if view.meta.is_empty() {
 		return Ok(T::default());
 	}
-	serde_json::from_slice(view.meta).map_err(|error| Reject::code("Conflict", format!("{what} meta: {error}")))
+	serde_json::from_slice(view.meta).map_err(|error| Reject::code(RejectCode::InvalidRequest, format!("{what} meta: {error}")))
 }

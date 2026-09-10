@@ -25,7 +25,7 @@ use tuwunel_core::{
 	Result, debug_warn,
 	matrix::{event::Event, pdu::PduCount},
 	wbf::{
-		Flags, Kind, PackBuilder, PackError, PackView,
+		Flags, Kind, PackBuilder, PackError, PackView, RejectCode,
 		events::{EVENT_LEN_PREFIX, framed_len, length_prefixed, list_pack_ranges},
 	},
 };
@@ -106,8 +106,8 @@ fn g_seq_field(meta: &Value, name: &str) -> std::result::Result<Option<PduCount>
 			.as_i64()
 			.map(PduCount::from_signed)
 			.map(Some)
-			.ok_or_else(|| Reject::code("Conflict", format!("`{name}` is not a g_seq this server issued"))),
-		| _ => Err(Reject::code("Conflict", format!("`{name}` must be an integer g_seq"))),
+			.ok_or_else(|| Reject::code(RejectCode::InvalidRequest, format!("`{name}` is not a g_seq this server issued"))),
+		| _ => Err(Reject::code(RejectCode::InvalidRequest, format!("`{name}` must be an integer g_seq"))),
 	}
 }
 

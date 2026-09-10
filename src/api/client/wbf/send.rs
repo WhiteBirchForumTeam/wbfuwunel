@@ -10,7 +10,7 @@
 use ruma::{OwnedRoomId, OwnedTransactionId, UserId, events::MessageLikeEventType, serde::Raw};
 use serde::Deserialize;
 use serde_json::{json, value::RawValue};
-use tuwunel_core::wbf::PackView;
+use tuwunel_core::wbf::{PackView, RejectCode};
 use tuwunel_service::Services;
 
 use super::{Reject, ack};
@@ -42,10 +42,10 @@ pub(super) async fn handle_event_send(
 	view: &PackView<'_>,
 ) -> Result<Vec<u8>, Reject> {
 	let meta: SendMeta = serde_json::from_slice(view.meta)
-		.map_err(|error| Reject::code("Conflict", format!("Event/Send meta: {error}")))?;
+		.map_err(|error| Reject::code(RejectCode::InvalidRequest, format!("Event/Send meta: {error}")))?;
 
 	let content: Box<RawValue> = serde_json::from_slice(view.data)
-		.map_err(|error| Reject::code("Conflict", format!("Event/Send data is not JSON: {error}")))?;
+		.map_err(|error| Reject::code(RejectCode::InvalidRequest, format!("Event/Send data is not JSON: {error}")))?;
 	let content = Raw::from_json(content);
 
 	let event_id = send_message_event(services, SendMessageEvent {
