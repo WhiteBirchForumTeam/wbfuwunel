@@ -73,7 +73,7 @@ offset  size  欄位          說明
 |---|---|---|---|
 | `0x01 Control` | `0x01 Hello` | `{ "protocol": 1, "client": "…", "features": [...] }` | 無 |
 | | `0x02 Ack` | 各 kind 定的回應內容；`IS_RESPONSE = 1`，`id`、`seq` 抄請求 | 視 kind（`Download/Read` 的回應 data 是讀出的 bytes） |
-| | `0x03 Error` | `{ "code": "…", "message": "…", "expected_seq"?: … }`；code：`UnsupportedVersion` `Corrupt` `UnknownKind` `TooLarge` `Unauthorized` `NotFound` `Conflict` `OutOfOrder` `Internal`；§6.3 加 `Forbidden`（憑證被拒）與 `RateLimited`（`retry_after_ms`）；[pack-pipeline](wbf-pack-pipeline.md) 加 `Unsupported`（這個 kind 不走這個傳輸，例：`Recent`／`Session` 走 HTTP）與 `TooManyConnections`（`max_connections`，裝置的 WS 名額滿了，連線隨即被關） | 無 |
+| | `0x03 Error` | `{ "code": "…", "message": "…" }` ＋ 該 code 定義的欄位；**code 的完整清單與意思在 §3.4**，那張表是唯一的來源 | 無 |
 | | `0x04 Ping` / `0x05 Pong` | `{ "nonce": … }` | 無 |
 | `0x02 Stream` | `Open` `Fragment` `Close` `Abandon` | [streaming-messages.md](streaming-messages.md) §4 | 密文本體 |
 | `0x03 Upload` | `Create` `Chunk` `Status` `Seal` `Abort` | [chunked-upload.md](chunked-upload.md) §4 | 塊 bytes（`Chunk`） |
@@ -118,6 +118,57 @@ offset  size  欄位          說明
 | `0xF0`–`0xFF` | 實驗用，不保證穩定 | |
 
 遷移時每個操作的 meta 就是它現在的 JSON body（ruma 的 request 型別直接 serde 成 meta），回應同理 —— 所以遷移是換外框，不是重寫語意。
+
+### 3.4 錯誤詞表（`Control/Error` 的 `code`）
+
+`code` 是**給程式讀的**：client 照它決定重試、重登、還是放棄。`message` 是給人讀的，措辭隨時會變，
+🚫 **client 不要 parse `message`**。這張表是唯一的來源。
+
+⏳ **狀態（2026-09-10）**：表是定的，**程式還沒跟上** —— 現在 `Reject::code` 收的是自由字串（`&'static str`），
+所以 code 是在呼叫點現寫的，`InvalidRequest` 也還沒有人發。實作要做兩件事：把那個字串換成一個列舉（`RejectCode`），
+讓呼叫點**沒辦法**發明新字；以及照下面的分界把現有的 code 歸位。⭐ 那個列舉就是這張表的閘門 —— 沒有它，表跟程式一定會漂。
+
+| code | 什麼意思 | 誰產生 | 額外欄位 | client 該怎麼辦 |
+|---|---|---|---|---|
+| `UnsupportedVersion` | pack 的版本位不是這個 server 支援的 | pack 解碼 | | 升級 client；重試沒有用 |
+| `Corrupt` | **這個 pack 解不開**：CRC 對不上、被截斷、保留旗標有值、送的是文字 frame | pack 解碼 | | 是傳輸或編碼壞了；重送同一個 pack 沒有用，重連 |
+| `UnknownKind` | 這個 `(kind, subtype)` 沒有 handler | 准入表 | | 這個 server 不會做這件事；別重試 |
+| `Unsupported` | 有 handler，但**不走這個傳輸**（例：`Recent`／`Subscribe`／`Session` 只走 WS） | 准入表 | | 換傳輸（開 WS），不是重試 |
+| `InvalidRequest` | pack 解得開，但 **meta／data 不是這個 subtype 要的**：JSON 壞、型別錯、缺欄位、值超出範圍、mxc 解不出來 | 各 handler | | client 的 bug；照 `message` 修，重送同樣的東西一定再錯 |
+| `TooLarge` | 超過 `wbf_meta_max_bytes`／`wbf_data_max_bytes`，或上傳宣告的大小上限 | 准入表、上傳 | | 切小再送 |
+| `Unauthorized` | 沒登入，或身分**不再**有效（token 到期、被撤、帳號被鎖） | session 閘門 | `soft_logout`?（Refresh） | 重新登入；WS 通常隨即被關（Close 1008） |
+| `Forbidden` | 身分驗過了但**不准**：憑證錯、帳號停用、不支援的登入 `type` | 登入 | | 不要自動重試；`message` 帶 Matrix 的 errcode |
+| `RateLimited` | 太快了 | 限速閘門 | `retry_after_ms` | 等那麼久再試，🚫 不要立刻重打 |
+| `TooManyConnections` | 這個 device 的 WS 名額滿了（`wbf_ws_max_connections_per_device`） | `admit` 閘門 | | 關掉一條舊的再連；這條連線隨即被關 |
+| `NotFound` | 指名的東西不存在（上傳 id、媒體） | 各 handler | | 重建那個東西，或放棄 |
+| `Conflict` | 請求**合法**，但跟 server 目前的狀態衝突（例：這個上傳已經封存／已經完成） | 上傳等有狀態的 kind | | 先讀狀態（`Upload/Status`）再決定；重送同一個請求還是會衝突 |
+| `OutOfOrder` | 有序類的 `seq` 不是接收端等的那個（§4） | 有序類 | `expected_seq` | 從 `expected_seq` 重送，🚫 不要自己重排 |
+| `Truncated` | 上傳觸到大小上限，被封成不完整（可以 Seal） | 上傳 | `received`、`total_len`、`finished`、`truncated` | 照那幾個數字決定 Seal 還是 Abort |
+| `Internal` | server 自己的錯 | 任何地方 | | 可以退避重試；連續發生就是 server 的 bug |
+
+⭐ **兩組最容易混的，分界寫在這裡**：
+
+- `Corrupt` vs `InvalidRequest` —— **框壞了**（解不開這個 pack）對上**內容不對**（pack 好好的，裡面的 JSON 不是這個操作要的）。
+  前者 client 沒辦法自己修，後者是 client 的 bug。
+- `InvalidRequest` vs `Conflict` —— **請求本身錯**對上**請求對、但現在不行**。判準：把 server 的狀態換一個，這個請求會不會變成合法的？
+  會 → `Conflict`；不會（怎麼樣都錯）→ `InvalidRequest`。
+
+📎 **`InvalidRequest` 是後來補的**（維護者 2026-09-10 定）：在那之前 meta 解析失敗回的是 `Conflict`（少數幾處回 `Corrupt`），
+兩個都在說謊 —— 一個把 client 的格式錯講成狀態衝突，一個把它講成傳輸壞掉，而 client 對這三種的處置**完全不同**。
+👉 這是 wbf 通道上**看得見的改動**，client 端要跟（見 wbf-matrix-client 的協議同步）。
+
+**要歸位的呼叫點**（實作那支照這張清單走，改完這裡的 ⏳ 一起拿掉）：
+
+| 現在 | 之後 | 哪裡 |
+|---|---|---|
+| `Conflict` | `InvalidRequest` | `parse_meta`（`Subscribe`／`Unsubscribe` 等所有走它的）、`Event/Send` 的 meta 與 data、`Recent` 的 `cg_seq`／`before` 型別與範圍、`Upload/Create` 的 `EncryptedFileInfo` 解碼、`invalid mxc`（兩處）、`chunk index too large`、`position too large`、`mxc is required` |
+| `Corrupt` | `InvalidRequest` | `Session` 的 `Login`／`Refresh`／`Logout` meta 形狀不對（`session.rs` 三處）——**pack 沒壞，是內容不對** |
+| `Conflict` | `InvalidRequest` | `From<Error>` 裡 `StatusCode::BAD_REQUEST` 的那一條 |
+| `Conflict` | 不動 | `UploadError::Conflict`（上傳狀態衝突）——這是這個 code 收窄後**唯一**該留的用法 |
+| `Corrupt` | 不動 | pack 解碼失敗、文字 frame（`ws.rs`）——框壞了 |
+
+⚠️ 實作那支要一起補的測試：**每個 code 至少一條**「這個情境回這個 code」的斷言，否則下一次歸位又會靠人眼。
+向量檔（`wbf-vectors.json`）現在有 `error_rate_limited`／`error_out_of_order`／`error_too_many_connections`，`InvalidRequest` 也要加一個。
 
 ## 4. 順序守則：依 kind 分兩類
 
@@ -186,7 +237,8 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 
 `POST /_wbf/v1/pack`，`Content-Type: application/octet-stream`，**body 是一個 pack，回應 body 也是一個 pack**。
 一個請求一個 pack；`id` 由 server 在 `Upload/Create` 的回應裡發，之後帶著它。它存在的理由是 curl 就能測；效能不是它的目標。
-`Stream` kind 走 HTTP 沒意義（沒人連著收），回 `Error(Conflict)`。`Session` kind（§6.3）也不走 HTTP pack：它的語意是「換這條連線的 Session」，HTTP 沒有連線可換，回 `Error(Conflict)`；HTTP 登入照舊用 `/login`。
+`Stream` kind 走 HTTP 沒意義（沒人連著收），回 `Error(Unsupported)`。`Session` kind（§6.3）也不走 HTTP pack：它的語意是「換這條連線的 Session」，HTTP 沒有連線可換，回 `Error(Unsupported)`；HTTP 登入照舊用 `/login`。
+（📎 這兩處本來寫的是 `Conflict`，但准入表從 pack-pipeline 那支開始回的就是 `Unsupported` —— 文件停在舊字，程式沒錯。§3.4 的分界：不走這個傳輸是 `Unsupported`。）
 
 ### 6.3 `Login`／`Refresh`／`Logout` —— 在通道上取得與放掉 session
 
