@@ -151,8 +151,8 @@ client：在清單裡的 → 本地是唯一真相；不在清單裡的 → 遠�
   解析端會把一個數字切成兩半。固定寬度本來就不需要分隔：筆數就是 `data.len() / 8`。
 - ⭐ 於是得到一個免費的 fail-closed 檢查：**`tc * 8 != data.len()` → `Error(InvalidRequest)`，一個都不刪。**
   兩邊對不上代表有一端的編碼壞了，那種時候不准動手。
-- 上限：`tc` 受 `wbf_data_max_bytes` 自然限制（16 MiB ÷ 8 ≈ 2M 筆），實務上一次 `Fetch` 最多 1000 則（§7），
-  所以一個銷毀命令典型是 1000 × 8 = 8 KB。
+- 大小：**典型是一個包一個呼叫** —— 100 × 8 = **800 byte**（§5.4 的節奏）。
+  上限是 `tc` 受 `wbf_data_max_bytes` 自然限制（16 MiB ÷ 8 ≈ 2M 筆）；client 若選擇積整窗再送，也不過 1000 × 8 = 8 KB。
 
 ### 5.2 結果的 data：同一個格式
 
@@ -168,6 +168,16 @@ client：在清單裡的 → 本地是唯一真相；不在清單裡的 → 遠�
 
 ⭐ 所以**不需要 NACK**：NACK 想講的「還在、再試一次」就是「不在 `ItemsDestroyed` 清單裡」，
 而且它比 NACK 多告訴你**是哪幾把**。
+
+### 5.4 節奏：一個包處理完就銷毀那一包
+
+⭐ **銷毀跟著 pack 走，不是跟著窗走**（維護者 2026-09-11）：client 每收到一個 `Batch`／`Push`，
+解包、逐則處理完，就對**那一包的 counts** 發一個 `ItemsDestroy`。整條路都是事件驅動的，
+🚫 不必等一窗（10 包）收齊。
+
+- 所以**典型的命令是 100 筆、800 byte**（§5.1），不是一窗 1000 筆。
+- ⭐ 這樣「已經處理好、但遠端還留著」的那段窗口最短 —— 一包而不是一窗。
+- 📎 client 要積起來一起送也可以（協議不限制，上限是 §7 的一窗），只是沒有理由這麼做。
 
 ## 6. 保留期：無窮 TTL（維護者 2026-09-11 定）
 
@@ -221,10 +231,13 @@ byte 上限仍然要接（規則只有一份，[wbf-wire-format.md](wbf-wire-for
 
 ```
 daemon 啟動、Login → Subscribe{device_id, cd_seq: 上次存的}   ← 先登記，再補洞
-                  → Device/Fetch(cd_seq) 補一窗              ← 離線期間漏的
+                  → Device/Fetch(cd_seq)                    ← 離線期間漏的，一窗 = 10 個 Batch
+每收到一個 Batch／Push（100 則）
                   → 逐則匯進 crypto store（OlmMachine::receive_sync_changes）
-                  → ItemsDestroy{ 成功的那些 count }
-                  → 之後靠 Push；收到 gap 就再 Fetch 一次
+                  → ItemsDestroy{ 這一包裡成功的那些 count }   ← 一包一個呼叫，不等整窗
+                  → 收到 ItemsDestroyed：在清單裡的，本地是唯一真相
+一窗收完（r = 0）還有更舊的 → 帶上一窗的 nt 當 cd_seq 再叫一次
+之後靠 Push；收到 gap 就再 Fetch 一次
 ```
 
 📎 **server 對 to-device 的內容本來就是瞎的**（`add_to_device_event` 只存 `type`／`sender`／`content`），
