@@ -86,8 +86,7 @@ impl Streams {
 
 		let entered = self
 			.rooms
-			.subscribe(connection, user, queue, id, &topics)
-			.expect("room topics hold many connections, so none is ever taken");
+			.subscribe(connection, user, queue, id, &topics);
 
 		// ⚠️ Count the rooms, do not count topics and subtract: following
 		// joins is a topic too, and on a re-`Subscribe` it is already

@@ -66,33 +66,11 @@ pub(super) struct Target {
 	pub(super) gap: bool,
 }
 
-/// How many connections one topic may hold — the stream says this once, when
-/// it is built, and the registry enforces it on every path.
-///
-/// ⚠️ The two streams differ here and the difference matters: a room may be
-/// subscribed by as many of a user's connections as they have open, while a
-/// device's to-device queue is held by exactly one, because whoever holds it
-/// destroys from it. Policing that with an `if` at one call site leaves every
-/// other path able to break it; saying it here means no path can.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum Occupancy {
-	/// Any number of connections (the room channels).
-	Many,
-	/// One connection at a time; a second is refused and the first keeps it
-	/// (the to-device queue).
-	One,
-}
-
-/// A topic that another connection already holds.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct TopicTaken;
-
 /// The subscribers of one stream, indexed by topic.
 ///
 /// `Topic` is whatever that stream subscribes by — a room for the event
 /// channels, a device for the to-device queue.
 pub(super) struct Subscribers<Topic> {
-	occupancy: Occupancy,
 	registry: RwLock<Registry<Topic>>,
 }
 
@@ -108,9 +86,8 @@ impl<Topic> Subscribers<Topic>
 where
 	Topic: Clone + Eq + Hash,
 {
-	pub(super) fn new(occupancy: Occupancy) -> Self {
+	pub(super) fn new() -> Self {
 		Self {
-			occupancy,
 			registry: RwLock::new(Registry {
 				topics: HashMap::new(),
 				subscribers: HashMap::new(),
@@ -130,12 +107,8 @@ where
 	///     id: the client's `Subscribe` id, example: 42
 	///     topics: what to enter, example: every joined room
 	/// Return:
-	///     Result<Vec<Topic>, TopicTaken>  the topics this connection was
-	///     **not** already in; `TopicTaken` when this stream holds one
-	///     connection per topic and another connection holds one of these —
-	///     and then **nothing** is entered, because a half-applied
-	///     subscription is worse than a refused one.
-	///     ⚠️ Which of the entered topics are worth reporting is the kind's
+	///     Vec<Topic>  the topics this connection was **not** already in.
+	///     ⚠️ Which of them are worth reporting is the kind's
 	///     business, not this module's: the room channels enter a topic that
 	///     is not a room (the one that follows joins), and counting entries
 	///     instead of naming them made a new room read as none at all
@@ -147,24 +120,8 @@ where
 		queue: Sender<Outgoing>,
 		id: u64,
 		topics: &[Topic],
-	) -> Result<Vec<Topic>, TopicTaken> {
+	) -> Vec<Topic> {
 		let mut registry = self.registry.write().expect("stream lock poisoned");
-
-		// Asked before anything is written: a stream whose topics hold one
-		// connection each refuses the second one outright, and the holder
-		// keeps what it has. 🚫 Not "the newest wins" — the holder may be in
-		// the middle of taking things it is about to destroy.
-		if self.occupancy == Occupancy::One {
-			let taken = topics.iter().any(|topic| {
-				registry
-					.topics
-					.get(topic)
-					.is_some_and(|holders| holders.iter().any(|held| *held != connection))
-			});
-			if taken {
-				return Err(TopicTaken);
-			}
-		}
 
 		// A connection subscribing as somebody else (a `Login` that kept the
 		// connection) starts over: the hooks find subscribers through
@@ -216,7 +173,7 @@ where
 			}
 		}
 
-		Ok(entered)
+		entered
 	}
 
 	/// Takes `connection` out of `topics`; ones it is not in are no-ops. The
