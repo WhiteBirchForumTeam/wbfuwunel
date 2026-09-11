@@ -3,6 +3,7 @@
 //! per HTTP request. The pack neither encrypts nor decrypts; it only knows
 //! its own layout and checksums. See `docs/design/wbf-wire-format.md`.
 
+pub mod error_code;
 pub mod events;
 pub mod file_info;
 pub mod pack;
@@ -10,6 +11,7 @@ pub mod pack;
 mod vectors;
 
 pub use self::{
+	error_code::RejectCode,
 	file_info::{ENCRYPTED_FILE_INFO_LEN, EncryptedFileInfo, FileInfoError},
 	pack::{
 		Flags, HEADER_LEN, Kind, PackBuilder, PackError, PackHeader, PackView, TRAILER_LEN, VERSION,

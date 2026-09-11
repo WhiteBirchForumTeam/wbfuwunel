@@ -207,7 +207,7 @@ Check '[1.8] ignored sender absent from Recent and /messages alike' ($hasBob -eq
 $http1 = Recent-Http $tokA 5 2 $null $null
 Check '[1.9] Recent over HTTP -> Error Unsupported, id copied' ($http1.subtype -eq 3 -and $http1.kind -eq 1 -and $http1.meta.code -eq 'Unsupported' -and $http1.id -eq 5) (Describe $http1)
 $bad = Recent-Ws $ws 6 2 'not-a-number' $null
-Check '[1.9b] non-integer after -> Error Conflict' ($bad.subtype -eq 3 -and $bad.kind -eq 1 -and $bad.meta.code -eq 'Conflict') (Describe $bad)
+Check '[1.9b] non-integer after -> Error InvalidRequest' ($bad.subtype -eq 3 -and $bad.kind -eq 1 -and $bad.meta.code -eq 'InvalidRequest' -and $bad.meta.code_id -eq 1201) (Describe $bad)
 $noMeta = Recent-Ws $ws 7 $null $null $null
 Check '[1.9c] empty meta = defaults (window 320, batch 10): one window, batches of at most 10' ($noMeta.subtype -eq 3 -and $noMeta.meta.tc -gt 0 -and $noMeta.meta.tc -lt 320 -and (@($noMeta.batches | Where-Object { $_.meta.bc -gt 10 }).Count -eq 0) -and $noMeta.batches.Count -eq [math]::Ceiling($noMeta.meta.tc / 10)) (Describe $noMeta)
 $big = Recent-Ws $ws 9 500 $null $null 1000

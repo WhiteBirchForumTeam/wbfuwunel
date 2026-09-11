@@ -3666,6 +3666,19 @@ pub struct Config {
 	#[serde(default = "default_wbf_ws_send_queue_len")]
 	pub wbf_ws_send_queue_len: usize,
 
+	/// How many frames in a row a wbf WebSocket may send that do not decode
+	/// as a pack — a bad checksum, a version this server does not speak, a
+	/// text frame — before the connection is closed with 1002. Any pack that
+	/// decodes resets the count, even one its handler then refuses: a peer
+	/// whose packs decode speaks the protocol. A run this long means the
+	/// other end is not speaking wbf at all, or an encoder has a bug, and a
+	/// working client never reaches it. Volume is the rate limiter's job,
+	/// not this one's (`docs/design/wbf-wire-format.md` 2.1).
+	///
+	/// default: 8
+	#[serde(default = "default_wbf_ws_corrupt_budget")]
+	pub wbf_ws_corrupt_budget: u32,
+
 	/// How many events one `Event/Recent` request (one window) returns when the
 	/// request does not say. A client pages with `before` for more.
 	///
@@ -5974,6 +5987,8 @@ fn default_login_rc_burst_count() -> u32 { 10 }
 fn default_wbf_ws_max_connections_per_device() -> u32 { 4 }
 
 fn default_wbf_ws_send_queue_len() -> usize { 32 }
+
+fn default_wbf_ws_corrupt_budget() -> u32 { 8 }
 
 fn default_wbf_recent_default_limit() -> usize { 320 }
 

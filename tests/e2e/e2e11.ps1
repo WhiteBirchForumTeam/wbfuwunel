@@ -214,6 +214,38 @@ do { $b = Recv-Or-Null $wsA 5000; if ($null -eq $b) { break }; if ($b.kind -eq 0
 $missing = @($sent | Where-Object { $recentIds -notcontains $_ }).Count
 Check '[2.3] Recent returns every flooded event (the truth is in the DB, the push only hinted)' ($missing -eq 0) "missing=$missing recent=$($recentIds.Count)"
 $wsA.Dispose()
+
+Log '################ Scenario 3: the connection health counter (wire-format 2.1) ################'
+# A pack whose kind byte is unassigned is framed perfectly: decode refuses it, but its sender speaks
+# the protocol, so it must not spend the budget. PR #38's first version counted every decode error
+# and would close this connection on the eighth one.
+$wsH = Ws-Open $tokA
+$unknownAnswers = 0
+try {
+  for ($i = 0; $i -lt 9; $i++) {
+    $p = Call $wsH (New-Pack 0x7f 1 0 0 $i @() @())
+    if ($p.subtype -eq 3 -and $p.meta.code -eq 'UnknownKind' -and $p.meta.code_id -eq 1101) { $unknownAnswers++ }
+  }
+} catch { Log "  (scenario 3: $($_.Exception.Message))" }
+Check '[3.1] nine packs with an unassigned kind -> UnknownKind each, the connection stays open' ($unknownAnswers -eq 9 -and $wsH.State -eq 'Open') "answered=$unknownAnswers state=$($wsH.State)"
+$hello = $null
+try { $hello = Call $wsH (Json-Pack 1 1 0 90 @{ protocol = 1; client = 'e2e11.ps1'; features = @() } $null) } catch { Log "  (scenario 3 Hello: $($_.Exception.Message))" }
+Check '[3.2] ... and the connection still answers a real request' ($null -ne $hello -and $hello.subtype -eq 2) $(if ($hello) { Describe $hello } else { 'no reply' })
+# Eight frames that really do not decode (the meta is damaged, so the CRC fails): the budget runs out.
+$corrupt = New-Pack 1 4 0 0 91 ([Text.Encoding]::UTF8.GetBytes('{"nonce":1}')) @()
+$corrupt[20] = [byte](($corrupt[20] -bxor 0xff))
+$errors = 0; $closed = $null
+# A connection the earlier checks already lost cannot be tested further, and sending into it is how
+# a failed run turns into a hung one: stop instead.
+for ($i = 0; $i -lt 8 -and $null -eq $closed -and $wsH.State -eq 'Open'; $i++) {
+  try { Ws-Send $wsH $corrupt } catch { Log "  (scenario 3 send: $($_.Exception.Message))"; break }
+  $f = Recv-Or-Null $wsH 5000
+  if ($null -eq $f) { continue }
+  if ($f.closed) { $closed = $f } elseif ($f.subtype -eq 3 -and $f.meta.code_id -eq 1002) { $errors++ }
+}
+if ($null -eq $closed) { $f = Recv-Or-Null $wsH 5000; if ($f -and $f.closed) { $closed = $f } }
+Check '[3.3] eight frames that do not decode -> Corrupt each, then the server closes the connection' ($null -ne $closed -and $errors -ge 7) "errors=$errors close=$($closed.code)"
+$wsH.Dispose()
 Stop-Server $p
 
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"
