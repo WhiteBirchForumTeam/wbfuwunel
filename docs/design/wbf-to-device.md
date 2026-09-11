@@ -181,13 +181,27 @@ client：在清單裡的 → 本地是唯一真相；不在清單裡的 → 遠�
 
 ## 7. 上限與設定
 
+⭐ **`limit` 不是隨便挑的數字，是算出來的**（維護者 2026-09-11 指正）：`Recent` 的 320 =
+`wbf_recent_default_batch`（10）× `wbf_ws_send_queue_len`（32）—— **一窗剛好塞得進發送佇列**，
+server 送完一窗不會卡在佇列上等 client 讀。Device 照同一個算法：
+
+```
+10000 （一次 Fetch） = 500 （一包）× 20 （包數）        20 < 32，佇列還留得下別的回應
+```
+
 | 旋鈕 | 預設 | 說明 |
 |---|---|---|
-| `wbf_device_fetch_default_limit` | 10000 | 一次 `Fetch` 回幾則（維護者 2026-09-11：可以比訊息那邊大，`wbf_recent_default_limit` 是 320） |
-| `wbf_device_fetch_max_limit` | 10000 | 上界；`Hello` 的回應宣告，跟 `Recent` 那套一樣 |
+| `wbf_device_fetch_default_limit` | **10000** | 一次 `Fetch` 回幾則。client 端就以「一次同步 10000 則」為限（維護者 2026-09-11） |
+| `wbf_device_fetch_max_limit` | **10000** | 上界；`Hello` 的回應宣告，跟 `Recent` 那套一樣 |
+| `wbf_device_batch_size` | **500** | 一個 `Batch` 幾則。⚠️ 這是 server 決定的，**`Fetch` 沒有 `batch` 參數**（`Recent` 有）—— 沒有呼叫點就不加，跟 §3.1.1 的 `to` 同一個理由 |
 | `wbf_push_max_events_per_pack` | 10（共用） | 推送一包幾則。to-device 事件都很小，先共用；有量測再拆自己的 |
 
 `wbf_data_max_bytes` 對所有 pack 一樣適用，**兩個上限哪個先滿就切在哪**。
+
+📎 **最壞情況的記憶體**（照 [wbf-pack-pipeline.md](wbf-pack-pipeline.md) §1 的規矩寫下來）：一條連線的佇列最多
+20 包 × 500 則 × 一則的大小。to-device 的一則是 olm 密文，實務上幾百 byte 到幾 KB，所以典型最壞是幾十 MB；
+理論上界仍是 `wbf_ws_send_queue_len` × `wbf_data_max_bytes`（跟其他 kind 同一條，不是這裡新增的風險）。
+🔲 這幾個數字**先這樣定**（維護者 2026-09-11），量過再調。
 
 ## 8. client 端會怎麼用（給讀 server 的人理解脈絡）
 
