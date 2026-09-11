@@ -66,38 +66,50 @@ kind `0x14 Event`（§3.3 的 Event 章），三個新 subtype：
 ## 3. server 端：兩張表、兩個接點
 
 ```
-registry（純記憶體，`Services.channels`）
+registry（純記憶體，`Services.streams`）                          ← 所有 WS 串流共用一份機制，房間只是其中一種
   SubscriberId = connection_id (u64)                              ← 維護者定：基於連線，不是使用者、也不是裝置；server 升級時發，AtomicU64 遞增
-  channels:     HashMap<room_id, HashSet<connection_id>>         ← 「channel」本體；空了就 remove
-  subscribers:  HashMap<connection_id, Subscriber>                ← Subscriber { user, device, queue: mpsc::Sender<Outgoing>, id, seq, gap, account_wide: bool }
+  topics:       HashMap<RoomTopic, HashSet<connection_id>>        ← RoomTopic::Room(room_id) 是「channel」本體；空了就 remove
+                                                                     RoomTopic::FollowsJoins(user_id) 是「這些訂閱要跟進這個人之後加入的房」
+  subscribers:  HashMap<connection_id, Subscriber>                ← Subscriber { user, queue: mpsc::Sender<Outgoing>, id, seq, gap }
   by_user:      HashMap<user_id, HashSet<connection_id>>          ← 退房 hook 要用：這個人的所有訂閱中的連線
 
 接點 1：append_pdu 提交之後
-   └─▶ channels::publish(room_id, pdu)
-          ├─ channels[room_id] 沒有 → 回（絕大多數房間：零成本）
+   └─▶ publish_to_channels(room_id, pdu)
+          ├─ 沒有人聽這個房 → 回（絕大多數房間：零成本）
           ├─ 事件 JSON 序列化一次
           └─ 對每個訂閱者：ignored_filter（發送者被這人 ignore 就跳）→ try_send(Push)；佇列滿 → 記 gap，不等
 
 接點 2：state_cache 的 join／leave 寫入點（mark_as_joined 那一組）
-   ├─ leave／kick／ban(user, room) → channels::evict(user, room)：by_user[user] 裡每個訂閱者從 channels[room] 拿掉
-   └─ join(user, room)             → channels::follow(user, room)：by_user[user] 裡 account_wide 的訂閱者加進 channels[room]
+   ├─ leave／kick／ban(user, room) → streams::evict(user, room)：一把鎖內，by_user[user] 的每條連線離開 Room(room)
+   └─ join(user, room)             → streams::follow(user, room)：一把鎖內，FollowsJoins(user) 裡的連線進入 Room(room)
 ```
 
+⭐ **「跟進之後加入的房」是一個 topic，不是訂閱者身上的旗標**（PR #42）。理由：join hook 因此問的是
+**跟其他人同一張索引**，而不是第二張會跟它不一致的表。
+⚠️ 兩個 hook 都是**單一交易**（查與改在同一把 write lock 內）：拆成兩次取鎖時，中間關掉的連線會被放進一個
+沒有訂閱者在後面的 topic，而那筆**沒有任何東西會來清**（審查者 cirno，PR #42）。
+📎 一個 topic 能裝幾條連線是**串流建構時宣告**的（房間是「多條」；to-device 的佇列是「一條」），
+由註冊表強制，不是在呼叫點用 `if` 擋 —— 擋在呼叫點的話，其他路徑就繞得過去。
+
 - **`Subscribe`**：點名的房逐一 `is_joined`，是成員才進 channel，不是的列進 Ack 的 `skipped`；沒點名 = 帳號層：掃 `userroomid_joined` 的前綴 `(user, *)`（`Recent` 每次掃的同一張表，
-  幾十到幾百個房，一次前綴讀），每個房把這個訂閱者放進 `channels[room]`，並標 `account_wide`——這個旗標只做一件事：之後這個帳號 join 新房時，join hook 把它加進新房的 channel。
-  **順序：先登記 `subscribers`／`by_user`（含 `account_wide`），再掃表加 channel。** 反過來的話，掃到一半發生的 join 其 hook 找不到這個訂閱者就漏了；先登記則最多重複加一次，HashSet 的 no-op。
+  幾十到幾百個房，一次前綴讀），每個房進 `Room(room)`，另外進 `FollowsJoins(user)` —— 後者只做一件事：之後這個帳號 join 新房時，join hook 把它加進新房的 channel。
+  **順序：先登記 `subscribers`／`by_user`，再掃表加 topic。** 反過來的話，掃到一半發生的 join 其 hook 找不到這個訂閱者就漏了；先登記則最多重複加一次，HashSet 的 no-op。
   同一訂閱者進同一 channel 兩次永遠是 no-op。
+  ⚠️ **Ack 的 `joined` 數的是「新進的**房**」**，不是「新進的 topic」：`FollowsJoins` 也是一個 topic，而 client 重連或 resync 會**再發一次 `Subscribe`**——
+  那時它已經在索引裡，拿 topic 數去減就會把一個真的新房報成 0（審查者 rumia／salvia／cirno，PR #42）。
 - ⚠️ **登記完要再讀一次成員資格**（`list_rooms_no_longer_joined`，讀到 false 的房就 `unsubscribe`，並列進 Ack 的 `skipped`）。
   先登記擋的是**登記之後**的 leave（hook 找得到訂閱者了）；**登記之前**那一小段——成員檢查已經回 true、連線還沒進 registry——發生的 leave／kick／ban，
   它的 `evict` 在 `by_user` 查無此人、no-op，而且**不會再來一次**：那條連線會留在 channel 裡收那個房之後的每一則事件，直到斷線。
   ⭐ 兩側都要蓋：登記前的 kick 由這次重讀剔掉，登記後的由 hook 接住。這是 channel 這份投影**唯一**可能從過期的真相寫進去的地方（審查者 rumia／salvia 2026-09-10）。
-- **`Unsubscribe`**：從點名的 channel 拿掉，不在裡面就 no-op；沒點名 = 全退並拿掉 `account_wide`。
+- **`Unsubscribe`**：從點名的 channel 拿掉，不在裡面就 no-op；沒點名 = **整個忘掉這條連線的訂閱**（`remove_connection`），
+  連「跟進之後加入的房」那個 topic 一起退。
 - **`connection_id`**：`ws_route` 升級時從一個 `AtomicU64` 拿，傳進 `serve`，放進 `PackContext`；`Hello` 的回應多報 `connection_id`（除錯用，client 不必用）。它只在 process 內有意義，不進 DB。
   `Login` 換帳號時連線號不變，但訂閱**全退**（channel 成員資格是舊帳號的），新帳號要收就再 `Subscribe`。
 - **`Subscribe` 換了身分就重來**：`subscribers[connection]` 已經在、但登記的 `user` 跟這次的不同（一條連線上的 `Login` 換了帳號），先 `remove_subscriber` 再重新登記 ——
   舊身分留在 `by_user` 裡的話，兩個 hook 會按舊帳號的房間動這條連線。今天 `ws.rs` 換裝置時就已經全退，所以走不到；但那是**兩個模組合起來才正確**，
   而這條線決定誰讀得到什麼，所以在 `subscribe` 自己這裡再問一次（審查者 rumia B1）。
-- **on disconnect**：`Subscription` 是 RAII（跟 `ConnectionSlot` 同形），drop 就把這個連線號從它在的每個 channel、`by_user`、`subscribers` 拿掉；不靠 loop 記得。
+- **on disconnect**：`ConnectionGuard` 是 RAII（跟 `ConnectionSlot` 同形），drop 就把這個連線號從**每一個串流**拿掉（不只房間）；不靠 loop 記得。
+  ⭐ 清除只有一個入口（`Streams::remove_connection`），所以新增一種串流時，不可能忘記幫它收尾。
 - **真相在哪**：誰能收的真相是 DB 的成員表；channel 是它的記憶體投影，靠接點 2 保持一致。漂移只可能來自漏接 hook 的新 join／leave 路徑，而那只有 `state_cache` 一組；重啟就清空，安全方向是「少推」，`Recent` 補得回來。
 - **接點 1 只有 `append_pdu` 提交後**：backfill 進來的舊事件不推（不是「新的」，`Recent` 拿得到）；redaction 是一則新事件，照推。
 - **可見性**：新事件對「現在是成員的人」永遠可見（`history_visibility` 管的是加入前的歷史），而能在 channel 裡的一定是成員，所以只做 ignore 過濾。

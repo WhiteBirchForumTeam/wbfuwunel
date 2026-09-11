@@ -33,7 +33,10 @@ use std::sync::{
 };
 
 pub use self::rooms::{EVENT_PUSH_SUBTYPE, PushedEvent, Subscribed};
-use self::{rooms::RoomTopic, subscribers::Subscribers};
+use self::{
+	rooms::RoomTopic,
+	subscribers::{Occupancy, Subscribers},
+};
 
 /// One WebSocket connection, numbered at upgrade; unique for the life of the
 /// process, meaningless outside it.
@@ -51,7 +54,10 @@ pub enum Outgoing {
 /// Every stream's subscribers, and the connection numbers they are keyed by.
 pub struct Streams {
 	next_connection: AtomicU64,
-	/// The room channels (`0x14 Event`).
+	/// The room channels (`0x14 Event`): a room may be listened to by as many
+	/// of a user's connections as they have open, so its topics hold many.
+	/// A stream where one connection holds a topic (the to-device queue, next)
+	/// says so when it is built, and the registry keeps it that way.
 	rooms: Subscribers<RoomTopic>,
 }
 
@@ -75,7 +81,7 @@ impl Streams {
 	pub fn new() -> Self {
 		Self {
 			next_connection: AtomicU64::new(1),
-			rooms: Subscribers::new(),
+			rooms: Subscribers::new(Occupancy::Many),
 		}
 	}
 

@@ -86,14 +86,18 @@ impl Streams {
 
 		let entered = self
 			.rooms
-			.subscribe(connection, user, queue, id, &topics);
+			.subscribe(connection, user, queue, id, &topics)
+			.expect("room topics hold many connections, so none is ever taken");
 
-		// The follow topic is not a channel; it must not count as one joined.
-		let joined = if account_wide {
-			entered.saturating_sub(1)
-		} else {
-			entered
-		};
+		// ⚠️ Count the rooms, do not count topics and subtract: following
+		// joins is a topic too, and on a re-`Subscribe` it is already
+		// entered — so "one new room" arrived as one new topic, and
+		// subtracting reported none (PR #42 review, found by rumia, salvia
+		// and cirno). `joined` is a field the client reads.
+		let joined = entered
+			.iter()
+			.filter(|topic| matches!(topic, RoomTopic::Room(_)))
+			.count();
 
 		Subscribed { joined }
 	}
@@ -362,6 +366,31 @@ mod tests {
 			.collect();
 		assert_eq!(sizes, vec![2, 2, 1]);
 		assert!(rx.try_recv().is_err(), "nothing more");
+	}
+
+	#[test]
+	fn resubscribing_account_wide_reports_the_rooms_that_are_new() {
+		// The Ack's `joined` is a number the client reads, and a client that
+		// reconnects or resyncs sends `Subscribe` again. Following joins is
+		// a topic of its own, so on the second call it is already entered —
+		// counting topics and subtracting one therefore reported a genuinely
+		// new room as none (PR #42 review).
+		let streams = Streams::new();
+		let alice = user_id!("@alice:localhost");
+		let old = room_id!("!old:localhost").to_owned();
+		let new = room_id!("!new:localhost").to_owned();
+		let (tx, _rx) = queue(4);
+
+		let first = streams.subscribe(1, alice, tx.clone(), 1, &[old.clone()], true);
+		assert_eq!(first.joined, 1, "the room it named");
+
+		// The user joined another room; the client subscribes again.
+		let second = streams.subscribe(1, alice, tx.clone(), 1, &[old.clone(), new.clone()], true);
+		assert_eq!(second.joined, 1, "one room is new, and following joins was already entered");
+
+		// Nothing new at all is nothing joined.
+		let third = streams.subscribe(1, alice, tx, 1, &[old, new], true);
+		assert_eq!(third.joined, 0);
 	}
 
 	#[test]
