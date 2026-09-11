@@ -105,7 +105,7 @@ impl Streams {
 	/// Takes `connection` out of the channels of `rooms`; rooms it is not in
 	/// are no-ops. The subscriber stays registered either way — in no channel
 	/// it simply receives nothing — and keeps following joins; only
-	/// `unsubscribe_all` and dropping the connection forget it.
+	/// `unsubscribe_all_rooms` and dropping the connection forget it.
 	pub fn unsubscribe(&self, connection: ConnectionId, rooms: &[OwnedRoomId]) {
 		let topics: Vec<RoomTopic> = rooms
 			.iter()
@@ -114,9 +114,17 @@ impl Streams {
 		self.rooms.unsubscribe(connection, &topics);
 	}
 
-	/// Takes `connection` out of every channel and forgets it as a room
-	/// subscriber. Idempotent.
-	pub fn unsubscribe_all(&self, connection: ConnectionId) { self.rooms.remove_connection(connection); }
+	/// Takes `connection` out of every **channel** and forgets it as a room
+	/// subscriber; its other streams are untouched. Idempotent.
+	///
+	/// ⚠️ The name says rooms because this is what `Event/Unsubscribe` with
+	/// no rooms named means — "stop listening to rooms", not "stop listening
+	/// to everything". A connection that leaves the channels keeps its
+	/// to-device queue, and something that ends every subscription is
+	/// `Streams::remove_connection`.
+	pub fn unsubscribe_all_rooms(&self, connection: ConnectionId) {
+		self.rooms.remove_connection(connection);
+	}
 
 	/// The join hook: `user` has joined `room`, so the user's subscriptions
 	/// that follow joins enter the room's channel.
@@ -409,7 +417,7 @@ mod tests {
 		let later = room_id!("!later:localhost");
 		let (tx, _rx) = queue(4);
 		streams.subscribe(1, alice, tx, 1, &[], true);
-		streams.unsubscribe_all(1);
+		streams.unsubscribe_all_rooms(1);
 
 		streams.follow(alice, later);
 

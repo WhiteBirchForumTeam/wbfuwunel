@@ -149,7 +149,7 @@ pub(super) async fn handle_unsubscribe(
 	let meta: UnsubscribeMeta = parse_meta(view, "Unsubscribe")?;
 	match meta.rooms {
 		| Some(rooms) => services.streams.unsubscribe(ctx.connection, &rooms),
-		| None => services.streams.unsubscribe_all(ctx.connection),
+		| None => services.streams.unsubscribe_all_rooms(ctx.connection),
 	}
 
 	reply

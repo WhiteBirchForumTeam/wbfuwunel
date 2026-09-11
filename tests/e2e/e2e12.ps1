@@ -180,6 +180,19 @@ Check '[1.11] Unsubscribe -> Ack, and the next connection can take the queue' ($
 $http = Send-Pack (Json-Pack 0x16 4 22 0 @{ device_id = $devA } $null) $tokA
 Check '[1.12] Device/Subscribe over HTTP -> Unsupported' ($http.subtype -eq 3 -and $http.meta.code_id -eq 1102) (Describe $http)
 
+# [1.13] logging in as somebody else on a live connection lets go of the old identity's queue.
+# Without this, alice's to-device items — her Megolm keys — are pushed into a connection that is
+# now bob's, and the queue stays held by a session that may no longer destroy from it.
+$ws3 = Ws-Open $tokA
+$heldA = Call $ws3 (Json-Pack 0x16 4 30 0 @{ device_id = $devA } $null)
+$swap = Call $ws3 (Json-Pack 16 1 31 0 @{ type = 'm.login.password'; identifier = @{ type = 'm.id.user'; user = 'bob' }; password = 'pw-pw-pw-pw'; initial_device_display_name = 'e2e12 swap' } $null)
+$null = Send-ToDevice $tokB $regA.user_id $devA 'after the identity swap'
+$leaked = @(Drain $ws3 2000 | Where-Object { $_.kind -eq 0x16 -and $_.subtype -eq 6 })
+Check '[1.13] after a Login as another user, the old device queue is let go and nothing is pushed to it' `
+  ($heldA.subtype -eq 2 -and $swap.subtype -eq 2 -and $leaked.Count -eq 0) `
+  "subscribe=$($heldA.subtype) login=$($swap.subtype) leaked=$($leaked.Count)"
+$ws3.Dispose()
+
 $ws.Dispose(); $ws2.Dispose()
 Stop-Server $server
 

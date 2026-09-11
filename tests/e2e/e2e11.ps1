@@ -8,9 +8,13 @@ function Check([string]$name, [bool]$ok, [string]$detail) {
 }
 function Write-Config11([string]$db, [int]$queueLen = 32) {
   $cfg = "$S\e2e11.toml"
+  # ⚠️ A to-device window must fit in the send queue (wbf-to-device.md 7, asserted at startup), so
+  # shrinking the queue for the backpressure scenario shrinks the window with it: a queue of four
+  # packs takes four packs of a hundred. Without this the server refuses to start, correctly.
+  $deviceLimit = $queueLen * 100
   @('[global]','server_name = "localhost"',('database_path = "' + ($db.Replace([string][char]92, '/')) + '"'),'port = 8015','address = ["127.0.0.1"]',
     'allow_registration = true','yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse = true','allow_federation = false',
-    ('wbf_ws_send_queue_len = ' + $queueLen),'wbf_ws_idle_timeout = 120','log = "info"') -join "`n" | Set-Content -Path $cfg -Encoding ascii
+    ('wbf_ws_send_queue_len = ' + $queueLen),('wbf_device_fetch_max_limit = ' + $deviceLimit),'wbf_ws_idle_timeout = 120','log = "info"') -join "`n" | Set-Content -Path $cfg -Encoding ascii
   $cfg
 }
 function GSeqOf($ev) { if ($ev.unsigned -and ($ev.unsigned.PSObject.Properties.Name -contains $GSEQKEY)) { [int64]$ev.unsigned.$GSEQKEY } else { $null } }

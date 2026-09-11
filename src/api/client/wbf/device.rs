@@ -189,11 +189,14 @@ pub(super) async fn handle_device_fetch(
 		.session
 		.ok_or_else(|| Reject::code(RejectCode::Unauthorized, "log in first: this connection has no session"))?;
 	let meta: FetchMeta = parse_meta(view, "Device/Fetch")?;
+	// ⚠️ `limit: 0` means none, and answers with one empty `Batch` — the same
+	// as `Event/Recent`, which does not raise a zero either. Clamping it up to
+	// one instead returned an item nobody asked for and hid the client bug
+	// that sent a zero (PR #43 review, rumia).
 	let limit = meta
 		.limit
 		.unwrap_or(services.config.wbf_device_fetch_default_limit)
-		.min(services.config.wbf_device_fetch_max_limit)
-		.max(1);
+		.min(services.config.wbf_device_fetch_max_limit);
 
 	let items = read_items(services, &session.user, &session.device, meta.cd_seq, limit).await;
 	for pack in build_batches(

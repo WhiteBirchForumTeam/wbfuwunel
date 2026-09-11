@@ -134,6 +134,11 @@ B 那邊還在處理就沒得救了。所以同時只有一條 —— 但「哪�
   那是兩次取鎖，兩條同時來的連線會雙雙看到空的、雙雙進去，綁定等於沒有（PR #42 的 join hook 同型錯誤）。
 - **`Unsubscribe` 解除綁定**（維護者 2026-09-11）：訂閱與綁定是同一件事的兩面 —— 不解除的話，
   那條連線退訂了卻還佔著裝置，其他連線得靠搶佔才進得來，而且沒有任何東西會來收拾它。
+- 🚨 **在同一條連線上換身分（`Session/Login` 換成另一個 user／device）也要解除** —— 而且是**每一條串流都退**，
+  不是只退房間（審查者 cirno／rumia／salvia，PR #43）。漏掉的話：舊裝置的 to-device 項目會被推進**現在屬於
+  另一個人的**佇列（別人的 Megolm 金鑰送進錯的 session），而且新 session 不是那個 topic 的持有者、銷毀會被拒 ——
+  那個裝置從此卡死。⚠️ 呼叫的是 `Streams::remove_connection`（唯一的全清入口），🚫 **不是**
+  `Event/Unsubscribe` 用的 `unsubscribe_all_rooms` —— 後者的語意是「不聽房間了」，把 to-device 一起清掉是另一回事。
 - 連線結束時也解除（RAII，跟 `ConnectionGuard` 同形），下一條連得上。
   ⭐ 兩條路都要有：`Unsubscribe` 是說出口的退出，斷線是沒說出口的退出，🚫 不能只接一種。
   📎 搶佔存在不代表這兩條可以省：它們是**正常**的歸還路徑，搶佔是**故障**的那條。
@@ -237,7 +242,15 @@ to-device 一則約 1 KB 又不需要逐則渲染，包大一點反而省來回�
 | `wbf_device_fetch_max_limit` | **1000** | client 帶的 `limit` 夾到這裡。🔲 維護者 2026-09-11 只定了「一次一千則」這個數，所以兩者同值；要讓 client 能要更多再分開 |
 | `wbf_device_default_batch` | **100** | **一包幾則**（`Fetch` 的回應 `Batch`）。⚠️ **client 不能指定** —— `Fetch` 沒有 `batch` 參數（`Recent` 有），一包裝多少是 server 的事 |
 | `wbf_push_max_events_per_pack` | 10（**與 `Event` 共用**） | **server 主動推的一包最多幾則**（維護者 2026-09-11）。推送要的是快，一包小一點先出去；補窗要的是吞吐，才用上面那個 100 |
-| ~~包數~~ | *（算出來的，10）* | `ceil(limit ÷ 一包則數)`。🚫 **不給旋鈕**：三個數字只有兩個自由度，三個都能調就會有「互相矛盾時誰贏」的問題。啟動時斷言它 ≤ `wbf_ws_send_queue_len`，不成立就是設定錯，fail closed |
+| ~~包數~~ | *（算出來的，10）* | `ceil(limit ÷ 一包則數)`。🚫 **不給旋鈕**：三個數字只有兩個自由度，三個都能調就會有「互相矛盾時誰贏」的問題。✅ 啟動時斷言它 ≤ `wbf_ws_send_queue_len`（`config/check.rs` 的 `check_wbf_device_window`），不成立就是設定錯，fail closed |
+
+⚠️ **那個斷言擋的是什麼，講精確一點**（PR #43 審查時補上的，審查者 rumia／salvia 抓到它只寫在文件上、沒落地）：
+`Fetch` 的 `Batch` 是**等得到佇列**才送的（handler `await`，不是 `try_send`），所以**不會掉包** ——
+放不下時發生的是**那個 handler 卡在半窗**等 client 讀，同時佔著它的名額。那不是資料損失，但是個沒人看得見的
+停頓，而且它的成因純粹是設定值互相矛盾 —— 這種東西應該在啟動時就講出來。
+
+📎 **`limit: 0` 就是「不要」**：回一則空的 `Batch`（`r=0`），跟 `Event/Recent` 一致。
+🚫 不夾成 1 —— 那會回一則沒人要的，還順手把 client 那個「欄位沒初始化」的 bug 藏起來。
 
 ⭐ **兩條路兩個數，是刻意的**：`Fetch`→`Batch` 是補洞（**大包少包**，100 × 10）、`Push` 是即時（**一包最多 10**，
 而且實務上就一則）。to-device 一則約 1 KB，所以兩邊都遠在 `wbf_data_max_bytes` 之內。

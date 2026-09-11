@@ -300,10 +300,15 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 				// given back when the old session drops here.
 				if let Some(old_session) = session.as_mut() {
 					new_session.inherit_slot(old_session);
-					// Channels were entered as the old identity; a new one
-					// subscribes again if it wants to listen.
+					// Every stream was entered as the old identity, so the
+					// new one keeps none of them and subscribes again if it
+					// wants to listen. ⚠️ Not the rooms-only unsubscribe:
+					// leaving the device queue behind would push another
+					// user's to-device items — their Megolm keys — into this
+					// connection's queue, which now belongs to somebody else
+					// (PR #43 review, found by cirno, rumia and salvia).
 					if !old_session.is_same_device(&new_session) {
-						services.streams.unsubscribe_all(connection);
+						services.streams.remove_connection(connection);
 					}
 				}
 				session = Some(new_session);

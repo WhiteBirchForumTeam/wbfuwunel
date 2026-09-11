@@ -126,7 +126,7 @@ impl Streams {
 mod tests {
 	use std::sync::Arc;
 
-	use ruma::{room_id, user_id};
+	use ruma::{device_id, room_id, user_id};
 	use tokio::sync::mpsc;
 
 	use super::{Outgoing, Streams};
@@ -148,6 +148,57 @@ mod tests {
 		assert!(!streams.is_listened(&a) && !streams.is_listened(&b));
 		assert!(!streams.is_subscribed(connection));
 		assert!(streams.listeners(&a).is_empty());
+	}
+
+	#[test]
+	fn a_connection_that_becomes_somebody_else_keeps_no_stream_of_the_old_identity() {
+		// A `Login` on a live connection: what the old identity subscribed to
+		// must be gone from **every** stream before the new one is served.
+		// Leaving the device queue behind pushed one user's to-device items
+		// into a queue that now belongs to another (PR #43 review), and the
+		// rooms-only unsubscribe is not enough here — which is why the call
+		// site uses this one entry point.
+		let streams = Arc::new(Streams::new());
+		let alice = user_id!("@alice:localhost");
+		let phone = device_id!("PHONE");
+		let room = room_id!("!a:localhost").to_owned();
+		let (tx, _rx) = mpsc::channel::<Outgoing>(4);
+		let connection = streams.next_connection_id();
+		streams.subscribe(connection, alice, tx.clone(), 1, &[room.clone()], true);
+		streams.subscribe_device(connection, alice, phone, tx, 2);
+		assert_eq!(streams.device_holder(alice, phone), Some(connection));
+
+		streams.remove_connection(connection);
+
+		assert_eq!(streams.device_holder(alice, phone), None, "the old device queue is let go");
+		assert!(!streams.is_listened(&room), "and so are the old rooms");
+	}
+
+	#[test]
+	fn leaving_the_room_channels_is_not_leaving_the_device_queue() {
+		// ⚠️ The two are different requests, which is why they are different
+		// methods: `Event/Unsubscribe` with no rooms named means "stop
+		// listening to rooms", and a client that sends it still wants its
+		// keys. The identity swap wants the other one — and the leak it
+		// caused was a call site reaching for a name that said "all" and
+		// meant "rooms".
+		let streams = Arc::new(Streams::new());
+		let alice = user_id!("@alice:localhost");
+		let phone = device_id!("PHONE");
+		let room = room_id!("!a:localhost").to_owned();
+		let (tx, _rx) = mpsc::channel::<Outgoing>(4);
+		let connection = streams.next_connection_id();
+		streams.subscribe(connection, alice, tx.clone(), 1, &[room.clone()], true);
+		streams.subscribe_device(connection, alice, phone, tx, 2);
+
+		streams.unsubscribe_all_rooms(connection);
+
+		assert!(!streams.is_listened(&room), "the rooms are left");
+		assert_eq!(
+			streams.device_holder(alice, phone),
+			Some(connection),
+			"and the device queue is not"
+		);
 	}
 
 	#[test]
