@@ -51,7 +51,7 @@ client 得讓兩個資料庫原子性地一起 commit —— 兩個 db、兩套�
 
 | subtype | 方向 | meta | data | 順序類別 |
 |---|---|---|---|---|
-| `0x01 Fetch` | client → server | `{ "limit": 10000?, "cd_seq": <count>? }`；`id` 由 client 選 | 無 | 無序 |
+| `0x01 Fetch` | client → server | `{ "limit": 1000?, "cd_seq": <count>? }`；`id` 由 client 選 | 無 | 無序 |
 | `0x02 Batch` | **server → client** | `{ "tc", "bc", "ot", "nt", "counts": [...], "r" }`；`id` 抄 `Fetch`，`seq` 從 0 嚴格 +1 | `bc` 則事件，u32 大端長度 ＋ JSON | 有序 |
 | `0x03 ItemsDestroy` | client → server | `{ "tc": <筆數> }`；`id` 由 client 選 | **`tc` × 8 byte**，每個是一個 u64 大端的 count（§5.1） | 無序 |
 | `0x04 Subscribe` | client → server | `{ "device_id": "…", "cd_seq": <count>? }`；`id` 由 client 選 | 無 | 無序 |
@@ -151,7 +151,8 @@ client：在清單裡的 → 本地是唯一真相；不在清單裡的 → 遠�
   解析端會把一個數字切成兩半。固定寬度本來就不需要分隔：筆數就是 `data.len() / 8`。
 - ⭐ 於是得到一個免費的 fail-closed 檢查：**`tc * 8 != data.len()` → `Error(InvalidRequest)`，一個都不刪。**
   兩邊對不上代表有一端的編碼壞了，那種時候不准動手。
-- 上限：`tc` 受 `wbf_data_max_bytes` 自然限制（16 MiB ÷ 8 ≈ 2M 筆），實務上一次 `Fetch` 最多 10000 則（§6）。
+- 上限：`tc` 受 `wbf_data_max_bytes` 自然限制（16 MiB ÷ 8 ≈ 2M 筆），實務上一次 `Fetch` 最多 1000 則（§7），
+  所以一個銷毀命令典型是 1000 × 8 = 8 KB。
 
 ### 5.2 結果的 data：同一個格式
 
@@ -186,14 +187,14 @@ client：在清單裡的 → 本地是唯一真相；不在清單裡的 → 遠�
 server 送完一窗不會卡在佇列上等 client 讀。Device 照同一個算法：
 
 ```
-10000 （一次 Fetch） = 500 （一包）× 20 （包數）        20 < 32，佇列還留得下別的回應
+1000 （一次 Fetch） = 100 （一包）× 10 （包數）         10 < 32，佇列還留得下別的回應
 ```
 
 | 旋鈕 | 預設 | 說明 |
 |---|---|---|
-| `wbf_device_fetch_default_limit` | **10000** | 一次 `Fetch` 回幾則。client 端就以「一次同步 10000 則」為限（維護者 2026-09-11） |
-| `wbf_device_fetch_max_limit` | **10000** | 上界；`Hello` 的回應宣告，跟 `Recent` 那套一樣 |
-| `wbf_device_batch_size` | **500** | 一個 `Batch` 幾則。⚠️ 這是 server 決定的，**`Fetch` 沒有 `batch` 參數**（`Recent` 有）—— 沒有呼叫點就不加，跟 §3.1.1 的 `to` 同一個理由 |
+| `wbf_device_fetch_default_limit` | **1000** | 一次 `Fetch` 回幾則。積得比這多就多叫幾次（帶上一窗的 `nt` 當 `cd_seq`） |
+| `wbf_device_fetch_max_limit` | **1000** | 上界；`Hello` 的回應宣告，跟 `Recent` 那套一樣 |
+| `wbf_device_batch_size` | **100** | 一個 `Batch` 幾則。⚠️ 這是 server 決定的，**`Fetch` 沒有 `batch` 參數**（`Recent` 有）—— 沒有呼叫點就不加，跟 §3.1.1 的 `to` 同一個理由 |
 | `wbf_push_max_events_per_pack` | 10（共用） | 推送一包幾則。to-device 事件都很小，先共用；有量測再拆自己的 |
 
 `wbf_data_max_bytes` 對所有 pack 一樣適用，**兩個上限哪個先滿就切在哪**。
@@ -207,11 +208,11 @@ olm 封裝再 base64 之後**一則大約 1 KB**；SAS 驗證與 `m.secret.send`
 | | 大小（估算） |
 |---|---|
 | 一則 | ~1 KB |
-| 一包（500 則） | ~0.5 MB |
-| 一窗（10000 則） | ~10 MB |
+| 一包（100 則） | ~100 KB |
+| 一窗（1000 則） | ~1 MB |
 
 ⚠️ **這是估算，不是量測** —— 實作那支要量一次真實數據再回來改這裡。
-📎 一包 ~0.5 MB **遠低於 `wbf_data_max_bytes`（16 MiB）**，所以實際切包的是 500 這個則數；
+📎 一包 ~100 KB **遠低於 `wbf_data_max_bytes`（16 MiB）**，所以實際切包的是 100 這個則數；
 byte 上限仍然要接（規則只有一份，[wbf-wire-format.md](wbf-wire-format.md) §2.1 那條教訓），只是幾乎不會觸發。
 理論上界仍是 `wbf_ws_send_queue_len` × `wbf_data_max_bytes`，跟其他 kind 同一條，不是這裡新增的風險。
 🔲 這幾個數字**先這樣定**（維護者 2026-09-11），量過再調。
