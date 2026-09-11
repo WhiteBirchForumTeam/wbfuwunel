@@ -116,24 +116,26 @@ impl Streams {
 
 	/// The join hook: `user` has joined `room`, so the user's subscriptions
 	/// that follow joins enter the room's channel.
+	///
+	/// ⚠️ One transaction (`copy_topic`), not "look them up, then enter
+	/// them": a connection that closed in between would otherwise be entered
+	/// with no subscriber behind it, and nothing cleans that up.
 	pub fn follow(&self, user: &UserId, room: &RoomId) {
-		let followers: Vec<ConnectionId> = self
-			.rooms
-			.listeners(&RoomTopic::FollowsJoins(user.to_owned()))
-			.into_iter()
-			.map(|(connection, _)| connection)
-			.collect();
-
-		self.rooms
-			.enter_topic(&RoomTopic::Room(room.to_owned()), &followers);
+		self.rooms.copy_topic(
+			&RoomTopic::FollowsJoins(user.to_owned()),
+			&RoomTopic::Room(room.to_owned()),
+		);
 	}
 
 	/// The leave hook: `user` is no longer in `room` (left, kicked, banned),
 	/// so every one of the user's connections leaves the room's channel.
+	///
+	/// ⚠️ One transaction for the same reason: between two locks the
+	/// connection could have become somebody else's (a `Login` on it), and
+	/// this would evict the new identity's subscription.
 	pub fn evict(&self, user: &UserId, room: &RoomId) {
-		let connections = self.rooms.connections_of(user);
 		self.rooms
-			.leave_topic(&RoomTopic::Room(room.to_owned()), &connections);
+			.leave_topic_of_user(user, &RoomTopic::Room(room.to_owned()));
 	}
 
 	/// Whether anyone listens to `room`: the cheap check before an event is
@@ -360,6 +362,30 @@ mod tests {
 			.collect();
 		assert_eq!(sizes, vec![2, 2, 1]);
 		assert!(rx.try_recv().is_err(), "nothing more");
+	}
+
+	#[test]
+	fn a_join_hook_enters_nobody_when_the_connection_is_already_gone() {
+		// ⚠️ This asserts the end state, not the race that produced it: the
+		// window PR #42's review found (cirno) needs the lookup and the
+		// insert to be two lock-takings, with the connection closing in
+		// between, and that is not reproducible here without threads. What
+		// closes it is that `copy_topic` is one transaction and that there
+		// is no longer an API to do it in two — `enter_topic` is gone. The
+		// invariant this guards is the visible half: a room that no
+		// subscriber is behind must not read as listened-to, because nothing
+		// would ever clean that up.
+		let streams = Streams::new();
+		let alice = user_id!("@alice:localhost");
+		let later = room_id!("!later:localhost");
+		let (tx, _rx) = queue(4);
+		streams.subscribe(1, alice, tx, 1, &[], true);
+		streams.unsubscribe_all(1);
+
+		streams.follow(alice, later);
+
+		assert_eq!(streams.listener_count(later), 0, "a room with no subscriber behind it is not listened to");
+		assert!(!streams.is_listened(later));
 	}
 
 	#[test]

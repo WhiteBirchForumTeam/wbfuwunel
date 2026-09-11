@@ -245,36 +245,46 @@ where
 			.contains_key(&connection)
 	}
 
-	/// The user's subscribed connections, for hooks that work by user (a
-	/// room's join and leave).
-	pub(super) fn connections_of(&self, user: &UserId) -> Vec<ConnectionId> {
-		self.registry
-			.read()
-			.expect("stream lock poisoned")
-			.by_user
-			.get(user)
-			.map(|connections| connections.iter().copied().collect())
-			.unwrap_or_default()
-	}
-
-	/// Puts `connections` into `topic` without asking anything: the caller
-	/// (a join hook) has decided they belong there.
-	pub(super) fn enter_topic(&self, topic: &Topic, connections: &[ConnectionId]) {
-		if connections.is_empty() {
+	/// Puts everyone currently in `from` into `to` as well, **in one
+	/// transaction**: the join hook, where `from` is "the subscriptions that
+	/// follow this user's joins" and `to` is the room just joined.
+	///
+	/// ⚠️ Looking the connections up and then entering them under a second
+	/// lock is not the same thing: a connection that unsubscribed or closed
+	/// in between would be put into `to` with no subscriber behind it, and
+	/// nothing would ever clean that up — a topic that looks listened-to
+	/// forever (PR #42 review, cirno). One lock, and only connections that
+	/// are subscribers right now.
+	pub(super) fn copy_topic(&self, from: &Topic, to: &Topic) {
+		let mut registry = self.registry.write().expect("stream lock poisoned");
+		let Some(movers) = registry.topics.get(from).cloned() else {
+			return;
+		};
+		let movers: Vec<ConnectionId> = movers
+			.into_iter()
+			.filter(|connection| registry.subscribers.contains_key(connection))
+			.collect();
+		if movers.is_empty() {
 			return;
 		}
-		let mut registry = self.registry.write().expect("stream lock poisoned");
-		let listeners = registry.topics.entry(topic.clone()).or_default();
-		for connection in connections {
-			listeners.insert(*connection);
+		let listeners = registry.topics.entry(to.clone()).or_default();
+		for connection in movers {
+			listeners.insert(connection);
 		}
 	}
 
-	/// Takes `connections` out of `topic` (a leave hook).
-	pub(super) fn leave_topic(&self, topic: &Topic, connections: &[ConnectionId]) {
+	/// Takes every connection of `user` out of `topic`, **in one
+	/// transaction**: the leave hook. Same reason as `copy_topic` — between
+	/// two locks, that connection could have become somebody else's (a
+	/// `Login` on the same connection), and this would then evict the new
+	/// identity's subscription.
+	pub(super) fn leave_topic_of_user(&self, user: &UserId, topic: &Topic) {
 		let mut registry = self.registry.write().expect("stream lock poisoned");
+		let Some(connections) = registry.by_user.get(user).cloned() else {
+			return;
+		};
 		for connection in connections {
-			registry.leave_topic(*connection, topic);
+			registry.leave_topic(connection, topic);
 		}
 	}
 
