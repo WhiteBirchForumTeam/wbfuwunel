@@ -213,10 +213,27 @@ to-device 一則約 1 KB 又不需要逐則渲染，包大一點反而省來回�
 |---|---|---|
 | `wbf_device_fetch_default_limit` | **1000** | 一次 `Fetch` 回幾則。積得比這多就多叫幾次（帶上一窗的 `nt` 當 `cd_seq`） |
 | `wbf_device_fetch_max_limit` | **1000** | 上界；`Hello` 的回應宣告，跟 `Recent` 那套一樣 |
-| `wbf_device_batch_size` | **100** | 一個 `Batch` 幾則。⚠️ 這是 server 決定的，**`Fetch` 沒有 `batch` 參數**（`Recent` 有）—— 沒有呼叫點就不加，跟 §3.1.1 的 `to` 同一個理由 |
-| `wbf_push_max_events_per_pack` | 10（共用） | 推送一包幾則。to-device 事件都很小，先共用；有量測再拆自己的 |
+| `wbf_device_max_events_per_pack` | **100** | 一個 pack 幾則，`Batch` 與 `Push` **共用這一個**（都是 `0x16`）。⚠️ **不跟 `Event` 共用**（下面 §7.1）：to-device 一則約 1 KB，房間事件一則可以是它的幾十倍，一包裝幾則本來就該分開定 |
+| ~~包數~~ | *（算出來的，10）* | `ceil(limit ÷ 每包則數)`。🚫 **不給旋鈕**：三個數字只有兩個自由度，三個都能調就會有「互相矛盾時誰贏」的問題。啟動時斷言它 ≤ `wbf_ws_send_queue_len`，不成立就是設定錯，`fail closed` |
+
+⚠️ **`Fetch` 沒有 `batch` 參數**（`Recent` 有）—— 一包幾則由 server 決定，沒有呼叫點就不加，跟 §3.1.1 的 `to` 同一個理由。
 
 `wbf_data_max_bytes` 對所有 pack 一樣適用，**兩個上限哪個先滿就切在哪**。
+
+### 7.1 現有的名字會誤導，實作那支一起修
+
+維護者 2026-09-11：`0x16` 的內容**遠比訊息小**，一包本來就該裝多一點 —— 所以不共用旋鈕。
+但這件事一攤開，就看到現有的名字**沒有一個說得出自己管哪個 kind**：
+
+| 現在的名字 | 問題 | 建議改成 |
+|---|---|---|
+| `wbf_push_max_events_per_pack`（10） | 讀起來像「所有推送」的上限，其實只管 `Event/Push`。`0x16` 也有 `Push` 之後，這個名字就是**錯的** | `wbf_event_push_max_events_per_pack` |
+| `wbf_recent_default_batch`（10）／`wbf_recent_max_batch`（100） | **`Batch` 在這個協議裡是一個 pack 的名字**（`0x14/0x03`），所以 `batch = 10` 讀起來像「10 個包」，其實是「一包 10 則」 | `wbf_recent_default_events_per_pack`／`wbf_recent_max_events_per_pack` |
+
+⚠️ **只改 config 的名字，不動線上的欄位**：`Recent` 請求 meta 裡的 `batch` 是**協議的一部分**（client 送的），
+改它要照 §3.4 那套「線上看得見的改動」流程走。config 的名字是 server 自己的事，改起來便宜。
+📎 這兩條記在這裡是因為它們**不是這支提案造成的**，但 `0x16` 一上線就會讓第一個名字真的說謊 ——
+所以實作那支順手修掉，🚫 不要再開一支「只改名字」的 PR。
 
 📎 **一則有多大**（照 [wbf-pack-pipeline.md](wbf-pack-pipeline.md) §1 的規矩，把記憶體算出來）：
 to-device 的一則**不是訊息事件**，是一小段 olm 密文 ——
