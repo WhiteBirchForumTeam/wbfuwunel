@@ -198,9 +198,22 @@ server 送完一窗不會卡在佇列上等 client 讀。Device 照同一個算�
 
 `wbf_data_max_bytes` 對所有 pack 一樣適用，**兩個上限哪個先滿就切在哪**。
 
-📎 **最壞情況的記憶體**（照 [wbf-pack-pipeline.md](wbf-pack-pipeline.md) §1 的規矩寫下來）：一條連線的佇列最多
-20 包 × 500 則 × 一則的大小。to-device 的一則是 olm 密文，實務上幾百 byte 到幾 KB，所以典型最壞是幾十 MB；
-理論上界仍是 `wbf_ws_send_queue_len` × `wbf_data_max_bytes`（跟其他 kind 同一條，不是這裡新增的風險）。
+📎 **一則有多大**（照 [wbf-pack-pipeline.md](wbf-pack-pipeline.md) §1 的規矩，把記憶體算出來）：
+to-device 的一則**不是訊息事件**，是一小段 olm 密文 ——
+`{ algorithm, sender_key, ciphertext: { <收件端 key>: { type, body } } }`，
+裡面最大的東西是 Megolm 的 session key（ratchet 四段 32 byte ＋ 簽章公鑰，raw 約 240 byte），
+olm 封裝再 base64 之後**一則大約 1 KB**；SAS 驗證與 `m.secret.send` 更小（幾百 byte）。
+
+| | 大小（估算） |
+|---|---|
+| 一則 | ~1 KB |
+| 一包（500 則） | ~0.5 MB |
+| 一窗（10000 則） | ~10 MB |
+
+⚠️ **這是估算，不是量測** —— 實作那支要量一次真實數據再回來改這裡。
+📎 一包 ~0.5 MB **遠低於 `wbf_data_max_bytes`（16 MiB）**，所以實際切包的是 500 這個則數；
+byte 上限仍然要接（規則只有一份，[wbf-wire-format.md](wbf-wire-format.md) §2.1 那條教訓），只是幾乎不會觸發。
+理論上界仍是 `wbf_ws_send_queue_len` × `wbf_data_max_bytes`，跟其他 kind 同一條，不是這裡新增的風險。
 🔲 這幾個數字**先這樣定**（維護者 2026-09-11），量過再調。
 
 ## 8. client 端會怎麼用（給讀 server 的人理解脈絡）
