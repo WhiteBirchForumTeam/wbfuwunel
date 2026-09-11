@@ -85,7 +85,7 @@ function Ids($packs) { @($packs | ForEach-Object { $_.events } | ForEach-Object 
 Log '################ Scenario 1: channels and Push ################'
 $db1 = "$S\e2e11db-1"; Remove-Item -Recurse -Force $db1 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db1 | Out-Null
 $cfg = Write-Config11 $db1
-$p = Start-Server $cfg 's1'
+$server = Start-Server $cfg 's1'
 $regA = Register 'alice'; $tokA = $regA.access_token
 $regB = Register 'bob'; $tokB = $regB.access_token
 $regC = Register 'carol'; $tokC = $regC.access_token
@@ -176,13 +176,13 @@ Check '[1.7b] Unsubscribe all -> Ack' ($u3.subtype -eq 2) (Describe $u3)
 $http = Send-Pack (Json-Pack 0x14 4 11 0 @{} $null) $tokA
 Check '[1.8] Subscribe over HTTP -> Error Unsupported' ($http.subtype -eq 3 -and $http.meta.code -eq 'Unsupported') (Describe $http)
 foreach ($w in @($wsSub, $wsNot, $wsLate, $wsNamed, $wsB)) { try { $w.Dispose() } catch {} }
-Stop-Server $p
+Stop-Server $server
 
 # ================= Scenario 2: backpressure: a reader that stops reading gets a gap, never blocks the sender =================
 Log '################ Scenario 2: gap under backpressure ################'
 $db2 = "$S\e2e11db-2"; Remove-Item -Recurse -Force $db2 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db2 | Out-Null
 $cfg2 = Write-Config11 $db2 4
-$p = Start-Server $cfg2 's2'
+$server = Start-Server $cfg2 's2'
 $regA = Register 'alice'; $tokA = $regA.access_token
 $regB = Register 'bob'; $tokB = $regB.access_token
 $r1 = Create-Room $tokA 'one'
@@ -223,8 +223,10 @@ $wsH = Ws-Open $tokA
 $unknownAnswers = 0
 try {
   for ($i = 0; $i -lt 9; $i++) {
-    $p = Call $wsH (New-Pack 0x7f 1 0 0 $i @() @())
-    if ($p.subtype -eq 3 -and $p.meta.code -eq 'UnknownKind' -and $p.meta.code_id -eq 1101) { $unknownAnswers++ }
+    # ⚠️ Not `$p`: at script scope that is the server's process handle, and overwriting it
+    # meant the run's last Stop-Server was handed a pack, read `.Id` as 0 and killed nothing.
+    $answer = Call $wsH (New-Pack 0x7f 1 0 0 $i @() @())
+    if ($answer.subtype -eq 3 -and $answer.meta.code -eq 'UnknownKind' -and $answer.meta.code_id -eq 1101) { $unknownAnswers++ }
   }
 } catch { Log "  (scenario 3: $($_.Exception.Message))" }
 Check '[3.1] nine packs with an unassigned kind -> UnknownKind each, the connection stays open' ($unknownAnswers -eq 9 -and $wsH.State -eq 'Open') "answered=$unknownAnswers state=$($wsH.State)"
@@ -246,7 +248,7 @@ for ($i = 0; $i -lt 8 -and $null -eq $closed -and $wsH.State -eq 'Open'; $i++) {
 if ($null -eq $closed) { $f = Recv-Or-Null $wsH 5000; if ($f -and $f.closed) { $closed = $f } }
 Check '[3.3] eight frames that do not decode -> Corrupt each, then the server closes the connection' ($null -ne $closed -and $errors -ge 7) "errors=$errors close=$($closed.code)"
 $wsH.Dispose()
-Stop-Server $p
+Stop-Server $server
 
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"
 

@@ -117,15 +117,26 @@ function Start-Server([string]$cfg, [string]$tag) {
 }
 # Stops the server and does not return until no server is left.
 #
-# ⚠️ Killing the handle we started is not enough on its own: 2026-09-11 a run wrote its last
-# line and left its server alive for eleven minutes, and a live server wedges everything after
-# it — it holds the port and the database, and its inherited handles keep the caller's
-# redirect open, so a run that finished looks exactly like a hang. The root cause of that one
-# kill not taking is not understood; sweeping by name until nothing answers is what makes it
-# deterministic. One script runs at a time here (README), so there is no other server to hit.
-function Stop-Server($p) {
+# ⚠️ 2026-09-11 a run wrote its last line and left its server alive for eleven minutes, and a
+# live server wedges everything after it — it holds the port and the database, and its
+# inherited handles keep the caller's redirect open, so a run that finished looks exactly like
+# a hang. The cause was found on 2026-09-12: e2e11 reused `$p` at script scope for a received
+# pack, so this function was handed a pack instead of the process. A pack has no `HasExited`
+# (so it read as still running) and its `.Id` was 0 — the kill went to the Idle process and
+# the server was never touched. The caller was fixed; the two guards below stay, because the
+# argument is the one thing this function cannot verify for the next caller.
+#
+# So: only ever kill something that really is a live process we were handed, and then sweep by
+# name until nothing is left. One script runs at a time here (README), so a tuwunel that is
+# still up after its own script asked it to stop is that script's, whoever holds the handle.
+function Stop-Server($serverProcess) {
 	Start-Sleep -Seconds 3
-	if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+	$isRealProcess = $serverProcess -is [System.Diagnostics.Process] -and $serverProcess.Id -gt 0
+	if ($isRealProcess -and -not $serverProcess.HasExited) {
+		Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
+	} elseif ($serverProcess -and -not $isRealProcess) {
+		Log "  !! Stop-Server was handed a $($serverProcess.GetType().Name), not a process — sweeping by name instead"
+	}
 	for ($i = 0; $i -lt 20; $i++) {
 		$alive = @(Get-Process -Name tuwunel -ErrorAction SilentlyContinue)
 		if ($alive.Count -eq 0) { break }
