@@ -9,7 +9,7 @@ use tuwunel_database::Database;
 
 pub(crate) use crate::OnceServices;
 use crate::{
-	channels::Channels,
+	streams::Streams,
 	connections::Connections,
 	account_data, admin, appservice, client, config, deactivate, emergency, federation, fetcher,
 	globals, key_backups,
@@ -80,7 +80,7 @@ pub struct Services {
 	/// Tasks that outlive their request (WebSockets); joined in `stop`.
 	pub connections: Connections,
 	/// Who listens to which room over a WebSocket, and the push to them.
-	pub channels: Channels,
+	pub streams: Arc<Streams>,
 	pub server: Arc<Server>,
 	pub db: Arc<Database>,
 }
@@ -150,7 +150,7 @@ pub async fn build(server: Arc<Server>) -> Result<Arc<Self>> {
 
 		manager: Mutex::new(None),
 		connections: Connections::new(),
-		channels: Channels::new(),
+		streams: Arc::new(Streams::new()),
 		server,
 		db,
 	});

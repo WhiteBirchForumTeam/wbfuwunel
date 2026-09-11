@@ -401,7 +401,7 @@ async fn handle_join(&self, room_id: &RoomId, user_id: &UserId, count: PduCount)
 
 	// The join hook of the wbf channels (docs/design/wbf-event-push.md 3):
 	// the user's account-wide subscribers start listening to this room.
-	self.services.channels.follow(user_id, room_id);
+	self.services.streams.follow(user_id, room_id);
 
 	Ok(())
 }
@@ -503,7 +503,7 @@ async fn handle_leave(&self, room_id: &RoomId, user_id: &UserId, count: PduCount
 
 	// The leave hook of the wbf channels: whether the user left, was kicked
 	// or banned, every one of their connections stops listening to the room.
-	self.services.channels.evict(user_id, room_id);
+	self.services.streams.evict(user_id, room_id);
 
 	if self.services.globals.user_is_local(user_id)
 		&& (self.services.config.forget_forced_upon_leave

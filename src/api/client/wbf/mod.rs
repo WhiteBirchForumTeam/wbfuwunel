@@ -32,7 +32,7 @@ use tuwunel_core::{
 };
 use tuwunel_service::{
 	Services,
-	channels::{ConnectionId, Outgoing},
+	streams::{ConnectionId, Outgoing},
 	connections::ConnectionSlot,
 	media::{UploadError, UploadRequest},
 };
@@ -78,7 +78,7 @@ mod event {
 	pub(super) const BATCH: u8 = 0x03;
 	pub(super) const SUBSCRIBE: u8 = 0x04;
 	pub(super) const UNSUBSCRIBE: u8 = 0x05;
-	// 0x06 Push is server to client only: `channels::EVENT_PUSH_SUBTYPE`.
+	// 0x06 Push is server to client only: `streams::EVENT_PUSH_SUBTYPE`.
 }
 
 /// # `POST /_wbf/v1/pack`

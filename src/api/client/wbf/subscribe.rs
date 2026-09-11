@@ -17,7 +17,7 @@ use tuwunel_core::{
 	matrix::pdu::PduCount,
 	wbf::{PackView, RejectCode},
 };
-use tuwunel_service::{Services, channels::PushedEvent};
+use tuwunel_service::{Services, streams::PushedEvent};
 
 use super::{Failure, PackContext, Reject, Reply, ack, recent};
 
@@ -75,7 +75,7 @@ pub(super) async fn handle_subscribe(
 
 	// Registered before the catch-up window is read (event-push 3): a join
 	// or an append during the read reaches the channel, at worst twice.
-	let subscribed = services.channels.subscribe(
+	let subscribed = services.streams.subscribe(
 		ctx.connection,
 		user,
 		queue,
@@ -91,7 +91,7 @@ pub(super) async fn handle_subscribe(
 	let left_since_the_check = list_rooms_no_longer_joined(services, user, &rooms).await;
 	if !left_since_the_check.is_empty() {
 		services
-			.channels
+			.streams
 			.unsubscribe(ctx.connection, &left_since_the_check);
 		skipped.extend(left_since_the_check.iter().cloned());
 	}
@@ -123,7 +123,7 @@ pub(super) async fn handle_subscribe(
 			.map(|event| PushedEvent { g_seq: event.g_seq, json: &event.json })
 			.collect();
 		services
-			.channels
+			.streams
 			.push_window(
 				ctx.connection,
 				&events,
@@ -148,8 +148,8 @@ pub(super) async fn handle_unsubscribe(
 ) -> Result<(), Failure> {
 	let meta: UnsubscribeMeta = parse_meta(view, "Unsubscribe")?;
 	match meta.rooms {
-		| Some(rooms) => services.channels.unsubscribe(ctx.connection, &rooms),
-		| None => services.channels.unsubscribe_all(ctx.connection),
+		| Some(rooms) => services.streams.unsubscribe(ctx.connection, &rooms),
+		| None => services.streams.unsubscribe_all(ctx.connection),
 	}
 
 	reply
