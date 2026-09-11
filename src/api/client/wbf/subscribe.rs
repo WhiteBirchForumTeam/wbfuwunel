@@ -19,7 +19,7 @@ use tuwunel_core::{
 };
 use tuwunel_service::{Services, streams::PushedEvent};
 
-use super::{Failure, PackContext, Reject, Reply, ack, recent};
+use super::{Failure, PackContext, Reject, Reply, ack, parse_meta, recent};
 
 #[derive(Default, Deserialize)]
 struct SubscribeMeta {
@@ -195,11 +195,4 @@ async fn joined_rooms(services: &Services, user: &UserId) -> Vec<OwnedRoomId> {
 		.map(ToOwned::to_owned)
 		.collect()
 		.await
-}
-
-fn parse_meta<T: Default + for<'de> Deserialize<'de>>(view: &PackView<'_>, what: &str) -> Result<T, Reject> {
-	if view.meta.is_empty() {
-		return Ok(T::default());
-	}
-	serde_json::from_slice(view.meta).map_err(|error| Reject::code(RejectCode::InvalidRequest, format!("{what} meta: {error}")))
 }

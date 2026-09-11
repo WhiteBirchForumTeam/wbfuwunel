@@ -24,6 +24,7 @@
 //! stored; a restart empties the registry and the safe direction is fewer
 //! pushes.
 
+mod devices;
 mod rooms;
 mod subscribers;
 
@@ -32,8 +33,11 @@ use std::sync::{
 	atomic::{AtomicU64, Ordering},
 };
 
-pub use self::rooms::{EVENT_PUSH_SUBTYPE, PushedEvent, Subscribed};
-use self::{rooms::RoomTopic, subscribers::Subscribers};
+pub use self::{
+	devices::{DEVICE_PUSH_SUBTYPE, DeviceSubscribeError, PushedItem},
+	rooms::{EVENT_PUSH_SUBTYPE, PushedEvent, Subscribed},
+};
+use self::{devices::DeviceTopic, rooms::RoomTopic, subscribers::Subscribers};
 
 /// One WebSocket connection, numbered at upgrade; unique for the life of the
 /// process, meaningless outside it.
@@ -53,6 +57,8 @@ pub struct Streams {
 	next_connection: AtomicU64,
 	/// The room channels (`0x14 Event`).
 	rooms: Subscribers<RoomTopic>,
+	/// The to-device queues (`0x16 Device`), at most one connection each.
+	devices: Subscribers<DeviceTopic>,
 }
 
 /// Leaves every stream when the connection's task ends, whichever way it
@@ -76,6 +82,7 @@ impl Streams {
 		Self {
 			next_connection: AtomicU64::new(1),
 			rooms: Subscribers::new(),
+			devices: Subscribers::new(),
 		}
 	}
 
@@ -93,8 +100,13 @@ impl Streams {
 		ConnectionGuard { streams: self.clone(), connection }
 	}
 
-	/// Takes `connection` out of every stream and forgets it.
-	pub fn remove_connection(&self, connection: ConnectionId) { self.rooms.remove_connection(connection); }
+	/// Takes `connection` out of **every** stream and forgets it. One place,
+	/// so a new stream cannot be added without its cleanup: the guard calls
+	/// only this.
+	pub fn remove_connection(&self, connection: ConnectionId) {
+		self.rooms.remove_connection(connection);
+		self.devices.remove_connection(connection);
+	}
 
 	/// Whether `connection` holds any subscription at all; for tests.
 	#[must_use]

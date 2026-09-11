@@ -3711,6 +3711,36 @@ pub struct Config {
 	#[serde(default = "default_wbf_recent_max_batch")]
 	pub wbf_recent_max_batch: usize,
 
+	/// How many to-device items one `Device/Fetch` answers with when the
+	/// request does not say. A device that fell behind asks again with the
+	/// last item's count, so this is a window, not a limit on the queue.
+	///
+	/// Sized the way `wbf_recent_default_limit` is: what has to fit the send
+	/// queue is the number of **packs** a window is cut into, so this is
+	/// `wbf_device_default_batch` times ten, and ten packs sit inside
+	/// `wbf_ws_send_queue_len` with room left for other replies.
+	///
+	/// default: 1000
+	#[serde(default = "default_wbf_device_fetch_default_limit")]
+	pub wbf_device_fetch_default_limit: usize,
+
+	/// Most to-device items one `Device/Fetch` may answer with; a larger
+	/// `limit` in the request is clamped to this.
+	///
+	/// default: 1000
+	#[serde(default = "default_wbf_device_fetch_max_limit")]
+	pub wbf_device_fetch_max_limit: usize,
+
+	/// How many to-device items one `Device/Batch` pack carries. Unlike
+	/// `Event/Recent`, the client does not choose: a to-device item is about
+	/// a kilobyte and nothing renders it one at a time, so these packs are
+	/// larger and fewer than a room window's. A pack is also cut at
+	/// `wbf_data_max_bytes`.
+	///
+	/// default: 100
+	#[serde(default = "default_wbf_device_default_batch")]
+	pub wbf_device_default_batch: usize,
+
 	/// Most events one `Event/Push` pack carries. A new event is pushed on
 	/// its own; this bounds the packs a `Subscribe` with `cg_seq` uses to
 	/// catch the client up. A pack is also cut at `wbf_data_max_bytes`.
@@ -5999,6 +6029,12 @@ fn default_wbf_recent_default_batch() -> usize { 10 }
 fn default_wbf_recent_max_batch() -> usize { 100 }
 
 fn default_wbf_push_max_events_per_pack() -> usize { 10 }
+
+fn default_wbf_device_fetch_default_limit() -> usize { 1000 }
+
+fn default_wbf_device_fetch_max_limit() -> usize { 1000 }
+
+fn default_wbf_device_default_batch() -> usize { 100 }
 
 fn default_media_storage_providers() -> BTreeSet<String> { ["media".to_owned()].into() }
 

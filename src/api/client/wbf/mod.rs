@@ -37,6 +37,7 @@ use tuwunel_service::{
 	media::{UploadError, UploadRequest},
 };
 
+mod device;
 mod recent;
 mod send;
 mod session;
@@ -431,6 +432,13 @@ const fn admission(kind: Kind, subtype: u8) -> Option<Admission> {
 		| (Kind::Event, event::RECENT) => Some(logged_in_websocket_only),
 		// They change what a connection listens to: WebSocket only.
 		| (Kind::Event, event::SUBSCRIBE | event::UNSUBSCRIBE) => Some(logged_in_websocket_only),
+		// The to-device queue is a connection's to hold, and destroying from
+		// it is only allowed to the connection holding it: WebSocket only,
+		// `Fetch` included (its reply is a stream of `Batch` packs).
+		| (
+			Kind::Device,
+			device::FETCH | device::ITEMS_DESTROY | device::SUBSCRIBE | device::UNSUBSCRIBE,
+		) => Some(logged_in_websocket_only),
 		| _ => None,
 	}
 }
@@ -538,6 +546,22 @@ async fn dispatch(
 		},
 		| (Kind::Event, event::UNSUBSCRIBE) => {
 			subscribe::handle_unsubscribe(services, ctx, view, reply).await?;
+			Ok(SessionChange::Keep)
+		},
+		| (Kind::Device, device::SUBSCRIBE) => {
+			device::handle_device_subscribe(services, ctx, view, reply).await?;
+			Ok(SessionChange::Keep)
+		},
+		| (Kind::Device, device::UNSUBSCRIBE) => {
+			device::handle_device_unsubscribe(services, ctx, view, reply).await?;
+			Ok(SessionChange::Keep)
+		},
+		| (Kind::Device, device::FETCH) => {
+			device::handle_device_fetch(services, ctx, view, reply).await?;
+			Ok(SessionChange::Keep)
+		},
+		| (Kind::Device, device::ITEMS_DESTROY) => {
+			device::handle_device_items_destroy(services, ctx, view, reply).await?;
 			Ok(SessionChange::Keep)
 		},
 		| _ => {
@@ -856,6 +880,24 @@ fn pong(view: &PackView<'_>) -> Vec<u8> {
 }
 
 /// An `Ack` answering `(id, seq)` with `meta` and, for reads, `data`.
+/// The meta of a request that carries one, decoded into that subtype's own
+/// type.
+///
+/// Args:
+///     view: the request
+///     what: the subtype's name for the error message, example: "Subscribe"
+/// Return:
+///     Result<T, Reject>  `T::default()` for an empty meta (a request that
+///     takes only defaults may send none); `InvalidRequest` when the bytes
+///     are not what this subtype takes.
+fn parse_meta<T: Default + for<'de> serde::Deserialize<'de>>(view: &PackView<'_>, what: &str) -> Result<T, Reject> {
+	if view.meta.is_empty() {
+		return Ok(T::default());
+	}
+	serde_json::from_slice(view.meta)
+		.map_err(|error| Reject::code(RejectCode::InvalidRequest, format!("{what} meta: {error}")))
+}
+
 fn ack(id: u64, seq: u32, meta: Value, data: Vec<u8>) -> Vec<u8> {
 	PackBuilder::new(Kind::Control, control::ACK, Flags::IS_RESPONSE, id, seq)
 		.json_meta(&meta)

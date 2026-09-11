@@ -26,6 +26,10 @@ fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{b:02x}")).collec
 
 /// The data section of an `Event/Batch` or `Event/Push`: the crate's own
 /// encoder, so the vectors and the server cannot disagree on the prefix.
+/// One to-device item as it is stored and served: an olm-encrypted envelope,
+/// about a kilobyte in the real world and trimmed here.
+const OLM_ITEM: &[u8] = br#"{"content":{"algorithm":"m.olm.v1.curve25519-aes-sha2","ciphertext":{"IlRMeOPX2e0MurIyfWEucYBRVOEEUMrOHqn/8mLqMjA":{"body":"AwogGJJzMhf4gw1bCCpMjmlAiIkNjOWRKvBRYJRQ4qNHBRQ","type":0}},"sender_key":"X3lUlvLELLYxeTx4yOVu6UDpasGEVO0Jbu+QFnm0cKQ"},"sender":"@a:localhost","type":"m.room.encrypted"}"#;
+
 fn length_prefixed(events: &[&[u8]]) -> Vec<u8> {
 	super::events::length_prefixed(events.iter().copied()).expect("vector events are small")
 }
@@ -127,6 +131,21 @@ fn current() -> Value {
 			// layout is Batch's. gap=true says a push was dropped before this one.
 			pack("push_one", Kind::Event, 0x06, Flags::IS_RESPONSE, 20, 0, br#"{"bc":1,"fs":4712,"gap":false,"ls":4712}"#, &length_prefixed(&[br#"{"content":{"body":"b","msgtype":"m.text"},"event_id":"$b:localhost","origin_server_ts":2,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":1,"org.wbftw.wbfuwunel.g_seq":4712,"org.wbftw.wbfuwunel.r_seq":2}}"#])),
 			pack("push_gap", Kind::Event, 0x06, Flags::IS_RESPONSE, 20, 3, br#"{"bc":1,"fs":4720,"gap":true,"ls":4720}"#, &length_prefixed(&[br#"{"content":{"body":"c","msgtype":"m.text"},"event_id":"$c:localhost","origin_server_ts":3,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":1,"org.wbftw.wbfuwunel.g_seq":4720,"org.wbftw.wbfuwunel.r_seq":3}}"#])),
+			// 0x16 Device: the to-device queue. Oldest first, so `ot` is the first
+			// item in the pack and `nt` the last — the mirror of Event's `fs`/`ls`,
+			// with different names so the two cannot be read as the same thing.
+			// `counts` is one position per item: to-device items are not PDUs and
+			// have nowhere of their own to carry it.
+			pack("device_subscribe", Kind::Device, 0x04, Flags::default(), 30, 0, br#"{"cd_seq":4711,"device_id":"RJYKSTBOIE"}"#, b""),
+			pack("ack_device_subscribe", Kind::Control, 0x02, Flags::IS_RESPONSE, 30, 0, br#"{"latest_cd_seq":4730}"#, b""),
+			pack("device_fetch", Kind::Device, 0x01, Flags::default(), 31, 0, br#"{"cd_seq":4711,"limit":1000}"#, b""),
+			pack("device_batch", Kind::Device, 0x02, Flags::IS_RESPONSE, 31, 0, br#"{"bc":1,"counts":[4712],"nt":4712,"ot":4712,"r":0,"tc":1}"#, &length_prefixed(&[OLM_ITEM])),
+			pack("device_push", Kind::Device, 0x06, Flags::IS_RESPONSE, 30, 0, br#"{"bc":1,"counts":[4713],"gap":false,"nt":4713,"ot":4713}"#, &length_prefixed(&[OLM_ITEM])),
+			// The destroy command and its result carry counts as raw big-endian
+			// u64s, eight bytes each with no separator: a separator byte would
+			// also occur inside a count.
+			pack("device_items_destroy", Kind::Device, 0x03, Flags::default(), 32, 0, br#"{"tc":2}"#, &[0, 0, 0, 0, 0, 0, 18, 104, 0, 0, 0, 0, 0, 0, 18, 105]),
+			pack("device_items_destroyed", Kind::Device, 0x07, Flags::IS_RESPONSE, 32, 0, br#"{"bc":2,"tc":2}"#, &[0, 0, 0, 0, 0, 0, 18, 104, 0, 0, 0, 0, 0, 0, 18, 105]),
 			pack("send_encrypted_with_attachments", Kind::Event, 0x02, Flags::default(), 0, 13, br#"{"room_id":"!r:localhost","type":"m.room.encrypted","txn_id":"t1","attachments":["mxc://localhost/1122334455667788"]}"#, br#"{"algorithm":"m.megolm.v1.aes-sha2","ciphertext":"AwgAEnACgAkLmt6qF84IK++J7UDH2Za1YVchHyprqTqsg","device_id":"RJYKSTBOIE","sender_key":"IlRMeOPX2e0MurIyfWEucYBRVOEEUMrOHqn/8mLqMjA","session_id":"X3lUlvLELLYxeTx4yOVu6UDpasGEVO0Jbu+QFnm0cKQ"}"#),
 			pack("ack_send", Kind::Control, 0x02, Flags::IS_RESPONSE, 0, 13, br#"{"event_id":"$Zm9vYmFy:localhost"}"#, b""),
 			pack("login_password", Kind::Session, 0x01, Flags::default(), 0, 14, br#"{"type":"m.login.password","identifier":{"type":"m.id.user","user":"alice"},"password":"correct-horse-battery","initial_device_display_name":"wbf desktop","refresh_token":true}"#, b""),
