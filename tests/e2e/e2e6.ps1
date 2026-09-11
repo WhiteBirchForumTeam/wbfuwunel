@@ -315,3 +315,7 @@ $r = Send-Pack (Json-Pack 4 2 0 13 @{ mxc = $mxc8; pos = (3*16384 + 1) } @()) $t
 Log "[5.10] Read pos=3*16384+1 -> $(Describe $r) identical=$([Linq.Enumerable]::SequenceEqual([byte[]]$r.data, [byte[]]$file8[49200..54199]))  (expect chunk=3 len=5000, True)"
 Stop-Server $p
 Log ''; Log 'DONE'
+
+# Leave on purpose: a pending ReceiveAsync or an undisposed socket can keep this process alive
+# long after DONE is written, which makes a finished run look like a hang.
+exit 0
