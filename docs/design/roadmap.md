@@ -6,7 +6,7 @@
 > 狀態標記：✅ 已合併 · 🔧 進行中 · 📄 有提案待同意 · 🔲 下一步 · 💭 候選（還沒決定要不要做）· 🚫 明確不做。
 > 每一項改狀態時順手改這裡；這裡的狀態如果跟 [`CHANGELOG-fork.md`](../../CHANGELOG-fork.md) 對不上，以 CHANGELOG 為準。
 >
-> 最後更新：2026-09-07（PR #30 合併後）。下一步：§2.6 的 `media/upload-lifecycle`，等維護者的 checklist。
+> 最後更新：2026-09-10（PR #36 與 #37 合併後）。下一步：§2.9 的工作 3 Draft Message；§2.6 的 `media/upload-lifecycle` 仍等維護者的 checklist。
 
 ## 0. 目標，一句話
 
@@ -99,12 +99,27 @@ Logout 後直接關線；同一條連線重複 Login 允許；**登入限速預�
 第一部分（§1–§6）已合併；三處跟提案不同（名額在發 token 前拿、一趟收齊一窗、一問一答 handler 保留簽名）在文件裡標 📎。
 **第二部分**（§8：review-followups §2.5 → §2.2 → §2.8，上傳生命週期）🔲 未開，順序與同支／另開由維護者定。client 端要跟的東西：wbf-matrix-client #15。
 
-### 2.9 📄 WS 訂閱與推送 ＋ 流式訊息第三版（草案 [wbf-event-push.md](wbf-event-push.md)、[streaming-messages.md](streaming-messages.md)，2026-09-08）
+### 2.9 🔧 WS 訂閱與推送（工作 2 ✅ PR #36，2026-09-10 合併）＋ Draft Message（工作 3 🔲 下一步）
 
 維護者 2026-09-08 定方向：先做重點功能，`media/upload-lifecycle` 晚點。三件工作：(1) 一般訊息走 WS——已是 `Event/Send`；(2) 連線訂閱自己的帳號，
-在的任何房間的新事件推過來——`Event/Subscribe`／`Unsubscribe`／`Push`，接在 `append_pdu` 提交後，registry `user → 連線`，`try_send` 掉了記 `gap` 用 `Recent` 補；
+在的任何房間的新事件推過來——`Event/Subscribe`／`Unsubscribe`／`Push`，接在 `append_pdu` 提交後，`try_send` 掉了記 `gap` 用 `Recent` 補；
 (3) Draft Message 坐在 channel 上——`Draft` 寫一則明文佔位事件當錨、`draft_id = g_seq`；`Keypoint`（≤ 8 KiB 明文，整個 buffer 換掉）／`Delta`／`Append` 只廣播不進庫，長文字 = Keypoint ＋ Append，沒有 Chunk；`Demand` 向作者要全文；`Abandon` = redact 佔位；收尾是 client 自己 `Abandon` 再送一則正常訊息，server 不做多餘的事；server 零記憶體狀態，每片從錨點讀驗作者。
 第二、三版草案作廢。
+
+**工作 2 已合併（PR #36）**：`service/channels`、`Event/Subscribe`／`Unsubscribe`／`Push`、`append_pdu` 與 `state_cache` 兩個 hook。
+⚠️ 提案寫的 registry 是 `user → 連線`，實作定案是 **`connection_id` → 訂閱者**（訂閱者是連線，不是使用者也不是裝置）；channel 是 DB 成員資格的記憶體投影。
+client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
+🔲 **還沒做的**：`Subscribe{rooms, cg_seq}` 的補窗是**全域**的（`collect_window` 不分房），server 端依 `rooms` 過濾是另一個提案；
+目前靠 §2.1 要求 client 不拿非訂閱房的事件推進水位（審查者 rumia R4）。
+
+**工作 3 Draft Message 🔲 下一步**：照 [streaming-messages.md](streaming-messages.md) §3–§8（`Stream` kind、server 零狀態、每片從佔位事件點讀驗作者、`wbf_draft_max_room_members`）。
+
+### 2.10 🔧 錯誤詞表：`code_id` ＋ `RejectCode` ＋ 連線健康計數器（文件 ✅ PR #37，實作 PR #38 進行中）
+
+維護者 2026-09-10 指定，起因是 PR #36 審查指出 `parse_meta` 失敗回 `Conflict` 語意不準。三條規則：**code 一律事先定義**（先在表上加一列才能發）、
+**每個 code 有序號**（`code_id`，1000 起、家族分段、`0` 永遠不合法、不重用）、**client 不認得的 code 就當「失敗且不知道能不能重試」**（不重試、往上報）。
+連帶把「連兩次壞就關線」換成**連線健康計數器**（解不開的框 −1、解得開的 pack 歸零、到 `wbf_ws_corrupt_budget`（8）Close 1002）——📎 舊那條**從來沒被實作過**。
+表與規則在 [wbf-wire-format.md](wbf-wire-format.md) §2.1／§3.4。⚠️ 歸位（格式錯的請求 `Conflict`／`Corrupt` → `InvalidRequest`）與 `code_id` 是**線上看得見的改動**，client 要跟。
 
 ## 3. 候選（要不要做，由維護者決定）
 

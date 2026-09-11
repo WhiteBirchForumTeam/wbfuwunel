@@ -45,14 +45,14 @@ use futures::{SinkExt, StreamExt};
 use tokio::{sync::mpsc, time::Instant};
 use tuwunel_core::{
 	debug,
-	wbf::{HEADER_LEN, PackError, decode},
+	wbf::{HEADER_LEN, PackError, RejectCode, decode},
 };
 
 use tuwunel_service::channels::{ConnectionId, Outgoing};
 
 use super::{
 	CloseReason, PackContext, Reply, Session, SessionChange, Transport, authenticate, error_pack, handle_pack,
-	header_id_seq, pack_error_code, pack_response, reserve_connection_slot, revalidate,
+	header_id_seq, pack_response, reserve_connection_slot, revalidate,
 };
 use crate::ClientIp;
 
@@ -84,7 +84,7 @@ pub(crate) async fn ws_route(
 	// Checked before the token lookup: a stopping server owes nobody a
 	// database read.
 	if !services.server.is_running() {
-		let reply = error_pack(0, 0, "Internal", "server is shutting down");
+		let reply = error_pack(0, 0, RejectCode::Internal, "server is shutting down");
 		return pack_response(StatusCode::SERVICE_UNAVAILABLE, reply);
 	}
 
@@ -94,7 +94,7 @@ pub(crate) async fn ws_route(
 		let mut session = match authenticate(&services, &headers).await {
 			| Ok(session) => session,
 			| Err(error) => {
-				let reply = error_pack(0, 0, "Unauthorized", &error.to_string());
+				let reply = error_pack(0, 0, RejectCode::Unauthorized, &error.to_string());
 				return pack_response(StatusCode::UNAUTHORIZED, reply);
 			},
 		};
@@ -173,6 +173,7 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 	let (queue, outgoing) = mpsc::channel::<Outgoing>(services.config.wbf_ws_send_queue_len.max(1));
 	let mut send_task = tokio::spawn(send_queued(sink, outgoing));
 	let mut reply = Reply::for_websocket(queue.clone());
+	let mut health = FrameHealth::new(services.config.wbf_ws_corrupt_budget);
 
 	// One subscription for the life of the connection, polled from every
 	// turn of the loop, rather than a fresh one per message.
@@ -211,8 +212,13 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 			// Control frames are answered by the WebSocket layer itself.
 			| Ok(Message::Ping(_) | Message::Pong(_)) => continue,
 			| Ok(Message::Text(_)) => {
-				let refused = error_pack(0, 0, "Corrupt", "text frames are not packs; send one pack per binary frame");
+				let refused = error_pack(0, 0, RejectCode::Corrupt, "text frames are not packs; send one pack per binary frame");
 				if queue.send(Outgoing::Pack(refused)).await.is_err() {
+					break;
+				}
+				health.record_undecodable_frame();
+				if health.is_spent() {
+					enqueue_close(&queue, close(close_code::PROTOCOL, "too many frames that are not packs")).await;
 					break;
 				}
 				continue;
@@ -233,7 +239,7 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 			// Header fields read without any CRC check: they only address the
 			// refusal, they decide nothing.
 			let (id, seq) = header_id_seq(&bytes);
-			let refused = error_pack(id, seq, "Unauthorized", &error.to_string());
+			let refused = error_pack(id, seq, RejectCode::Unauthorized, &error.to_string());
 			if queue.try_send(Outgoing::Pack(refused)).is_err() {
 				// A full queue means a peer that is not reading; the close
 				// frame matters more than the explanation.
@@ -251,13 +257,29 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 					| PackError::DataCrc { .. } => header_id_seq(&bytes),
 					| _ => (0, 0),
 				};
-				let refused = error_pack(id, seq, pack_error_code(error), &error.to_string());
+				let refused = error_pack(id, seq, RejectCode::for_pack_error(&error), &error.to_string());
 				if queue.send(Outgoing::Pack(refused)).await.is_err() {
 					break;
+				}
+				// A peer whose frames stop decoding is not speaking this
+				// protocol (wire-format §2.1); one bad frame is not worth a
+				// reconnect, a run of them is all this connection is doing.
+				// Not every refusal from `decode` is that: a pack whose kind
+				// byte is simply unassigned is framed perfectly, and its
+				// sender is speaking wbf. The code decides, in one place.
+				if RejectCode::for_pack_error(&error).is_undecodable_frame() {
+					health.record_undecodable_frame();
+					if health.is_spent() {
+						enqueue_close(&queue, close(close_code::PROTOCOL, "too many packs that do not decode")).await;
+						break;
+					}
+				} else {
+					health.record_decoded_pack();
 				}
 				continue;
 			},
 		};
+		health.record_decoded_pack();
 
 		let ctx = PackContext { session: session.as_ref(), client, transport: Transport::WebSocket, connection };
 		let change = match handle_pack(&services, &ctx, view, &mut reply).await {
@@ -338,6 +360,39 @@ async fn send_queued(mut sink: futures::stream::SplitSink<WebSocket, Message>, m
 
 fn close(code: u16, reason: &'static str) -> Outgoing { Outgoing::Close { code, reason } }
 
+/// How much unreadable input a connection may send before it is closed
+/// (wire-format §2.1).
+///
+/// Only the frame counts. A pack that decodes clears the score even when its
+/// handler then refuses it: a peer whose packs decode does speak this
+/// protocol, and what it asks for is the handler's business. What this
+/// watches for is the other thing — a peer that is not speaking wbf at all,
+/// or an encoder with a bug — and there the frames do not decode, one after
+/// another, until the budget is gone.
+///
+/// The specification counts down from zero to `-budget`; counting the
+/// unreadable frames up to `budget` is the same rule, and reads better here.
+struct FrameHealth {
+	budget: u32,
+	undecodable_in_a_row: u32,
+}
+
+impl FrameHealth {
+	/// Args:
+	///     budget: `wbf_ws_corrupt_budget`, example: 8 (0 is read as 1, so
+	///         the connection still gets one frame before it is closed)
+	const fn new(budget: u32) -> Self { Self { budget: if budget == 0 { 1 } else { budget }, undecodable_in_a_row: 0 } }
+
+	fn record_undecodable_frame(&mut self) { self.undecodable_in_a_row = self.undecodable_in_a_row.saturating_add(1); }
+
+	fn record_decoded_pack(&mut self) { self.undecodable_in_a_row = 0; }
+
+	/// Return:
+	///     bool  true once the budget is gone and the connection is to be
+	///     closed with 1002; false while it may still send more.
+	const fn is_spent(&self) -> bool { self.undecodable_in_a_row >= self.budget }
+}
+
 /// Queues the close frame, waiting at most `DRAIN_TIMEOUT` for room. A peer
 /// that has stopped reading keeps the queue full; then the frame is not worth
 /// waiting for: the receive loop ends, the drain below times out too, and the
@@ -356,4 +411,49 @@ async fn enqueue_close(queue: &mpsc::Sender<Outgoing>, frame: Outgoing) {
 /// Who a connection is, for its log lines.
 fn user_label(session: Option<&Session>) -> &str {
 	session.map_or("(not logged in)", |session| session.user.as_str())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::FrameHealth;
+
+	#[test]
+	fn a_run_of_undecodable_frames_spends_the_budget() {
+		let mut health = FrameHealth::new(8);
+
+		for _ in 0..7 {
+			health.record_undecodable_frame();
+			assert!(!health.is_spent(), "seven in a row is still inside the budget");
+		}
+		health.record_undecodable_frame();
+
+		assert!(health.is_spent(), "the eighth closes the connection");
+	}
+
+	#[test]
+	fn one_pack_that_decodes_clears_the_score() {
+		let mut health = FrameHealth::new(8);
+		for _ in 0..7 {
+			health.record_undecodable_frame();
+		}
+
+		// The handler may well refuse this pack; that is not this counter's
+		// business. It decoded, so the peer speaks the protocol.
+		health.record_decoded_pack();
+		for _ in 0..7 {
+			health.record_undecodable_frame();
+		}
+
+		assert!(!health.is_spent(), "the budget started over");
+	}
+
+	#[test]
+	fn a_budget_of_zero_still_allows_one_frame() {
+		let mut health = FrameHealth::new(0);
+		assert!(!health.is_spent(), "nothing has gone wrong yet");
+
+		health.record_undecodable_frame();
+
+		assert!(health.is_spent());
+	}
 }

@@ -76,13 +76,18 @@ offset  size  欄位          說明
 
 | 收到什麼 | 計數器 |
 |---|---|
-| **解不開的框**：CRC 不合、`version` 不對、保留旗標非 0、長度對不上、文字 frame | **−1** |
+| **解不開的框**：CRC 不合、`version` 不對、保留旗標非 0、長度對不上、文字 frame（即 `Corrupt` 與 `UnsupportedVersion`） | **−1** |
 | **解得開的 pack** | **歸零** |
+| ⚠️ **`decode` 拒掉、但框本身是好的**：kind 位未分配（`UnknownKind`）、區段長度超上限（`TooLarge`） | **歸零**（跟解得開的 pack 同一邊） |
 
 `counter ≤ −wbf_ws_corrupt_budget`（預設 **8**）→ 送完最後那個 `Error` 之後 Close **1002**（protocol error）關線。
 
 - ⭐ **只有「框」的錯扣分。** pack 解得開就歸零 —— 即使 handler 之後回 `InvalidRequest`、`Unauthorized`、`NotFound`：
   那些代表對方**看得懂這個協議**，只是這一個請求不對。計數器量的是「你會不會講這個協議」，不是「你有沒有做錯事」。
+- ⚠️ **「被 `decode` 拒掉」不等於「框壞了」**：`decode` 是先讀 kind 位再驗 CRC（`pack.rs`），
+  所以一個**結構完好、CRC 正確、只是 kind 未分配**的 pack 也會從 `decode` 出來帶著錯。它的發信方**會講 wbf**，
+  扣它的分等於把一個正常的 client 送了八個新 kind 就關掉。⭐ **實作上一律拿 `RejectCode::for_pack_error(&error).is_undecodable_frame()` 當閘門**，
+  不要在計數點再寫一份「哪些算框錯」的列表（審查者 cirno／ rumia／salvia 2026-09-10：PR #38 的第一版就是漏了這道閘門）。
 - 📎 **為什麼是 8 而不是 2**：連續 8 個解不開的框，實務上只有兩種可能 —— **對面根本不是在講 wbf**（協議錯、當成別的東西連進來），
   或者**某一端的編碼有 bug**。正常的 client 認得協議，除非自己壞掉，否則一輩子碰不到這個門檻。
   2 太嚴苛：一個偶發的壞框（見上面那張表的明文那一跳）就把一條好好的連線踢掉，而重連付的代價比那個壞框大得多。
@@ -90,7 +95,8 @@ offset  size  欄位          說明
   有人用「7 個壞、1 個好」的節奏繞過它，換到的也只是「每個壞框換一個 `Error` 回應」—— 那是**限速**該管的事（§6.3.4），不是這裡。
   🚫 不要把兩件事塞進同一個計數器：一個變數同時管兩種閾值，兩邊都會調不準。
 - **HTTP 路徑沒有這個計數器**：一個請求一個 pack、沒有連線可關，壞框就回一個 `Error`（§6.2）。
-- ⏳ **未實作**：`ws.rs` 目前不數。實作連同 §3.4 的 `RejectCode` 一起做，測試要有「8 個壞框關線」與「中間夾一個好 pack 就不關」兩條。
+- ✅ **實作到位**：`ws.rs` 的 `FrameHealth`（計的是「連續幾個解不開的框」，跟上面的負數計法等價：連續 8 次 ⇔ 計數器到 −8），
+  旋鈕是 `wbf_ws_corrupt_budget`。測試：「8 個壞框關線」、「中間夾一個好 pack 就重新算」、「預算 0 也至少給一個框」。
 
 ## 3. kind、subtype、meta
 
@@ -166,10 +172,9 @@ offset  size  欄位          說明
 `code` 是**給程式讀的**：client 照它決定重試、重登、還是放棄。`message` 是給人讀的，措辭隨時會變，
 🚫 **client 不要 parse `message`**。這張表是唯一的來源。
 
-⏳ **狀態（2026-09-10）**：表是定的，**程式還沒跟上** —— 現在 `Reject::code` 收的是自由字串（`&'static str`），
-所以 code 是在呼叫點現寫的；`code_id` 還沒上線，`InvalidRequest` 也還沒有人發。實作要做四件事：把那個字串換成一個列舉（`RejectCode`），
-讓呼叫點**沒辦法**發明新字；每個 `Error` 的 meta 加上 `code_id`；照下面的分界把現有的 code 歸位；以及 §2.1 的連線健康計數器。
-⭐ 那個列舉就是這張表的閘門 —— 沒有它，表跟程式一定會漂（今天就是這樣漂的）。
+✅ **實作到位（2026-09-10）**：`RejectCode`（`src/core/wbf/error_code.rs`）是這張表在程式裡的投影 ——
+`Reject::code` 只收它的變體，呼叫點**沒辦法**再現編一個字串；每個 `Error` 的 meta 帶 `code_id` 與 `code`。
+⭐ 那個列舉就是這張表的閘門 —— 沒有它的那段日子，`Conflict` 就長到了十一個呼叫點。
 
 每個 code 有一個**序號**（`code_id`）和一個**名字**（`code`），兩個都在線上，一對一，**都不重用**（維護者 2026-09-10 定）。
 序號是給程式比對的（不必比字串、看範圍就知道是哪一家），名字是給人看 log 與向量檔的。
@@ -178,7 +183,7 @@ offset  size  欄位          說明
 |---|---|---|---|---|---|
 | 1001 | `UnsupportedVersion` | pack 的版本位不是這個 server 支援的 | pack 解碼 | | 升級 client；重試沒有用（這個跟 `Corrupt` 一樣扣 §2.1 的計數器） |
 | 1002 | `Corrupt` | **這個 pack 解不開**：CRC 對不上、被截斷、保留旗標有值、送的是文字 frame | pack 解碼 | | 重連**一次**就好；再來一次就是編碼端的 bug（實務上多半是，見 §2 的 📎），往上報，🚫 不要一直重連 |
-| 1101 | `UnknownKind` | 這個 `(kind, subtype)` 沒有 handler | 准入表 | | 這個 server 不會做這件事；別重試 |
+| 1101 | `UnknownKind` | 這個 `(kind, subtype)` 沒有 handler | pack 解碼（kind 位未分配）或准入表（subtype 沒 handler） | | 這個 server 不會做這件事；別重試。📎 兩條路都**不**扣 §2.1 的計數器 —— 框是好的 |
 | 1102 | `Unsupported` | 有 handler，但**不走這個傳輸**（例：`Recent`／`Subscribe`／`Session` 只走 WS） | 准入表 | | 換傳輸（開 WS），不是重試 |
 | 1103 | `TooLarge` | 超過 `wbf_meta_max_bytes`／`wbf_data_max_bytes`，或上傳宣告的大小上限 | 准入表、上傳 | | 切小再送 |
 | 1201 | `InvalidRequest` | pack 解得開，但 **meta／data 不是這個 subtype 要的**：JSON 壞、型別錯、缺欄位、值超出範圍、mxc 解不出來 | 各 handler | | client 的 bug；照 `message` 修，重送同樣的東西一定再錯 |
@@ -233,9 +238,9 @@ offset  size  欄位          說明
 兩個都在說謊 —— 一個把 client 的格式錯講成狀態衝突，一個把它講成傳輸壞掉，而 client 對這三種的處置**完全不同**。
 👉 這是 wbf 通道上**看得見的改動**，client 端要跟（見 wbf-matrix-client 的協議同步）。
 
-**要歸位的呼叫點**（實作那支照這張清單走，改完這裡的 ⏳ 一起拿掉）：
+**歸位過的呼叫點**（✅ 都已改，留著這張表是為了下一個問「這條為什麼是這個碼」的人）：
 
-| 現在 | 之後 | 哪裡 |
+| 本來 | 現在 | 哪裡 |
 |---|---|---|
 | `Conflict` | `InvalidRequest` | `parse_meta`（`Subscribe`／`Unsubscribe` 等所有走它的）、`Event/Send` 的 meta 與 data、`Recent` 的 `cg_seq`／`before` 型別與範圍、`Upload/Create` 的 `EncryptedFileInfo` 解碼、`invalid mxc`（兩處）、`chunk index too large`、`position too large`、`mxc is required` |
 | `Corrupt` | `InvalidRequest` | `Session` 的 `Login`／`Refresh`／`Logout` meta 形狀不對（`session.rs` 三處）——**pack 沒壞，是內容不對** |
@@ -243,12 +248,14 @@ offset  size  欄位          說明
 | `Conflict` | 不動 | `UploadError::Conflict`（上傳狀態衝突）——這是這個 code 收窄後**唯一**該留的用法 |
 | `Corrupt` | 不動 | pack 解碼失敗、文字 frame（`ws.rs`）——框壞了 |
 
-⚠️ 實作那支要一起補的測試：**每個 code 至少一條**「這個情境回這個 code」的斷言，加上一條「序號與名字一對一、沒有重複」的表格測試，
-否則下一次歸位又會靠人眼。
+✅ **測試**：`error_code.rs` 有「序號與名字一對一、沒有重複」與「沒有一個序號小到會跟預設值撞」兩條表格測試；
+`mod.rs` 有「解不開的 pack 是 `Corrupt`、格式錯的請求是 `InvalidRequest`」的分界斷言；e2e8／e2e9 各有一條線上實測。
+⚠️ **不是每個 code 都有專屬的情境斷言**（`UnsupportedVersion`、`Truncated`、`Internal` 沒有）——
+這裡本來寫著「每個 code 至少一條」，那句話當時就寫得比做得到的滿；缺口留著，不要把它讀成已經蓋滿。
 
-⚠️ **向量檔會整批變動**：`code_id` 一加，現有的 `error_rate_limited`／`error_out_of_order`／`error_too_many_connections`／
-`error_unsupported` 的 meta bytes 全部改寫（`wbf-vectors.json` 要重生），`InvalidRequest` 也要加一個。
-👉 這是 client 端**必須同步**的那一刻：舊 client 讀新向量會對不上，而它讀不到 `code_id` 時的行為就是上面那條「不認得就不認得」。
+✅ **向量檔已整批重生**：`error_rate_limited`／`error_out_of_order`／`error_unsupported`／`error_too_many_connections`
+的 meta 都多了 `code_id`，並新增 `error_invalid_request`。
+👉 這就是 client 端**必須同步**的那一刻：舊 client 讀新向量會對不上，而它讀不到 `code_id` 時的行為就是上面那條「不認得就不認得」。
 
 ## 4. 順序守則：依 kind 分兩類
 

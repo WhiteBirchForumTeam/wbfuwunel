@@ -25,7 +25,10 @@ use ruma::api::{
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use tuwunel_core::{Error, debug, wbf::PackView};
+use tuwunel_core::{
+	Error, debug,
+	wbf::{PackView, RejectCode},
+};
 use tuwunel_service::Services;
 
 use tuwunel_service::connections::ConnectionSlot;
@@ -58,7 +61,7 @@ pub(super) async fn handle(
 		| LOGIN => login(services, ctx, view, reply).await,
 		| REFRESH => refresh(services, ctx, view, reply).await,
 		| LOGOUT => logout(services, ctx.session, view, reply).await,
-		| _ => Err(Reject::code("UnknownKind", "no such Session operation").into()),
+		| _ => Err(Reject::code(RejectCode::UnknownKind, "no such Session operation").into()),
 	}
 }
 
@@ -87,7 +90,7 @@ async fn login(services: &Services, ctx: &PackContext<'_>, view: &PackView<'_>, 
 				.map_err(refuse_login)?,
 		| _ =>
 			return Err(Reject::code(
-				"Forbidden",
+				RejectCode::Forbidden,
 				"only m.login.password and m.login.token are accepted on the channel; other flows use HTTP /login",
 			)
 			.into()),
@@ -179,7 +182,7 @@ async fn refresh(services: &Services, ctx: &PackContext<'_>, view: &PackView<'_>
 		.map_err(refuse_login)?;
 
 	let meta: RefreshMeta = serde_json::from_slice(view.meta)
-		.map_err(|e| Reject::code("Corrupt", format!("Refresh meta must be {{\"refresh_token\"}}: {e}")))?;
+		.map_err(|e| Reject::code(RejectCode::InvalidRequest, format!("Refresh meta must be {{\"refresh_token\"}}: {e}")))?;
 
 	let mut gate = SlotGate::new(services, ctx);
 	let refreshed = services
@@ -215,14 +218,14 @@ struct LogoutMeta {
 /// `all`), acknowledges, and the connection is closed by the caller.
 async fn logout(services: &Services, current: Option<&Session>, view: &PackView<'_>, reply: &mut Reply) -> Result<SessionChange, Failure> {
 	let Some(session) = current else {
-		return Err(Reject::code("Unauthorized", "this connection is not logged in").into());
+		return Err(Reject::code(RejectCode::Unauthorized, "this connection is not logged in").into());
 	};
 
 	let meta: LogoutMeta = if view.meta.is_empty() {
 		LogoutMeta::default()
 	} else {
 		serde_json::from_slice(view.meta)
-			.map_err(|e| Reject::code("Corrupt", format!("Logout meta must be {{\"all\"?: bool}}: {e}")))?
+			.map_err(|e| Reject::code(RejectCode::InvalidRequest, format!("Logout meta must be {{\"all\"?: bool}}: {e}")))?
 	};
 
 	services
@@ -247,11 +250,11 @@ fn parse_login_request(meta: &[u8]) -> Result<LoginRequest, Failure> {
 		.uri("/_matrix/client/v3/login")
 		.header(CONTENT_TYPE, "application/json")
 		.body(meta.to_vec())
-		.map_err(|e| Reject::code("Internal", format!("could not frame the login request: {e}")))?;
+		.map_err(|e| Reject::code(RejectCode::Internal, format!("could not frame the login request: {e}")))?;
 
 	let no_path_arguments: &[&str] = &[];
 	LoginRequest::try_from_http_request(http_request, no_path_arguments)
-		.map_err(|e| Reject::code("Corrupt", format!("Login meta is not a /login request body: {e}")).into())
+		.map_err(|e| Reject::code(RejectCode::InvalidRequest, format!("Login meta is not a /login request body: {e}")).into())
 }
 
 /// The optional tail of a login or refresh reply, present only when the
@@ -273,7 +276,7 @@ fn insert_token_lifetime(meta: &mut Map<String, Value>, refresh_token: Option<St
 /// else about the credentials to `Forbidden`.
 fn refuse_login(error: Error) -> Failure {
 	if let ErrorKind::UnknownToken(data) = error.kind() {
-		return Reject::with_extra("Unauthorized", error.to_string(), json!({ "soft_logout": data.soft_logout })).into();
+		return Reject::with_extra(RejectCode::Unauthorized, error.to_string(), json!({ "soft_logout": data.soft_logout })).into();
 	}
 
 	match error.status_code() {
@@ -285,9 +288,9 @@ fn refuse_login(error: Error) -> Failure {
 				},
 				| _ => None,
 			};
-			Reject::with_extra("RateLimited", error.to_string(), json!({ "retry_after_ms": retry_after_ms })).into()
+			Reject::with_extra(RejectCode::RateLimited, error.to_string(), json!({ "retry_after_ms": retry_after_ms })).into()
 		},
-		| StatusCode::UNAUTHORIZED => Reject::code("Unauthorized", error.to_string()).into(),
-		| _ => Reject::code("Forbidden", error.to_string()).into(),
+		| StatusCode::UNAUTHORIZED => Reject::code(RejectCode::Unauthorized, error.to_string()).into(),
+		| _ => Reject::code(RejectCode::Forbidden, error.to_string()).into(),
 	}
 }

@@ -52,7 +52,8 @@ server 回 Ack meta `{ "protocol": 1, "server": "<server name>", "features": ["u
 上限（server 預設，config 可調）：`meta_len ≤ 65536`，`data_len ≤ 16 MiB + 4096`。超過整個 pack 拒收（`TooLarge`）。
 
 回應 pack：`kind = 0x01`，`subtype = 0x02 Ack` 或 `0x03 Error`，`flags` 帶 `IS_RESPONSE`，`id` 與 `seq` **抄請求的**。
-Ack 的 meta 是 JSON（各訊息定義）；Error 的 meta 是 JSON `{ "code": "...", "message": "...", ...其他欄位 }`。
+Ack 的 meta 是 JSON（各訊息定義）；Error 的 meta 是 JSON `{ "code_id": <序號>, "code": "...", "message": "...", ...該 code 定義的欄位 }` ——
+**程式比對 `code_id`**，`code` 是它的名字，完整清單與意思見 [wbf-wire-format.md](wbf-wire-format.md) §3.4（那張表是唯一的來源）。
 
 ## 3. 上傳（kind `0x03`）
 
