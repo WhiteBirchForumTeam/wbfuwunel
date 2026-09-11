@@ -68,6 +68,7 @@ fork 專屬的文件都在 [`docs/design/`](docs/design/)。它們刻意不進�
 | **分塊上傳／下載規格書**（給 client 開發者：byte 排法、每個訊息、錯誤碼、流程） | [docs/design/chunked-upload-spec.md](docs/design/chunked-upload-spec.md) |
 | 規格的黃金測試向量（server 實作產生，client 複製一份對著測；漂移在測試階段被抓到） | [docs/design/wbf-vectors.json](docs/design/wbf-vectors.json) |
 | 📄 WS 訂閱與推送：連線 `Subscribe` 自己的帳號，新事件逐則 `Push`，掉了用 `Recent` 補（草案） | [docs/design/wbf-event-push.md](docs/design/wbf-event-push.md) |
+| 📄 to-device 走通道（`0x16 Device`）：訂閱一個裝置、推送、`Fetch` 補洞；**銷毀是明確的命令**（`ItemsDestroy` → `Ack` 收到 → `ItemsDestroyed` 結果），一個裝置只准一條連線收，沒銷毀的永遠留著（提案，issue #39） | [docs/design/wbf-to-device.md](docs/design/wbf-to-device.md) |
 | 📄 Draft Message 第四版：佔位事件當錨（`draft_id = g_seq`）、`Keypoint`（≤ 8 KiB，換掉整個 buffer）／`Delta`／`Append` 只廣播、`Demand` 要全文、收尾是 client 自己 `Abandon` 再送正常訊息（草案） | [docs/design/streaming-messages.md](docs/design/streaming-messages.md) |
 | pack 處理管線（§1–§6 已實作，PR #33）：連線即佇列、每 device 4 條 WS（發 token 前的 `admit` 閘門）、發送 task、handler 契約與准入表、`Recent` 的 client 拉窗 ＋ `Event/Batch` 串流、HTTP→WS 搬遷的模子；§8 第二部分未開 | [docs/design/wbf-pack-pipeline.md](docs/design/wbf-pack-pipeline.md) |
 | WebSocket 通道的二進位封包外框（兩者共用）；§6.1 連線背後的 session（每個 message 重驗、關機 join）；§6.3 `Session` kind：`Login`／`Refresh`／`Logout` 走通道、匿名升級 30 秒、HTTP 與通道共用的登入限速 | [docs/design/wbf-wire-format.md](docs/design/wbf-wire-format.md) |

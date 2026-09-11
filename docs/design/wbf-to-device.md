@@ -1,0 +1,202 @@
+# to-device 走通道：`0x16 Device` 的訂閱、推送與銷毀
+
+> **狀態**：📄 提案，2026-09-11。起點是 client 端（`amaid/wbf-matrix-client`）的需求
+> （本 repo 的 issue #39，原文在 client repo 的 `docs/design/to-device-push-proposal.md`）。
+> §7 那四件事維護者 2026-09-10／2026-09-11 已經拍板，寫在下面各節；**程式還沒開始**。
+>
+> 相關：[wbf-wire-format.md](wbf-wire-format.md)（§3.3 的 `0x16` 這一格、§3.4 錯誤詞表）、
+> [wbf-event-push.md](wbf-event-push.md)（訂閱與推送，PR #36 已實作）、
+> [room-seq-and-recent.md](room-seq-and-recent.md)（`Recent` 的拉窗）。
+
+## 0. 一句話
+
+to-device（Megolm 金鑰、裝置驗證、SSSS secret）走 `0x16 Device`，形狀跟 `0x14 Event` **同構** ——
+推送是主路、`Fetch` 是斷線後補洞 —— 差別只有一個：**它的東西是一次性的，client 收好之後要叫 server 銷毀**。
+
+## 1. 為什麼不併進 `Event/Recent`
+
+維護者問過「device key 能不能混進 event 一起發」。答案是不併，理由只有一條，但那條夠硬：
+
+> **一個游標同時代表兩件事，而其中一件是破壞性的。**
+
+```
+拉一窗 → 房間事件寫進 client 的快取 ✅ → 金鑰匯進 crypto store ❌（磁碟滿／store 壞）
+                                        ↑ 游標已經前進 = 已經表示「可以刪了」
+```
+
+房間事件的水位前進只表示「我快取好了」，錯了**還能重讀**（事件永久保存）；
+to-device 的水位前進表示「可以刪了」，錯了**就沒了**。要讓同一個游標兼任這兩種語意，
+client 得讓兩個資料庫原子性地一起 commit —— 兩個 db、兩套失敗模式，做不到。
+
+⭐ 第二個獨立的理由：**to-device 不只有房間金鑰**。`m.key.verification.*`（SAS）是**互動**的：
+如果它只在「拉房間歷史」時順便帶回來，使用者按下「驗證這台裝置」之後，對面要等到有人去拉歷史才收得到。
+📎 所以 to-device 需要自己的推送時機，不能寄生在房間事件的節奏上。
+
+## 2. 游標：同一個號碼空間，兩個不同的水位
+
+`add_to_device_event`（`src/service/users/device.rs`）用的是 `globals.next_count()` ——
+**跟 PDU 的 count 同一支**，所以 to-device 的 count 與 `g_seq` 可以直接比大小。但它們是兩個水位，名字要分開：
+
+| | client 存的水位 | 語意 | 誰推進 |
+|---|---|---|---|
+| 房間事件 | `cg_seq` | 我快取到哪 | client 自己，可重讀 |
+| **to-device** | **`cd_seq`** | 我 **durable 收下並處理完**到哪 | client 自己；**銷毀是另一個獨立的動作**（§5） |
+
+⚠️ **`g_seq` 寫得進 PDU 的 `unsigned`，to-device 的 count 沒有地方放** —— 它不是 PDU，
+存起來的就是 `{ type, sender, content }`。所以每一則的 count 必須由 pack 的 meta 帶（§3 的 `counts`）。
+
+## 3. `0x16 Device` 的七個 subtype
+
+編號刻意跟 `0x14 Event` 對齊（同號同位置，好對照）：
+
+| subtype | 方向 | meta | data | 順序類別 |
+|---|---|---|---|---|
+| `0x01 Fetch` | client → server | `{ "limit": 10000?, "cd_seq": <count>?, "to": <count>? }`；`id` 由 client 選 | 無 | 無序 |
+| `0x02 Batch` | **server → client** | `{ "tc", "bc", "ot", "nt", "counts": [...], "r" }`；`id` 抄 `Fetch`，`seq` 從 0 嚴格 +1 | `bc` 則事件，u32 大端長度 ＋ JSON | 有序 |
+| `0x03 ItemsDestroy` | client → server | `{ "tc": <筆數> }`；`id` 由 client 選 | **`tc` × 8 byte**，每個是一個 u64 大端的 count（§5.1） | 無序 |
+| `0x04 Subscribe` | client → server | `{ "device_id": "…", "cd_seq": <count>? }`；`id` 由 client 選 | 無 | 無序 |
+| `0x05 Unsubscribe` | client → server | `{}` | 無 | 無序 |
+| `0x06 Push` | **server → client** | `{ "bc", "ot", "nt", "counts": [...], "gap": bool }`；`id` 抄 `Subscribe`，`seq` 每推一次 +1 | 同 `Batch` 的切法 | 事件驅動 |
+| `0x07 ItemsDestroyed` | **server → client** | `{ "tc", "bc" }`；`id` 抄 `ItemsDestroy` | **`bc` × 8 byte**，銷毀掉的 count（§5.2） | 無序（一個命令一則） |
+
+### 3.1 跟 `Event` 那一套刻意不同的三處
+
+**① 順序是舊 → 新，不是新 → 舊。** `Event/Batch`／`Push` 是新到舊（讀歷史從最新看起）；這裡相反：
+
+- **銷毀是逐則推進的**：處理一則、記一則，舊→新才走得順。
+- **`m.key.verification.*` 有序**：一個 SAS flow 的步驟顛倒過來就跑不動。
+
+**② `fs`／`ls` 換成 `ot`／`nt`**（維護者 2026-09-10 定的縮寫）。`Event` 那邊 `fs`／`ls` 的定義是
+「這批**最新**／**最舊**的 `g_seq`」——**語意的，不是位置的**。順序一翻，同一組名字會指到相反的東西。
+🚫 **不要把 `ot`／`nt` 跟 `fs`／`ls` 混用，兩邊順序相反**：`ot` = 這批最舊的 count，`nt` = 這批最新的。
+
+**③ 多一個 `counts` 陣列。** `Event` 的每則事件自己的 `unsigned` 裡有 `g_seq`；to-device 沒有那個位置，
+所以 meta 帶 `counts: [c1, c2, …]`（`bc` 個，跟 data 的事件一一對應）。
+⚠️ 沒有它就只能整批銷毀：批次中間匯入失敗時，要嘛整批重來、要嘛冒險銷毀還沒處理好的。
+
+### 3.2 跟 `Event` 一樣的部分（不重複定義）
+
+- **只走 WS**（准入表），HTTP 回 `Unsupported`。
+- **一個 pack 同時受兩個上限切**：則數與 `wbf_data_max_bytes`，共用 `core::wbf::events::list_pack_ranges`
+  （[wbf-wire-format.md](wbf-wire-format.md) §2.1 那條教訓：一個規則兩份實作一定會漂）。
+- **`gap`**、**`seq` 只是推送序號**、**水位只認 `nt`／`ot` 不認 `seq`**：`wbf-event-push.md` §2／§4 原封適用。
+
+## 4. 訂閱：一個裝置只能有一條連線在收
+
+⚠️ 協議層的訂閱者仍然是**連線**（`connection_id`），`wbf-event-push.md` §1 那條**不動**。
+這裡多的是**登記時的鍵**：`Device/Subscribe` 的 meta 帶 `device_id`，server 把那條連線綁到該裝置。
+
+理由是**銷毀是破壞性的**：同一裝置兩條連線都訂閱，A 收到 count=500 匯入成功後叫 server 銷毀，
+B 那邊還在處理就沒得救了。所以：
+
+- server 多一張 **`device_id → connection_id`** 的表（🚫 **不放進 `channels`**：那個模組回答的是「誰在聽哪個房間」）。
+  已經有人在訂 → `Error(Conflict)`（1502：換個狀態——那條連線關掉——它就合法）。
+- 連線結束時解除綁定（RAII，跟 `ConnectionGuard` 同形），下一條連得上。
+- 🚫 **不要「後來的踢掉先來的」**：那會讓手滑開兩個 client 的人靜默地換掉正在同步的那條。
+- ⚠️ **`device_id` 必須跟 session 的對得上，對不上回 `Error(Forbidden)`（1302）**（維護者 2026-09-10）。
+  連線是 `Session/Login` 換來的，**session 裡那個才是身分的唯一來源**；client 帶進來的只是**明示意圖**。
+  🚫 不驗的話，裝置 A 可以訂閱裝置 B 的 to-device 再叫 server 銷毀 —— 同一個帳號底下的橫向破壞。
+- 📎 **為什麼還要 client 報**（session 已經知道）：它保護 client 不被自己的 bug 害死 ——
+  client 若拿著錯的 `device_id`，沒有這道比對時 server 會照 session 正確地同步，而 client 把金鑰匯進
+  **另一個 crypto store**，然後那些項目已經被銷毀，救不回來。一次登記多一個字串，換 fail closed。
+
+## 5. 銷毀：`ItemsDestroy` → `Ack` → `ItemsDestroyed` 的閉環
+
+維護者 2026-09-11 定的形狀。**client 收到推送不回任何東西**；等它 durable 存好，才發銷毀命令。
+
+```
+client 訂閱 ──▶ server 推送（Push）
+client 存好（不回 ACK）
+client ──▶ Device/ItemsDestroy { tc }，data = tc × 8 byte 的 count
+server ──▶ Control/Ack          ← 只表示「命令收到」，不表示刪了
+server 執行刪除
+server ──▶ Device/ItemsDestroyed { tc, bc }，data = bc × 8 byte 的 count（真的沒了的那些）
+client：在清單裡的 → 本地是唯一真相；不在清單裡的 → 遠端仍有，下次再清
+```
+
+- ⭐ **`Ack` 只表示「收到命令」**，不表示刪除完成 —— 這是維護者 2026-09-11 的更正，本來的 `Ack{until}`
+  同時兼任兩件事，而其中一件會失敗。
+- ⭐ **只有一種結果封包**（`ItemsDestroyed`）。沒刪掉的**由 client 相減得出**：它手上有送出去的清單，
+  `tc` 又抄回了命令的總數。🚫 不另外發一個「沒刪掉」的封包 —— 同一件事兩個來源會漂。
+- ⚠️ **一把都沒刪掉，也要回一則 `bc = 0` 的 `ItemsDestroyed`。** 否則「一把都沒刪」跟「server 沒回應」
+  在 client 眼裡長得一樣，而那兩件事的處置不同（前者 do nothing，後者是「卡在可能要重試」）。
+- ⭐ **「已經不在了」算銷毀成功**（維護者 2026-09-11）：server 去刪、發現確實不在，就列進 `ItemsDestroyed`。
+  client 要的是「遠端沒有這把了」這個**狀態**，不是「這次是我刪掉的」這個**事件**。所以命令是**冪等**的，重送安全。
+- **client 不必無窮等**：整條路是事件驅動的，收到 `ItemsDestroyed` 就更新本地。真正的卡住只有一種
+  ——**連 `Ack` 都沒收到**，那就是「可能要重試」，而重試安全（上一條）。
+
+### 5.1 命令的 data：固定 8 byte，**沒有分隔符號**
+
+每個 count 是 **u64 大端 8 byte**，一個接一個，`tc` 在 meta。
+
+- 🚫 **不要分隔符號。** `0xFF` 這種分隔會出現在資料裡（count = 255 的最低位就是 `0xFF`），
+  解析端會把一個數字切成兩半。固定寬度本來就不需要分隔：筆數就是 `data.len() / 8`。
+- ⭐ 於是得到一個免費的 fail-closed 檢查：**`tc * 8 != data.len()` → `Error(InvalidRequest)`，一個都不刪。**
+  兩邊對不上代表有一端的編碼壞了，那種時候不准動手。
+- 上限：`tc` 受 `wbf_data_max_bytes` 自然限制（16 MiB ÷ 8 ≈ 2M 筆），實務上一次 `Fetch` 最多 10000 則（§6）。
+
+### 5.2 結果的 data：同一個格式
+
+`ItemsDestroyed` 的 data 是 `bc` × 8 byte 的 count（同樣沒有分隔符號），meta 的 `tc` 抄命令的總數、
+`bc` 是這則清單的筆數。client 用 `tc` 對回自己送出去的那張清單，相減得出還在遠端的。
+
+### 5.3 `Error` 與「沒刪掉」是兩件事
+
+| | 意思 | client 怎麼辦 |
+|---|---|---|
+| **`Error`** | **命令沒被受理**：不是綁定的那條連線（`Forbidden`）、`tc` 與 data 對不上（`InvalidRequest`）、server 自己爆了（`Internal`） | 照 [wbf-wire-format.md](wbf-wire-format.md) §3.4 那張表 |
+| **`ItemsDestroyed` 沒列到的 count** | **命令受理了，但這幾把沒刪掉** | do nothing，遠端仍有；下次開機再清 |
+
+⭐ 所以**不需要 NACK**：NACK 想講的「還在、再試一次」就是「不在 `ItemsDestroyed` 清單裡」，
+而且它比 NACK 多告訴你**是哪幾把**。
+
+## 6. 保留期：無窮 TTL（維護者 2026-09-11 定）
+
+**沒被銷毀的 to-device 永遠留著**，`ItemsDestroy` 是唯一的刪除入口（底下就是既有的
+`remove_to_device_events`）。⭐ 理由：靜默丟掉金鑰的代價（那些訊息**永遠解不開**）遠大於佔磁碟。
+
+⚠️ 代價要寫清楚：**被遺棄的裝置那條佇列會永遠長大**（手機掉了、重灌又沒登出）。配套兩條，
+實作那支要一起做，否則「無窮」會是**不可觀測的**無窮：
+
+1. **刪裝置就清佇列** —— 實作時確認 `remove_device` 那條路現在有沒有做；沒有就補。
+2. **admin 看得到佇列大小** —— 一個指令印出「誰的哪台裝置堆了多少則、最舊的是什麼時候」。
+
+## 7. 上限與設定
+
+| 旋鈕 | 預設 | 說明 |
+|---|---|---|
+| `wbf_device_fetch_default_limit` | 10000 | 一次 `Fetch` 回幾則（維護者 2026-09-11：可以比訊息那邊大，`wbf_recent_default_limit` 是 320） |
+| `wbf_device_fetch_max_limit` | 10000 | 上界；`Hello` 的回應宣告，跟 `Recent` 那套一樣 |
+| `wbf_push_max_events_per_pack` | 10（共用） | 推送一包幾則。to-device 事件都很小，先共用；有量測再拆自己的 |
+
+`wbf_data_max_bytes` 對所有 pack 一樣適用，**兩個上限哪個先滿就切在哪**。
+
+## 8. client 端會怎麼用（給讀 server 的人理解脈絡）
+
+```
+daemon 啟動、Login → Subscribe{device_id, cd_seq: 上次存的}   ← 先登記，再補洞
+                  → Device/Fetch(cd_seq) 補一窗              ← 離線期間漏的
+                  → 逐則匯進 crypto store（OlmMachine::receive_sync_changes）
+                  → ItemsDestroy{ 成功的那些 count }
+                  → 之後靠 Push；收到 gap 就再 Fetch 一次
+```
+
+📎 **server 對 to-device 的內容本來就是瞎的**（`add_to_device_event` 只存 `type`／`sender`／`content`），
+這個提案不改變那件事。
+📎 client 完成之後照自己的 config 把金鑰備份回 server，走的是 Matrix 既有的 key backup（`0x17 Keys` 那一格），
+**不在本提案範圍**。
+
+## 9. 跟 client 原提案不同的地方（合併後要在 client repo 開同步 issue）
+
+| client 原提案 | 這裡定的 | 為什麼 |
+|---|---|---|
+| `0x03 Ack { until }`，前綴刪除 | **`0x03 ItemsDestroy { tc } + data`**，明確列出每一則的 count | 維護者 2026-09-11：刪除是命令不是回執；前綴會把「我處理到哪」與「可以刪哪些」綁成一件事 |
+| `Ack` 之後就算刪了 | **`Ack` 只表示收到命令**，結果另外由 `ItemsDestroyed` 帶回 | 同上；命令要有回應，回應要講結果 |
+| `oldest` / `newest` | **`ot` / `nt`** | 維護者 2026-09-10；短名跟線上其他欄位（`bc`、`tc`、`fs`、`ls`、`r`）一致，而且仍然跟 `fs`／`ls` 長得不一樣 |
+| 保留期待定 | **無窮 TTL** ＋ 刪裝置清佇列 ＋ admin 可觀測 | §6 |
+
+## 10. 還沒決定的
+
+- **`Fetch` 的 `to` 欄位**（拉一段區間的上界）client 提案裡有，但沒有說誰會用它。實作前確認：
+  沒有使用情境就先不做，🚫 不要為了對稱而加一個沒人呼叫的參數。
+- **`Unsubscribe` 之後綁定要不要留**：目前的想法是一起解除（訂閱與綁定是同一件事的兩面）。
