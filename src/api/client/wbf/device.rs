@@ -25,7 +25,7 @@ use tuwunel_core::{
 };
 use tuwunel_service::{
 	Services,
-	streams::{DeviceSubscribeError, PushedItem},
+	streams::PushedItem,
 };
 
 use super::{Failure, PackContext, Reject, Reply, ack, parse_meta};
@@ -77,8 +77,9 @@ struct Item {
 ///     view: meta example: `{"device_id":"PHONE","cd_seq":4711}`
 /// Return:
 ///     Result<(), Failure>  Ack meta `{latest_cd_seq}`; `Forbidden` when the
-///     named device is not this session's, `Conflict` when another
-///     connection already holds the queue.
+///     named device is not this session's. Another connection already
+///     holding the queue is not a refusal: this one takes it over, and that
+///     one is sent `Superseded` (1505).
 pub(super) async fn handle_device_subscribe(
 	services: &Services,
 	ctx: &PackContext<'_>,
@@ -110,15 +111,13 @@ pub(super) async fn handle_device_subscribe(
 		.into());
 	}
 
+	// Whoever held this device's queue has been displaced and told so by the
+	// registry (`Superseded`, 1505). There is no refusal to handle here: the
+	// rule is the registry's, enforced in the same transaction as the entry,
+	// so no `if` at this call site can be right or wrong about it.
 	services
 		.streams
-		.subscribe_device(ctx.connection, &session.user, &device, queue, view.header.id)
-		.map_err(|error| match error {
-			| DeviceSubscribeError::TakenByAnotherConnection => Reject::code(
-				RejectCode::Conflict,
-				"another connection of this device already holds its to-device queue; close that one first",
-			),
-		})?;
+		.subscribe_device(ctx.connection, &session.user, &device, queue, view.header.id);
 
 	// Read before the window, like `Recent`: a client that stores it never
 	// misses an item added while the window was being read.

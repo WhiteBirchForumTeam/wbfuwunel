@@ -34,10 +34,14 @@ use std::sync::{
 };
 
 pub use self::{
-	devices::{DEVICE_PUSH_SUBTYPE, DeviceSubscribeError, PushedItem},
+	devices::{DEVICE_PUSH_SUBTYPE, PushedItem},
 	rooms::{EVENT_PUSH_SUBTYPE, PushedEvent, Subscribed},
 };
-use self::{devices::DeviceTopic, rooms::RoomTopic, subscribers::Subscribers};
+use self::{
+	devices::DeviceTopic,
+	rooms::RoomTopic,
+	subscribers::{Occupancy, Subscribers},
+};
 
 /// One WebSocket connection, numbered at upgrade; unique for the life of the
 /// process, meaningless outside it.
@@ -82,8 +86,12 @@ impl Streams {
 	pub fn new() -> Self {
 		Self {
 			next_connection: AtomicU64::new(1),
-			rooms: Subscribers::new(),
-			devices: Subscribers::new(),
+			rooms: Subscribers::new(Occupancy::Many),
+			// ⚠️ The one-connection rule of the to-device queue is declared
+			// here, once, rather than checked wherever a `Subscribe`
+			// arrives: the registry can enforce it without a gap between
+			// looking and entering, and a call site cannot.
+			devices: Subscribers::new(Occupancy::OneTheLatest),
 		}
 	}
 

@@ -94,6 +94,7 @@ impl Streams {
 		// subtracting reported none (PR #42 review, found by rumia, salvia
 		// and cirno). `joined` is a field the client reads.
 		let joined = entered
+			.topics
 			.iter()
 			.filter(|topic| matches!(topic, RoomTopic::Room(_)))
 			.count();

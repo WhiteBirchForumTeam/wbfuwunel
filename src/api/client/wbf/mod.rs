@@ -51,7 +51,7 @@ use crate::ClientIp;
 mod control {
 	pub(super) const HELLO: u8 = 0x01;
 	pub(super) const ACK: u8 = 0x02;
-	pub(super) const ERROR: u8 = 0x03;
+	pub(super) const ERROR: u8 = tuwunel_core::wbf::CONTROL_ERROR_SUBTYPE;
 	pub(super) const PING: u8 = 0x04;
 	pub(super) const PONG: u8 = 0x05;
 }

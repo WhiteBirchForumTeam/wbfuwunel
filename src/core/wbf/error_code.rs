@@ -11,6 +11,12 @@
 
 use super::PackError;
 
+/// The `Control` subtype every `Error` pack is sent as. Here rather than with
+/// the API's other subtype constants because the service layer emits one too
+/// (`Superseded`, from the stream registry), and a second `0x03` written
+/// somewhere else is a second place for it to drift.
+pub const CONTROL_ERROR_SUBTYPE: u8 = 0x03;
+
 /// One `Control/Error` code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RejectCode {
@@ -46,13 +52,17 @@ pub enum RejectCode {
 	OutOfOrder,
 	/// 1504: an upload hit the size limit and was finished as incomplete.
 	Truncated,
+	/// 1505: a later connection of the same device took this subscription
+	/// over, and it has ended. ⚠️ The only code the server sends unasked: it
+	/// carries the *subscription's* id, not a request's (§3.4).
+	Superseded,
 	/// 1901: the server's own fault.
 	Internal,
 }
 
 impl RejectCode {
 	/// Every code, so a test can hold the whole table at once.
-	pub const ALL: [Self; 15] = [
+	pub const ALL: [Self; 16] = [
 		Self::UnsupportedVersion,
 		Self::Corrupt,
 		Self::UnknownKind,
@@ -67,6 +77,7 @@ impl RejectCode {
 		Self::Conflict,
 		Self::OutOfOrder,
 		Self::Truncated,
+		Self::Superseded,
 		Self::Internal,
 	];
 
@@ -91,6 +102,7 @@ impl RejectCode {
 			| Self::Conflict => 1502,
 			| Self::OutOfOrder => 1503,
 			| Self::Truncated => 1504,
+			| Self::Superseded => 1505,
 			| Self::Internal => 1901,
 		}
 	}
@@ -114,6 +126,7 @@ impl RejectCode {
 			| Self::Conflict => "Conflict",
 			| Self::OutOfOrder => "OutOfOrder",
 			| Self::Truncated => "Truncated",
+			| Self::Superseded => "Superseded",
 			| Self::Internal => "Internal",
 		}
 	}

@@ -88,7 +88,7 @@ function Destroy($ws, [uint64]$id, $counts) {
 Log '################ Scenario 1: the to-device queue over the channel ################'
 $db = "$S\e2e12db"; Remove-Item -Recurse -Force $db -EA SilentlyContinue; New-Item -ItemType Directory -Force $db | Out-Null
 $cfg = Write-Config12 $db
-$p = Start-Server $cfg 's1'
+$server = Start-Server $cfg 's1'
 $regA = Register 'alice'; $tokA = $regA.access_token; $devA = $regA.device_id
 $regB = Register 'bob'; $tokB = $regB.access_token
 
@@ -104,10 +104,22 @@ Check '[1.1] Subscribe naming another device -> Forbidden' ($wrong.subtype -eq 3
 $ok = Call $ws (Json-Pack 0x16 4 10 0 @{ device_id = $devA } $null)
 Check '[1.2] Subscribe with the session device -> Ack latest_cd_seq' ($ok.subtype -eq 2 -and $ok.meta.latest_cd_seq -gt 0) (Describe $ok)
 
-# [1.3] a second connection of the same device is refused, and the first keeps it
+# [1.3] a later connection of the same device takes the queue over, and the one it displaced is told.
+# Refusing the later one instead would mean a device whose last connection died silently cannot
+# subscribe until the idle timeout — and if that connection is wedged, not ever (wbf-to-device.md 4).
 $ws2 = Ws-Open $tokA
-$taken = Call $ws2 (Json-Pack 0x16 4 11 0 @{ device_id = $devA } $null)
-Check '[1.3] a second connection -> Conflict, the holder does not change' ($taken.subtype -eq 3 -and $taken.meta.code_id -eq 1502) (Describe $taken)
+$took = Call $ws2 (Json-Pack 0x16 4 11 0 @{ device_id = $devA } $null)
+Check '[1.3a] a later connection of the same device -> Ack, it takes the queue over' ($took.subtype -eq 2 -and $took.meta.latest_cd_seq -gt 0) (Describe $took)
+$notice = Recv-Or-Null $ws 5000
+Check '[1.3b] the displaced connection is told: Superseded, carrying its own subscription id, IS_LAST' `
+  ($null -ne $notice -and $notice.subtype -eq 3 -and $notice.meta.code_id -eq 1505 -and $notice.meta.code -eq 'Superseded' -and $notice.id -eq 10 -and ($notice.flags -band 8) -eq 8) `
+  "id=$($notice.id) flags=$($notice.flags) code=$($notice.meta.code_id)"
+# Taking it back, so the rest of this script speaks through $ws — and the same notice goes the other way.
+$back = Call $ws (Json-Pack 0x16 4 10 0 @{ device_id = $devA } $null)
+$notice2 = Recv-Or-Null $ws2 5000
+Check '[1.3c] it works in both directions: the second connection is displaced by its own id' `
+  ($back.subtype -eq 2 -and $null -ne $notice2 -and $notice2.meta.code_id -eq 1505 -and $notice2.id -eq 11) `
+  "id=$($notice2.id) code=$($notice2.meta.code_id)"
 
 # [1.4] bob sends to alice's device -> pushed to the holder, with its count
 $null = Send-ToDevice $tokB $regA.user_id $devA 'first'
@@ -169,7 +181,7 @@ $http = Send-Pack (Json-Pack 0x16 4 22 0 @{ device_id = $devA } $null) $tokA
 Check '[1.12] Device/Subscribe over HTTP -> Unsupported' ($http.subtype -eq 3 -and $http.meta.code_id -eq 1102) (Describe $http)
 
 $ws.Dispose(); $ws2.Dispose()
-Stop-Server $p
+Stop-Server $server
 
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"
 

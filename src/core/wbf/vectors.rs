@@ -146,6 +146,10 @@ fn current() -> Value {
 			// also occur inside a count.
 			pack("device_items_destroy", Kind::Device, 0x03, Flags::default(), 32, 0, br#"{"tc":2}"#, &[0, 0, 0, 0, 0, 0, 18, 104, 0, 0, 0, 0, 0, 0, 18, 105]),
 			pack("device_items_destroyed", Kind::Device, 0x07, Flags::IS_RESPONSE, 32, 0, br#"{"bc":2,"tc":2}"#, &[0, 0, 0, 0, 0, 0, 18, 104, 0, 0, 0, 0, 0, 0, 18, 105]),
+			// The one pack the server sends without being asked: the id is the
+			// displaced connection's own `Device/Subscribe` (30 above), not a
+			// request of its own, and IS_LAST ends that conversation.
+			pack("error_superseded", Kind::Control, 0x03, Flags::IS_RESPONSE.union(Flags::IS_LAST), 30, 1, br#"{"code":"Superseded","code_id":1505,"message":"another connection of this device took its to-device queue over"}"#, b""),
 			pack("send_encrypted_with_attachments", Kind::Event, 0x02, Flags::default(), 0, 13, br#"{"room_id":"!r:localhost","type":"m.room.encrypted","txn_id":"t1","attachments":["mxc://localhost/1122334455667788"]}"#, br#"{"algorithm":"m.megolm.v1.aes-sha2","ciphertext":"AwgAEnACgAkLmt6qF84IK++J7UDH2Za1YVchHyprqTqsg","device_id":"RJYKSTBOIE","sender_key":"IlRMeOPX2e0MurIyfWEucYBRVOEEUMrOHqn/8mLqMjA","session_id":"X3lUlvLELLYxeTx4yOVu6UDpasGEVO0Jbu+QFnm0cKQ"}"#),
 			pack("ack_send", Kind::Control, 0x02, Flags::IS_RESPONSE, 0, 13, br#"{"event_id":"$Zm9vYmFy:localhost"}"#, b""),
 			pack("login_password", Kind::Session, 0x01, Flags::default(), 0, 14, br#"{"type":"m.login.password","identifier":{"type":"m.id.user","user":"alice"},"password":"correct-horse-battery","initial_device_display_name":"wbf desktop","refresh_token":true}"#, b""),
