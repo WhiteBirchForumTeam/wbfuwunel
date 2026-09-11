@@ -107,6 +107,7 @@ Logout 後直接關線；同一條連線重複 Login 允許；**登入限速預�
 第二、三版草案作廢。
 
 **工作 2 已合併（PR #36）**：`service/channels`、`Event/Subscribe`／`Unsubscribe`／`Push`、`append_pdu` 與 `state_cache` 兩個 hook。
+📎 那個模組 PR #42 之後叫 `service/streams`（共用核心 ＋ 房間政策），要找程式碼看那裡。
 ⚠️ 提案寫的 registry 是 `user → 連線`，實作定案是 **`connection_id` → 訂閱者**（訂閱者是連線，不是使用者也不是裝置）；channel 是 DB 成員資格的記憶體投影。
 client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
 🔲 **還沒做的**：`Subscribe{rooms, cg_seq}` 的補窗是**全域**的（`collect_window` 不分房），server 端依 `rooms` 過濾是另一個提案；

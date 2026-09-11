@@ -80,7 +80,7 @@ Stream pack 進來（已登入、准入表過、meta 是合法的 room_id、head
    ├─ Keypoint／Delta／Append／Abandon：sender == 這條連線的 user         ← 否則 Error(Forbidden "not the author")
    ├─ Demand：這條連線的 user 是 room_id 的成員                      ← 否則 Error(Forbidden)
    ├─ 限速（§7）、大小（§7）
-   └─ 廣播：channels::relay(room_id, 原 pack)，全房含發送連線——Demand 也一樣，沒有特別路由；正在寫這則草稿的那台裝置回 Keypoint，其他人忽略
+   └─ 廣播：Services.streams.relay(room_id, None, 原 pack)，全房含發送連線——Demand 也一樣，沒有特別路由；正在寫這則草稿的那台裝置回 Keypoint，其他人忽略
 ```
 
 沒有 `g_seq → 事件` 的全站索引，所以 **`room_id` 是必填**：事件的 key 是 `(房間, g_seq)`，帶了 `room_id` 就是一次點讀。這是每片一次 DB 讀，
@@ -109,7 +109,7 @@ server 讀 123 → 作者是 A → 只送給 A 訂閱中的連線。A 廣播 `Ke
 
 | 共用 | 在哪 |
 |---|---|
-| 訂閱 registry、`try_send`、掉了就掉、全房廣播 | `Services.channels`（[wbf-event-push.md](wbf-event-push.md) §3）：`relay(room, None, pack)`，六個 subtype 都只用這一個 |
+| 訂閱 registry、`try_send`、掉了就掉、全房廣播 | `Services.streams`（[wbf-event-push.md](wbf-event-push.md) §3）：`relay(room, None, pack)`，六個 subtype 都只用這一個 |
 | 發送佇列與發送 task | pipeline §1 |
 | 佔位事件的寫入、redact、`Push` | 既有的 `send_message_event`／`redact` 路徑，什麼都不加 |
 

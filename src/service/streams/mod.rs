@@ -55,7 +55,8 @@ pub enum Outgoing {
 /// Every stream's subscribers, and the connection numbers they are keyed by.
 pub struct Streams {
 	next_connection: AtomicU64,
-	/// The room channels (`0x14 Event`).
+	/// The room channels (`0x14 Event`): a room may be listened to by as many
+	/// of a user's connections as the user has open.
 	rooms: Subscribers<RoomTopic>,
 	/// The to-device queues (`0x16 Device`), at most one connection each.
 	devices: Subscribers<DeviceTopic>,

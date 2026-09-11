@@ -82,13 +82,6 @@ struct Registry<Topic> {
 	by_user: HashMap<OwnedUserId, HashSet<ConnectionId>>,
 }
 
-impl<Topic> Default for Subscribers<Topic>
-where
-	Topic: Clone + Eq + Hash,
-{
-	fn default() -> Self { Self::new() }
-}
-
 impl<Topic> Subscribers<Topic>
 where
 	Topic: Clone + Eq + Hash,
@@ -114,8 +107,12 @@ where
 	///     id: the client's `Subscribe` id, example: 42
 	///     topics: what to enter, example: every joined room
 	/// Return:
-	///     usize  how many topics were newly entered (ones it was already in
-	///     do not count).
+	///     Vec<Topic>  the topics this connection was **not** already in.
+	///     ⚠️ Which of them are worth reporting is the kind's
+	///     business, not this module's: the room channels enter a topic that
+	///     is not a room (the one that follows joins), and counting entries
+	///     instead of naming them made a new room read as none at all
+	///     (PR #42 review).
 	pub(super) fn subscribe(
 		&self,
 		connection: ConnectionId,
@@ -123,7 +120,7 @@ where
 		queue: Sender<Outgoing>,
 		id: u64,
 		topics: &[Topic],
-	) -> usize {
+	) -> Vec<Topic> {
 		let mut registry = self.registry.write().expect("stream lock poisoned");
 
 		// A connection subscribing as somebody else (a `Login` that kept the
@@ -164,7 +161,7 @@ where
 			.or_default()
 			.insert(connection);
 
-		let mut entered: usize = 0;
+		let mut entered = Vec::new();
 		for topic in topics {
 			if registry
 				.topics
@@ -172,7 +169,7 @@ where
 				.or_default()
 				.insert(connection)
 			{
-				entered = entered.saturating_add(1);
+				entered.push(topic.clone());
 			}
 		}
 
