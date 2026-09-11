@@ -1,6 +1,6 @@
 # WS 訂閱與推送：連線訂閱自己的帳號，server 把新事件推過來
 
-**狀態**：🔧 實作中（分支 `wbf/channels`，提案 PR #35 2026-09-08 核可）。這是維護者 2026-09-08 說的「工作 2」：WS 訂閱自己帳號的 event，在的任何房間的新事件自然推過來。
+**狀態**：✅ 已實作（提案 PR #35 2026-09-08 核可，PR #36 合併；registry 在 PR #42 抽成所有 WS 串流共用的核心，落點見 §8）。這是維護者 2026-09-08 說的「工作 2」：WS 訂閱自己帳號的 event，在的任何房間的新事件自然推過來。
 [streaming-messages.md](streaming-messages.md)（工作 3）坐在這份之上；工作 1（一般訊息走 WS）已經是 `Event/Send`（PR #24）。
 
 **這份改的是什麼**：到 PR #33 為止，WS 只有 client 問、server 答；[wbf-pack-pipeline.md](wbf-pack-pipeline.md) §1 留了發送 task 與有界佇列，就是給這裡用的：
@@ -121,7 +121,7 @@ registry（純記憶體，`Services.streams`）                          ← 所
 
 - **推送絕不阻塞 append**：`try_send`，佇列滿就丟並把 `gap` 記起來，下一次推得進去的 `Push` 帶 `gap: true`。append 是所有訊息的路徑，不能被一條讀得慢的連線拖住。
 - **掉了的不重送**：持久化的事件 `Recent` 拿得到；推送的責任是「盡快」不是「一定」。這跟 pipeline §1 的背壓（handler 等佇列）**故意不同**：handler 的回應是 client 問的，等得起；推送是 server 塞的，塞不進就算。
-- **每連線的成本**：訂閱者一筆 ＋ 它在的 channel 數個 HashSet 項；佇列是 pipeline 的那個。**每則事件的成本**：一次 `channels[room]` 查詢＋訂閱者數次 `try_send`；跟房間人數無關。
+- **每連線的成本**：訂閱者一筆 ＋ 它在的 channel 數個 HashSet 項；佇列是 pipeline 的那個。**每則事件的成本**：一次 `topics[Room(room)]` 查詢＋訂閱者數次 `try_send`；跟房間人數無關。
 - **比 `wbf_data_max_bytes` 還寬的單則事件不推**（跟 `Event/Recent` 的 `collect_window` 同一道過濾，記一行 `debug_warn`）：`Recent` 既然跳過它，推了就是給 client 一個它永遠補不回來的東西，而那一幀本身也已經超過連線的 `max_message_size`。
 - **推之前在鎖內重驗房間成員**：`listeners()` 的快照到 `push` 之間隔著一次 ignore 的 DB 讀，這中間發生的 `evict`（離房／踢／ban）必須算數，所以 live 路徑走 `push_to_room`，在讀鎖內確認連線還在那個 channel 裡。補窗路徑（`push_window`）不帶房，它推的是該帳號的全域視窗。
 - **`gap` 掛在「下一次推得進去的 `Push`」上**，所以掉包之後那條連線如果再也沒有新事件可推，這個旗標就永遠不會送達。設計上接受——推送的用途是「不用輪詢」，不是「保證一致」——但 client 🚫 不要把「沒收到 `gap`」讀成「沒漏過」：重新連上、或使用者把 app 切回前景時，照樣 `Recent` 對一次水位。
@@ -136,7 +136,7 @@ registry（純記憶體，`Services.streams`）                          ← 所
 | typing、receipts、presence | **這版不推**（§6）。 |
 | E2EE | 事件本來就是密文，推的是 `pduid_pdu` 裡的 JSON，server 不多讀任何東西。 |
 | 聯邦 | 不相干：聯邦進來的事件走同一個 `append_pdu`，一樣推。 |
-| [streaming-messages.md](streaming-messages.md) | 草稿走同一個 channel、同一條佇列，`channels::relay(room, except_connection, pack)`。 |
+| [streaming-messages.md](streaming-messages.md) | 草稿走同一個 channel、同一條佇列，`Services.streams.relay(room, except_connection, pack)`。 |
 
 ## 6. 不做的
 
@@ -159,7 +159,8 @@ registry（純記憶體，`Services.streams`）                          ← 所
 
 | 東西 | 檔 |
 |---|---|
-| `Services.channels`：三張表、`subscribe`／`unsubscribe`／`Subscription`（RAII）、`publish`、`relay`、`follow`／`evict` | `src/service/channels/mod.rs`（新；名字避開既有的 `service/push`＝Matrix push rules） |
+| 共用核心：topic 索引、每 (連線, 串流) 的 `id`／`seq`／`gap`、`push_with`、`ConnectionGuard` | `src/service/streams/subscribers.rs`、`mod.rs`（PR #42；名字避開既有的 `service/push`＝Matrix push rules） |
+| `Services.streams` 的房間政策：`subscribe`／`unsubscribe`／`follow`／`evict`／`push_to_room`／`push_window`／`relay` | `src/service/streams/rooms.rs`（PR #42 之前是 `src/service/channels/mod.rs`，那個模組已刪） |
 | 接點 1 | `src/service/rooms/timeline/append.rs`，提交後 |
 | 接點 2 | `src/service/rooms/state_cache/update.rs`，`mark_as_joined`／left 那一組 |
 | `Subscribe`／`Unsubscribe` handler、`Push` 編碼（共用 `recent.rs` 的長度前綴） | `src/api/client/wbf/subscribe.rs`（新）、`mod.rs` 准入表三列 |
