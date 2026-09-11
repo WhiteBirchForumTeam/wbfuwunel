@@ -30,7 +30,7 @@ use tuwunel_core::{
 use tuwunel_database::Json;
 
 use super::{ExtractBody, ExtractRelatesTo, ExtractRelatesToEventId, RoomMutexGuard, bias_count};
-use crate::channels::PushedEvent;
+use crate::streams::PushedEvent;
 use crate::media_refs::Holder;
 use crate::rooms::{
 	read_receipt::PrivateRead, short::ShortRoomId, state_accessor::plain_text_topic,
@@ -284,11 +284,11 @@ where
 /// never differ.
 #[implement(super::Service)]
 async fn publish_to_channels(&self, room_id: &RoomId, sender: &UserId, pdu_id: &RawPduId) {
-	if !self.services.channels.is_listened(room_id) {
+	if !self.services.streams.is_listened(room_id) {
 		return;
 	}
 
-	let listeners = self.services.channels.listeners(room_id);
+	let listeners = self.services.streams.listeners(room_id);
 	let mut recipients = Vec::with_capacity(listeners.len());
 	for (connection, user) in listeners {
 		if !self.services.users.user_is_ignored(sender, &user).await {
@@ -315,7 +315,7 @@ async fn publish_to_channels(&self, room_id: &RoomId, sender: &UserId, pdu_id: &
 	}
 
 	self.services
-		.channels
+		.streams
 		.push_to_room(room_id, &recipients, &[PushedEvent { g_seq, json }]);
 }
 

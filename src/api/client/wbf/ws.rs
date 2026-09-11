@@ -48,7 +48,7 @@ use tuwunel_core::{
 	wbf::{HEADER_LEN, PackError, RejectCode, decode},
 };
 
-use tuwunel_service::channels::{ConnectionId, Outgoing};
+use tuwunel_service::streams::{ConnectionId, Outgoing};
 
 use super::{
 	CloseReason, PackContext, Reply, Session, SessionChange, Transport, authenticate, error_pack, handle_pack,
@@ -163,8 +163,8 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 	// The connection's number, and the guard that unsubscribes it from every
 	// channel when this task ends, whichever way (pipeline 2.1 shape: RAII,
 	// not a path that remembers to).
-	let connection: ConnectionId = services.channels.next_connection_id();
-	let _channels_guard = services.channels.connection_guard(connection);
+	let connection: ConnectionId = services.streams.next_connection_id();
+	let _streams_guard = services.streams.connection_guard(connection);
 
 	// The send queue and its task. Bounded: a handler that produces faster
 	// than the peer reads waits in `Reply::send`, and with it the receive
@@ -303,7 +303,7 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 					// Channels were entered as the old identity; a new one
 					// subscribes again if it wants to listen.
 					if !old_session.is_same_device(&new_session) {
-						services.channels.unsubscribe_all(connection);
+						services.streams.unsubscribe_all(connection);
 					}
 				}
 				session = Some(new_session);

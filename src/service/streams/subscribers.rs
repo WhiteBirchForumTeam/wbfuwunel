@@ -29,13 +29,29 @@ use tuwunel_core::{debug, wbf::PackError};
 
 use super::{ConnectionId, Outgoing};
 
-/// One connection's subscription to one stream.
+/// One connection's subscription to one stream: a long-lived **conversation**
+/// in the wire format's sense (`id` names it, `seq` counts inside it).
+///
+/// A conversation is opened by the command that starts it — `Subscribe` here,
+/// `Upload/Create` elsewhere — and its `seq` is scoped to **that
+/// conversation**, not to the kind and not to the connection. Two
+/// conversations of the same kind can be in flight on one connection (two
+/// uploads interleave in e2e7 today), so a per-kind counter would put both
+/// their packs in one sequence and neither end could tell them apart.
+///
+/// ⚠️ What `seq` is *not*: a retransmission mechanism. Nothing is lost inside
+/// a WebSocket — a lost frame means the connection is gone — so a gap in
+/// `seq` means the server dropped a pack on purpose (a full queue), which is
+/// what `gap` says explicitly. Recovery is asking again from a cursor, not
+/// resending a numbered packet.
 struct Subscriber {
 	user: OwnedUserId,
 	queue: Sender<Outgoing>,
-	/// The client's `Subscribe` id, copied into every push.
+	/// The client's `Subscribe` id: the conversation's name, copied into
+	/// every push of it.
 	id: u64,
-	/// The next push's `seq`.
+	/// The next push's `seq` **within this conversation**. A `Subscribe`
+	/// naming a different id starts a new conversation, so it starts over.
 	seq: AtomicU32,
 	/// A push was dropped since the last one that went out.
 	gap: AtomicBool,
@@ -68,7 +84,7 @@ struct Registry<Topic> {
 
 impl<Topic> Default for Subscribers<Topic>
 where
-	Topic: Eq + Hash,
+	Topic: Clone + Eq + Hash,
 {
 	fn default() -> Self { Self::new() }
 }
@@ -148,7 +164,7 @@ where
 			.or_default()
 			.insert(connection);
 
-		let mut entered = 0;
+		let mut entered: usize = 0;
 		for topic in topics {
 			if registry
 				.topics
