@@ -206,24 +206,29 @@ Recent：  一包  10 則 × 32 包 = 一窗  320 則     32 包 = 佇列剛好�
 Device：  一包 100 則 × 10 包 = 一窗 1000 則     10 包 < 32，佇列還留得下別的回應
 ```
 
-⚠️ 兩邊的形狀是**相反**的：`Recent` 是**小包多包**（一包 10 則），Device 是**大包少包**（一包 100 則）。
+⚠️ 兩邊的形狀是**相反**的：`Recent` 是**小包多包**（一包 10 則），Device 的補窗是**大包少包**（一包 100 則）。
 to-device 一則約 1 KB 又不需要逐則渲染，包大一點反而省來回；房間事件要一進來就上畫面，所以切細。
+📎 但**推送那條路兩邊一樣**（一包最多 10 則，共用 `wbf_push_max_events_per_pack`）：推送要的是快，不是吞吐。
 
 | 旋鈕 | 預設 | 說明 |
 |---|---|---|
-| `wbf_device_fetch_default_limit` | **1000** | 一次 `Fetch` 回幾則。積得比這多就多叫幾次（帶上一窗的 `nt` 當 `cd_seq`） |
-| `wbf_device_fetch_max_limit` | **1000** | 上界；`Hello` 的回應宣告，跟 `Recent` 那套一樣 |
-| `wbf_device_max_events_per_pack` | **100** | 一個 pack 幾則，`Batch` 與 `Push` **共用這一個**（都是 `0x16`）。⚠️ **不跟 `Event` 共用**（下面 §7.1）：to-device 一則約 1 KB，房間事件一則可以是它的幾十倍，一包裝幾則本來就該分開定 |
-| ~~包數~~ | *（算出來的，10）* | `ceil(limit ÷ 每包則數)`。🚫 **不給旋鈕**：三個數字只有兩個自由度，三個都能調就會有「互相矛盾時誰贏」的問題。啟動時斷言它 ≤ `wbf_ws_send_queue_len`，不成立就是設定錯，`fail closed` |
+| `wbf_device_fetch_default_limit` | **1000** | **一次 `Fetch` 回幾則**（client 沒帶 `limit` 時）。積得比這多就多叫幾次，帶上一窗的 `nt` 當 `cd_seq` |
+| `wbf_device_fetch_max_limit` | **1000** | client 帶的 `limit` 夾到這裡。🔲 維護者 2026-09-11 只定了「一次一千則」這個數，所以兩者同值；要讓 client 能要更多再分開 |
+| `wbf_device_default_batch` | **100** | **一包幾則**（`Fetch` 的回應 `Batch`）。⚠️ **client 不能指定** —— `Fetch` 沒有 `batch` 參數（`Recent` 有），一包裝多少是 server 的事 |
+| `wbf_push_max_events_per_pack` | 10（**與 `Event` 共用**） | **server 主動推的一包最多幾則**（維護者 2026-09-11）。推送要的是快，一包小一點先出去；補窗要的是吞吐，才用上面那個 100 |
+| ~~包數~~ | *（算出來的，10）* | `ceil(limit ÷ 一包則數)`。🚫 **不給旋鈕**：三個數字只有兩個自由度，三個都能調就會有「互相矛盾時誰贏」的問題。啟動時斷言它 ≤ `wbf_ws_send_queue_len`，不成立就是設定錯，fail closed |
 
-⚠️ **`Fetch` 沒有 `batch` 參數**（`Recent` 有）—— 一包幾則由 server 決定，沒有呼叫點就不加，跟 §3.1.1 的 `to` 同一個理由。
+⭐ **兩條路兩個數，是刻意的**：`Fetch`→`Batch` 是補洞（**大包少包**，100 × 10）、`Push` 是即時（**一包最多 10**，
+而且實務上就一則）。to-device 一則約 1 KB，所以兩邊都遠在 `wbf_data_max_bytes` 之內。
 
 `wbf_data_max_bytes` 對所有 pack 一樣適用，**兩個上限哪個先滿就切在哪**。
 
-### 7.1 現有的名字會誤導，實作那支一起修
+### 7.1 現有的旋鈕實際上管什麼（`Recent` 那組**不動**）
 
-維護者 2026-09-11：`0x16` 的內容**遠比訊息小**，一包本來就該裝多一點 —— 所以不共用旋鈕。
-這件事一攤開，就看到現有的名字說不清自己管什麼。**先擺事實**（值與行為都從程式碼讀出來，不是照名字猜）：
+⭐ **定案（維護者 2026-09-11）：`Recent` 的變數名字與預設值都不改。** 下面這張表留著，是因為
+`0x16` 的數字要跟它對齊（一包幾則、一窗幾則、誰夾誰），而**照名字猜會猜錯** —— 這一輪就猜錯過一次。
+
+**先擺事實**（值與行為都從程式碼讀出來，不是照名字猜）：
 
 | 現在的名字 | 預設 | **實際上管什麼**（程式碼） | 誰在用 |
 |---|---|---|---|
@@ -241,21 +246,15 @@ to-device 一則約 1 KB 又不需要逐則渲染，包大一點反而省來回�
 (2) 不需要擋 —— client 送 `limit=500, batch=1`（500 包）時，佇列滿了 handler 就卡在 `Reply::send` 等它讀，
 那正是 [wbf-pack-pipeline.md](wbf-pack-pipeline.md) §1 設計好的背壓。
 
-**要改的名字**：
+**討論過但不改的**（維護者 2026-09-11 定）：
 
-| 現在 | 改成 | 為什麼 |
+| 想過要改的 | 為什麼有人會想改 | 為什麼不改 |
 |---|---|---|
-| `wbf_push_max_events_per_pack` | `wbf_event_push_max_events_per_pack` | 讀起來像管「所有推送」，其實只管 `Event/Push`。`0x16` 也有 `Push` 之後，這個名字就真的在說謊（維護者同意） |
-| `wbf_recent_default_batch` | `wbf_recent_events_per_pack` | **`Batch` 在這個協議裡是一個 pack 的名字**（`0x14/0x03`），所以 `batch = 10` 會被讀成「10 個包」——這一輪我們兩個各踩了一次 |
-| `wbf_recent_max_batch` | `wbf_recent_events_per_pack_max` | 同上；它跟前一條**是同一個量**（一包幾則）的預設與上限，所以名字只差 `_max` |
+| `wbf_push_max_events_per_pack` → `wbf_event_push_…` | 讀起來像管「所有推送」 | `0x16` 的推送**就是共用它**，所以這個名字現在是準的 —— 它管的正是「server 主動推的一包幾則」，不分 kind |
+| `wbf_recent_default_batch` ／ `_max_batch` → `…events_per_pack` | `Batch` 在這個協議裡是一個 pack 的名字，`batch = 10` 會被讀成「10 個包」 | 改名要動 config、`Hello` 的回應欄位（線上可見）、文件與 e2e，換來的只是可讀性 —— **維護者定：先不動**。`0x16` 這邊改用 `wbf_device_default_batch`，**跟現有的家族對齊**，一致比各自漂亮更值錢 |
 
-⚠️ **只改 config 的名字，不動線上的欄位**。兩個地方是協議、不是 server 內部的事：
-`Recent` 請求 meta 的 `batch`（client 送的），以及 `Hello` 回應裡照樣叫 `recent_default_batch`／`recent_max_batch`
-的那兩個欄位（[mod.rs](../../src/api/client/wbf/mod.rs) 的 `hello`）。改它們要走 §3.4 那套「線上看得見的改動」流程，
-🔲 **要不要一起改由維護者決定**；不改的話 config 與 `Hello` 的用字會有落差，而那個落差要寫進 config 的說明裡。
-
-📎 這些名字**不是這支提案造成的**，但 `0x16` 一上線就會讓第一個真的說謊 ——
-所以實作那支順手修掉，🚫 不要再開一支「只改名字」的 PR。
+⚠️ 所以 `batch` 這個字在這份協議裡固定是「**一包幾則**」，不是包數。🚫 之後新增旋鈕沿用這個用法，
+不要在同一個 repo 裡出現第二種讀法。
 
 📎 **一則有多大**（照 [wbf-pack-pipeline.md](wbf-pack-pipeline.md) §1 的規矩，把記憶體算出來）：
 to-device 的一則**不是訊息事件**，是一小段 olm 密文 ——
