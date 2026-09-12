@@ -132,6 +132,13 @@ offset  size  欄位          說明
 | | `0x05 Unsubscribe` | `{ "rooms"?: ["!…"] }`；沒帶 = 全退；回應 `{}`；退不存在的是 no-op。**退訂退的是當下的 channel，不是黑名單**：帳號層訂閱者（`Subscribe` 沒帶 `rooms`）點名退掉某房之後，**再加入那個房時仍會被自動加回來** | 無 |
 | | `0x06 Push`（只有 server → client） | `{ "bc", "fs", "ls", "gap": bool }`；`id` 抄 `Subscribe`，`seq` 每推一次 +1；`gap: true` = 前面有推送被丟，用 `Recent` 補；事件驅動類，不 Ack、不重送，見 [wbf-event-push.md](wbf-event-push.md) | `bc` 則事件，跟 `Batch` 同一個長度前綴切法 |
 | `0x14 Event` | `0x02 Send` | `{ "room_id", "type", "txn_id", "attachments": [mxc…] }`；回應 `{ "event_id" }` | 事件 content 的 JSON（E2EE 就是 `m.room.encrypted` 的 content）。`attachments` 是 server 讀不到密文時唯一的引用來源，見 [media-attachments.md](media-attachments.md) |
+| `0x16 Device` | `0x04 Subscribe` | `{ "device_id", "cd_seq"? }`，**`id` 由 client 選**（之後每個 `Push` 抄它）；`device_id` 必須是這條連線 session 的那個，否則 `Error(Forbidden)`；回應 `{ "latest_cd_seq" }`；**只走 WS**。⚠️ 一個裝置同時只有一條連線在收，而且**後來的接手** —— 被接手的那條收到 `Error(Superseded)`（1505），見 [wbf-to-device.md](wbf-to-device.md) §4 | 無 |
+| | `0x05 Unsubscribe` | `{}`；回應 `{}`；沒訂也是 no-op。退訂**同時解除裝置綁定**，下一條連線不必靠搶佔就拿得到 | 無 |
+| | `0x01 Fetch` | `{ "cd_seq": <count>, "limit": 1000? }`，**`id` 由 client 選**；回應是一串 `0x02 Batch`，不是 `Ack`；**只走 WS**。📎 `limit: 0` 就是「不要」，回一則空 `Batch` | 無 |
+| | `0x02 Batch`（只有 server → client） | `{ "tc", "bc", "ot", "nt", "counts": [u64…], "r" }`：這一窗總則數、這批則數、這批**最舊／最新**的 count、逐則的 count、之後還剩幾則；`r = 0` 就是這窗結束。⚠️ 名字是 `ot`／`nt` 不是 `fs`／`ls`，因為**順序相反**：to-device 是**舊到新**（client 照這個順序匯入再銷毀） | `bc` 則項目，跟 `Event/Batch` 同一個長度前綴切法 |
+| | `0x06 Push`（只有 server → client） | `{ "bc", "ot", "nt", "counts": [u64…], "gap": bool }`；`id` 抄 `Subscribe`，`seq` 每推一次 +1；`gap: true` = 前面有推送被丟，用 `Fetch` 補 | 同上 |
+| | `0x03 ItemsDestroy` | `{ "tc" }`；**data 是 `tc` 個 u64 大端的 count**（不是 JSON、不是前綴，就是 `tc × 8` byte）；`tc` 與 data 長度對不上 → `Error(InvalidRequest)`，**一則都不刪**；只有持有這個佇列的連線能發，否則 `Error(Forbidden)`。回應**先** `Control/Ack`（只表示收到命令），**再**一則 `0x07 ItemsDestroyed` | `tc × 8` byte |
+| | `0x07 ItemsDestroyed`（只有 server → client） | `{ "tc", "bc" }`：命令裡有幾則、**真的沒了**幾則；data 是那 `bc` 個 count。⚠️ 一則都沒刪也會回（空清單），否則「沒刪掉」跟「server 沒回應」在 client 眼裡一樣。已經不在的**算銷毀成功** —— client 要的是狀態，不是事件 | `bc × 8` byte |
 | 其餘 | — | 拒收並回 `Error(UnknownKind)` | |
 
 ### 3.3 kind 的分配表（為之後把所有 HTTP 請求遷到 WS 預留）
@@ -276,6 +283,21 @@ WebSocket 本身保證到達順序，所以**順序錯一定是邏輯錯誤**，
 | **事件驅動** | server 主動推的東西（別人的 `Stream/Fragment` 轉發、之後的通知） | 發送端的序號 | 接收端不守順序，收到就處理；掉了就掉了（§5 流式的送達語意） |
 
 `Upload/Create`、`Seal`、`Abort`、`Stream/Open`、`Close` 這些**一次性指令**歸無序類（一個請求一個回應）。
+
+### 4.1 `seq` 屬於**會話**，不屬於 kind、也不屬於連線
+
+⭐ **`id` 是會話的名字，`seq` 是它裡面的計數**（PR #42 定案，實作在 `service/streams/subscribers.rs`）。
+會話由開啟它的那個指令命名 —— `Subscribe`、`Fetch`、`Recent`、`Upload/Create` —— 之後屬於它的每一包都抄那個 `id`，
+`seq` 只在**那段會話內**遞增。
+
+| 🚫 不是這樣 | 為什麼不行 |
+|---|---|
+| 每個 kind 一個計數 | 同一條連線上同 kind 的兩段會話會共用一個序列（e2e7 就有兩個上傳交錯），兩邊都看不出哪一包是自己的 |
+| 每條連線一個計數 | 一條連線同時背房間推送與 to-device 推送（這是**正常形狀**，不是特例），互相看起來就像對方漏了號 |
+
+所以：**一條連線上可以同時有好幾段會話在跑**，各自數各自的。
+📎 `Subscribe` 帶**不同的 `id`** 重訂就是**開一段新會話**：`seq` 歸零、`gap` 清掉。
+⚠️ 但**它已經進了哪些 topic 不會因此重來**（退訂是 `Unsubscribe` 的事）——「新的 id」講的是編號，不是成員資格。
 
 ## 5. 收發管線（兩端一樣）
 
