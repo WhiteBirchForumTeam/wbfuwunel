@@ -83,6 +83,7 @@ ruma 的 `redact_in_place` 只留規格允許的 key，`unsigned` 不在裡面�
 
 kind `0x14 Event`（wire-format §3.3 已分配給 send／messages／context 這個領域），subtype **`0x01 Recent`**。
 回應不是一個 `Ack`，而是**一串 `0x03 Batch`**（server → client），所以請求的 `id` 要由 client 選（Batch 抄它回來、`seq` 給批次用）。
+⚠️ **選的是那七個 byte 的值，第一個 byte 是型別 `0x01`**（client 的會話號，[wbf-wire-format.md](wbf-wire-format.md) §2.2，PR #47）：裸值（型別 `0x00`）在 handler 之前就被回 `InvalidRequest`。
 **只走 WebSocket**；HTTP 回 `Error(Unsupported)`。這一段自 [wbf-pack-pipeline.md](wbf-pack-pipeline.md) §6（維護者 2026-09-07 定）改寫，那份是權威。
 
 請求 meta（JSON，明文，server 要讀）；四個欄位都可省略：

@@ -36,6 +36,8 @@
 
 kind `0x14 Event`（§3.3 的 Event 章），三個新 subtype：
 
+⚠️ **「`id` 由 client 選」講的是選那七個 byte 的值，第一個 byte 是型別 `0x01`**（client 的會話號，[wbf-wire-format.md](wbf-wire-format.md) §2.2，PR #47）：裸值（型別 `0x00`）在 handler 之前就被回 `InvalidRequest`。
+
 | subtype | 誰發 | header | meta | data |
 |---|---|---|---|---|
 | `0x04 Subscribe` | client | `id` 由 client 選（之後每個 `Push` 抄它） | `{ "rooms"?: ["!…"], "cg_seq"?: <g_seq> }`；沒帶 `rooms` = 帳號層（所有加入的房，含之後加入的） | 無。回 `Ack`，meta `{ "latest_g_seq": <g_seq>, "joined": n, "skipped": ["!…"] }`（`skipped` = 不是成員的房：點名時就不是的，加上登記後重讀才發現已經離開的） |

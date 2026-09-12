@@ -28,7 +28,10 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tuwunel_core::{
 	Error, Result, debug, err, error,
-	wbf::{EncryptedFileInfo, Flags, Kind, PackBuilder, PackError, PackView, RejectCode, decode},
+	wbf::{
+		EncryptedFileInfo, Flags, IdType, Kind, PackBuilder, PackError, PackView, RejectCode, decode,
+		id_value,
+	},
 };
 use tuwunel_service::{
 	Services,
@@ -409,6 +412,19 @@ struct Admission {
 	/// It may come over `POST /_wbf/v1/pack`. Off for kinds whose reply is a
 	/// stream and for kinds that change a connection's session.
 	http_ok: bool,
+	/// What the header's `id` must be for this pair (wire-format §2.2).
+	///
+	/// ⚠️ It lives in this table and not a second one because it answers the
+	/// same question the rest of the row does — what this `(kind, subtype)`
+	/// takes — and two tables keyed by the same pair drift.
+	id_type: IdType,
+}
+
+/// The same row with a different kind of `id`: the four transports are
+/// spelled once each above, and this says what a row's id must be without
+/// repeating the rest of it.
+const fn with(row: Admission, id_type: IdType) -> Admission {
+	Admission { anonymous_ok: row.anonymous_ok, http_ok: row.http_ok, id_type }
 }
 
 /// Args:
@@ -417,44 +433,117 @@ struct Admission {
 /// Return:
 ///     Option<Admission>  None for a pair this server does not handle.
 const fn admission(kind: Kind, subtype: u8) -> Option<Admission> {
-	let logged_in_any_transport = Admission { anonymous_ok: false, http_ok: true };
-	let logged_in_websocket_only = Admission { anonymous_ok: false, http_ok: false };
-	let anyone_websocket_only = Admission { anonymous_ok: true, http_ok: false };
-	let anyone_any_transport = Admission { anonymous_ok: true, http_ok: true };
-
+	// The four transports, each spelled once, then the id type per row: a
+	// pack with no conversation carries a zero id, a client-named one
+	// carries the client's number, and the two the server mints name what
+	// they name (§2.2).
+	let logged_in_any_transport =
+		Admission { anonymous_ok: false, http_ok: true, id_type: IdType::None };
+	let logged_in_websocket_only =
+		Admission { anonymous_ok: false, http_ok: false, id_type: IdType::None };
+	let anyone_websocket_only =
+		Admission { anonymous_ok: true, http_ok: false, id_type: IdType::None };
+	let anyone_any_transport =
+		Admission { anonymous_ok: true, http_ok: true, id_type: IdType::None };
 	match (kind, subtype) {
 		| (Kind::Control, control::HELLO | control::PING) => Some(anyone_any_transport),
 		| (Kind::Session, session::LOGIN | session::REFRESH) => Some(anyone_websocket_only),
 		| (Kind::Session, session::LOGOUT) => Some(logged_in_websocket_only),
-		| (Kind::Upload, upload::CREATE | upload::CHUNK | upload::STATUS | upload::SEAL | upload::ABORT) =>
-			Some(logged_in_any_transport),
+		// `Create` opens the upload and is answered with its id; everything
+		// after it names that upload.
+		| (Kind::Upload, upload::CREATE) => Some(logged_in_any_transport),
+		| (Kind::Upload, upload::CHUNK | upload::STATUS | upload::SEAL | upload::ABORT) =>
+			Some(with(logged_in_any_transport, IdType::Upload)),
+		// Download is addressed by the mxc in its meta, not by a conversation.
 		| (Kind::Download, download::INFO | download::READ) => Some(logged_in_any_transport),
 		| (Kind::Event, event::SEND) => Some(logged_in_any_transport),
 		// Its reply is a stream of `Batch` packs: WebSocket only.
-		| (Kind::Event, event::RECENT) => Some(logged_in_websocket_only),
+		| (Kind::Event, event::RECENT) => Some(with(logged_in_websocket_only, IdType::ClientConversation)),
 		// They change what a connection listens to: WebSocket only.
-		| (Kind::Event, event::SUBSCRIBE | event::UNSUBSCRIBE) => Some(logged_in_websocket_only),
+		| (Kind::Event, event::SUBSCRIBE | event::UNSUBSCRIBE) =>
+			Some(with(logged_in_websocket_only, IdType::ClientConversation)),
 		// The to-device queue is a connection's to hold, and destroying from
 		// it is only allowed to the connection holding it: WebSocket only,
 		// `Fetch` included (its reply is a stream of `Batch` packs).
 		| (
 			Kind::Device,
 			device::FETCH | device::ITEMS_DESTROY | device::SUBSCRIBE | device::UNSUBSCRIBE,
-		) => Some(logged_in_websocket_only),
+		) => Some(with(logged_in_websocket_only, IdType::ClientConversation)),
 		// A draft only means anything to connections that are listening to
 		// the room, and its pieces are broadcast rather than answered:
 		// WebSocket only, every subtype.
+		// `Draft` has no anchor yet, so it carries no id; every other
+		// subtype names the anchor by its event position.
+		| (Kind::Stream, stream::DRAFT) => Some(logged_in_websocket_only),
 		| (
 			Kind::Stream,
-			stream::DRAFT
-			| stream::ABANDON
-			| stream::KEYPOINT
-			| stream::DELTA
-			| stream::APPEND
-			| stream::DEMAND,
-		) => Some(logged_in_websocket_only),
+			stream::ABANDON | stream::KEYPOINT | stream::DELTA | stream::APPEND | stream::DEMAND,
+		) => Some(with(logged_in_websocket_only, IdType::EventPosition)),
 		| _ => None,
 	}
+}
+
+/// The wire form of an upload id: its value with the upload type on top.
+///
+/// ⚠️ `Internal` rather than a truncation if it does not fit: the value is
+/// also the mxc's media id, so a shortened one would name a different file.
+/// Nothing can mint one that large today (`mint_upload_id` draws 56 bits),
+/// which is exactly why the check belongs here — the day that changes, this
+/// says so instead of handing out a wrong id.
+fn compose_upload_id(value: u64) -> Result<u64, Reject> {
+	IdType::Upload.compose(value).map_err(|refused| {
+		Reject::code(
+			RejectCode::Internal,
+			format!("this upload's id does not fit the wire format: {refused}"),
+		)
+	})
+}
+
+/// Refuses a pack whose `id` is not the kind of identifier this
+/// `(kind, subtype)` takes (wire-format §2.2).
+///
+/// ⭐ This is what makes the type byte worth carrying. Without the check it
+/// is decoration: a client could put an upload id where a subscription's
+/// number goes and the only symptom would be a later "not found" that names
+/// the wrong problem.
+///
+/// Args:
+///     id: the header field as it arrived
+///     expected: what the admission table says this pair takes
+/// Return:
+///     Result<(), Reject>  `InvalidRequest` when the type byte is not the
+///     expected one, when it is a byte the table does not define, or when a
+///     pack that has no conversation carries a value anyway.
+fn refuse_wrong_id_type(id: u64, expected: IdType) -> Result<(), Reject> {
+	let Some(actual) = IdType::of(id) else {
+		return Err(Reject::code(
+			RejectCode::InvalidRequest,
+			format!("the id's first byte is 0x{:02x}, which names no kind of id", id >> 56),
+		));
+	};
+
+	if actual != expected {
+		return Err(Reject::code(
+			RejectCode::InvalidRequest,
+			format!(
+				"this kind takes {} in its id, and this one carries {}",
+				expected.name(),
+				actual.name()
+			),
+		));
+	}
+
+	// ⚠️ `None` means the whole id is zero, not just the type byte: a value
+	// under it would be a number nothing can resolve, and accepting it would
+	// let a client believe it had named something.
+	if expected == IdType::None && id != 0 {
+		return Err(Reject::code(
+			RejectCode::InvalidRequest,
+			"this kind has no conversation, so its id is 0",
+		));
+	}
+
+	Ok(())
 }
 
 /// Why a pack could not be handled to completion: the client's request was
@@ -539,6 +628,7 @@ async fn dispatch(
 	if ctx.session.is_none() && !admission.anonymous_ok {
 		return Err(Reject::code(RejectCode::Unauthorized, "log in first: this connection has no session").into());
 	}
+	refuse_wrong_id_type(header.id, admission.id_type)?;
 
 	match (header.kind, header.subtype) {
 		| (Kind::Control, control::HELLO) => {
@@ -715,12 +805,16 @@ async fn handle_upload_create(services: &Services, user: &UserId, view: &PackVie
 	};
 
 	let created = services.media.upload_create(user, request).await?;
+	// ⭐ The client is handed the id already composed with its type, so that
+	// putting a type byte on an upload id is written once here rather than
+	// once in every client, in every language (wire-format §2.2).
+	let upload_id = compose_upload_id(created.upload_id)?;
 
 	Ok(ack(
-		created.upload_id,
+		upload_id,
 		view.header.seq,
 		json!({
-			"id": created.upload_id,
+			"id": upload_id,
 			"mxc": created.mxc,
 			"chunk_size": created.chunk_size,
 			"chunk_max_bytes": created.chunk_max_bytes,
@@ -733,7 +827,7 @@ async fn handle_upload_create(services: &Services, user: &UserId, view: &PackVie
 async fn handle_upload_chunk(services: &Services, user: &UserId, view: &PackView<'_>) -> std::result::Result<Vec<u8>, Reject> {
 	let stored = services
 		.media
-		.upload_chunk(user, view.header.id, view.header.seq, view.data, view.header.flags.is_last())
+		.upload_chunk(user, id_value(view.header.id), view.header.seq, view.data, view.header.flags.is_last())
 		.await?;
 
 	Ok(ack(
@@ -751,7 +845,7 @@ async fn handle_upload_chunk(services: &Services, user: &UserId, view: &PackView
 }
 
 async fn handle_upload_status(services: &Services, user: &UserId, view: &PackView<'_>) -> std::result::Result<Vec<u8>, Reject> {
-	let status = services.media.upload_status(user, view.header.id).await?;
+	let status = services.media.upload_status(user, id_value(view.header.id)).await?;
 
 	Ok(ack(
 		view.header.id,
@@ -775,14 +869,14 @@ async fn handle_upload_seal(services: &Services, user: &UserId, view: &PackView<
 	let new_meta = (!view.data.is_empty()).then(|| view.data.to_vec());
 	let mxc = services
 		.media
-		.upload_seal(user, view.header.id, new_meta)
+		.upload_seal(user, id_value(view.header.id), new_meta)
 		.await?;
 
 	Ok(ack(view.header.id, view.header.seq, json!({ "mxc": mxc }), Vec::new()))
 }
 
 async fn handle_upload_abort(services: &Services, user: &UserId, view: &PackView<'_>) -> std::result::Result<Vec<u8>, Reject> {
-	services.media.upload_abort(user, view.header.id).await?;
+	services.media.upload_abort(user, id_value(view.header.id)).await?;
 
 	Ok(ack(view.header.id, view.header.seq, json!({ "ok": true }), Vec::new()))
 }
@@ -956,9 +1050,66 @@ fn pack_response(status: StatusCode, pack: Vec<u8>) -> Response {
 
 #[cfg(test)]
 mod tests {
-	use tuwunel_core::wbf::{Kind, RejectCode, decode};
+	use tuwunel_core::wbf::{IdType, Kind, RejectCode, decode};
 
-	use super::{Reject, control};
+	use super::{Reject, admission, control, refuse_wrong_id_type};
+
+	#[test]
+	fn an_id_of_the_wrong_kind_is_refused_before_the_handler_sees_it() {
+		// The type byte is only worth carrying if a mismatch is an error:
+		// an upload id in a subscription's field would otherwise come back
+		// as "not found", which names the wrong problem.
+		let upload = IdType::Upload.compose(7).expect("fits");
+		let conversation = IdType::ClientConversation.compose(7).expect("fits");
+
+		assert!(refuse_wrong_id_type(conversation, IdType::ClientConversation).is_ok());
+		assert!(refuse_wrong_id_type(upload, IdType::ClientConversation).is_err());
+		assert!(refuse_wrong_id_type(conversation, IdType::Upload).is_err());
+	}
+
+	#[test]
+	fn a_pack_with_no_conversation_carries_a_whole_zero() {
+		// ⚠️ Not just a zero type byte: a value under `None` names nothing,
+		// and accepting it would let a client believe it had named something.
+		assert!(refuse_wrong_id_type(0, IdType::None).is_ok());
+		assert!(refuse_wrong_id_type(5, IdType::None).is_err());
+	}
+
+	#[test]
+	fn an_id_type_this_server_does_not_define_is_refused_not_guessed() {
+		// Including the extension byte: adding a type later must not be
+		// mistaken for something this version already understood.
+		for byte in [0x04u8, 0xFF] {
+			let id = (u64::from(byte) << 56) | 1;
+			assert!(refuse_wrong_id_type(id, IdType::ClientConversation).is_err());
+			assert!(refuse_wrong_id_type(id, IdType::None).is_err());
+		}
+	}
+
+	#[test]
+	fn every_admitted_pair_says_what_its_id_must_be() {
+		// The table is the only place that answers this, so the answer has
+		// to be there for every row it admits — a pair that is handled but
+		// unclassified would be a hole the dispatcher walks straight past.
+		for (kind, subtype) in [
+			(Kind::Control, control::HELLO),
+			(Kind::Upload, super::upload::CHUNK),
+			(Kind::Event, super::event::SUBSCRIBE),
+			(Kind::Device, super::device::FETCH),
+			(Kind::Stream, super::stream::APPEND),
+			(Kind::Stream, super::stream::DRAFT),
+		] {
+			let row = admission(kind, subtype).expect("this pair is handled");
+			let expected = match (kind, subtype) {
+				| (Kind::Upload, _) => IdType::Upload,
+				| (Kind::Event | Kind::Device, _) => IdType::ClientConversation,
+				| (Kind::Stream, super::stream::DRAFT) => IdType::None,
+				| (Kind::Stream, _) => IdType::EventPosition,
+				| _ => IdType::None,
+			};
+			assert_eq!(row.id_type, expected, "{kind:?}/{subtype:#x}");
+		}
+	}
 
 	#[test]
 	fn a_reject_becomes_an_error_pack_answering_the_request() {

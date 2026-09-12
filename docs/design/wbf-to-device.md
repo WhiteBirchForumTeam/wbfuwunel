@@ -52,6 +52,8 @@ client 得讓兩個資料庫原子性地一起 commit —— 兩個 db、兩套�
 
 編號刻意跟 `0x14 Event` 對齊（同號同位置，好對照）：
 
+⚠️ **「`id` 由 client 選」講的是選那七個 byte 的值，第一個 byte 是型別 `0x01`**（client 的會話號，[wbf-wire-format.md](wbf-wire-format.md) §2.2，PR #47）：這個 kind 的每個 subtype 都吃 `0x01`，裸值（型別 `0x00`）在 handler 之前就被回 `InvalidRequest`。
+
 | subtype | 方向 | meta | data | 順序類別 |
 |---|---|---|---|---|
 | `0x01 Fetch` | client → server | `{ "limit": 1000?, "cd_seq": <count>? }`；`id` 由 client 選 | 無 | 無序 |

@@ -40,7 +40,7 @@ server 回 Ack meta `{ "protocol": 1, "server": "<server name>", "features": ["u
 | 1 | 1 | `kind` | `0x01` Control、`0x03` Upload、`0x04` Download |
 | 2 | 1 | `subtype` | 見 §3、§4 |
 | 3 | 1 | `flags` | bit0 `META_ENCRYPTED`(0x01)、bit1 `WANT_ACK`(0x02)、bit2 `IS_RESPONSE`(0x04)、bit3 `IS_LAST`(0x08)；其餘必須 0 |
-| 4 | 8 | `id` | 上傳 id；`Create` 與所有 Download 請求為 0 |
+| 4 | 8 | `id` | 上傳 id，**含第一個 byte 的型別 `0x03`**（§2.2）——`Ack` 給的那個數字原樣填；`Create` 與所有 Download 請求**整個是 0** |
 | 12 | 4 | `seq` | `Chunk`：**塊索引（0 起）**；其他請求：請求號（client 自訂，回應抄回） |
 | 16 | 4 | `meta_len` | 可 0 |
 | 20 | n | `meta` | 見各訊息 |
@@ -86,12 +86,14 @@ server 檢查（任一不過就 `Error`，一個 byte 都還沒收）：
 Ack meta：
 
 ```json
-{ "id": 1234605616436508552, "mxc": "mxc://example.org/1122334455667788",
+{ "id": 249342211600893996, "mxc": "mxc://example.org/75d76b9dfb482c",
   "chunk_size": 65536, "chunk_max_bytes": 69632, "expires_at": 1788516156 }
 ```
 
-- `id`：之後每個 pack 標頭的 `id`。64-bit 隨機，server 發號前確認沒和進行中的上傳、既有媒體、墓碑撞到。
-- `mxc`：**同一個值**的另一種寫法，media id = `id` 的 16 位小寫 hex。房間事件的 `url` 用它。
+- `id`：**原樣抄進之後每個 pack 標頭的 `id`**。⚠️ 它的第一個 byte 是型別（`0x03` ＝ 上傳，[wbf-wire-format.md](wbf-wire-format.md) §2.2），其餘 7 byte 是值；🚨 **client 不要自己組這個數字** —— 拿 `Ack` 給的就對了。值是 56-bit 隨機，server 發號前確認沒和進行中的上傳、既有媒體、墓碑撞到。
+- `mxc`：**同一個值**的另一種寫法：media id ＝ 把型別 byte 拔掉之後那 7 byte 的小寫 hex，也就是 **14 個字元**。房間事件的 `url` 用它。
+  📎 舉例：`id` 是 `249342211600893996`（`0x03` ‖ `0x75d76b9dfb482c`）→ media id 是 `75d76b9dfb482c`。
+  ⚠️ **這個改動之前上傳的媒體是 16 個字元**，client 兩種都要認得 —— media id 對任何人來說都只是一個字串，🚫 不要驗它的長度。
 - `chunk_max_bytes` = `chunk_size + media_chunk_overhead_max`（預設 4 KiB）：這個上傳每塊 data 的上限。
 - `expires_at`：Unix 秒；每收一塊往後推 `media_upload_ttl`（預設 86400 秒）。
 

@@ -137,7 +137,7 @@ sweeper 用 `media_upload_ttl=2`：「等 3 秒 → 同時送 Chunk 與觸發 sw
 
 `has_holders`（`media_refs/mod.rs:478-483`）與 `forget_media`（`:237`）用 `(mxc,)` 當前綴。一元 tuple 序列化**沒有尾端分隔符**（`ser.rs:151-171`，
 分隔符只寫在元素之間），所以 `mxc://s/abc` 的前綴也匹配 `mxc://s/abcd‖…`。這個 repo 的慣例是 `(mxc, Interfix)`（`media/data.rs:544`）。
-現在不會出事是因為本站媒體 id 是定長隨機字串、分塊上傳的 id 是 16 位 hex —— 一個 16 字元的 id 是另一個 32 字元 id 的前綴，機率是 16⁻¹⁶；
+現在不會出事是因為本站媒體 id 是定長隨機字串、分塊上傳的 id 是定長 hex（寫這份時 16 位，PR #47 之後 14 位）—— 一個短 id 剛好是另一個 32 字元 id 的前綴，機率是 16⁻¹⁴ 這個量級；
 但正確性不該靠這個（A5：不要靠巧合正確）。後果方向：`has_holders` 假陽性 → 媒體永不刪（漏水）；`forget_media` 列到別人的房間 → 只刪
 自己 `(room, mxc)` 的列，無害。
 

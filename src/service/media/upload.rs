@@ -198,15 +198,20 @@ pub async fn upload_create(&self, user: &UserId, request: UploadRequest) -> Uplo
 		return Err(UploadError::TooLarge("maximum number of pending media uploads reached".into()));
 	}
 
-	// One unique value, two spellings: the 64-bit id goes in pack headers,
-	// its hex is the mxc's media id. No table maps one to the other.
+	// One unique value, two spellings: the 56-bit id goes in pack headers
+	// under its type byte (wire-format §2.2), and its hex is the mxc's media
+	// id. No table maps one to the other.
 	//
-	// 64 random bits make a collision negligible, but a collision would
-	// overwrite someone's media, so the id is checked against uploads in
-	// progress, existing media and tombstones before it is handed out.
+	// 📎 The media id is therefore **fourteen** hex digits for anything
+	// uploaded from now on. Media from before keeps its sixteen; they are
+	// strings and cannot collide, and nothing reads a media id's length.
+	//
+	// A collision would overwrite someone's media, so the id is checked
+	// against uploads in progress, existing media and tombstones before it is
+	// handed out.
 	let (upload_id, mxc) = loop {
 		let upload_id = mint_upload_id();
-		let mxc: OwnedMxcUri = format!("mxc://{}/{upload_id:016x}", self.services.globals.server_name()).into();
+		let mxc: OwnedMxcUri = format!("mxc://{}/{upload_id:014x}", self.services.globals.server_name()).into();
 		if self.is_upload_id_free(upload_id, &mxc).await {
 			break (upload_id, mxc);
 		}
@@ -703,10 +708,16 @@ fn crosses_upload_limit(max_len: u64, chunk_size: u32, total_len: u64, received_
 
 /// A random, non-zero upload id. Zero means "no id" on the wire. Whether it
 /// is free is `is_upload_id_free`'s business.
+///
+/// ⚠️ **Fourteen hex digits, not sixteen**: on the wire the header's `id`
+/// spends its first byte on the type (wire-format §2.2), so an upload id has
+/// seven bytes to live in — and those seven bytes are also, in hex, the mxc's
+/// media id. 56 random bits still make a collision a curiosity rather than a
+/// risk, and the caller re-draws when one happens.
 fn mint_upload_id() -> u64 {
 	loop {
-		let hex = utils::rand::string_from(b"0123456789abcdef", 16);
-		let id = u64::from_str_radix(&hex, 16).expect("16 hex digits fit a u64");
+		let hex = utils::rand::string_from(b"0123456789abcdef", 14);
+		let id = u64::from_str_radix(&hex, 16).expect("14 hex digits fit a u64");
 		if id != 0 {
 			return id;
 		}

@@ -13,7 +13,7 @@
 use serde_json::{Value, json};
 
 use super::{
-	ENCRYPTED_FILE_INFO_LEN, EncryptedFileInfo, Flags, Kind, PackBuilder, PackError, decode,
+	ENCRYPTED_FILE_INFO_LEN, EncryptedFileInfo, Flags, IdType, Kind, PackBuilder, PackError, decode,
 };
 
 /// Where the vectors live, relative to this file.
@@ -33,6 +33,25 @@ const OLM_ITEM: &[u8] = br#"{"content":{"algorithm":"m.olm.v1.curve25519-aes-sha
 fn length_prefixed(events: &[&[u8]]) -> Vec<u8> {
 	super::events::length_prefixed(events.iter().copied()).expect("vector events are small")
 }
+
+/// The three id types, composed by the same code a pack goes through
+/// (§2.2), so that the vectors and the implementation cannot disagree about
+/// where the type byte sits.
+fn conversation(value: u64) -> u64 {
+	IdType::ClientConversation
+		.compose(value)
+		.expect("a vector's conversation number is small")
+}
+fn anchor(g_seq: u64) -> u64 {
+	IdType::EventPosition
+		.compose(g_seq)
+		.expect("a vector's g_seq is small")
+}
+fn upload(value: u64) -> u64 { IdType::Upload.compose(value).expect("a vector's upload id fits") }
+
+/// The upload every upload and download vector is about: 56 bits, so its
+/// hex is the fourteen-character media id `mxc://localhost/22334455667788`.
+const UPLOAD_VALUE: u64 = 0x0022_3344_5566_7788;
 
 fn unhex(text: &str) -> Vec<u8> {
 	(0..text.len())
@@ -76,7 +95,7 @@ fn current() -> Value {
 	};
 
 	let create_meta = EncryptedFileInfo { file_size: 132056, chunk_size: 65536, chunk_count: 3 }.encode();
-	let good = pack("chunk", Kind::Upload, 0x02, Flags::default(), 0x1122_3344_5566_7788, 0, b"", b"\xde\xad\xbe\xef\x01");
+	let good = pack("chunk", Kind::Upload, 0x02, Flags::default(), upload(UPLOAD_VALUE), 0, b"", b"\xde\xad\xbe\xef\x01");
 
 	// Damaged copies of `good`, one field at a time.
 	let good_bytes = unhex(good["bytes_hex"].as_str().expect("hex"));
@@ -85,6 +104,17 @@ fn current() -> Value {
 		mutate(&mut bytes);
 		json!({ "name": name, "bytes_hex": hex(&bytes), "error": error })
 	};
+
+	// The draft every `0x02 Stream` vector is about.
+	//
+	// 🚨 The `Ack`'s `id` is computed, not typed out. It has to be exactly
+	// what the pieces then carry in their header, and the one hand-written
+	// copy of it in this file was **wrong** — it named a different `g_seq`
+	// than the `g_seq` beside it, so a client copying the Ack would have
+	// addressed a draft nobody opened.
+	const DRAFT_G_SEQ: u64 = 4711;
+	let ack_draft_open =
+		format!(r#"{{"event_id":"$d:localhost","g_seq":{DRAFT_G_SEQ},"id":{}}}"#, anchor(DRAFT_G_SEQ));
 
 	json!({
 		"format_version": 1,
@@ -105,52 +135,63 @@ fn current() -> Value {
 			pack("ping", Kind::Control, 0x04, Flags::default(), 0, 2, br#"{"nonce":42}"#, b""),
 			pack("create", Kind::Upload, 0x01, Flags::default(), 0, 3, &create_meta, b"<ciphertext of the file description>"),
 			good,
-			pack("chunk_last", Kind::Upload, 0x02, Flags::IS_LAST, 0x1122_3344_5566_7788, 2, b"", b"\xde\xad\xbe\xef\x01"),
-			pack("status", Kind::Upload, 0x03, Flags::default(), 0x1122_3344_5566_7788, 4, b"", b""),
-			pack("seal", Kind::Upload, 0x04, Flags::default(), 0x1122_3344_5566_7788, 5, b"", b""),
-			pack("abort", Kind::Upload, 0x05, Flags::default(), 0x1122_3344_5566_7788, 6, b"", b""),
-			pack("info", Kind::Download, 0x01, Flags::default(), 0, 7, br#"{"mxc":"mxc://localhost/1122334455667788"}"#, b""),
-			pack("read_by_pos", Kind::Download, 0x02, Flags::default(), 0, 8, br#"{"mxc":"mxc://localhost/1122334455667788","pos":131079}"#, b""),
-			pack("read_by_chunk", Kind::Download, 0x02, Flags::default(), 0, 9, br#"{"mxc":"mxc://localhost/1122334455667788","chunk":2}"#, b""),
-			pack("ack_chunk", Kind::Control, 0x02, Flags::IS_RESPONSE, 0x1122_3344_5566_7788, 0, br#"{"received":1,"chunk_count":3,"total_len":65552,"finished":false,"truncated":false}"#, b""),
+			pack("chunk_last", Kind::Upload, 0x02, Flags::IS_LAST, upload(UPLOAD_VALUE), 2, b"", b"\xde\xad\xbe\xef\x01"),
+			pack("status", Kind::Upload, 0x03, Flags::default(), upload(UPLOAD_VALUE), 4, b"", b""),
+			pack("seal", Kind::Upload, 0x04, Flags::default(), upload(UPLOAD_VALUE), 5, b"", b""),
+			pack("abort", Kind::Upload, 0x05, Flags::default(), upload(UPLOAD_VALUE), 6, b"", b""),
+			pack("info", Kind::Download, 0x01, Flags::default(), 0, 7, br#"{"mxc":"mxc://localhost/22334455667788"}"#, b""),
+			pack("read_by_pos", Kind::Download, 0x02, Flags::default(), 0, 8, br#"{"mxc":"mxc://localhost/22334455667788","pos":131079}"#, b""),
+			pack("read_by_chunk", Kind::Download, 0x02, Flags::default(), 0, 9, br#"{"mxc":"mxc://localhost/22334455667788","chunk":2}"#, b""),
+			pack("ack_chunk", Kind::Control, 0x02, Flags::IS_RESPONSE, upload(UPLOAD_VALUE), 0, br#"{"received":1,"chunk_count":3,"total_len":65552,"finished":false,"truncated":false}"#, b""),
 			pack("ack_read", Kind::Control, 0x02, Flags::IS_RESPONSE, 0, 8, br#"{"chunk":2,"pos":131072,"len":5,"chunk_size":65536,"chunk_count":3,"total_len":132104}"#, b"\xde\xad\xbe\xef\x01"),
-			pack("recent_first_start", Kind::Event, 0x01, Flags::default(), 10, 0, br#"{"limit":2,"batch":1}"#, b""),
-			pack("recent_with_cached_g_seq", Kind::Event, 0x01, Flags::default(), 11, 0, br#"{"limit":320,"cg_seq":4700,"batch":10}"#, b""),
-			pack("recent_next_window", Kind::Event, 0x01, Flags::default(), 12, 0, br#"{"limit":320,"cg_seq":4700,"before":4711,"batch":10}"#, b""),
+			pack("recent_first_start", Kind::Event, 0x01, Flags::default(), conversation(10), 0, br#"{"limit":2,"batch":1}"#, b""),
+			pack("recent_with_cached_g_seq", Kind::Event, 0x01, Flags::default(), conversation(11), 0, br#"{"limit":320,"cg_seq":4700,"batch":10}"#, b""),
+			pack("recent_next_window", Kind::Event, 0x01, Flags::default(), conversation(12), 0, br#"{"limit":320,"cg_seq":4700,"before":4711,"batch":10}"#, b""),
 			// The window for `recent_first_start` has two events and a batch of one,
 			// so it comes back as two Batch packs: seq 0 with r=1, seq 1 with r=0.
 			// Each event in data is a big-endian u32 length and then its JSON.
-			pack("batch_first", Kind::Event, 0x03, Flags::IS_RESPONSE, 10, 0, br#"{"bc":1,"fs":4712,"ls":4712,"r":1,"tc":2}"#, &length_prefixed(&[br#"{"content":{"body":"b","msgtype":"m.text"},"event_id":"$b:localhost","origin_server_ts":2,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":1,"org.wbftw.wbfuwunel.g_seq":4712,"org.wbftw.wbfuwunel.r_seq":2}}"#])),
-			pack("batch_last", Kind::Event, 0x03, Flags::IS_RESPONSE, 10, 1, br#"{"bc":1,"fs":4711,"ls":4711,"r":0,"tc":2}"#, &length_prefixed(&[br#"{"content":{"body":"a","msgtype":"m.text"},"event_id":"$a:localhost","origin_server_ts":1,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":2,"org.wbftw.wbfuwunel.g_seq":4711,"org.wbftw.wbfuwunel.r_seq":1}}"#])),
-			pack("batch_empty_window", Kind::Event, 0x03, Flags::IS_RESPONSE, 11, 0, br#"{"bc":0,"fs":0,"ls":0,"r":0,"tc":0}"#, b""),
-			pack("subscribe_account_wide", Kind::Event, 0x04, Flags::default(), 20, 0, br#"{"cg_seq":4700}"#, b""),
-			pack("subscribe_rooms", Kind::Event, 0x04, Flags::default(), 21, 0, br#"{"rooms":["!r:localhost"]}"#, b""),
-			pack("ack_subscribe", Kind::Control, 0x02, Flags::IS_RESPONSE, 20, 0, br#"{"joined":3,"latest_g_seq":4712,"skipped":[]}"#, b""),
-			pack("unsubscribe_all", Kind::Event, 0x05, Flags::default(), 20, 1, b"", b""),
+			pack("batch_first", Kind::Event, 0x03, Flags::IS_RESPONSE, conversation(10), 0, br#"{"bc":1,"fs":4712,"ls":4712,"r":1,"tc":2}"#, &length_prefixed(&[br#"{"content":{"body":"b","msgtype":"m.text"},"event_id":"$b:localhost","origin_server_ts":2,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":1,"org.wbftw.wbfuwunel.g_seq":4712,"org.wbftw.wbfuwunel.r_seq":2}}"#])),
+			pack("batch_last", Kind::Event, 0x03, Flags::IS_RESPONSE, conversation(10), 1, br#"{"bc":1,"fs":4711,"ls":4711,"r":0,"tc":2}"#, &length_prefixed(&[br#"{"content":{"body":"a","msgtype":"m.text"},"event_id":"$a:localhost","origin_server_ts":1,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":2,"org.wbftw.wbfuwunel.g_seq":4711,"org.wbftw.wbfuwunel.r_seq":1}}"#])),
+			pack("batch_empty_window", Kind::Event, 0x03, Flags::IS_RESPONSE, conversation(11), 0, br#"{"bc":0,"fs":0,"ls":0,"r":0,"tc":0}"#, b""),
+			pack("subscribe_account_wide", Kind::Event, 0x04, Flags::default(), conversation(20), 0, br#"{"cg_seq":4700}"#, b""),
+			pack("subscribe_rooms", Kind::Event, 0x04, Flags::default(), conversation(21), 0, br#"{"rooms":["!r:localhost"]}"#, b""),
+			pack("ack_subscribe", Kind::Control, 0x02, Flags::IS_RESPONSE, conversation(20), 0, br#"{"joined":3,"latest_g_seq":4712,"skipped":[]}"#, b""),
+			pack("unsubscribe_all", Kind::Event, 0x05, Flags::default(), conversation(20), 1, b"", b""),
 			// A pushed event: id copies the Subscribe, seq counts pushes; the data
 			// layout is Batch's. gap=true says a push was dropped before this one.
-			pack("push_one", Kind::Event, 0x06, Flags::IS_RESPONSE, 20, 0, br#"{"bc":1,"fs":4712,"gap":false,"ls":4712}"#, &length_prefixed(&[br#"{"content":{"body":"b","msgtype":"m.text"},"event_id":"$b:localhost","origin_server_ts":2,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":1,"org.wbftw.wbfuwunel.g_seq":4712,"org.wbftw.wbfuwunel.r_seq":2}}"#])),
-			pack("push_gap", Kind::Event, 0x06, Flags::IS_RESPONSE, 20, 3, br#"{"bc":1,"fs":4720,"gap":true,"ls":4720}"#, &length_prefixed(&[br#"{"content":{"body":"c","msgtype":"m.text"},"event_id":"$c:localhost","origin_server_ts":3,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":1,"org.wbftw.wbfuwunel.g_seq":4720,"org.wbftw.wbfuwunel.r_seq":3}}"#])),
+			pack("push_one", Kind::Event, 0x06, Flags::IS_RESPONSE, conversation(20), 0, br#"{"bc":1,"fs":4712,"gap":false,"ls":4712}"#, &length_prefixed(&[br#"{"content":{"body":"b","msgtype":"m.text"},"event_id":"$b:localhost","origin_server_ts":2,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":1,"org.wbftw.wbfuwunel.g_seq":4712,"org.wbftw.wbfuwunel.r_seq":2}}"#])),
+			pack("push_gap", Kind::Event, 0x06, Flags::IS_RESPONSE, conversation(20), 3, br#"{"bc":1,"fs":4720,"gap":true,"ls":4720}"#, &length_prefixed(&[br#"{"content":{"body":"c","msgtype":"m.text"},"event_id":"$c:localhost","origin_server_ts":3,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":1,"org.wbftw.wbfuwunel.g_seq":4720,"org.wbftw.wbfuwunel.r_seq":3}}"#])),
 			// 0x16 Device: the to-device queue. Oldest first, so `ot` is the first
 			// item in the pack and `nt` the last — the mirror of Event's `fs`/`ls`,
 			// with different names so the two cannot be read as the same thing.
 			// `counts` is one position per item: to-device items are not PDUs and
 			// have nowhere of their own to carry it.
-			pack("device_subscribe", Kind::Device, 0x04, Flags::default(), 30, 0, br#"{"cd_seq":4711,"device_id":"RJYKSTBOIE"}"#, b""),
-			pack("ack_device_subscribe", Kind::Control, 0x02, Flags::IS_RESPONSE, 30, 0, br#"{"latest_cd_seq":4730}"#, b""),
-			pack("device_fetch", Kind::Device, 0x01, Flags::default(), 31, 0, br#"{"cd_seq":4711,"limit":1000}"#, b""),
-			pack("device_batch", Kind::Device, 0x02, Flags::IS_RESPONSE, 31, 0, br#"{"bc":1,"counts":[4712],"nt":4712,"ot":4712,"r":0,"tc":1}"#, &length_prefixed(&[OLM_ITEM])),
-			pack("device_push", Kind::Device, 0x06, Flags::IS_RESPONSE, 30, 0, br#"{"bc":1,"counts":[4713],"gap":false,"nt":4713,"ot":4713}"#, &length_prefixed(&[OLM_ITEM])),
+			pack("device_subscribe", Kind::Device, 0x04, Flags::default(), conversation(30), 0, br#"{"cd_seq":4711,"device_id":"RJYKSTBOIE"}"#, b""),
+			pack("ack_device_subscribe", Kind::Control, 0x02, Flags::IS_RESPONSE, conversation(30), 0, br#"{"latest_cd_seq":4730}"#, b""),
+			pack("device_fetch", Kind::Device, 0x01, Flags::default(), conversation(31), 0, br#"{"cd_seq":4711,"limit":1000}"#, b""),
+			pack("device_batch", Kind::Device, 0x02, Flags::IS_RESPONSE, conversation(31), 0, br#"{"bc":1,"counts":[4712],"nt":4712,"ot":4712,"r":0,"tc":1}"#, &length_prefixed(&[OLM_ITEM])),
+			pack("device_push", Kind::Device, 0x06, Flags::IS_RESPONSE, conversation(30), 0, br#"{"bc":1,"counts":[4713],"gap":false,"nt":4713,"ot":4713}"#, &length_prefixed(&[OLM_ITEM])),
 			// The destroy command and its result carry counts as raw big-endian
 			// u64s, eight bytes each with no separator: a separator byte would
 			// also occur inside a count.
-			pack("device_items_destroy", Kind::Device, 0x03, Flags::default(), 32, 0, br#"{"tc":2}"#, &[0, 0, 0, 0, 0, 0, 18, 104, 0, 0, 0, 0, 0, 0, 18, 105]),
-			pack("device_items_destroyed", Kind::Device, 0x07, Flags::IS_RESPONSE, 32, 0, br#"{"bc":2,"tc":2}"#, &[0, 0, 0, 0, 0, 0, 18, 104, 0, 0, 0, 0, 0, 0, 18, 105]),
+			pack("device_items_destroy", Kind::Device, 0x03, Flags::default(), conversation(32), 0, br#"{"tc":2}"#, &[0, 0, 0, 0, 0, 0, 18, 104, 0, 0, 0, 0, 0, 0, 18, 105]),
+			pack("device_items_destroyed", Kind::Device, 0x07, Flags::IS_RESPONSE, conversation(32), 0, br#"{"bc":2,"tc":2}"#, &[0, 0, 0, 0, 0, 0, 18, 104, 0, 0, 0, 0, 0, 0, 18, 105]),
 			// The one pack the server sends without being asked: the id is the
 			// displaced connection's own `Device/Subscribe` (30 above), not a
 			// request of its own, and IS_LAST ends that conversation.
-			pack("error_superseded", Kind::Control, 0x03, Flags::IS_RESPONSE.union(Flags::IS_LAST), 30, 1, br#"{"code":"Superseded","code_id":1505,"message":"another connection of this device took its to-device queue over"}"#, b""),
-			pack("send_encrypted_with_attachments", Kind::Event, 0x02, Flags::default(), 0, 13, br#"{"room_id":"!r:localhost","type":"m.room.encrypted","txn_id":"t1","attachments":["mxc://localhost/1122334455667788"]}"#, br#"{"algorithm":"m.megolm.v1.aes-sha2","ciphertext":"AwgAEnACgAkLmt6qF84IK++J7UDH2Za1YVchHyprqTqsg","device_id":"RJYKSTBOIE","sender_key":"IlRMeOPX2e0MurIyfWEucYBRVOEEUMrOHqn/8mLqMjA","session_id":"X3lUlvLELLYxeTx4yOVu6UDpasGEVO0Jbu+QFnm0cKQ"}"#),
+			pack("error_superseded", Kind::Control, 0x03, Flags::IS_RESPONSE.union(Flags::IS_LAST), conversation(30), 1, br#"{"code":"Superseded","code_id":1505,"message":"another connection of this device took its to-device queue over"}"#, b""),
+			// Drafts (`0x02 Stream`). ⚠️ This kind's meta is the room id as
+			// UTF-8 text, not JSON, and a piece's data starts with the
+			// big-endian `prev` it follows (streaming-messages.md §3.0).
+			// The id is the anchor's position, so it carries `0x02`.
+			pack("draft_open", Kind::Stream, 0x01, Flags::default(), 0, 40, b"!r:localhost", b""),
+			pack("ack_draft_open", Kind::Control, 0x02, Flags::IS_RESPONSE, 0, 40, ack_draft_open.as_bytes(), b""),
+			pack("draft_keypoint", Kind::Stream, 0x03, Flags::default(), anchor(DRAFT_G_SEQ), 1, b"!r:localhost", &[&[0, 0, 0, 0][..], b"AwgAEnAC<ciphertext of the whole draft>"].concat()),
+			pack("draft_append", Kind::Stream, 0x05, Flags::default(), anchor(DRAFT_G_SEQ), 2, b"!r:localhost", &[&[0, 0, 0, 1][..], b"AwgAEnAC<ciphertext appended to piece 1>"].concat()),
+			pack("draft_demand", Kind::Stream, 0x10, Flags::default(), anchor(DRAFT_G_SEQ), 3, b"!r:localhost", b""),
+			pack("draft_abandon", Kind::Stream, 0x02, Flags::default(), anchor(DRAFT_G_SEQ), 41, b"!r:localhost", b""),
+			pack("ack_draft_abandon", Kind::Control, 0x02, Flags::IS_RESPONSE, anchor(DRAFT_G_SEQ), 41, br#"{"redaction_event_id":"$r:localhost"}"#, b""),
+			pack("send_encrypted_with_attachments", Kind::Event, 0x02, Flags::default(), 0, 13, br#"{"room_id":"!r:localhost","type":"m.room.encrypted","txn_id":"t1","attachments":["mxc://localhost/22334455667788"]}"#, br#"{"algorithm":"m.megolm.v1.aes-sha2","ciphertext":"AwgAEnACgAkLmt6qF84IK++J7UDH2Za1YVchHyprqTqsg","device_id":"RJYKSTBOIE","sender_key":"IlRMeOPX2e0MurIyfWEucYBRVOEEUMrOHqn/8mLqMjA","session_id":"X3lUlvLELLYxeTx4yOVu6UDpasGEVO0Jbu+QFnm0cKQ"}"#),
 			pack("ack_send", Kind::Control, 0x02, Flags::IS_RESPONSE, 0, 13, br#"{"event_id":"$Zm9vYmFy:localhost"}"#, b""),
 			pack("login_password", Kind::Session, 0x01, Flags::default(), 0, 14, br#"{"type":"m.login.password","identifier":{"type":"m.id.user","user":"alice"},"password":"correct-horse-battery","initial_device_display_name":"wbf desktop","refresh_token":true}"#, b""),
 			pack("ack_login", Kind::Control, 0x02, Flags::IS_RESPONSE, 0, 14, br#"{"access_token":"syt_YWxpY2U_ExampleTokenExampleToken_1a2b3c","device_id":"RJYKSTBOIE","expires_in_ms":3600000,"refresh_token":"refresh_ExampleRefreshTokenExampleRefre","user_id":"@alice:localhost"}"#, b""),
@@ -158,8 +199,8 @@ fn current() -> Value {
 			pack("logout", Kind::Session, 0x03, Flags::default(), 0, 16, br#"{}"#, b""),
 			pack("logout_all", Kind::Session, 0x03, Flags::default(), 0, 17, br#"{"all":true}"#, b""),
 			pack("error_rate_limited", Kind::Control, 0x03, Flags::IS_RESPONSE, 0, 14, br#"{"code":"RateLimited","code_id":1401,"message":"M_LIMIT_EXCEEDED: Too many login attempts from this address.","retry_after_ms":700}"#, b""),
-			pack("error_out_of_order", Kind::Control, 0x03, Flags::IS_RESPONSE, 0x1122_3344_5566_7788, 2, br#"{"code":"OutOfOrder","code_id":1503,"expected_seq":1,"message":"expected chunk 1"}"#, b""),
-			pack("error_unsupported", Kind::Control, 0x03, Flags::IS_RESPONSE, 10, 0, br#"{"code":"Unsupported","code_id":1102,"message":"this kind is only served over the WebSocket channel; POST /_wbf/v1/pack is for one-pack requests"}"#, b""),
+			pack("error_out_of_order", Kind::Control, 0x03, Flags::IS_RESPONSE, upload(UPLOAD_VALUE), 2, br#"{"code":"OutOfOrder","code_id":1503,"expected_seq":1,"message":"expected chunk 1"}"#, b""),
+			pack("error_unsupported", Kind::Control, 0x03, Flags::IS_RESPONSE, conversation(10), 0, br#"{"code":"Unsupported","code_id":1102,"message":"this kind is only served over the WebSocket channel; POST /_wbf/v1/pack is for one-pack requests"}"#, b""),
 			pack("error_too_many_connections", Kind::Control, 0x03, Flags::IS_RESPONSE, 0, 14, br#"{"code":"TooManyConnections","code_id":1402,"max_connections":4,"message":"this device already holds 4 wbf connections; close one before opening another"}"#, b""),
 			pack("error_invalid_request", Kind::Control, 0x03, Flags::IS_RESPONSE, 0, 18, br#"{"code":"InvalidRequest","code_id":1201,"message":"Subscribe meta: invalid type: string, expected a sequence"}"#, b""),
 			pack("empty", Kind::Control, 0x04, Flags::default(), 0, 0, b"", b""),
@@ -212,6 +253,52 @@ fn regenerate() {
 
 /// The file's packs decode to the fields it says, and re-encode to the bytes
 /// it says. This is the test a client copies.
+/// Every vector's `id` is one this server would accept.
+///
+/// 🚨 A golden vector is what a client copies and implements from, so a
+/// sample the same version's server refuses is worse than a missing one: it
+/// teaches the wrong bytes with the file's authority. Seven vectors were
+/// exactly that — conversation ids left untyped when the type byte was
+/// introduced, so a client following them would have had every `Recent` and
+/// `Subscribe` refused (PR #47 review, cirno).
+///
+/// ⚠️ This checks the invariant, not each pack against the admission table:
+/// that table lives in the API crate, which this one cannot see. What it can
+/// say is that no vector carries a value the type byte does not account for,
+/// which is what went wrong — and unlike a grep, it cannot miss one.
+#[test]
+fn no_vector_carries_an_id_the_type_byte_does_not_explain() {
+	let vectors: Value = serde_json::from_str(VECTORS).expect("vectors file is JSON");
+	for pack in vectors["packs"].as_array().expect("packs") {
+		let name = pack["name"].as_str().expect("name");
+		let id = pack["id"].as_u64().expect("id");
+		let kind = IdType::of(id).unwrap_or_else(|| {
+			panic!("{name}: the id's first byte is 0x{:02x}, which names no kind of id", id >> 56)
+		});
+		assert!(
+			kind != IdType::None || id == 0,
+			"{name}: id {id} has no type byte, so it is a value under `None` — the one thing an \
+			 id may never be"
+		);
+
+		// An `Ack` that hands the client both a position and the id to use
+		// from now on must hand it the same thing twice. 🚨 One did not: the
+		// composed id was typed out by hand and named a different `g_seq`
+		// than the `g_seq` beside it.
+		let meta: Option<Value> =
+			pack["meta_text"].as_str().and_then(|text| serde_json::from_str(text).ok());
+		if let Some(meta) = meta {
+			if let (Some(g_seq), Some(minted)) = (meta["g_seq"].as_u64(), meta["id"].as_u64()) {
+				assert_eq!(
+					IdType::EventPosition.compose(g_seq),
+					Ok(minted),
+					"{name}: the Ack's id and its g_seq name different drafts"
+				);
+			}
+		}
+	}
+}
+
 #[test]
 fn packs_round_trip_against_the_file() {
 	let vectors: Value = serde_json::from_str(VECTORS).expect("vectors file is JSON");

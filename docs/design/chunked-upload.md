@@ -85,9 +85,11 @@ WebSocket 上是一框一 pack；HTTP 上是 `POST /_wbf/v1/pack` 一次一 pack
 | `mediaid_upload` | `upload_id`（u64 BE） | `Cbor(Upload)` | 上傳的**宣告**，`Create` 寫一次之後不動：`mxc`、`owner`、`chunk_size`、`chunk_count`、`file_size`、`meta`（加密描述，最大 64 KiB）、`created_at`。沒有檔名、沒有 MIME：server 從來沒被告知這堆 bytes 是什麼 |
 | `mediaid_upload_progress` | `upload_id`（u64 BE） | `Cbor(UploadProgress)` | 上傳的**進度**，每塊重寫（幾十 byte）：`received_count`（下一塊的 index）、`total_len`（累計，也就是暫存檔長度與下一塊的偏移）、`finished`、`truncated`（§6）、`last_chunk_at`。與 `mxc_chunk` 那一塊的位置同一個 txn。宣告與進度分兩列，是為了每塊不重寫那 64 KiB 的描述。沒有 bitmap：有序序列的「已收」永遠是 0..n 連續。沒有 `state` 欄：兩個 seal 撞在一起靠鎖與冪等收尾 |
 
-鍵是 `upload_id` 而不是 mxc 字串，因為 pack 的標頭帶的是 `id`（u64），server 一個點讀就找到，不用解 meta。
-**`upload_id` 與 mxc 是同一個唯一值的兩種寫法**：server 在 `Create` 時隨機發 64 bit，mxc 的 media id 就是它的 16 位 hex（`mxc://server/1122334455667788`）。沒有對照表；上傳、下載、房間事件用的都是這一個地址。
-它是**隨機值，不是計數器**：不累加、不常駐、不落地，server 跑多久都沒有用完或溢位的問題。唯一的風險是撞號（一百萬個媒體下每次約 5×10⁻¹⁴），而撞到會蓋掉別人的媒體，所以 `Create` 發號前多兩次點讀：進行中的上傳、既有媒體、壓碑，任一個有就重抽（fail closed，成本可忽略）。
+鍵是 `upload_id` 而不是 mxc 字串，因為 pack 的標頭帶的就是它，server 一個點讀就找到，不用解 meta。
+⚠️ **標頭的 `id` 是 `0x03 ‖ upload_id`**（型別 byte ＋ 7 byte 的值，[wbf-wire-format.md](wbf-wire-format.md) §2.2，PR #47）；**列的鍵是拔掉型別之後那個值**。所以「上傳 id」這個詞在這份文件裡一律指那個值，線上那 8 個 byte 比它多一個型別 byte。
+**`upload_id` 與 mxc 是同一個唯一值的兩種寫法**：server 在 `Create` 時隨機發 **56 bit**，mxc 的 media id 就是它的 **14 位** hex（`mxc://server/22334455667788`）。沒有對照表；上傳、下載、房間事件用的都是這一個地址。
+🚫 **不要驗 media id 的長度**：型別 byte 之前鑄的媒體是 16 個字元，它們照樣有效（字串，不會跟 14 個字元的新 id 相撞）。
+它是**隨機值，不是計數器**：不累加、不常駐、不落地，server 跑多久都沒有用完或溢位的問題。唯一的風險是撞號（一百萬個媒體下 56 bit 每次約 1.4×10⁻¹¹），而撞到會蓋掉別人的媒體，所以 `Create` 發號前多兩次點讀：進行中的上傳、既有媒體、壓碑，任一個有就重抽（fail closed，成本可忽略）。
 
 TTL 設 `media_upload_ttl × 2` 當兜底，真正的清理是 §6 的 sweeper。**sealed 之後這列刪掉**。
 
@@ -99,13 +101,13 @@ TTL 設 `media_upload_ttl × 2` 當兜底，真正的清理是 §6 的 sweeper�
 
 ## 4. 上傳：kind = `Upload`
 
-標頭：`id = upload_id`（`Create` 時為 0），`seq` = 塊 index（`Chunk`，0 起）或請求號（其他）。meta 明文，但**只放 server 運作非知道不可的欄位**（尺寸、mxc、位置）；`Create` 的 meta 是 16 byte 二進位的 `EncryptedFileInfo`（§2.2），其他 subtype 的 meta 是 JSON 或空。
+標頭：`id = 0x03 ‖ upload_id`（`Create` 時整個是 0 —— 號還沒鑄，型別 `0x00`；組好的 `id` 從 `Ack` 抄），`seq` = 塊 index（`Chunk`，0 起）或請求號（其他）。meta 明文，但**只放 server 運作非知道不可的欄位**（尺寸、mxc、位置）；`Create` 的 meta 是 16 byte 二進位的 `EncryptedFileInfo`（§2.2），其他 subtype 的 meta 是 JSON 或空。
 檔名、MIME、尺寸、金鑰、每塊的雜湊、整檔的雜湊，一律不給 server：那些在房間裡那則**加密事件**的內容（§7），跟 Matrix E2EE 的 `m.file` 一樣，server 存的是它不知道是什麼的 bytes。
-`META_ENCRYPTED` 旗標是給串流訊息用的（[streaming-messages.md](streaming-messages.md)）：那時 meta 是 client 密文，server 只轉發不讀。
+📎 `META_ENCRYPTED` 旗標**現在沒有任何 kind 在用**：它本來是留給串流訊息的，但草稿定案時 meta 成了明文的 room id（server 要靠它知道往哪個房間廣播），所以 `Stream` 的 flags 也是 0 —— 見 [wbf-wire-format.md](wbf-wire-format.md) §3.1。
 
 | subtype | 請求 meta | 請求 data | 回應（`Ack` 的 meta） |
 |---|---|---|---|
-| `0x01 Create` | **`EncryptedFileInfo` 16 byte 二進位**：`file_size` u64 ‖ `chunk_size` u32（0 = 預設）‖ `chunk_count` u32，big-endian | **client 加密的檔案描述**（可空） | `{ "id": <upload_id>, "mxc": "mxc://…/<hex(id)>", "chunk_size": …, "chunk_max_bytes": …, "expires_at": … }`（`id` 與 `mxc` 是同一個值；`chunk_max_bytes` = `chunk_size + media_chunk_overhead_max`）。`chunk_count ≠ ceil(file_size / chunk_size)` → `Error(Conflict)`；`file_size > media_upload_max_len` → `Error(TooLarge)`。`file_size = 0` 且 `chunk_count = 0` = 串流模式（§2.2），只有一個是 0 → `Error(Conflict)` |
+| `0x01 Create` | **`EncryptedFileInfo` 16 byte 二進位**：`file_size` u64 ‖ `chunk_size` u32（0 = 預設）‖ `chunk_count` u32，big-endian | **client 加密的檔案描述**（可空） | `{ "id": <組好的 id>, "mxc": "mxc://…/<14 位 hex(值)>", "chunk_size": …, "chunk_max_bytes": …, "expires_at": … }`（`id` 是**線上要填的那 8 個 byte**（`0x03 ‖ 值`），mxc 的 media id 是**拔掉型別之後那個值**的 14 位 hex —— 兩者仍是同一個唯一值的兩種寫法，只差那個 byte；`chunk_max_bytes` = `chunk_size + media_chunk_overhead_max`）。`chunk_count ≠ ceil(file_size / chunk_size)` → `Error(Conflict)`；`file_size > media_upload_max_len` → `Error(TooLarge)`。`file_size = 0` 且 `chunk_count = 0` = 串流模式（§2.2），只有一個是 0 → `Error(Conflict)` |
 | `0x02 Chunk` | 無（`id`、`seq` 在標頭就夠） | 第 `seq` 塊的 bytes，長度由 client 定，每塊可以不同；最後一塊可帶 `IS_LAST` | `{ "received": <已到塊數>, "chunk_count": …, "total_len": <累計 bytes>, "finished": bool, "truncated": bool }`。收到第 `chunk_count − 1` 塊就 `finished`（串流：收到帶 `IS_LAST` 的塊；回應的 `chunk_count` 為 `null`）。`data_crc` 不合 → `Error(Corrupt)`；`data_len > chunk_max_bytes` → `Error(TooLarge)`；空塊、`seq ≥ chunk_count`、完成後還有塊、`IS_LAST` 帶在不是最後一塊上 → `Error(Conflict)`；會超過單檔上限或塊數上限 → 這塊不收、上傳強制結束、`Error(Truncated)` 帶 `received`、`total_len`、`truncated: true`（§6）；`seq < received_count`（重送）→ 不重寫、再 Ack 一次，冪等 |
 | `0x03 Status` | 無 | 無 | `{ "received": <已到塊數>, "chunk_count": …, "total_len": …, "finished": bool, "truncated": bool, "chunk_size": …, "file_size": … }`；續傳從 `seq = received` 接著送 |
 | `0x04 Seal` | 無 | **可選**：新的加密描述，取代 `Create` 時那份 | `{ "mxc": "…" }`。還沒完成 → `Error(Conflict)` 帶目前塊數與 bytes |
@@ -119,7 +121,7 @@ TTL 設 `media_upload_ttl × 2` 當兜底，真正的清理是 §6 的 sweeper�
 
 ## 5. 下載：kind = `Download`
 
-標頭：`id = 0`（mxc 在 meta 裡，因為它是字串），`seq` = 請求號。meta 明文。
+標頭：`id` **整個是 0**（型別 `0x00`：下載沒有會話，mxc 在 meta 裡，因為它是字串），`seq` = 請求號。meta 明文。
 
 | subtype | 請求 meta | 回應 |
 |---|---|---|

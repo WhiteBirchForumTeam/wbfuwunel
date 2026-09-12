@@ -83,11 +83,11 @@ function Drain-Pushes($ws, [int]$quietMs = 1500) {
 }
 function Subscribe($ws, [uint64]$id, $rooms, $cgSeq) {
   $meta = @{}; if ($null -ne $rooms) { $meta.rooms = @($rooms) }; if ($null -ne $cgSeq) { $meta.cg_seq = $cgSeq }
-  Call $ws (Json-Pack 0x14 4 $id 0 $meta $null)
+  Call $ws (Json-Pack 0x14 4 (Conv $id) 0 $meta $null)
 }
 function Unsubscribe($ws, [uint64]$id, $rooms) {
   $meta = @{}; if ($null -ne $rooms) { $meta.rooms = @($rooms) }
-  Call $ws (Json-Pack 0x14 5 $id 1 $meta $null)
+  Call $ws (Json-Pack 0x14 5 (Conv $id) 1 $meta $null)
 }
 function Ids($packs) { @($packs | ForEach-Object { $_.events } | ForEach-Object { $_.event_id }) }
 # A Stream pack (0x02): the meta is the room id itself, as UTF-8 text rather than JSON, and the
@@ -124,7 +124,7 @@ $ack = Subscribe $wsSub 7 $null $null
 Check '[1.1a] account-wide Subscribe -> Ack with joined>=1, latest_g_seq, skipped=[]' ($ack.subtype -eq 2 -and $ack.meta.joined -ge 1 -and $ack.meta.latest_g_seq -gt 0 -and @($ack.meta.skipped).Count -eq 0) (Describe $ack)
 $m1 = Send-Msg $r1 'hello from bob' $tokB
 $pushes = @(Drain-Pushes $wsSub)
-Check '[1.1b] bob sends -> the subscribed connection gets one Push with that event, id=7 seq=0, fs=ls=g_seq, gap=false' ($pushes.Count -eq 1 -and $pushes[0].subtype -eq 6 -and $pushes[0].id -eq 7 -and $pushes[0].seq -eq 0 -and @($pushes[0].events).Count -eq 1 -and $pushes[0].events[0].event_id -eq $m1 -and [int64]$pushes[0].meta.fs -eq (GSeqOf $pushes[0].events[0]) -and $pushes[0].meta.fs -eq $pushes[0].meta.ls -and $pushes[0].meta.gap -eq $false) "$(Describe $pushes[0]) events=$(@($pushes[0].events).Count) first=$($pushes[0].events[0].event_id) m1=$m1 g=$(GSeqOf $pushes[0].events[0])"
+Check '[1.1b] bob sends -> the subscribed connection gets one Push with that event, id=7 seq=0, fs=ls=g_seq, gap=false' ($pushes.Count -eq 1 -and $pushes[0].subtype -eq 6 -and $pushes[0].id -eq (Conv 7) -and $pushes[0].seq -eq 0 -and @($pushes[0].events).Count -eq 1 -and $pushes[0].events[0].event_id -eq $m1 -and [int64]$pushes[0].meta.fs -eq (GSeqOf $pushes[0].events[0]) -and $pushes[0].meta.fs -eq $pushes[0].meta.ls -and $pushes[0].meta.gap -eq $false) "$(Describe $pushes[0]) events=$(@($pushes[0].events).Count) first=$($pushes[0].events[0].event_id) m1=$m1 g=$(GSeqOf $pushes[0].events[0])"
 $nothing = Recv-Or-Null $wsNot 1000
 Check '[1.1c] the unsubscribed connection got nothing' ($null -eq $nothing) ''
 
@@ -195,7 +195,7 @@ $u3 = Unsubscribe $wsLate 8 $null
 Check '[1.7b] Unsubscribe all -> Ack' ($u3.subtype -eq 2) (Describe $u3)
 
 # [1.8] HTTP: Subscribe is Unsupported
-$http = Send-Pack (Json-Pack 0x14 4 11 0 @{} $null) $tokA
+$http = Send-Pack (Json-Pack 0x14 4 (Conv 11) 0 @{} $null) $tokA
 Check '[1.8] Subscribe over HTTP -> Error Unsupported' ($http.subtype -eq 3 -and $http.meta.code -eq 'Unsupported') (Describe $http)
 foreach ($w in @($wsSub, $wsNot, $wsLate, $wsNamed, $wsB)) { try { $w.Dispose() } catch {} }
 Stop-Server $server
@@ -231,7 +231,7 @@ Check '[2.2b] the next Push after the drops carries gap=true' ($gapSeen -ge 1 -a
 $sent += $mAfter
 # fill in with Recent from the watermark (the last event before the flood: the join); collect all windows
 $recentIds = @()
-Ws-Send $wsA (Json-Pack 0x14 1 99 0 @{ limit = 200; batch = 20 } $null)
+Ws-Send $wsA (Json-Pack 0x14 1 (Conv 99) 0 @{ limit = 200; batch = 20 } $null)
 # ⚠️ `$batch`, never `$b`: PowerShell variable names are case-insensitive, so `$b` is the helpers'
 # `$B` — the base URL — and overwriting it makes the next Start-Server probe an address named after
 # a hashtable. It stayed invisible while nothing after this line used $B (README, and e2e12 again).
@@ -295,11 +295,22 @@ $null = Subscribe $wsB 41 $null $null
 
 # [4.1] Draft writes a real, pushed anchor event
 $draft = Call $wsA (Draft-Pack $room 1)
-$draftId = [uint64]$draft.meta.g_seq
+$draftId = [uint64]$draft.meta.id   # already carries its type byte (wire-format 2.2)
 $anchorPushes = @(Drain-Pushes $wsB 1500)
 $anchorTypes = @($anchorPushes | ForEach-Object { $_.events } | ForEach-Object { $_.type })
 Check '[4.1a] Draft -> Ack with event_id and g_seq' ($draft.subtype -eq 2 -and $draft.meta.event_id -and $draftId -gt 0) (Describe $draft)
 Check '[4.1b] the anchor is a real event: bob is pushed it, type org.wbftw.wbfuwunel.draft' ($anchorTypes -contains 'org.wbftw.wbfuwunel.draft') "types=$($anchorTypes -join ',')"
+
+# The id's type byte, on this kind specifically (wire-format 2.2, PR #47). The unit
+# tests cover the gate; these two cover the two mistakes a client actually makes:
+# composing the id itself before the server has minted one, and sending a piece with
+# the bare g_seq it read out of the Ack's meta instead of the composed id beside it.
+$earlyType = Call $wsA (Stream-Pack 0x01 $room (Anchor 7) 2 $null)
+Check '[4.1c] a Draft naming an anchor it does not have yet -> InvalidRequest' `
+  ($earlyType.subtype -eq 3 -and $earlyType.meta.code_id -eq 1201) (Describe $earlyType)
+$bareId = Call $wsA (Piece-Pack 0x05 $room ([uint64]$draft.meta.g_seq) 1 0 ([Text.Encoding]::UTF8.GetBytes('x')))
+Check '[4.1d] a piece carrying the bare g_seq instead of the composed id -> InvalidRequest' `
+  ($bareId.subtype -eq 3 -and $bareId.meta.code_id -eq 1201) (Describe $bareId)
 $null = Drain-Pushes $wsA 800
 
 # [4.2] the three piece subtypes reach the room unchanged — and the author's own connection too
@@ -368,9 +379,9 @@ $null = Drain-Pushes $wsA 800
 # [4.7] who may write, and to what
 $notAuthor = Call $wsB (Piece-Pack 0x05 $room $draftId 9 8 $appendData)
 Check '[4.7a] a piece from somebody who is not the author -> Forbidden' ($notAuthor.subtype -eq 3 -and $notAuthor.meta.code_id -eq 1302) (Describe $notAuthor)
-$noSuchDraft = Call $wsA (Piece-Pack 0x05 $room 999999 9 8 $appendData)
+$noSuchDraft = Call $wsA (Piece-Pack 0x05 $room (Anchor 999999) 9 8 $appendData)
 Check '[4.7b] a draft id nothing in the room has -> NotFound' ($noSuchDraft.subtype -eq 3 -and $noSuchDraft.meta.code_id -eq 1501) (Describe $noSuchDraft)
-$notADraft = Call $wsA (Piece-Pack 0x05 $room ([uint64](GSeqOf (Api Get "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($room))/event/$(Send-Msg $room 'an ordinary message' $tokA)" $null $tokA))) 9 8 $appendData)
+$notADraft = Call $wsA (Piece-Pack 0x05 $room (Anchor ([uint64](GSeqOf (Api Get "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($room))/event/$(Send-Msg $room 'an ordinary message' $tokA)" $null $tokA)))) 9 8 $appendData)
 Check '[4.7c] an event that is not a draft -> Conflict' ($notADraft.subtype -eq 3 -and $notADraft.meta.code_id -eq 1502) (Describe $notADraft)
 $httpDraft = Send-Pack (Draft-Pack $room 9) $tokA
 Check '[4.7d] Stream over HTTP -> Unsupported' ($httpDraft.subtype -eq 3 -and $httpDraft.meta.code_id -eq 1102) (Describe $httpDraft)
@@ -407,15 +418,15 @@ $wsB2 = Ws-Open $tokB; $null = Call $wsB2 (Json-Pack 1 1 0 1 @{ protocol = 1; cl
 $null = Subscribe $wsB2 45 $null $null
 $null = Drain-Pushes $wsA 800; $null = Drain-Pushes $wsB2 800
 $draft2 = Call $wsA (Draft-Pack $room2 300)
-$id2 = [uint64]$draft2.meta.g_seq
-Check '[4.11pre] the draft these checks need is open' ($draft2.subtype -eq 2 -and $id2 -gt 0) (Describe $draft2)
+$id2 = [uint64]$draft2.meta.id
+Check '[4.11pre] the draft these checks need is open' ($draft2.subtype -eq 2 -and $draft2.meta.g_seq -gt 0) (Describe $draft2)
 $null = Drain-Pushes $wsA 800; $null = Drain-Pushes $wsB2 800
 
 # R7: a stranger must not learn, from the difference between the refusals, whether an event exists
 $regD = Register 'dave'; $tokD = $regD.access_token
 $wsD = Ws-Open $tokD; $null = Call $wsD (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e11-d'; features = @() } $null)
 $probeOpen = Call $wsD (Stream-Pack 0x10 $room2 $id2 1 $null)
-$probeMissing = Call $wsD (Stream-Pack 0x10 $room2 999999 1 $null)
+$probeMissing = Call $wsD (Stream-Pack 0x10 $room2 (Anchor 999999) 1 $null)
 Check '[4.11a] a non-member probing an open draft and a missing one gets the same refusal' `
   ($probeOpen.subtype -eq 3 -and $probeMissing.subtype -eq 3 -and $probeOpen.meta.code_id -eq 1302 -and $probeMissing.meta.code_id -eq 1302) `
   "open=$($probeOpen.meta.code_id) missing=$($probeMissing.meta.code_id)"
@@ -455,7 +466,7 @@ $null = Api Put "/_matrix/client/v3/user/$([uri]::EscapeDataString($regB.user_id
 
 # R4: the room can take a voice away, and an open draft must not be a way around that.
 $bobDraft = Call $wsB2 (Draft-Pack $room2 1)
-$bobId = [uint64]$bobDraft.meta.g_seq
+$bobId = [uint64]$bobDraft.meta.id
 $null = Drain-Pushes $wsB2 800
 Ws-Send $wsB2 (Piece-Pack 0x05 $room2 $bobId 1 0 $appendData)
 $beforeMute = @(Drain-Pushes $wsB2 1500 | Where-Object { $_.kind -eq 0x02 })
@@ -484,7 +495,7 @@ $server = Start-Server $cfg4 's4b'
 $wsA3 = Ws-Open $tokA; $null = Call $wsA3 (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e11-a3'; features = @() } $null)
 $afterRestart = Call $wsA3 (Draft-Pack $room2 1)
 Check '[4.11i] a Draft after a restart writes a new anchor instead of replaying the first run''s' `
-  ($afterRestart.subtype -eq 2 -and [uint64]$afterRestart.meta.g_seq -ne $draftId) `
+  ($afterRestart.subtype -eq 2 -and [uint64]$afterRestart.meta.id -ne $draftId) `
   "g_seq=$($afterRestart.meta.g_seq) first run=$draftId"
 
 # R2: a suspended account may abandon its draft but not write to it

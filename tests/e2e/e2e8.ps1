@@ -51,7 +51,8 @@ function Batch-Events([byte[]]$data) {
 # An Error pack ends the collection at once and comes back as-is (subtype 3, .events empty).
 function Recent-Ws($ws, [uint32]$id, $limit, $after, $before, $batch) {
   $meta = @{}; if ($null -ne $limit) { $meta.limit = $limit }; if ($null -ne $after) { $meta.cg_seq = $after }; if ($null -ne $before) { $meta.before = $before }; if ($null -ne $batch) { $meta.batch = $batch }
-  Ws-Send $ws (Json-Pack 0x14 1 $id 0 $meta $null)
+  # Conv: a Recent's id is a conversation number this client picked (wire-format 2.2).
+  Ws-Send $ws (Json-Pack 0x14 1 (Conv $id) 0 $meta $null)
   $batches = @(); $events = @()
   do {
     $p = Ws-Recv-Bounded $ws 15000
@@ -69,7 +70,7 @@ function Recent-Ws($ws, [uint32]$id, $limit, $after, $before, $batch) {
 }
 function Recent-Http($tok, [uint32]$id, $limit, $after, $before) {
   $meta = @{}; if ($null -ne $limit) { $meta.limit = $limit }; if ($null -ne $after) { $meta.cg_seq = $after }; if ($null -ne $before) { $meta.before = $before }
-  $p = Send-Pack (Json-Pack 0x14 1 $id 0 $meta $null) $tok
+  $p = Send-Pack (Json-Pack 0x14 1 (Conv $id) 0 $meta $null) $tok
   $p.events = @()
   $p
 }
@@ -154,7 +155,7 @@ $allAlice = @(); foreach ($jr in $joined) { $allAlice += @((Room-Messages $jr $t
 Log "  alice joined rooms = $($joined.Count) events = $($allAlice.Count)"
 # limit 3 with batch 1: three Batch packs (r = 2, 1, 0), tc = 3 on every one, fs/ls are the events' own g_seq
 $page1 = Recent-Ws $ws 2 3 $null $null 1
-Check '[1.6] first window: 3 Batch packs of 1, tc=3 on each, r counts 2,1,0, seq 0,1,2' ($page1.subtype -eq 3 -and $page1.batches.Count -eq 3 -and $page1.events.Count -eq 3 -and (($page1.batches | ForEach-Object { $_.meta.tc }) -join ',') -eq '3,3,3' -and (($page1.batches | ForEach-Object { $_.meta.r }) -join ',') -eq '2,1,0' -and (($page1.batches | ForEach-Object { $_.seq }) -join ',') -eq '0,1,2' -and (($page1.batches | ForEach-Object { $_.id }) -join ',') -eq '2,2,2') (Describe $page1)
+Check '[1.6] first window: 3 Batch packs of 1, tc=3 on each, r counts 2,1,0, seq 0,1,2' ($page1.subtype -eq 3 -and $page1.batches.Count -eq 3 -and $page1.events.Count -eq 3 -and (($page1.batches | ForEach-Object { $_.meta.tc }) -join ',') -eq '3,3,3' -and (($page1.batches | ForEach-Object { $_.meta.r }) -join ',') -eq '2,1,0' -and (($page1.batches | ForEach-Object { $_.seq }) -join ',') -eq '0,1,2' -and (($page1.batches | ForEach-Object { $_.id }) -join ',') -eq "$(Conv 2),$(Conv 2),$(Conv 2)") (Describe $page1)
 $latest1 = GSeqOf $page1.events[0]
 Check '[1.6a] g_seq descends across the window' (((GSeqOf $page1.events[0]) -gt (GSeqOf $page1.events[1])) -and ((GSeqOf $page1.events[1]) -gt (GSeqOf $page1.events[2]))) "g=$(($page1.events | ForEach-Object { GSeqOf $_ }) -join ',')"
 Check '[1.6g] each batch fs/ls equal its one event g_seq; the last ls is the next cursor' ((0..2 | ForEach-Object { ([int64]$page1.batches[$_].meta.fs -eq (GSeqOf $page1.events[$_])) -and ([int64]$page1.batches[$_].meta.ls -eq (GSeqOf $page1.events[$_])) }) -notcontains $false -and [int64]$page1.meta.next -eq (GSeqOf $page1.events[2])) "next=$($page1.meta.next)"
@@ -205,7 +206,7 @@ Check '[1.8] ignored sender absent from Recent and /messages alike' ($hasBob -eq
 
 # [1.9] HTTP is not a transport for Recent (its reply streams); bad cursor; defaults; batch clamping
 $http1 = Recent-Http $tokA 5 2 $null $null
-Check '[1.9] Recent over HTTP -> Error Unsupported, id copied' ($http1.subtype -eq 3 -and $http1.kind -eq 1 -and $http1.meta.code -eq 'Unsupported' -and $http1.id -eq 5) (Describe $http1)
+Check '[1.9] Recent over HTTP -> Error Unsupported, id copied' ($http1.subtype -eq 3 -and $http1.kind -eq 1 -and $http1.meta.code -eq 'Unsupported' -and $http1.id -eq (Conv 5)) (Describe $http1)
 $bad = Recent-Ws $ws 6 2 'not-a-number' $null
 Check '[1.9b] non-integer after -> Error InvalidRequest' ($bad.subtype -eq 3 -and $bad.kind -eq 1 -and $bad.meta.code -eq 'InvalidRequest' -and $bad.meta.code_id -eq 1201) (Describe $bad)
 $noMeta = Recent-Ws $ws 7 $null $null $null
@@ -318,7 +319,7 @@ Log "  erin: $($roomsE.Count) rooms, $($allE.Count) events"
 $wsE = Ws-Open $tokE
 function Time-Window($ws, [uint32]$id, $limit, $batch) {
   $sw = [Diagnostics.Stopwatch]::StartNew()
-  Ws-Send $ws (Json-Pack 0x14 1 $id 0 @{ limit = $limit; batch = $batch } $null)
+  Ws-Send $ws (Json-Pack 0x14 1 (Conv $id) 0 @{ limit = $limit; batch = $batch } $null)
   $first = $null; $n = 0
   do { $pk = Ws-Recv-Bounded $ws 30000; if ($null -eq $first) { $first = $sw.Elapsed.TotalMilliseconds }; $n++ } while ($pk.meta.r -ne 0)
   @{ first_ms = [math]::Round($first, 1); total_ms = [math]::Round($sw.Elapsed.TotalMilliseconds, 1); batches = $n; tc = $pk.meta.tc }
