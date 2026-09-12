@@ -55,6 +55,14 @@ function New-Pack([byte]$kind, [byte]$subtype, [byte]$flags, [uint64]$id, [uint3
   $ms.Write((BE32 (Crc32c $data 0 $data.Length)), 0, 4)
   $ms.ToArray()
 }
+# The header's id carries its own type in the first byte (wire-format 2.2), so a client cannot
+# put an upload id where a subscription's number goes without the server saying so. 2^56 is the
+# shift, written as a multiplication because PowerShell 5.1's -shl is signed.
+function Wbf-Id([byte]$type, [uint64]$value) { ([uint64]$type * [uint64]72057594037927936) + $value }
+# 0x01: a conversation number this client picked (Recent, Subscribe, Device/*).
+function Conv([uint64]$n) { Wbf-Id 1 $n }
+# 0x02: an event's position — how a draft names its anchor.
+function Anchor([uint64]$g) { Wbf-Id 2 $g }
 function Json-Pack([byte]$kind, [byte]$subtype, [uint64]$id, [uint32]$seq, $obj, [byte[]]$data) {
   $meta = if ($null -ne $obj) { [Text.Encoding]::UTF8.GetBytes(($obj | ConvertTo-Json -Compress)) } else { @() }
   New-Pack $kind $subtype 0 $id $seq $meta $data

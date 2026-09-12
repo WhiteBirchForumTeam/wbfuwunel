@@ -28,7 +28,7 @@ use serde_json::{json, value::to_raw_value};
 use tuwunel_core::{
 	Event, debug,
 	matrix::pdu::{PduCount, PduId, RawPduId},
-	wbf::{Flags, Kind, PackBuilder, PackView, RejectCode},
+	wbf::{Flags, IdType, Kind, PackBuilder, PackView, RejectCode, id_value},
 };
 use tuwunel_service::Services;
 
@@ -186,12 +186,17 @@ async fn open_draft(
 	.map_err(Reject::from)?;
 
 	let g_seq = read_g_seq(services, &event_id).await?;
+	// ⭐ The draft's id, already composed with its type: `g_seq` stays in the
+	// meta as the plain number it is everywhere else, and `id` is what the
+	// following packs put in the header — so no client has to work out that
+	// the two differ by a byte (wire-format §2.2).
+	let id = compose_anchor_id(g_seq)?;
 
 	reply
 		.send(ack(
 			view.header.id,
 			view.header.seq,
-			json!({ "event_id": event_id, "g_seq": g_seq }),
+			json!({ "event_id": event_id, "g_seq": g_seq, "id": id }),
 			Vec::new(),
 		))
 		.await?;
@@ -210,7 +215,7 @@ async fn abandon_draft(
 	let user = ctx.user()?;
 	refuse_oversized_payload(view)?;
 	refuse_unless_member(services, user, room_id).await?;
-	let anchor = read_open_draft(services, room_id, view.header.id).await?;
+	let anchor = read_open_draft(services, room_id, id_value(view.header.id)).await?;
 	refuse_unless_author(&anchor, user)?;
 
 	let redaction_event_id = redact_event_as(services, user, room_id, &anchor.event_id, None)
@@ -261,7 +266,7 @@ async fn relay_piece(
 	refuse_unless_chained(view)?;
 	refuse_unless_member(services, &session.user, room_id).await?;
 
-	let anchor = read_open_draft(services, room_id, view.header.id).await?;
+	let anchor = read_open_draft(services, room_id, id_value(view.header.id)).await?;
 	refuse_unless_author(&anchor, &session.user)?;
 	refuse_unless_allowed_to_speak(services, &session.user, room_id).await?;
 
@@ -299,7 +304,7 @@ async fn relay_demand(
 	// The anchor is read after membership (R7) and for the same reason as a
 	// piece's: an id nobody can resolve is `NotFound`, and a closed draft is
 	// not worth a broadcast.
-	let _anchor = read_open_draft(services, room_id, view.header.id).await?;
+	let _anchor = read_open_draft(services, room_id, id_value(view.header.id)).await?;
 
 	services
 		.drafts
@@ -532,6 +537,20 @@ async fn refuse_room_too_large(services: &Services, room_id: &RoomId) -> Result<
 		));
 	}
 	Ok(())
+}
+
+/// The wire id of a draft: its anchor's position with the type byte on top.
+///
+/// ⚠️ Refused rather than truncated if the position needs more than 56 bits:
+/// a shortened one would name another event in the same room. A server would
+/// have to have written 72 quadrillion events to see it.
+fn compose_anchor_id(g_seq: i64) -> Result<u64, Reject> {
+	u64::try_from(g_seq)
+		.ok()
+		.and_then(|position| IdType::EventPosition.compose(position).ok())
+		.ok_or_else(|| {
+			Reject::code(RejectCode::Internal, "this room's positions no longer fit a draft id")
+		})
 }
 
 /// The draft id of the anchor just written: its `g_seq`, which is the count

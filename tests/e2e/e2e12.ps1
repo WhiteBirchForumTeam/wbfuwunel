@@ -73,7 +73,7 @@ function Count-Bytes($counts) {
 }
 function Destroy($ws, [uint64]$id, $counts) {
   $data = Count-Bytes $counts
-  Ws-Send $ws (New-Pack 0x16 3 0 $id 0 ([Text.Encoding]::UTF8.GetBytes((@{ tc = @($counts).Count } | ConvertTo-Json -Compress))) $data)
+  Ws-Send $ws (New-Pack 0x16 3 0 (Conv $id) 0 ([Text.Encoding]::UTF8.GetBytes((@{ tc = @($counts).Count } | ConvertTo-Json -Compress))) $data)
   $ack = $null; $result = $null
   for ($i = 0; $i -lt 20 -and ($null -eq $ack -or $null -eq $result); $i++) {
     $p = Recv-Or-Null $ws 10000
@@ -97,28 +97,28 @@ $hello = Call $ws (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e12'; features
 Check '[1.0] Hello answers on a fresh connection' ($hello.subtype -eq 2) "connection_id=$($hello.meta.connection_id)"
 
 # [1.1] the device_id must be the session's
-$wrong = Call $ws (Json-Pack 0x16 4 10 0 @{ device_id = 'NOTMYDEVICE' } $null)
+$wrong = Call $ws (Json-Pack 0x16 4 (Conv 10) 0 @{ device_id = 'NOTMYDEVICE' } $null)
 Check '[1.1] Subscribe naming another device -> Forbidden' ($wrong.subtype -eq 3 -and $wrong.meta.code_id -eq 1302) (Describe $wrong)
 
 # [1.2] the right one is accepted
-$ok = Call $ws (Json-Pack 0x16 4 10 0 @{ device_id = $devA } $null)
+$ok = Call $ws (Json-Pack 0x16 4 (Conv 10) 0 @{ device_id = $devA } $null)
 Check '[1.2] Subscribe with the session device -> Ack latest_cd_seq' ($ok.subtype -eq 2 -and $ok.meta.latest_cd_seq -gt 0) (Describe $ok)
 
 # [1.3] a later connection of the same device takes the queue over, and the one it displaced is told.
 # Refusing the later one instead would mean a device whose last connection died silently cannot
 # subscribe until the idle timeout — and if that connection is wedged, not ever (wbf-to-device.md 4).
 $ws2 = Ws-Open $tokA
-$took = Call $ws2 (Json-Pack 0x16 4 11 0 @{ device_id = $devA } $null)
+$took = Call $ws2 (Json-Pack 0x16 4 (Conv 11) 0 @{ device_id = $devA } $null)
 Check '[1.3a] a later connection of the same device -> Ack, it takes the queue over' ($took.subtype -eq 2 -and $took.meta.latest_cd_seq -gt 0) (Describe $took)
 $notice = Recv-Or-Null $ws 5000
 Check '[1.3b] the displaced connection is told: Superseded, carrying its own subscription id, IS_LAST' `
-  ($null -ne $notice -and $notice.subtype -eq 3 -and $notice.meta.code_id -eq 1505 -and $notice.meta.code -eq 'Superseded' -and $notice.id -eq 10 -and ($notice.flags -band 8) -eq 8) `
+  ($null -ne $notice -and $notice.subtype -eq 3 -and $notice.meta.code_id -eq 1505 -and $notice.meta.code -eq 'Superseded' -and $notice.id -eq (Conv 10) -and ($notice.flags -band 8) -eq 8) `
   "id=$($notice.id) flags=$($notice.flags) code=$($notice.meta.code_id)"
 # Taking it back, so the rest of this script speaks through $ws — and the same notice goes the other way.
-$back = Call $ws (Json-Pack 0x16 4 10 0 @{ device_id = $devA } $null)
+$back = Call $ws (Json-Pack 0x16 4 (Conv 10) 0 @{ device_id = $devA } $null)
 $notice2 = Recv-Or-Null $ws2 5000
 Check '[1.3c] it works in both directions: the second connection is displaced by its own id' `
-  ($back.subtype -eq 2 -and $null -ne $notice2 -and $notice2.meta.code_id -eq 1505 -and $notice2.id -eq 11) `
+  ($back.subtype -eq 2 -and $null -ne $notice2 -and $notice2.meta.code_id -eq 1505 -and $notice2.id -eq (Conv 11)) `
   "id=$($notice2.id) code=$($notice2.meta.code_id)"
 
 # [1.4] bob sends to alice's device -> pushed to the holder, with its count
@@ -128,11 +128,11 @@ $pushes = @(Drain $ws 2000 | Where-Object { $_.kind -eq 0x16 -and $_.subtype -eq
 $pushedCounts = @($pushes | ForEach-Object { Counts $_ })
 $pushedBodies = @($pushes | ForEach-Object { Items ([byte[]]$_.data) } | ForEach-Object { $_.content.body })
 Check '[1.4] both messages are pushed, each with its count' ($pushedCounts.Count -eq 2 -and $pushedBodies -contains 'first' -and $pushedBodies -contains 'second') "counts=$($pushedCounts -join ',') bodies=$($pushedBodies -join ',')"
-Check '[1.4b] the pushes carry the subscription id, not the request id' (@($pushes | Where-Object { $_.id -eq 10 }).Count -eq $pushes.Count) "ids=$(@($pushes | ForEach-Object { $_.id }) -join ',')"
+Check '[1.4b] the pushes carry the subscription id, not the request id' (@($pushes | Where-Object { $_.id -eq (Conv 10) }).Count -eq $pushes.Count) "ids=$(@($pushes | ForEach-Object { $_.id }) -join ',')"
 
 # [1.5] nothing was destroyed yet, so a Fetch from zero returns them
 $fetch = @()
-Ws-Send $ws (Json-Pack 0x16 1 12 0 @{ cd_seq = 0 } $null)
+Ws-Send $ws (Json-Pack 0x16 1 (Conv 12) 0 @{ cd_seq = 0 } $null)
 do { $batch = Recv-Or-Null $ws 5000; if ($null -eq $batch) { break }; if ($batch.kind -eq 0x16 -and $batch.subtype -eq 2) { $fetch += ,$batch } } while ($batch.meta.r -ne 0)
 $fetched = @($fetch | ForEach-Object { Counts $_ })
 Check '[1.5] Fetch returns the queue oldest first, r=0 on the last pack' ($fetched.Count -eq 2 -and $fetched[0] -lt $fetched[1] -and $fetch[-1].meta.r -eq 0) "counts=$($fetched -join ',')"
@@ -146,7 +146,7 @@ Check '[1.6b] every count asked for is reported gone' (@($destroyedCounts).Count
 
 # [1.7] and they really are gone
 $after = @()
-Ws-Send $ws (Json-Pack 0x16 1 14 0 @{ cd_seq = 0 } $null)
+Ws-Send $ws (Json-Pack 0x16 1 (Conv 14) 0 @{ cd_seq = 0 } $null)
 do { $batch = Recv-Or-Null $ws 5000; if ($null -eq $batch) { break }; if ($batch.kind -eq 0x16 -and $batch.subtype -eq 2) { $after += ,$batch } } while ($batch.meta.r -ne 0)
 Check '[1.7] the queue is empty afterwards (one empty Batch, r=0)' ($after.Count -eq 1 -and $after[0].meta.bc -eq 0 -and $after[0].meta.tc -eq 0 -and $after[0].meta.r -eq 0) (Describe $after[0])
 
@@ -160,32 +160,32 @@ Check '[1.8] destroying an item that is already gone still reports it destroyed'
 # [1.9] tc and the data must agree, or nothing is destroyed
 $null = Send-ToDevice $tokB $regA.user_id $devA 'fourth'
 $fourth = @(Drain $ws 2000 | Where-Object { $_.kind -eq 0x16 -and $_.subtype -eq 6 } | ForEach-Object { Counts $_ })
-$lying = Call $ws (New-Pack 0x16 3 0 17 0 ([Text.Encoding]::UTF8.GetBytes('{"tc":5}')) (Count-Bytes $fourth))
+$lying = Call $ws (New-Pack 0x16 3 0 (Conv 17) 0 ([Text.Encoding]::UTF8.GetBytes('{"tc":5}')) (Count-Bytes $fourth))
 Check '[1.9] tc that disagrees with the data -> InvalidRequest' ($lying.subtype -eq 3 -and $lying.meta.code_id -eq 1201) (Describe $lying)
 $stillThere = @()
-Ws-Send $ws (Json-Pack 0x16 1 18 0 @{ cd_seq = 0 } $null)
+Ws-Send $ws (Json-Pack 0x16 1 (Conv 18) 0 @{ cd_seq = 0 } $null)
 do { $batch = Recv-Or-Null $ws 5000; if ($null -eq $batch) { break }; if ($batch.kind -eq 0x16 -and $batch.subtype -eq 2) { $stillThere += ,$batch } } while ($batch.meta.r -ne 0)
 Check '[1.9b] and nothing was destroyed' (@($stillThere | ForEach-Object { Counts $_ }).Count -eq 1) "left=$(@($stillThere | ForEach-Object { Counts $_ }) -join ',')"
 
 # [1.10] only the holder may destroy
-$notHolder = Call $ws2 (New-Pack 0x16 3 0 19 0 ([Text.Encoding]::UTF8.GetBytes('{"tc":1}')) (Count-Bytes $fourth))
+$notHolder = Call $ws2 (New-Pack 0x16 3 0 (Conv 19) 0 ([Text.Encoding]::UTF8.GetBytes('{"tc":1}')) (Count-Bytes $fourth))
 Check '[1.10] ItemsDestroy from a connection that does not hold the queue -> Forbidden' ($notHolder.subtype -eq 3 -and $notHolder.meta.code_id -eq 1302) (Describe $notHolder)
 
 # [1.11] Unsubscribe hands the queue back
-$bye = Call $ws (Json-Pack 0x16 5 20 0 @{} $null)
-$nowFree = Call $ws2 (Json-Pack 0x16 4 21 0 @{ device_id = $devA } $null)
+$bye = Call $ws (Json-Pack 0x16 5 (Conv 20) 0 @{} $null)
+$nowFree = Call $ws2 (Json-Pack 0x16 4 (Conv 21) 0 @{ device_id = $devA } $null)
 Check '[1.11] Unsubscribe -> Ack, and the next connection can take the queue' ($bye.subtype -eq 2 -and $nowFree.subtype -eq 2) "unsubscribe=$($bye.subtype) subscribe=$($nowFree.subtype)"
 
 # [1.12] HTTP is not a place to hold a queue
-$http = Send-Pack (Json-Pack 0x16 4 22 0 @{ device_id = $devA } $null) $tokA
+$http = Send-Pack (Json-Pack 0x16 4 (Conv 22) 0 @{ device_id = $devA } $null) $tokA
 Check '[1.12] Device/Subscribe over HTTP -> Unsupported' ($http.subtype -eq 3 -and $http.meta.code_id -eq 1102) (Describe $http)
 
 # [1.13] logging in as somebody else on a live connection lets go of the old identity's queue.
 # Without this, alice's to-device items — her Megolm keys — are pushed into a connection that is
 # now bob's, and the queue stays held by a session that may no longer destroy from it.
 $ws3 = Ws-Open $tokA
-$heldA = Call $ws3 (Json-Pack 0x16 4 30 0 @{ device_id = $devA } $null)
-$swap = Call $ws3 (Json-Pack 16 1 31 0 @{ type = 'm.login.password'; identifier = @{ type = 'm.id.user'; user = 'bob' }; password = 'pw-pw-pw-pw'; initial_device_display_name = 'e2e12 swap' } $null)
+$heldA = Call $ws3 (Json-Pack 0x16 4 (Conv 30) 0 @{ device_id = $devA } $null)
+$swap = Call $ws3 (Json-Pack 16 1 0 31 @{ type = 'm.login.password'; identifier = @{ type = 'm.id.user'; user = 'bob' }; password = 'pw-pw-pw-pw'; initial_device_display_name = 'e2e12 swap' } $null)
 $null = Send-ToDevice $tokB $regA.user_id $devA 'after the identity swap'
 $leaked = @(Drain $ws3 2000 | Where-Object { $_.kind -eq 0x16 -and $_.subtype -eq 6 })
 Check '[1.13] after a Login as another user, the old device queue is let go and nothing is pushed to it' `

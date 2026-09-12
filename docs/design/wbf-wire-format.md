@@ -102,7 +102,7 @@ offset  size  欄位          說明
 
 ### 2.2 `id` 的第一個 byte 是型別（維護者 2026-09-12）[BREAKING]
 
-> **狀態**：📄 提案，等維護者同意。這一節同意之後才動程式。
+> **狀態**：✅ 已實作（提案 PR #46 核可）。
 
 ```
 offset=4  size=8   id  ＝ [id_type: 1 byte] ‖ [值: 7 byte 大端]
@@ -153,7 +153,15 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 - 🚫 **不在這個 byte 裡放版本號**：pack 的第 0 個 byte 已經是版本，兩套版本機制之後會有「誰說了算」的問題；
   而且 `header_id_seq()` 必須在 **CRC 還沒驗過**時用固定偏移把 `id` 挖出來回 `Error`，佈局隨版本而變會讓那件事變成「要先知道版本才讀得懂」。
 
-**這支要跟的東西**（都是 [BREAKING]）：`wbf-vectors.json` 重出、全部 e2e 腳本、`chunked-upload-spec.md` 的 id 敘述，以及 client repo 的協議同步 issue。
+⚠️ **升級的代價，寫清楚**：
+
+| 什麼 | 會怎樣 |
+|---|---|
+| **升級當下正在進行的分塊上傳** | ⛔ **失效**。舊的上傳 id 是整 64 bit，在新格式裡表達不出來；client 重新 `Create` 就好（本來就是斷線後的正常路徑） |
+| **已經存在的媒體** | ✅ 不受影響。它們的 media id 是 16 個字元的字串，與 14 個字元的新 id 不會相撞；🚫 任何人都不要驗 media id 的長度 |
+| **舊 client** | ⛔ 每一個帶 `id` 的包都會被拒（`InvalidRequest`）—— 這就是 [BREAKING] 的意思 |
+
+**跟這支一起改的**：`wbf-vectors.json` 重出（順手補上一直沒有的 `0x02 Stream` 七個包）、e2e 腳本、`chunked-upload-spec.md` 的 id 敘述，以及 client repo 的協議同步 issue（[wbf-matrix-client#29](http://ai.zooy.cc:30008/amaid/wbf-matrix-client/issues/29)）。
 
 ## 3. kind、subtype、meta
 
