@@ -32,7 +32,9 @@ offset  size  欄位          說明
                             bit2 IS_RESPONSE：這是對 (id, seq) 那個請求的回應
                             bit3 IS_LAST：這個有序序列的最後一個（上傳的最後一塊、流的最後一片）
                             其餘保留，必須為 0
-4       8     id            會話／物件識別（u64）：上傳的 upload id、流的 stream id；0 = 無
+4       8     id            會話／物件識別：[id_type 1 byte] ‖ [值 7 byte]，型別表在 §2.2
+                            0x00 = 無（整個 id 必須是 0）、0x01 client 的會話號、
+                            0x02 事件位置 g_seq、0x03 上傳 id
 12      4     seq           序號（u32）；語意依 kind 的順序類別（§4）
 16      4     meta_len      meta 的位元組數（可為 0）
 20      m     meta          JSON bytes（明文或密文）
@@ -97,6 +99,61 @@ offset  size  欄位          說明
 - **HTTP 路徑沒有這個計數器**：一個請求一個 pack、沒有連線可關，壞框就回一個 `Error`（§6.2）。
 - ✅ **實作到位**：`ws.rs` 的 `FrameHealth`（計的是「連續幾個解不開的框」，跟上面的負數計法等價：連續 8 次 ⇔ 計數器到 −8），
   旋鈕是 `wbf_ws_corrupt_budget`。測試：「8 個壞框關線」、「中間夾一個好 pack 就重新算」、「預算 0 也至少給一個框」。
+
+### 2.2 `id` 的第一個 byte 是型別（維護者 2026-09-12）[BREAKING]
+
+> **狀態**：📄 提案，等維護者同意。這一節同意之後才動程式。
+
+```
+offset=4  size=8   id  ＝ [id_type: 1 byte] ‖ [值: 7 byte 大端]
+```
+
+⭐ **一個 id 自己就說得出它是什麼。** 在這之前，同一個欄位裝著三種來源完全不同的東西 —— client 自己挑的會話號、server 隨機鑄的上傳 id、資料庫給的事件位置 `g_seq` —— 要**先看 `kind`** 才分得出來。那代表兩件事：
+
+- client 若拿一張以 `id` 為鍵的表記自己的會話，兩種不同的東西會**悄悄共用一格**；
+- server 收到一個對不上的 id 只能回「找不到」，說不出「你把上傳 id 填到訂閱那一格了」。
+
+型別 byte 讓這兩件事都變成**讀得出來的錯**。
+
+| `id_type` | 誰鑄 | 值是什麼 | 用在 |
+|---|---|---|---|
+| `0x00` | — | **整個 id 必須是 0** | 沒有會話的包：`Control/Hello`、`Ping`、`Session/*`、`Download/*`（用 meta 的 mxc 定位）、`Upload/Create`、`Stream/Draft`（還沒有錨） |
+| `0x01` | **client** | 它自己挑的會話號 | `Event/Recent`、`Event/Subscribe`／`Unsubscribe`、`Device/Subscribe`／`Unsubscribe`／`Fetch`／`ItemsDestroy` |
+| `0x02` | **server**（資料庫） | 事件位置 `g_seq` | `Stream/Abandon`／`Keypoint`／`Delta`／`Append`／`Demand`（草稿的錨） |
+| `0x03` | **server** | 上傳 id。⚠️ **去掉型別 byte 就是 mxc 的 media id** | `Upload/Chunk`／`Status`／`Seal`／`Abort` |
+| `0x04`–`0xEF` | — | 未分配 | 🚨 照 §3.4 的同一條鐵律：**先在這張表加一列，才能發** |
+| `0xF0`–`0xFE` | — | 保留 | |
+| `0xFF` | — | **延伸**：真正的型別寫在 meta 裡 | 逃生門。之後真的出現一種這張表沒想到的 id，用它，而不必動 frame |
+
+**規則**
+
+1. 🚨 **server 驗型別與 `(kind, subtype)` 對不對得上**，不符 → `InvalidRequest`。不驗的話型別只是裝飾。
+2. **需要會話的包填 `0`** → `InvalidRequest`；**不需要會話的包填了非 0** → `InvalidRequest`。
+   📎 後者今天就已經是事實（`Hello`、`Download/*`、`Upload/Create` 一律填 0，向量檔可證），所以這條是把既有慣例寫成規則，不是新負擔。
+3. **值只剩 56 bit。** `g_seq` 與上傳 id 都遠在這之下（2⁵⁶ ≈ 7.2 × 10¹⁶）；真的超過就**拒絕**（fail closed），🚫 不截斷。
+4. **型別不重用、號碼不回收** —— 跟 `code_id` 同一條（§3.4）。
+5. ⭐ **鑄了 id 的 `Ack` 要把組好的 id 回給 client**（`Upload/Create` 的 `{"id": …}`、`Stream/Draft` 的 `{"id": …}` ＋ 既有的 `g_seq`）。
+   不然「把型別併進值裡」這個位元運算，每個 client、每種語言都要自己寫對一次。
+
+⚠️ **server 保證的與不保證的，寫清楚**（維護者 2026-09-12 定 A 方案）：`0x01` 是 client 自己鑄的，
+所以 server 驗的是**型別對不對**，🚫 **不驗**「同一條連線內有沒有重複」—— 它看不到 client 的表。
+⭐ 因此**跨型別**的碰撞（上傳 id 撞到某個 `g_seq`）由協議擋住；**同型別內**的重複是**發的人自己的責任**：
+誰發的誰負責不撞。這條要明寫，免得有人以為 server 保證了它其實沒檢查的事。
+
+**mxc 怎麼辦**：media id 是**拔掉型別之後的 7 byte**，十六進位 **14 個字元**（`{值:014x}`）。
+Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 padding**。
+📎 既有媒體的 16 字元 media id 不受影響（它們是字串，不會跟 14 字元的新 id 相撞），而「上傳 id 的十六進位**就是** media id、兩者之間沒有對照表」這個性質仍然成立 —— 只是換成低 7 byte。
+⚠️ 上傳 id 的隨機位元從 64 降到 56。那裡本來就有「撞到就重抽」的迴圈（`is_upload_id_free`），所以影響只是極罕見地多抽一次。
+
+**為什麼型別佔滿一個 byte**（討論過 4 bit 與 2 bit）：
+
+- 剩下的值要維持**整數個 byte** —— mxc 才能直接印成 14 個字元。4 bit 會剩 60 bit＝7.5 byte，media id 變成 15 個字元、要定一條補位規則，⭐ **而那正是會被下一個實作者漏掉的那種規則**。
+- 讀型別是**一次固定偏移的 byte 讀取**，不是位移＋遮罩；這段每個 client 都要重寫一次。
+- 2 bit 只有 4 個值，**今天就用光**（無、client、`g_seq`、upload），下次要加就又是一次 breaking。
+- 🚫 **不在這個 byte 裡放版本號**：pack 的第 0 個 byte 已經是版本，兩套版本機制之後會有「誰說了算」的問題；
+  而且 `header_id_seq()` 必須在 **CRC 還沒驗過**時用固定偏移把 `id` 挖出來回 `Error`，佈局隨版本而變會讓那件事變成「要先知道版本才讀得懂」。
+
+**這支要跟的東西**（都是 [BREAKING]）：`wbf-vectors.json` 重出、全部 e2e 腳本、`chunked-upload-spec.md` 的 id 敘述，以及 client repo 的協議同步 issue。
 
 ## 3. kind、subtype、meta
 
