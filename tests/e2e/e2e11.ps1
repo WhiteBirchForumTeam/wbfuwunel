@@ -91,6 +91,12 @@ function Stream-Pack([byte]$subtype, [string]$room, [uint64]$draftId, [uint32]$s
   New-Pack 0x02 $subtype 0 $draftId $seq ([Text.Encoding]::UTF8.GetBytes($room)) $data
 }
 function Draft-Pack([string]$room, [uint32]$seq) { Stream-Pack 0x01 $room 0 $seq $null }
+# A piece (Keypoint/Delta/Append): its data starts with the seq it follows, big-endian
+# (streaming-messages.md 3.0). Keypoint's prev is 0 — it replaces the whole buffer.
+function Piece-Pack([byte]$subtype, [string]$room, [uint64]$draftId, [uint32]$seq, [uint32]$prev, [byte[]]$payload) {
+  if ($null -eq $payload) { $payload = @() }
+  Stream-Pack $subtype $room $draftId $seq ([byte[]]((BE32 $prev) + $payload))
+}
 
 # ================= Scenario 1: subscribe, push, membership hooks, ignore =================
 Log '################ Scenario 1: channels and Push ################'
@@ -295,61 +301,71 @@ $null = Drain-Pushes $wsA 800
 $appendData = [Text.Encoding]::UTF8.GetBytes('piece one')
 $deltaData = [Text.Encoding]::UTF8.GetBytes('piece two')
 $keyData = [Text.Encoding]::UTF8.GetBytes('the whole draft so far')
-Ws-Send $wsA (Stream-Pack 0x05 $room $draftId 0 $appendData)
-Ws-Send $wsA (Stream-Pack 0x04 $room $draftId 1 $deltaData)
-Ws-Send $wsA (Stream-Pack 0x03 $room $draftId 2 $keyData)
+Ws-Send $wsA (Piece-Pack 0x05 $room $draftId 1 0 $appendData)
+Ws-Send $wsA (Piece-Pack 0x04 $room $draftId 2 1 $deltaData)
+Ws-Send $wsA (Piece-Pack 0x03 $room $draftId 3 0 $keyData)
 $atB = @(Drain-Pushes $wsB 1500 | Where-Object { $_.kind -eq 0x02 })
 $atA = @(Drain-Pushes $wsA 1500 | Where-Object { $_.kind -eq 0x02 })
 $subtypesB = @($atB | ForEach-Object { $_.subtype })
-$bodiesB = @($atB | ForEach-Object { [Text.Encoding]::UTF8.GetString([byte[]]$_.data) })
+$bodiesB = @($atB | ForEach-Object { [Text.Encoding]::UTF8.GetString(([byte[]]$_.data), 4, $_.data.Length - 4) })
+$prevsB = @($atB | ForEach-Object { RdBE32 ([byte[]]$_.data) 0 })
 $metaB = @($atB | ForEach-Object { $_.metaText })
 Check '[4.2a] bob receives Append, Delta and Keypoint in order, data byte for byte' `
   (($subtypesB -join ',') -eq '5,4,3' -and ($bodiesB -join '|') -eq 'piece one|piece two|the whole draft so far') `
   "subtypes=$($subtypesB -join ',') bodies=$($bodiesB -join '|')"
+Check '[4.2d] each piece names the one it follows; the Keypoint names none' (($prevsB -join ',') -eq '0,1,0') "prevs=$($prevsB -join ',')"
 Check '[4.2b] the meta is the room id itself and the header carries the draft id and the piece counter' `
-  (($metaB | Select-Object -Unique) -eq $room -and (@($atB | ForEach-Object { $_.id }) -join ',') -eq "$draftId,$draftId,$draftId" -and (@($atB | ForEach-Object { $_.seq }) -join ',') -eq '0,1,2') `
+  (($metaB | Select-Object -Unique) -eq $room -and (@($atB | ForEach-Object { $_.id }) -join ',') -eq "$draftId,$draftId,$draftId" -and (@($atB | ForEach-Object { $_.seq }) -join ',') -eq '1,2,3') `
   "meta=$($metaB[0]) ids=$(@($atB | ForEach-Object { $_.id }) -join ',') seqs=$(@($atB | ForEach-Object { $_.seq }) -join ',')"
 Check '[4.2c] the author gets its own pieces back (one broadcast, no special case)' (@($atA).Count -eq 3) "at the author=$(@($atA).Count)"
 
 # [4.3] the size limit, both sides of it
 $tooBig = [byte[]]::new(10241)
-$justFits = [byte[]]::new(10240)
-$big = Call $wsA (Stream-Pack 0x03 $room $draftId 3 $tooBig)
+$justFits = [byte[]]::new(10236)   # plus the 4-byte prev is exactly the limit
+$big = Call $wsA (Stream-Pack 0x03 $room $draftId 4 $tooBig)
 Check '[4.3a] a piece over wbf_draft_max_piece_bytes -> TooLarge' ($big.subtype -eq 3 -and $big.meta.code_id -eq 1103) (Describe $big)
-Ws-Send $wsA (Stream-Pack 0x03 $room $draftId 4 $justFits)
+Ws-Send $wsA (Piece-Pack 0x03 $room $draftId 5 0 $justFits)
 $fitted = @(Drain-Pushes $wsB 1500 | Where-Object { $_.kind -eq 0x02 })
 Check '[4.3b] exactly the limit passes' (@($fitted).Count -eq 1 -and @($fitted)[0].data.Length -eq 10240) "packs=$(@($fitted).Count) bytes=$(@($fitted)[0].data.Length)"
 $null = Drain-Pushes $wsA 800
 
 # [4.4] the meta is a room id, not JSON
-$badMeta = Call $wsA (New-Pack 0x02 0x05 0 $draftId 5 ([Text.Encoding]::UTF8.GetBytes('{"room_id":"!x:localhost"}')) $appendData)
+$badMeta = Call $wsA (New-Pack 0x02 0x05 0 $draftId 6 ([Text.Encoding]::UTF8.GetBytes('{"room_id":"!x:localhost"}')) ([byte[]]((BE32 0) + $appendData)))
 Check '[4.4] meta that is not a room id -> InvalidRequest' ($badMeta.subtype -eq 3 -and $badMeta.meta.code_id -eq 1201) (Describe $badMeta)
+
+# [4.4b] the chain itself: the three rules the server enforces without reading the content
+$noPrev = Call $wsA (Stream-Pack 0x05 $room $draftId 7 ([Text.Encoding]::UTF8.GetBytes('ab')))
+Check '[4.4b] a piece whose data is too short to carry prev -> InvalidRequest' ($noPrev.subtype -eq 3 -and $noPrev.meta.code_id -eq 1201) (Describe $noPrev)
+$zeroSeq = Call $wsA (Piece-Pack 0x05 $room $draftId 0 0 $appendData)
+Check '[4.4c] a piece numbered 0 -> InvalidRequest (0 is reserved for "no base")' ($zeroSeq.subtype -eq 3 -and $zeroSeq.meta.code_id -eq 1201) (Describe $zeroSeq)
+$basedKeypoint = Call $wsA (Piece-Pack 0x03 $room $draftId 7 6 $keyData)
+Check '[4.4d] a Keypoint that names a base -> InvalidRequest (it replaces the whole draft)' ($basedKeypoint.subtype -eq 3 -and $basedKeypoint.meta.code_id -eq 1201) (Describe $basedKeypoint)
 
 # [4.5] Demand is broadcast like any other piece; a connection that did not subscribe gets nothing
 $wsC = Ws-Open $tokC; $null = Call $wsC (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e11-c'; features = @() } $null)
 Invite $room $regC.user_id $tokA; Join $room $tokC
 $null = Subscribe $wsC 42 $null $null
 $null = Drain-Pushes $wsA 800; $null = Drain-Pushes $wsB 800; $null = Drain-Pushes $wsC 800
-Ws-Send $wsC (Stream-Pack 0x10 $room $draftId 0 $null)
+Ws-Send $wsC (Stream-Pack 0x10 $room $draftId 1 $null)
 $demandA = @(Drain-Pushes $wsA 1500 | Where-Object { $_.kind -eq 0x02 -and $_.subtype -eq 0x10 })
 $demandC = @(Drain-Pushes $wsC 1500 | Where-Object { $_.kind -eq 0x02 -and $_.subtype -eq 0x10 })
 Check '[4.5] a Demand reaches the author and the asker alike (no special routing)' (@($demandA).Count -eq 1 -and @($demandC).Count -eq 1) "author=$(@($demandA).Count) asker=$(@($demandC).Count)"
 $null = Drain-Pushes $wsB 800
 
 # [4.6] the piece counter is the client's; the server carries it and does not renumber
-Ws-Send $wsA (Stream-Pack 0x05 $room $draftId 5 $appendData)
-Ws-Send $wsA (Stream-Pack 0x05 $room $draftId 6 $appendData)
-Ws-Send $wsA (Stream-Pack 0x05 $room $draftId 8 $appendData)
+Ws-Send $wsA (Piece-Pack 0x05 $room $draftId 5 4 $appendData)
+Ws-Send $wsA (Piece-Pack 0x05 $room $draftId 6 5 $appendData)
+Ws-Send $wsA (Piece-Pack 0x05 $room $draftId 8 7 $appendData)
 $counted = @(Drain-Pushes $wsB 1500 | Where-Object { $_.kind -eq 0x02 })
 Check '[4.6] 5, 6, 8 arrive as 5, 6, 8 (the gap is the client''s to notice)' ((@($counted | ForEach-Object { $_.seq }) -join ',') -eq '5,6,8') "seqs=$(@($counted | ForEach-Object { $_.seq }) -join ',')"
 $null = Drain-Pushes $wsA 800
 
 # [4.7] who may write, and to what
-$notAuthor = Call $wsB (Stream-Pack 0x05 $room $draftId 0 $appendData)
+$notAuthor = Call $wsB (Piece-Pack 0x05 $room $draftId 9 8 $appendData)
 Check '[4.7a] a piece from somebody who is not the author -> Forbidden' ($notAuthor.subtype -eq 3 -and $notAuthor.meta.code_id -eq 1302) (Describe $notAuthor)
-$noSuchDraft = Call $wsA (Stream-Pack 0x05 $room 999999 0 $appendData)
+$noSuchDraft = Call $wsA (Piece-Pack 0x05 $room 999999 9 8 $appendData)
 Check '[4.7b] a draft id nothing in the room has -> NotFound' ($noSuchDraft.subtype -eq 3 -and $noSuchDraft.meta.code_id -eq 1501) (Describe $noSuchDraft)
-$notADraft = Call $wsA (Stream-Pack 0x05 $room ([uint64](GSeqOf (Api Get "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($room))/event/$(Send-Msg $room 'an ordinary message' $tokA)" $null $tokA))) 0 $appendData)
+$notADraft = Call $wsA (Piece-Pack 0x05 $room ([uint64](GSeqOf (Api Get "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($room))/event/$(Send-Msg $room 'an ordinary message' $tokA)" $null $tokA))) 9 8 $appendData)
 Check '[4.7c] an event that is not a draft -> Conflict' ($notADraft.subtype -eq 3 -and $notADraft.meta.code_id -eq 1502) (Describe $notADraft)
 $httpDraft = Send-Pack (Draft-Pack $room 9) $tokA
 Check '[4.7d] Stream over HTTP -> Unsupported' ($httpDraft.subtype -eq 3 -and $httpDraft.meta.code_id -eq 1102) (Describe $httpDraft)
@@ -361,7 +377,7 @@ Check '[4.8] a room past wbf_draft_max_room_members -> Conflict' ($tooBusy.subty
 
 # [4.9] the throttle: 100 pieces at once is more than 30/s with a burst of 60
 $refused = 0
-for ($i = 0; $i -lt 100; $i++) { Ws-Send $wsA (Stream-Pack 0x05 $room $draftId ([uint32](100 + $i)) $appendData) }
+for ($i = 0; $i -lt 100; $i++) { Ws-Send $wsA (Piece-Pack 0x05 $room $draftId ([uint32](100 + $i)) ([uint32](99 + $i)) $appendData) }
 $answers = @(Drain-Pushes $wsA 2500)
 $refused = @($answers | Where-Object { $_.kind -eq 0x01 -and $_.subtype -eq 3 -and $_.meta.code_id -eq 1401 }).Count
 $relayed = @($answers | Where-Object { $_.kind -eq 0x02 }).Count
@@ -369,9 +385,9 @@ Check '[4.9] a hundred pieces at once: some are relayed, the rest are RateLimite
 $null = Drain-Pushes $wsB 1500; $null = Drain-Pushes $wsC 1500
 
 # [4.10] the client's own ending: Abandon redacts the anchor, and the draft is closed for good
-$bye = Call $wsA (Stream-Pack 0x02 $room $draftId 11 $null)
+$bye = Call $wsA (Stream-Pack 0x02 $room $draftId 201 $null)
 $redactions = @(Drain-Pushes $wsB 2000 | ForEach-Object { $_.events } | Where-Object { $_.type -eq 'm.room.redaction' })
-$afterAbandon = Call $wsA (Stream-Pack 0x05 $room $draftId 12 $appendData)
+$afterAbandon = Call $wsA (Piece-Pack 0x05 $room $draftId 202 201 $appendData)
 Check '[4.10a] Abandon -> Ack with the redaction event id' ($bye.subtype -eq 2 -and $bye.meta.redaction_event_id) (Describe $bye)
 Check '[4.10b] subscribers see the redaction as an ordinary push' (@($redactions).Count -ge 1) "redactions=$(@($redactions).Count)"
 Check '[4.10c] a piece for an abandoned draft -> Conflict' ($afterAbandon.subtype -eq 3 -and $afterAbandon.meta.code_id -eq 1502) (Describe $afterAbandon)

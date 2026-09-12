@@ -209,6 +209,7 @@ async fn relay_piece(
 		)
 		.into());
 	}
+	refuse_unless_chained(view)?;
 
 	let anchor = read_open_draft(services, room_id, view.header.id).await?;
 	refuse_unless_author(&anchor, &session.user)?;
@@ -321,6 +322,48 @@ fn refuse_unless_author(anchor: &DraftAnchor, user: &UserId) -> Result<(), Rejec
 			"only the author of a draft may write to it",
 		));
 	}
+	Ok(())
+}
+
+/// The chain a receiver reads before applying a piece: its `data` starts with
+/// a big-endian u32 naming the piece it follows, and its `seq` is its own
+/// number (`docs/design/streaming-messages.md` §3.0).
+///
+/// ⭐ Why the server enforces a field it never reads the meaning of: without
+/// these three checks the chain is a convention, and a convention that
+/// nothing rejects is one that some client eventually does not follow — at
+/// which point the receiver cannot tell "I missed a piece" from "this sender
+/// numbers differently", which is the whole thing `prev` exists to answer.
+///
+/// Args:
+///     view: a `Keypoint`, `Delta` or `Append`
+/// Return:
+///     Result<(), Reject>  `InvalidRequest` when the data is too short to
+///     carry `prev`, when `seq` is 0 (reserved, so that `prev = 0` can mean
+///     "no base" and nothing else), or when a `Keypoint` names a base — it
+///     replaces the whole buffer, so there is nothing for it to follow.
+fn refuse_unless_chained(view: &PackView<'_>) -> Result<(), Reject> {
+	let Some(prev) = view.data.get(..4) else {
+		return Err(Reject::code(
+			RejectCode::InvalidRequest,
+			"a draft piece starts with four bytes naming the piece it follows",
+		));
+	};
+	let prev = u32::from_be_bytes(prev.try_into().expect("four bytes"));
+
+	if view.header.seq == 0 {
+		return Err(Reject::code(
+			RejectCode::InvalidRequest,
+			"a draft piece is numbered from 1; 0 is reserved for `prev` meaning no base",
+		));
+	}
+	if view.header.subtype == stream::KEYPOINT && prev != 0 {
+		return Err(Reject::code(
+			RejectCode::InvalidRequest,
+			format!("a Keypoint replaces the whole draft, so its `prev` is 0, not {prev}"),
+		));
+	}
+
 	Ok(())
 }
 

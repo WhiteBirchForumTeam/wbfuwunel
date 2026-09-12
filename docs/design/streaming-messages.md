@@ -29,16 +29,42 @@ data 是密文（E2EE 房）或明文，server 不讀。server 轉發時 **pack 
 header：`id`（8 byte）填 `g_seq`（`Draft` 填 0），它就是「這個 pack 屬於哪則草稿」。
 **`seq`（4 byte）= 作者對這則草稿遞增的片計數**（`Keypoint`／`Delta`／`Append`；同一個 `g_seq` 下永遠遞增，維護者 2026-09-08）。
 順序本身由 TCP 保，`seq` 不是拿來排序的，是拿來**發現洞**的：片會掉的地方不是 TCP，是 server 對某一個接收者的發送佇列滿了 `try_send` 丟掉（作者與其他人都不知道），
-沒有計數的話接收者少一段 `Append`、或把 `Delta` 套在錯的基底上，都是默默壞掉。接收者看到跳號就 `Demand`。server 不看 `seq`。
+沒有計數的話接收者少一段 `Append`、或把 `Delta` 套在錯的基底上，都是默默壞掉。接收者看到跳號就 `Demand`。server 不看 `seq` 的值。
 `Draft`／`Abandon`／`Demand` 的 `seq` 照無序類規則當請求號，Ack 抄回。
+
+### 3.0 片的 data 前 4 個 byte 是**它接在誰後面**（維護者 2026-09-12）
+
+```
+片的 data ＝ [prev: u32 大端] ‖ 密文
+```
+
+⭐ **`prev` 指向這片所依據的那一片的 `seq`** —— 「這個 `Append` 接在第 11 片之後」。有了它，接收者在**套用之前**就能判斷自己對不對得上，而不是靠「號碼應該要剛好大 1」這個算術推論：
+
+```
+Keypoint  seq=1  prev=0    "Hello"        ← 0 ＝ 沒有基底，它自己就是起點
+Append    seq=2  prev=1    " world"
+Append    seq=3  prev=2    "!"
+```
+
+- **`seq` 從 1 起算**，`0` 永遠保留給 `prev` 的「沒有基底」。🚫 兩者不能共用 `0` —— 那樣「接在第 0 片之後」跟「沒有基底」在線上長得一樣，正是 [wbf-wire-format.md](wbf-wire-format.md) §3.4 那條「佔位值不能跟真值撞」的同一個坑。
+  ⚠️ 這跟 §4.1 講的「新會話 `seq` 歸零」不衝突：那條講的是 **server 自己的推送計數**（`Push`／`Batch`），這裡的片計數是**作者填的**。
+- **`Keypoint` 的 `prev` 必須是 0**：它把 buffer 整個換掉，指向誰都沒有意義。
+- 中途加入的人手上沒有任何狀態，所以第一個收到的片不論 `prev` 是什麼都對不上 → `Demand`，這正是它該做的事。
+- 📎 **掉了最後一片就是掉了**（維護者 2026-09-12）：串流沒有「寫完了」這個可觀測事件 —— 掉最後一片跟作者停下來打字在線上一模一樣，連作者自己都不知道自己是不是寫完了。而真正的內容最後會走**正式訊息**那條路（持久事件、`g_seq` 水位、`Recent` 補洞），所以最壞只是預覽停在倒數第二片，直到那則訊息蓋過去。🚫 **不為此加任何 server 端的補洞機制**。
+- server **不讀密文、也不追 `prev` 對不對**（它對草稿零狀態，無從比對）。它只做三件無狀態的檢查，好讓這個約定在線上真的成立而不只是紙上規則：
+  | 檢查 | 不合 |
+  |---|---|
+  | 片的 `data` 至少 4 byte | `InvalidRequest` |
+  | 片的 `seq ≥ 1` | `InvalidRequest` |
+  | `Keypoint` 的 `prev` ＝ 0 | `InvalidRequest` |
 
 | subtype | 誰發 | 進庫？ | data |
 |---|---|---|---|
 | `0x01 Draft` | 作者 | **是**：佔位事件 | 無。回 `Ack` `{ "event_id", "g_seq" }` |
 | `0x02 Abandon` | 作者 | **是**：redact 佔位事件 | 無。回 `Ack` `{ "redaction_event_id" }`；訂閱者從 `Push` 收到 redaction |
-| `0x03 Keypoint` | 作者 | 否 | **完整字段**：接收者把這則草稿的 buffer 整個清空換成它。明文上限 **8 KiB**（client 約定），server 對 data 的 hard limit **10 KiB**（密文，含加密外框） |
-| `0x04 Delta` | 作者 | 否 | 相對於接收者目前狀態的差異（格式是 client 約定，§5） |
-| `0x05 Append` | 作者 | 否 | 直接接在末尾的文字 |
+| `0x03 Keypoint` | 作者 | 否 | `prev`(=0) ＋**完整字段**：接收者把這則草稿的 buffer 整個清空換成它。明文上限 **8 KiB**（client 約定），server 對 data 的 hard limit **10 KiB**（密文，含 4 byte 的 `prev` 與加密外框） |
+| `0x04 Delta` | 作者 | 否 | `prev` ＋相對於 `prev` 那個狀態的差異（格式是 client 約定，§5） |
+| `0x05 Append` | 作者 | 否 | `prev` ＋直接接在 `prev` 那個狀態末尾的文字 |
 | `0x10 Demand` | **任何成員** | 否 | 無。跟其他片一樣**廣播給房間 channel 的每個訂閱者**（維護者：不擋、不特別路由，更乾淨）；正在寫這則草稿的那台裝置回一次 `Keypoint`（太長就再跟 `Append`），其他人收到 `Demand` 就忽略 |
 
 - **沒有 `Chunk`**（維護者 2026-09-08：多餘）。長於 8 KiB 的草稿 = 一個 `Keypoint`（前 8 KiB）＋若干個 `Append`；接收者的 buffer 先被削成 8 KiB、再長回來。
@@ -94,7 +120,8 @@ Stream pack 進來（已登入、准入表過、meta 是合法的 room_id、head
   例如 12 KiB 的草稿，有人 `Demand`，所有人的 buffer 先被削成 8 KiB、接著收到 4 KiB 的 `Append` 回到 12 KiB。這就是「塊」，不需要另一個型別。
 - **`Delta`**：相對於接收者目前狀態的差異；接收者只在「有狀態」時套（收過 `Keypoint`，或從空字串開始且沒漏過片），不然等下一個 `Keypoint`（或自己 `Demand`）。
 - **`Append`**：接在末尾。最常見的 LLM 情境，一片就是幾個 token。
-- **片計數 `seq`**：作者對每則草稿遞增；接收者看到跳號就把這則草稿標成「等全文」並 `Demand`，收到 `Keypoint` 才繼續套。server 不看它。作者換連線續發：計數接著送，或先送一個 `Keypoint` 對齊。
+- **片計數 `seq` 與 `prev`**（§3.0）：`seq` 是作者對每則草稿遞增的號（**從 1 起**），`prev` 是這片依據的那一片的號。接收者**套之前先比 `prev` 跟自己手上的狀態**；對不上就把這則草稿標成「等全文」並 `Demand`，收到 `Keypoint` 才繼續套。
+  ⭐ 比「號碼應該大 1」可靠的地方在於：作者**換連線續發**時不必假裝連號 —— 它可以接著送（`prev` 指得到）或先送一個 `Keypoint`（`prev=0` 重新起頭），兩種接收端都讀得懂，而不是只能靠算術猜。
 - **第一片**可以是 `Keypoint`、也可以是從空字串起的 `Delta`／`Append`——都允許，client 決定。
 - **delta 的內部格式**（密文裡）定在 client 的約定，server spec 只定「有這三種」與它們的語意。
 
