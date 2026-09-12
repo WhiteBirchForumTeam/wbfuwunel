@@ -371,11 +371,38 @@ where
 		self.mark_gap(&dropped);
 	}
 
+	/// Queues the same pack for several connections, dropping any that is no
+	/// longer in `topic`.
+	///
+	/// ⚠️ The membership is read again **here**, under this lock, because the
+	/// caller chose its recipients earlier and may have awaited in between
+	/// (the draft relay asks the database who ignores the author). A leave or
+	/// a kick that landed during that await counts, and the snapshot the
+	/// caller holds does not know about it.
+	///
+	/// Args:
+	///     topic: the topic every recipient must still be in
+	///     connections: the caller's chosen recipients
+	///     pack: the bytes, copied once per recipient
+	pub(super) fn send_pack_to_topic(&self, topic: &Topic, connections: &[ConnectionId], pack: &[u8]) {
+		let registry = self.registry.read().expect("stream lock poisoned");
+		let Some(listeners) = registry.topics.get(topic) else {
+			return;
+		};
+		for connection in connections.iter().filter(|c| listeners.contains(c)) {
+			let Some(subscriber) = registry.subscribers.get(connection) else {
+				continue;
+			};
+			let _dropped_or_gone = subscriber
+				.queue
+				.try_send(Outgoing::Pack(pack.to_vec()));
+		}
+	}
+
 	/// Queues a pack the caller built for one connection, outside any
 	/// subscription bookkeeping: what a stream sends on its own initiative
-	/// (a relayed draft piece, a result the client is waiting for). Same
-	/// never-block rule; no `gap` is recorded, because nothing here is part
-	/// of a numbered sequence.
+	/// (a result the client is waiting for). Same never-block rule; no `gap`
+	/// is recorded, because nothing here is part of a numbered sequence.
 	///
 	/// Return:
 	///     bool  true when it was queued.

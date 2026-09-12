@@ -49,7 +49,9 @@ Append    seq=3  prev=2    "!"
 - **`seq` 從 1 起算**，`0` 永遠保留給 `prev` 的「沒有基底」。🚫 兩者不能共用 `0` —— 那樣「接在第 0 片之後」跟「沒有基底」在線上長得一樣，正是 [wbf-wire-format.md](wbf-wire-format.md) §3.4 那條「佔位值不能跟真值撞」的同一個坑。
   ⚠️ 這跟 §4.1 講的「新會話 `seq` 歸零」不衝突：那條講的是 **server 自己的推送計數**（`Push`／`Batch`），這裡的片計數是**作者填的**。
 - **`Keypoint` 的 `prev` 必須是 0**：它把 buffer 整個換掉，指向誰都沒有意義。
-- 中途加入的人手上沒有任何狀態，所以第一個收到的片不論 `prev` 是什麼都對不上 → `Demand`，這正是它該做的事。
+- 中途加入的人手上沒有狀態，所以收到 `Delta`／`Append` 時不論 `prev` 是什麼都對不上 → `Demand`。
+  ⚠️ **但 `Keypoint` 是例外**：它帶的就是完整內容（`prev=0`），所以中途加入的人**直接拿它建立狀態就好，不要再 `Demand`** ——
+  否則兩個新來的人會互相觸發對方的重傳（外部審查 2026-09-12）。
 - 📎 **掉了最後一片就是掉了**（維護者 2026-09-12）：串流沒有「寫完了」這個可觀測事件 —— 掉最後一片跟作者停下來打字在線上一模一樣，連作者自己都不知道自己是不是寫完了。而真正的內容最後會走**正式訊息**那條路（持久事件、`g_seq` 水位、`Recent` 補洞），所以最壞只是預覽停在倒數第二片，直到那則訊息蓋過去。🚫 **不為此加任何 server 端的補洞機制**。
 - server **不讀密文、也不追 `prev` 對不對**（它對草稿零狀態，無從比對）。它只做三件無狀態的檢查，好讓這個約定在線上真的成立而不只是紙上規則：
   | 檢查 | 不合 |
@@ -100,15 +102,51 @@ Append    seq=3  prev=2    "!"
 
 ## 4. 誰能發什麼：每次從錨讀
 
+🚨 **順序本身是設計的一部分**（外部審查 2026-09-12，R7）：**成員資格在讀錨之前**。反過來的話，
+`NotFound`／`Conflict`／`Forbidden` 三種回應的差別，就讓一個沒進房的人問得出「那個 `(房間, g_seq)`
+存不存在、是不是一則還開著的草稿」—— 在一個他讀不到的房間裡。
+
 ```
-Stream pack 進來（已登入、准入表過、meta 是合法的 room_id、header id = g_seq）
-   ├─ 從 pduid_pdu 讀 (room_id 的短號, g_seq)                    ← 一次點讀；沒有 → Error(NotFound)
-   ├─ 它是 org.wbftw.wbfuwunel.draft、沒被 redact                            ← 否則 Error(Conflict "not an open draft")
-   ├─ Keypoint／Delta／Append／Abandon：sender == 這條連線的 user         ← 否則 Error(Forbidden "not the author")
-   ├─ Demand：這條連線的 user 是 room_id 的成員                      ← 否則 Error(Forbidden)
-   ├─ 限速（§7）、大小（§7）
-   └─ 廣播：Services.streams.relay(room_id, None, 原 pack)，全房含發送連線——Demand 也一樣，沒有特別路由；正在寫這則草稿的那台裝置回 Keypoint，其他人忽略
+Stream pack 進來（已登入、准入表過）
+   ├─ meta 是合法的 room_id                                  ← 否則 Error(InvalidRequest)
+   ├─ flags == 0                                            ← 否則 Error(InvalidRequest)（§3.0）
+   ├─ 宣告無 data 的 subtype（Draft／Abandon／Demand）帶了 > 1 KiB  ← Error(InvalidRequest) 並關閉連線
+   ├─ 片：大小 ≤ wbf_draft_max_piece_bytes、data ≥ 4 byte、seq ≥ 1、Keypoint 的 prev = 0
+   ├─ 🚨 這條連線的 user 是 room_id 的成員                      ← 否則 Error(Forbidden)。在讀錨之前
+   ├─ 從 pduid_pdu 讀 (room_id 的短號, g_seq)                  ← 一次點讀；沒有 → Error(NotFound)
+   ├─ 它是 org.wbftw.wbfuwunel.draft、沒被 redact              ← 否則 Error(Conflict "not an open draft")
+   ├─ Keypoint／Delta／Append／Abandon：sender == 這條連線的 user  ← 否則 Error(Forbidden "not the author")
+   ├─ 片：這個帳號**現在**還能不能發言                            ← 見 §4.1；否則 Error(Forbidden)
+   ├─ 限速（§7）
+   └─ 廣播：Services.streams.relay_to(room_id, 沒有 ignore 作者的收件人, pack)
+        · 全房含發送連線；Demand 也一樣廣播，不特別路由
+        · flags 一律 0；Demand 的 data 一律剝掉
 ```
+
+### 4.1 錨是「持續的許可」，所以每片都要重問
+
+⚠️ 一則開著的草稿**不會過期**，所以「當初能開稿」不等於「現在還能發」。外部審查（2026-09-12，R2／R4）
+指出兩條會被繞過的政策，兩條都補在片的路徑上：
+
+| 政策 | 為什麼非問不可 |
+|---|---|
+| **帳號被停權**（`is_suspended`） | 一般發訊明確拒絕停權帳號的非 redaction 事件；不問的話，停權者用一則永遠存在的錨繼續對全房輸出 |
+| **房間撤掉他的發言權**（power level） | 「禁言」若擋不住草稿，那個禁言就是假的。問的是房間本來就知道的問題：**這個 user 現在還能不能送錨那個 type 的事件** |
+
+⭐ **`Abandon` 故意不走這個閘門**：撤回自己的東西是停權帳號**仍然有**的權利（既有的 redaction 政策
+本來就這樣定），把它一起擋掉會讓被停權的人連收拾自己的草稿都做不到。
+
+🚨 **錨只能由 `Stream/Draft` 寫**（R6）：`org.wbftw.wbfuwunel.draft` 是**保留的事件型別**，一般
+`Event/Send` 與 HTTP `/send` 一律 `Forbidden`。否則人數上限只綁得住**自願**走 `Draft` 的 client ——
+自己送一則同型別事件就能拿到一個可用的錨。📎 聯邦不是破口：外站寫的錨 sender 是外站的人，而片必須是錨的
+作者發的。
+
+### 4.2 收件人：跟一般訊息同一套
+
+廣播前逐一問 `user_is_ignored(作者, 收件人)`（`Demand` 則問發問者）—— 房間推送本來就這樣過濾，
+草稿不照做的話，「把某人 ignore 掉」會擋住他的訊息卻擋不住他的草稿（R5）。
+⚠️ 這一步會 **await 資料庫**，所以送出時**在鎖內重驗**每個收件人還在不在這個房間：中間落地的
+leave／kick 必須算數（`relay_to`）。
 
 沒有 `g_seq → 事件` 的全站索引，所以 **`room_id` 是必填**：事件的 key 是 `(房間, g_seq)`，帶了 `room_id` 就是一次點讀。這是每片一次 DB 讀，
 跟限速同量級（30 片／秒），不做快取——快取就是 server 的草稿狀態，第三版拿掉的東西不放回來。
@@ -130,7 +168,8 @@ Stream pack 進來（已登入、准入表過、meta 是合法的 room_id、head
 
 房間 A、B、C、D。A 送 `Draft` → 佔位事件 `g_seq = 123`，`Push` 給 B、C（D 不在線）。A 不斷 `Append`／`Delta`，B、C 跟著改。
 D 上線、`Subscribe`、從 `Recent` 或 `Push` 看到 123 是一則草稿、接著收到 `Delta` 但沒有狀態 → D 送 `Demand(id = 123)`。
-server 讀 123 → 作者是 A → 只送給 A 訂閱中的連線。A 廣播 `Keypoint(id = 123)`（超過 8 KiB 就再接幾個 `Append`）。B、C 也收到，等於重新對齊一次。
+server 讀 123 → 驗 D 是房間成員 → 跟其他片一樣**廣播給全房**（維護者 2026-09-08：不特別路由）；A 那台在寫草稿的裝置回一次
+`Keypoint(id = 123)`（超過 8 KiB 就再接幾個 `Append`），其他人收到 `Demand` 就忽略。B、C 也收到那個 `Keypoint`，等於重新對齊一次。
 之後的 `Delta`／`Append` D 就跟得上。
 
 ## 6. 跟 channel 共用什麼

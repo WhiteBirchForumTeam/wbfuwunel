@@ -59,6 +59,7 @@ pub(super) async fn handle_event_send(
 		timestamp: None,
 		declared_attachments: meta.attachments,
 		via_legacy_http: false,
+		may_write_reserved_type: false,
 	})
 	.await?;
 

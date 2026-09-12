@@ -28,7 +28,7 @@ use serde_json::{json, value::to_raw_value};
 use tuwunel_core::{
 	Event, debug,
 	matrix::pdu::{PduCount, PduId, RawPduId},
-	wbf::{Kind, PackBuilder, PackView, RejectCode},
+	wbf::{Flags, Kind, PackBuilder, PackView, RejectCode},
 };
 use tuwunel_service::Services;
 
@@ -66,6 +66,7 @@ pub(super) async fn handle(
 	reply: &mut Reply,
 ) -> Result<(), Failure> {
 	let room_id = parse_room_id(view)?;
+	refuse_unless_flagless(view)?;
 
 	match subtype {
 		| stream::DRAFT => open_draft(services, ctx, &room_id, view, reply).await,
@@ -102,6 +103,28 @@ fn parse_room_id(view: &PackView<'_>) -> Result<OwnedRoomId, Reject> {
 	})
 }
 
+/// Every `Stream` pack has `flags = 0`, both directions (維護者 2026-09-12).
+///
+/// ⚠️ All four defined flags say something about the pack's relationship to
+/// the one receiving it, and for this kind every one of them is false:
+/// `META_ENCRYPTED` cannot be set because the meta is the room id the server
+/// has to read; pieces are never acknowledged; a piece is nobody's response;
+/// and a draft has no observable last piece. Refusing them here rather than
+/// masking them on relay keeps "relayed as it is" literally true — a pack
+/// that would have to be changed is not relayed at all — and tells the
+/// client with the mistake, instead of passing it to the whole room.
+fn refuse_unless_flagless(view: &PackView<'_>) -> Result<(), Reject> {
+	if view.header.flags == Flags::default() {
+		return Ok(());
+	}
+
+	Err(Reject::code(
+		RejectCode::InvalidRequest,
+		"a Stream pack sets no flags: its meta is plaintext, it is not a response, it is not \
+		 acknowledged, and a draft has no last piece",
+	))
+}
+
 /// `Stream/Draft`: write the anchor and answer with the draft's id.
 async fn open_draft(
 	services: &Services,
@@ -114,6 +137,7 @@ async fn open_draft(
 		.session
 		.ok_or_else(|| Reject::code(RejectCode::Unauthorized, "log in first: this connection has no session"))?;
 
+	refuse_oversized_payload(view)?;
 	refuse_room_too_large(services, room_id).await?;
 
 	// The anchor goes through the ordinary send: same idempotency, same
@@ -122,9 +146,22 @@ async fn open_draft(
 	//
 	// ⚠️ The transaction id is this connection and request, not a client's:
 	// `Stream/Draft` has no `txn_id` field. Two Drafts are two drafts, which
-	// is why it must not collide with an earlier one — a collision would
-	// silently answer with an anchor that may already be abandoned.
-	let txn_id: OwnedTransactionId = format!("wbf-draft-{}-{}", ctx.connection, view.header.seq).into();
+	// is why it must not collide with an earlier one — a collision silently
+	// answers with an anchor that may already be abandoned, or be in another
+	// room entirely.
+	//
+	// The connection's name here is `connection_tag`, not the bare number:
+	// transaction ids are stored, the numbers restart with the process, and
+	// the first draft after a restart was answering with the one from before
+	// it (external review 2026-09-12, R1). Within one run the name is stable,
+	// so re-sending a request with the same `seq` is still the replay the
+	// design document describes.
+	let txn_id: OwnedTransactionId = format!(
+		"wbf-draft-{}-{}",
+		services.streams.connection_tag(ctx.connection),
+		view.header.seq
+	)
+	.into();
 	let content = to_raw_value(&json!({ "msgtype": DRAFT_EVENT_TYPE, "body": DRAFT_BODY }))
 		.map_err(|error| Reject::code(RejectCode::Internal, format!("draft anchor content: {error}")))?;
 	let content = Raw::from_json(content);
@@ -141,6 +178,9 @@ async fn open_draft(
 		timestamp: None,
 		declared_attachments: Vec::new(),
 		via_legacy_http: false,
+		// The one caller that may: this is the command the anchor's policy
+		// (the room-size cap) lives in.
+		may_write_reserved_type: true,
 	})
 	.await
 	.map_err(Reject::from)?;
@@ -168,6 +208,8 @@ async fn abandon_draft(
 	reply: &mut Reply,
 ) -> Result<(), Failure> {
 	let user = ctx.user()?;
+	refuse_oversized_payload(view)?;
+	refuse_unless_member(services, user, room_id).await?;
 	let anchor = read_open_draft(services, room_id, view.header.id).await?;
 	refuse_unless_author(&anchor, user)?;
 
@@ -188,6 +230,13 @@ async fn abandon_draft(
 
 /// `Stream/Keypoint`, `Delta`, `Append`: the author's content, carried to the
 /// room unchanged and never stored.
+///
+/// ⚠️ The order of the checks is part of the design, not an accident:
+/// **membership comes before the anchor is read**. Reading first and refusing
+/// afterwards told a stranger, through the difference between `NotFound`,
+/// `Conflict` and `Forbidden`, whether a given `(room, g_seq)` exists and
+/// whether it is an open draft — in a room they cannot read (external review
+/// 2026-09-12, R7).
 async fn relay_piece(
 	services: &Services,
 	ctx: &PackContext<'_>,
@@ -210,10 +259,11 @@ async fn relay_piece(
 		.into());
 	}
 	refuse_unless_chained(view)?;
+	refuse_unless_member(services, &session.user, room_id).await?;
 
 	let anchor = read_open_draft(services, room_id, view.header.id).await?;
 	refuse_unless_author(&anchor, &session.user)?;
-	refuse_unless_member(services, &session.user, room_id).await?;
+	refuse_unless_allowed_to_speak(services, &session.user, room_id).await?;
 
 	services
 		.drafts
@@ -225,7 +275,7 @@ async fn relay_piece(
 		)
 		.map_err(|retry_after| retry_later("too many draft pieces", retry_after))?;
 
-	broadcast(services, room_id, view);
+	broadcast(services, room_id, &session.user, view, view.data).await;
 	Ok(())
 }
 
@@ -243,11 +293,13 @@ async fn relay_demand(
 		.session
 		.ok_or_else(|| Reject::code(RejectCode::Unauthorized, "log in first: this connection has no session"))?;
 
-	// The anchor is read for the same reason as a piece's: an id nobody can
-	// resolve is `NotFound`, and a closed draft is not worth a broadcast.
-	let _anchor = read_open_draft(services, room_id, view.header.id).await?;
-
+	refuse_oversized_payload(view)?;
 	refuse_unless_member(services, &session.user, room_id).await?;
+
+	// The anchor is read after membership (R7) and for the same reason as a
+	// piece's: an id nobody can resolve is `NotFound`, and a closed draft is
+	// not worth a broadcast.
+	let _anchor = read_open_draft(services, room_id, view.header.id).await?;
 
 	services
 		.drafts
@@ -259,7 +311,12 @@ async fn relay_demand(
 		)
 		.map_err(|retry_after| retry_later("too many draft demands", retry_after))?;
 
-	broadcast(services, room_id, view);
+	// ⚠️ Relayed with **no data**: a `Demand` asks for something, it does not
+	// carry anything, and whatever a client put there would otherwise be
+	// copied to every connection in the room (external review 2026-09-12,
+	// R3). Stripping is unconditional; a payload large enough to be an
+	// attempt rather than a slip is refused above.
+	broadcast(services, room_id, &session.user, view, &[]).await;
 	Ok(())
 }
 
@@ -367,6 +424,73 @@ fn refuse_unless_chained(view: &PackView<'_>) -> Result<(), Reject> {
 	Ok(())
 }
 
+/// How much data a subtype that declares none may carry before the server
+/// stops treating it as a slip: `Draft`, `Abandon` and `Demand` have no data
+/// at all, and a client that fills one has either a bug or an intention.
+const NO_DATA_TOLERANCE: usize = 1024;
+
+/// Refuses a pack that declares no data but carries a payload worth
+/// noticing, and closes the connection with it (維護者 2026-09-12).
+///
+/// ⚠️ Why closing: a `Demand` is broadcast to the whole room, so anything it
+/// carries is copied once per connection. The general pack limit is 16 MiB,
+/// which at three demands and ten listeners is most of a gigabyte of copying
+/// for a pack the specification says is empty (external review 2026-09-12,
+/// R3). Below the tolerance the payload is simply dropped on relay; above it,
+/// nothing about the sender is worth continuing with.
+fn refuse_oversized_payload(view: &PackView<'_>) -> Result<(), Reject> {
+	if view.data.len() <= NO_DATA_TOLERANCE {
+		return Ok(());
+	}
+
+	Err(Reject::closing(
+		RejectCode::InvalidRequest,
+		format!(
+			"this Stream subtype carries no data, and this one carries {} bytes",
+			view.data.len()
+		),
+	))
+}
+
+/// Whether this account may put content into a room **right now** — the two
+/// policies an anchor written earlier does not carry with it.
+///
+/// ⚠️ An open draft is permission-shaped: it lives until it is abandoned, so
+/// without this an author keeps broadcasting after the server suspends them
+/// or the room takes their voice away, while every other way of putting
+/// something into that room refuses them (external review 2026-09-12, R2 and
+/// R4). `Abandon` deliberately does not come through here: taking back your
+/// own event is what a suspended account is still allowed to do.
+async fn refuse_unless_allowed_to_speak(
+	services: &Services,
+	user: &UserId,
+	room_id: &RoomId,
+) -> Result<(), Reject> {
+	if services.users.is_suspended(user).await {
+		return Err(Reject::code(
+			RejectCode::Forbidden,
+			"this account is suspended; it may abandon its drafts but not write to them",
+		));
+	}
+
+	// The anchor is an event of the draft type, so the question the room
+	// answers is the one it already knows: may this user send that type here?
+	let Ok(power_levels) = services.state_accessor.get_power_levels(room_id).await else {
+		return Err(Reject::code(
+			RejectCode::Forbidden,
+			"this server cannot read the room's power levels",
+		));
+	};
+	if !power_levels.user_can_send_message(user, MessageLikeEventType::from(DRAFT_EVENT_TYPE)) {
+		return Err(Reject::code(
+			RejectCode::Forbidden,
+			"this room no longer allows this user to send messages",
+		));
+	}
+
+	Ok(())
+}
+
 /// ⚠️ Membership is checked for **pieces as well as demands**, which the
 /// design document asks for only on demands. Being the author of the anchor
 /// is not the same as still being in the room: somebody who wrote a draft and
@@ -421,24 +545,59 @@ async fn read_g_seq(services: &Services, event_id: &EventId) -> Result<i64, Reje
 		.map_err(|_| Reject::code(RejectCode::Internal, "the draft anchor has no position"))
 }
 
-/// Sends the pack on to everyone subscribed to the room, **including the
-/// connection it came from**: the author's other devices need it, and telling
-/// one connection apart would be a rule that buys nothing.
+/// Sends the pack on to the room's subscribers, **including the connection it
+/// came from**: the author's other devices need it, and telling one
+/// connection apart would be a rule that buys nothing.
 ///
-/// The bytes are rebuilt rather than borrowed because a decoded pack is a
-/// view into a buffer the receive loop still owns; the fields are copied
-/// across unchanged, so what the room receives is what the author sent.
-fn broadcast(services: &Services, room_id: &RoomId, view: &PackView<'_>) {
+/// Two things are decided here rather than by the sender:
+///
+/// ⭐ **Who receives it.** Anyone who ignores `sender` does not — the same
+/// answer they get for that person's ordinary messages, from the same
+/// `user_is_ignored`. Without it, ignoring somebody silenced their messages
+/// and not their drafts (external review 2026-09-12, R5). The membership of
+/// every recipient is read once more inside `relay_to`, because this function
+/// awaits the database between choosing them and sending.
+///
+/// ⚠️ **The flags are 0.** All four mean something about the pack's
+/// relationship to whoever receives it — meta is encrypted (it is not: it is
+/// the room id, which the server reads), acknowledge this, this answers your
+/// request, this ends the sequence — and after a relay none of them is true
+/// of the receiver (維護者 2026-09-12). A piece arriving with any flag set is
+/// refused on the way in, so "relayed as it is" stays literally true.
+///
+/// Args:
+///     sender: the user whose content this is — the anchor's author for a
+///         piece, the asker for a `Demand`
+///     data: what to carry; `&[]` strips a `Demand`'s payload
+async fn broadcast(
+	services: &Services,
+	room_id: &RoomId,
+	sender: &UserId,
+	view: &PackView<'_>,
+	data: &[u8],
+) {
 	let header = view.header;
-	let pack = PackBuilder::new(Kind::Stream, header.subtype, header.flags, header.id, header.seq)
+	let pack = PackBuilder::new(Kind::Stream, header.subtype, Flags::default(), header.id, header.seq)
 		.meta(view.meta)
-		.and_then(|builder| builder.data(view.data))
+		.and_then(|builder| builder.data(data))
 		.map(PackBuilder::finish);
+	let Ok(pack) = pack else {
+		debug!("wbf draft piece not re-encoded, dropped");
+		return;
+	};
 
-	match pack {
-		| Ok(pack) => services.streams.relay(room_id, None, &pack),
-		| Err(error) => debug!("wbf draft piece not re-encoded, dropped: {error}"),
+	let mut recipients = Vec::new();
+	for (connection, listener) in services.streams.listeners(room_id) {
+		if !services
+			.users
+			.user_is_ignored(sender, &listener)
+			.await
+		{
+			recipients.push(connection);
+		}
 	}
+
+	services.streams.relay_to(room_id, &recipients, &pack);
 }
 
 /// The throttles' refusal, in the shape §3.4 gives `RateLimited`: the client

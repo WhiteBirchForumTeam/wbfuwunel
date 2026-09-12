@@ -25,6 +25,11 @@ function Invite($room, $who, $tok) { $null = Api Post "/_matrix/client/v3/rooms/
 function Join($room, $tok) { $null = Api Post "/_matrix/client/v3/join/$([uri]::EscapeDataString($room))" '{}' $tok }
 function Leave($room, $tok) { $null = Api Post "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($room))/leave" '{}' $tok }
 function Kick($room, $who, $tok) { $null = Api Post "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($room))/kick" (@{ user_id = $who } | ConvertTo-Json -Compress) $tok }
+# Sends an event of an arbitrary type through the ordinary path; $null when the server refuses.
+function Send-Msg-Typed($room, $type, $content, $tok) {
+  $txn = [guid]::NewGuid().ToString('N')
+  (Api Put "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($room))/send/$([uri]::EscapeDataString($type))/$txn" ($content | ConvertTo-Json -Compress) $tok).event_id
+}
 function Send-Msg($room, $body, $tok) {
   $txn = [guid]::NewGuid().ToString('N')
   (Api Put "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($room))/send/m.room.message/$txn" (@{ msgtype = 'm.text'; body = $body } | ConvertTo-Json -Compress) $tok).event_id
@@ -392,7 +397,106 @@ Check '[4.10a] Abandon -> Ack with the redaction event id' ($bye.subtype -eq 2 -
 Check '[4.10b] subscribers see the redaction as an ordinary push' (@($redactions).Count -ge 1) "redactions=$(@($redactions).Count)"
 Check '[4.10c] a piece for an abandoned draft -> Conflict' ($afterAbandon.subtype -eq 3 -and $afterAbandon.meta.code_id -eq 1502) (Describe $afterAbandon)
 
-foreach ($w in @($wsA, $wsB, $wsC)) { try { $w.Dispose() } catch {} }
+# [4.11] the seven holes the external review of 2026-09-12 found, each refused where it was let through.
+# A second room, with two members: the first one is at the member cap, so no new draft can be
+# opened there — and a draft that was refused would make every check below pass for the wrong
+# reason.
+$room2 = Create-Room $tokA 'drafts two'
+Invite $room2 $regB.user_id $tokA; Join $room2 $tokB
+$wsB2 = Ws-Open $tokB; $null = Call $wsB2 (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e11-b2'; features = @() } $null)
+$null = Subscribe $wsB2 45 $null $null
+$null = Drain-Pushes $wsA 800; $null = Drain-Pushes $wsB2 800
+$draft2 = Call $wsA (Draft-Pack $room2 300)
+$id2 = [uint64]$draft2.meta.g_seq
+Check '[4.11pre] the draft these checks need is open' ($draft2.subtype -eq 2 -and $id2 -gt 0) (Describe $draft2)
+$null = Drain-Pushes $wsA 800; $null = Drain-Pushes $wsB2 800
+
+# R7: a stranger must not learn, from the difference between the refusals, whether an event exists
+$regD = Register 'dave'; $tokD = $regD.access_token
+$wsD = Ws-Open $tokD; $null = Call $wsD (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e11-d'; features = @() } $null)
+$probeOpen = Call $wsD (Stream-Pack 0x10 $room2 $id2 1 $null)
+$probeMissing = Call $wsD (Stream-Pack 0x10 $room2 999999 1 $null)
+Check '[4.11a] a non-member probing an open draft and a missing one gets the same refusal' `
+  ($probeOpen.subtype -eq 3 -and $probeMissing.subtype -eq 3 -and $probeOpen.meta.code_id -eq 1302 -and $probeMissing.meta.code_id -eq 1302) `
+  "open=$($probeOpen.meta.code_id) missing=$($probeMissing.meta.code_id)"
+$wsD.Dispose()
+
+# R3: a Demand declares no data; a large one is refused and the connection closed, a small one is stripped
+Ws-Send $wsB2 (Stream-Pack 0x10 $room2 $id2 1 ([Text.Encoding]::UTF8.GetBytes('ignored payload')))
+$strippedAtA = @(Drain-Pushes $wsA 1500 | Where-Object { $_.kind -eq 0x02 -and $_.subtype -eq 0x10 })
+Check '[4.11b] a Demand is relayed with its data stripped' (@($strippedAtA).Count -eq 1 -and @($strippedAtA)[0].data.Length -eq 0) `
+  "packs=$(@($strippedAtA).Count) bytes=$(@($strippedAtA)[0].data.Length)"
+$wsFat = Ws-Open $tokB; $null = Call $wsFat (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e11-fat'; features = @() } $null)
+$fat = Call $wsFat (Stream-Pack 0x10 $room2 $id2 1 ([byte[]]::new(2048)))
+$fatClose = Recv-Or-Null $wsFat 5000
+Check '[4.11c] a Demand carrying 2 KiB -> InvalidRequest and the connection is closed' `
+  ($fat.subtype -eq 3 -and $fat.meta.code_id -eq 1201 -and $null -ne $fatClose -and $fatClose.closed) `
+  "code=$($fat.meta.code_id) closed=$($fatClose.closed) reason=$($fatClose.code)"
+$wsFat.Dispose()
+
+# flags: a Stream pack sets none of them
+$flagged = Call $wsA (New-Pack 0x02 0x05 8 $id2 2 ([Text.Encoding]::UTF8.GetBytes($room2)) ([byte[]]((BE32 1) + $appendData)))
+Check '[4.11d] a Stream pack with a flag set -> InvalidRequest' ($flagged.subtype -eq 3 -and $flagged.meta.code_id -eq 1201) (Describe $flagged)
+
+# R6: the anchor's event type is the server's to write
+$forged = Send-Msg-Typed $room 'org.wbftw.wbfuwunel.draft' @{ msgtype = 'org.wbftw.wbfuwunel.draft'; body = '(draft)' } $tokA
+Check '[4.11e] an ordinary send of the anchor type -> refused, so the room cap cannot be walked around' ($null -eq $forged) "event_id=$forged"
+
+# R5: ignoring somebody hides their draft pieces, as it hides their messages
+$null = Api Put "/_matrix/client/v3/user/$([uri]::EscapeDataString($regB.user_id))/account_data/m.ignored_user_list" (@{ ignored_users = @{ $regA.user_id = @{} } } | ConvertTo-Json -Compress -Depth 4) $tokB
+Start-Sleep -Seconds 1
+$null = Drain-Pushes $wsA 800; $null = Drain-Pushes $wsB2 800
+Ws-Send $wsA (Piece-Pack 0x05 $room2 $id2 2 1 $appendData)
+$atIgnorer = @(Drain-Pushes $wsB2 1500 | Where-Object { $_.kind -eq 0x02 })
+$atOther = @(Drain-Pushes $wsA 1500 | Where-Object { $_.kind -eq 0x02 })
+Check '[4.11f] a piece from an ignored author does not reach the ignorer, and still reaches everyone else' `
+  (@($atIgnorer).Count -eq 0 -and @($atOther).Count -eq 1) "ignorer=$(@($atIgnorer).Count) other=$(@($atOther).Count)"
+$null = Api Put "/_matrix/client/v3/user/$([uri]::EscapeDataString($regB.user_id))/account_data/m.ignored_user_list" (@{ ignored_users = @{} } | ConvertTo-Json -Compress -Depth 4) $tokB
+
+# R4: the room can take a voice away, and an open draft must not be a way around that.
+$bobDraft = Call $wsB2 (Draft-Pack $room2 1)
+$bobId = [uint64]$bobDraft.meta.g_seq
+$null = Drain-Pushes $wsB2 800
+Ws-Send $wsB2 (Piece-Pack 0x05 $room2 $bobId 1 0 $appendData)
+$beforeMute = @(Drain-Pushes $wsB2 1500 | Where-Object { $_.kind -eq 0x02 })
+$null = Api Put "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($room2))/state/m.room.power_levels/" (@{ users = @{ $regA.user_id = 100; $regB.user_id = -1 }; events_default = 0 } | ConvertTo-Json -Compress -Depth 4) $tokA
+Start-Sleep -Seconds 1
+$muted = Call $wsB2 (Piece-Pack 0x05 $room2 $bobId 2 1 $appendData)
+Check '[4.11g] a piece before the room takes the author''s voice away is relayed' (@($beforeMute).Count -eq 1) "packs=$(@($beforeMute).Count)"
+Check '[4.11h] and one after it -> Forbidden: an open draft is not a way around a mute' ($muted.subtype -eq 3 -and $muted.meta.code_id -eq 1302) (Describe $muted)
+# Bob's voice goes back: the next check is about suspension, and a muted user cannot redact
+# either (a redaction is an event too), which would make it pass for the wrong reason.
+$null = Api Put "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($room2))/state/m.room.power_levels/" (@{ users = @{ $regA.user_id = 100 }; events_default = 0 } | ConvertTo-Json -Compress -Depth 4) $tokA
+Start-Sleep -Seconds 1
+
+foreach ($w in @($wsA, $wsB, $wsC, $wsB2)) { try { $w.Dispose() } catch {} }
+
+# R2 and R1 both need a restart: suspension is an admin endpoint (so somebody has to be made an
+# admin, which is a command that runs with the server stopped), and the transaction id can only
+# be shown to survive a restart by restarting.
+Stop-Server $server
+$null = Exec $cfg4 @("user make-user-admin $($regA.user_id)") 'admin'
+$server = Start-Server $cfg4 's4b'
+
+# R1: this is the first connection of a new run, so its number is 1 — the same number alice's
+# first connection had. With the same request seq, the transaction id would be the one from the
+# first run, and the Ack would carry that run's anchor (in the other room).
+$wsA3 = Ws-Open $tokA; $null = Call $wsA3 (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e11-a3'; features = @() } $null)
+$afterRestart = Call $wsA3 (Draft-Pack $room2 1)
+Check '[4.11i] a Draft after a restart writes a new anchor instead of replaying the first run''s' `
+  ($afterRestart.subtype -eq 2 -and [uint64]$afterRestart.meta.g_seq -ne $draftId) `
+  "g_seq=$($afterRestart.meta.g_seq) first run=$draftId"
+
+# R2: a suspended account may abandon its draft but not write to it
+$suspend = Api Put "/_matrix/client/v1/admin/suspend/$([uri]::EscapeDataString($regB.user_id))" (@{ suspended = $true } | ConvertTo-Json -Compress) $tokA
+$wsB3 = Ws-Open $tokB; $null = Call $wsB3 (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e11-b3'; features = @() } $null)
+$null = Subscribe $wsB3 46 $null $null
+$suspendedPiece = Call $wsB3 (Piece-Pack 0x05 $room2 $bobId 3 1 $appendData)
+Check '[4.11j] a suspended author cannot broadcast a piece' ($null -ne $suspend -and $suspendedPiece.subtype -eq 3 -and $suspendedPiece.meta.code_id -eq 1302) "suspend=$($suspend.suspended) $(Describe $suspendedPiece)"
+$byeSuspended = Call $wsB3 (Stream-Pack 0x02 $room2 $bobId 301 $null)
+Check '[4.11k] ... but may still abandon its own draft' ($byeSuspended.subtype -eq 2 -and $byeSuspended.meta.redaction_event_id) (Describe $byeSuspended)
+
+$wsA3.Dispose(); $wsB3.Dispose()
 Stop-Server $server
 
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"

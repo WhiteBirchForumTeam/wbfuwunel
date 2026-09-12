@@ -228,23 +228,19 @@ impl Streams {
 		}
 	}
 
-	/// Forwards a pack as it is to everyone listening to `room`, except
-	/// `except` (the connection that sent it, when the sender must not get
-	/// its own copy). For `Stream` drafts. Same drop rule as `push`, but no
-	/// gap is recorded: a dropped draft piece is recovered by the client's
-	/// own `Demand`, not by `Recent`.
-	pub fn relay(&self, room: &RoomId, except: Option<ConnectionId>, pack: &[u8]) {
-		let listeners: Vec<ConnectionId> = self
-			.rooms
-			.listeners(&RoomTopic::Room(room.to_owned()))
-			.into_iter()
-			.map(|(connection, _)| connection)
-			.filter(|connection| Some(*connection) != except)
-			.collect();
-
-		for connection in listeners {
-			let _dropped_or_gone = self.rooms.send_pack(connection, pack.to_vec());
-		}
+	/// Forwards a pack as it is to `connections`, dropping any that has left
+	/// `room` in the meantime. For `Stream` drafts. Same drop rule as `push`,
+	/// but no gap is recorded: a dropped draft piece is recovered by the
+	/// client's own `Demand`, not by `Recent`.
+	///
+	/// ⚠️ The recipients are the caller's because choosing them needs the
+	/// database — who ignores the author — and this layer neither reads that
+	/// nor awaits. `listeners` is where the caller gets its candidates; the
+	/// membership is checked once more inside, so a leave that landed during
+	/// that read still counts.
+	pub fn relay_to(&self, room: &RoomId, connections: &[ConnectionId], pack: &[u8]) {
+		self.rooms
+			.send_pack_to_topic(&RoomTopic::Room(room.to_owned()), connections, pack);
 	}
 }
 
@@ -491,7 +487,12 @@ mod tests {
 	}
 
 	#[test]
-	fn relay_skips_the_excepted_connection() {
+	fn a_relay_reaches_the_named_recipients_and_only_those_still_in_the_room() {
+		// ⚠️ The caller chooses the recipients because choosing them needs
+		// the database (who ignores the author), which means it awaits — and
+		// what it decided can be out of date by the time it sends. So the
+		// membership is read again on the way out: that is the half this
+		// pins, because the ignore filter itself lives in the API layer.
 		let streams = Streams::new();
 		let alice = user_id!("@alice:localhost");
 		let bob = user_id!("@bob:localhost");
@@ -501,12 +502,21 @@ mod tests {
 		streams.subscribe(1, alice, tx_a, 1, &[room.clone()], false);
 		streams.subscribe(2, bob, tx_b, 1, &[room.clone()], false);
 
-		streams.relay(&room, Some(1), b"pack");
-		assert!(rx_a.try_recv().is_err(), "the sender's connection got nothing");
+		streams.relay_to(&room, &[2], b"pack");
+		assert!(rx_a.try_recv().is_err(), "a connection the caller left out gets nothing");
 		assert_eq!(take_pack(&mut rx_b), b"pack");
 
-		streams.relay(&room, None, b"all");
+		streams.relay_to(&room, &[1, 2], b"all");
 		assert_eq!(take_pack(&mut rx_a), b"all");
 		assert_eq!(take_pack(&mut rx_b), b"all");
+
+		// Bob leaves between the caller's choice and the send.
+		streams.evict(bob, &room);
+		streams.relay_to(&room, &[1, 2], b"after the leave");
+		assert_eq!(take_pack(&mut rx_a), b"after the leave");
+		assert!(
+			rx_b.try_recv().is_err(),
+			"a recipient who left the room in the meantime is dropped, not trusted from the snapshot"
+		);
 	}
 }

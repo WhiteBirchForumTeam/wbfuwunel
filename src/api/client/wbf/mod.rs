@@ -626,6 +626,13 @@ impl Reject {
 		Self { code, message: message.into(), extra, closes_connection: false }
 	}
 
+	/// A refusal that also ends the connection: for a request so far outside
+	/// the protocol that the next one from the same sender is not worth
+	/// reading. The error still goes out first, so the client learns why.
+	fn closing(code: RejectCode, message: impl Into<String>) -> Self {
+		Self { code, message: message.into(), extra: Value::Null, closes_connection: true }
+	}
+
 	/// The device already holds `max` connections; this one is turned away
 	/// and, on a WebSocket, closed.
 	fn too_many_connections(max: u32) -> Self {
