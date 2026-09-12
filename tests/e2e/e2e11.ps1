@@ -300,6 +300,17 @@ $anchorPushes = @(Drain-Pushes $wsB 1500)
 $anchorTypes = @($anchorPushes | ForEach-Object { $_.events } | ForEach-Object { $_.type })
 Check '[4.1a] Draft -> Ack with event_id and g_seq' ($draft.subtype -eq 2 -and $draft.meta.event_id -and $draftId -gt 0) (Describe $draft)
 Check '[4.1b] the anchor is a real event: bob is pushed it, type org.wbftw.wbfuwunel.draft' ($anchorTypes -contains 'org.wbftw.wbfuwunel.draft') "types=$($anchorTypes -join ',')"
+
+# The id's type byte, on this kind specifically (wire-format 2.2, PR #47). The unit
+# tests cover the gate; these two cover the two mistakes a client actually makes:
+# composing the id itself before the server has minted one, and sending a piece with
+# the bare g_seq it read out of the Ack's meta instead of the composed id beside it.
+$earlyType = Call $wsA (Stream-Pack 0x01 $room (Anchor 7) 2 $null)
+Check '[4.1c] a Draft naming an anchor it does not have yet -> InvalidRequest' `
+  ($earlyType.subtype -eq 3 -and $earlyType.meta.code_id -eq 1201) (Describe $earlyType)
+$bareId = Call $wsA (Piece-Pack 0x05 $room ([uint64]$draft.meta.g_seq) 1 0 ([Text.Encoding]::UTF8.GetBytes('x')))
+Check '[4.1d] a piece carrying the bare g_seq instead of the composed id -> InvalidRequest' `
+  ($bareId.subtype -eq 3 -and $bareId.meta.code_id -eq 1201) (Describe $bareId)
 $null = Drain-Pushes $wsA 800
 
 # [4.2] the three piece subtypes reach the room unchanged — and the author's own connection too

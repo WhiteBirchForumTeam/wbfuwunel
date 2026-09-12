@@ -14,7 +14,7 @@ mod vectors;
 pub use self::{
 	error_code::{CONTROL_ERROR_SUBTYPE, RejectCode},
 	file_info::{ENCRYPTED_FILE_INFO_LEN, EncryptedFileInfo, FileInfoError},
-	id_type::{ID_VALUE_MAX, IdType, IdValueTooLarge, id_value},
+	id_type::{ID_VALUE_MAX, IdType, IdValueRefused, id_value},
 	pack::{
 		Flags, HEADER_LEN, Kind, PackBuilder, PackError, PackHeader, PackView, TRAILER_LEN, VERSION,
 		decode,

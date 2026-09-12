@@ -100,6 +100,7 @@ client 那邊「開幾條、哪條走什麼、pending → sending → sent」是
 | 4 | decode（版本、旗標、長度、兩個 CRC） | `Error(<PackError 對應碼>)`，`id`/`seq` 只在 DataCrc 錯時從 header 抄 | 到這裡才碰 bytes 內容 |
 | 5 | meta／data 不超過設定上限 | `Error(TooLarge)` | decode 之後才知道長度是真的 |
 | 6 | **這個 kind 在這個狀態、這個傳輸上准不准** | 匿名連線送非白名單 → `Error(Unauthorized)`；HTTP 送只准 WS 的 kind → `Error(Unsupported)`；沒人認得的 kind → `Error(UnknownKind)` | 一張表回答，不散在 handler 裡 |
+| 6.5 | **`id` 的型別是這個 `(kind, subtype)` 要的嗎**（[wbf-wire-format.md](wbf-wire-format.md) §2.2，PR #47） | 型別不符、表沒定義的 byte、以及「沒有會話卻帶值」→ `Error(InvalidRequest)` | 跟第 6 關同一張表的同一列（多一欄 `id_type`）：⭐ 兩張以同一個 key 索引的表遲早漂 |
 | 7 | 派發到 handler（§4） | handler 的 `Reject` → `Error(code)` 同 `id`/`seq` | |
 | 8 | 回應進發送佇列；套用 handler 回的 `SessionChange` | `Close` → 送 Close 1000 結束 | 回應**先於** Close 入隊，client 一定先收到 Ack 再收到關線 |
 

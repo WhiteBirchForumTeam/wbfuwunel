@@ -1,6 +1,6 @@
 # wbf pack：通道與 HTTP 共用的二進位封包，以及收發的管線
 
-> **狀態：草案，等維護者同意。** 定義 fork 自己的即時通道（WebSocket over TLS）上**每一個二進位訊框**，也是 HTTP 測試路徑的
+> **狀態：✅ 已實作，並且是現行契約**（第三版 2026-09-03 定，之後每一支都寫回這裡：`0x16 Device` PR #43、`0x02 Stream` PR #45、§2.2 的 `id` 型別 byte PR #46／#47）。定義 fork 自己的即時通道（WebSocket over TLS）上**每一個二進位訊框**，也是 HTTP 測試路徑的
 > request body 與 response body —— **兩邊都是 pack，沒有 JSON 回應**。分塊上傳（[chunked-upload.md](chunked-upload.md)）與
 > 流式訊息（[streaming-messages.md](streaming-messages.md)）都建立在它上面。
 > 第三版依維護者 2026-09-03 指示：**pack 不管加密、只管格式與 CRC；拆包禁止 O(n) 掃描；加密好的 bytes 直接落在 data 段不再複製；
@@ -172,12 +172,17 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 | `Control` | server | 0 |
 | `Upload` | server（它要知道大小、位置） | 0 |
 | `Download` | server | 0 |
-| `Stream` | **對方 client**（server 只轉發） | 1 |
+| `Stream` | server（它要知道是哪個房間）；**data 才是給對方 client 的** | 0 |
 | 之後的 `Room`／`Query`（看房間、看第幾條訊息） | server | 0 |
 
 規則一條：**server 要靠它動作的 meta 是明文；只是經過 server 的 meta 是密文。** `id` 與 `seq` 永遠在明文標頭，Ack 不讀 meta。
 
+⚠️ **`Stream` 這一列本來寫 1**（草稿的設計原本打算把 meta 當密文轉發）。實作定案時反過來了：meta 就是明文的 room id —— server 非知道它不可，否則不知道往哪個房間廣播（維護者 2026-09-12，PR #45）。所以**`Stream` 的 flags 整個必須是 0**，帶任何一個 bit 都是 `InvalidRequest`；密文在 data 裡。
+
 ### 3.2 表
+
+⚠️ **這張表裡的每一個 `id` 都是 §2.2 的組合形式**（型別 byte ＋ 7 byte 的值），不是裸值 ——
+**「client 選」講的是選那個值，型別仍然由 §2.2 決定**（會話號是 `0x01`），而 server 鑄的那些（`g_seq`、上傳 id）client 從 `Ack` 抄整個 `id` 回去。型別不符 server 在 handler 之前就回 `InvalidRequest`。
 
 | kind | subtype | meta（JSON） | data |
 |---|---|---|---|
@@ -185,7 +190,7 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 | | `0x02 Ack` | 各 kind 定的回應內容；`IS_RESPONSE = 1`，`id`、`seq` 抄請求 | 視 kind（`Download/Read` 的回應 data 是讀出的 bytes） |
 | | `0x03 Error` | `{ "code_id": <序號>, "code": "…", "message": "…" }` ＋ 該 code 定義的欄位；程式比對 `code_id`，`code` 是它的名字；**完整清單在 §3.4**，那張表是唯一的來源 | 無 |
 | | `0x04 Ping` / `0x05 Pong` | `{ "nonce": … }` | 無 |
-| `0x02 Stream`（草稿，[streaming-messages.md](streaming-messages.md)） | `0x01 Draft` | ⚠️ **這個 kind 的 meta 不是 JSON，是 room id 本身**（UTF-8 文字）——`id` 已經說了是哪則草稿，meta 只剩房間。`Draft` 的 `id` 填 0（還沒有草稿）；回應 `{ "event_id", "g_seq" }`，**`g_seq` 就是這則草稿的 id**，之後每包都填在 header 的 `id`；**只走 WS**。房間人數超過 `wbf_draft_max_room_members` → `Conflict` | 無 |
+| `0x02 Stream`（草稿，[streaming-messages.md](streaming-messages.md)） | `0x01 Draft` | ⚠️ **這個 kind 的 meta 不是 JSON，是 room id 本身**（UTF-8 文字）——`id` 已經說了是哪則草稿，meta 只剩房間。`Draft` 的 `id` **整個填 0**（型別 `0x00`：還沒有草稿可指）；回應 `{ "event_id", "g_seq", "id" }`，**`id` ＝ `0x02 ‖ g_seq`（§2.2），之後每包直接抄它填 header 的 `id`** —— 🚫 client 不要自己疊型別 byte；**只走 WS**。房間人數超過 `wbf_draft_max_room_members` → `Conflict` | 無 |
 | | `0x02 Abandon` | `id` = 草稿 id；只有作者能發；回應 `{ "redaction_event_id" }` —— 它就是 redact 那則錨，訂閱者從**普通的 `Event/Push`** 收到 | 無 |
 | | `0x03 Keypoint`（作者） | **完整內容**，接收者拿它換掉整個 buffer。`seq` 是作者的片計數（**從 1 起**，0 保留），⚠️ `prev` 必須是 **0**：它自己就是起點 | **`prev`(u32 大端) ‖ 密文** |
 | | `0x04 Delta`（作者） | 相對於 `prev` 那一片之後的狀態的差異；差異本身是 client 之間的約定，server 不讀 | 同上 |

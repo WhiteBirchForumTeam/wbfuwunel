@@ -40,7 +40,7 @@ server 回 Ack meta `{ "protocol": 1, "server": "<server name>", "features": ["u
 | 1 | 1 | `kind` | `0x01` Control、`0x03` Upload、`0x04` Download |
 | 2 | 1 | `subtype` | 見 §3、§4 |
 | 3 | 1 | `flags` | bit0 `META_ENCRYPTED`(0x01)、bit1 `WANT_ACK`(0x02)、bit2 `IS_RESPONSE`(0x04)、bit3 `IS_LAST`(0x08)；其餘必須 0 |
-| 4 | 8 | `id` | 上傳 id；`Create` 與所有 Download 請求為 0 |
+| 4 | 8 | `id` | 上傳 id，**含第一個 byte 的型別 `0x03`**（§2.2）——`Ack` 給的那個數字原樣填；`Create` 與所有 Download 請求**整個是 0** |
 | 12 | 4 | `seq` | `Chunk`：**塊索引（0 起）**；其他請求：請求號（client 自訂，回應抄回） |
 | 16 | 4 | `meta_len` | 可 0 |
 | 20 | n | `meta` | 見各訊息 |

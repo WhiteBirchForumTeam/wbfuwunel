@@ -339,7 +339,8 @@ struct DraftAnchor {
 ///
 /// Args:
 ///     room_id: from the pack's meta
-///     g_seq: the pack header's `id`, example: 123
+///     g_seq: the value under the header `id`'s type byte (`id_value`), not
+///     the whole field, example: 123
 /// Return:
 ///     Result<DraftAnchor, Reject>  `NotFound` when no event of the room has
 ///     that `g_seq`; `Conflict` when it is not a draft anchor, or has been

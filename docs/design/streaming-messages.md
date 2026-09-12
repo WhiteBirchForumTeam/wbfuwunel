@@ -1,6 +1,6 @@
-# Draft Message（草稿訊息）設計草案，第四版
+# Draft Message（草稿訊息），第四版
 
-> **狀態：📄 草案，等維護者同意。** 第四版依維護者 2026-09-08 的設計重寫：**草稿一開始就是一則真的、持久化的佔位訊息**，它的 `g_seq` 就是 `draft_id`；
+> **狀態：✅ 已實作**（PR #45，2026-09-12 合併；header `id` 的型別 byte 見 PR #47）。第四版依維護者 2026-09-08 的設計重寫：**草稿一開始就是一則真的、持久化的佔位訊息**，草稿的名字就是它的 `g_seq`；
 > 之後的內容變化（`Keypoint`／`Delta`／`Append`）只廣播、不進庫；中途進來的人用 `Demand` 向作者要全文；`Abandon` 就是 redact 佔位訊息；
 > 收尾是 client 的事：自己 `Abandon`、再自己送一則正常訊息，server 不做多餘的事。走 [wbf-event-push.md](wbf-event-push.md) 的 channel（工作 2），這份是工作 3。
 > 第三版（暫時 id、server 零狀態、沒有錨）作廢：它的問題是中途進來的人對不回草稿，而且 `draft_id` 的作用域要靠 `(sender, device)` 拼。第四版用一則真事件當錨，全部解掉。
@@ -14,10 +14,10 @@
 
 ## 2. 三個規則
 
-1. **錨是真事件**：`Draft` 讓 server 寫一則明文的 service 事件（§3.1），它有 `event_id`、有 `g_seq`；**`draft_id = g_seq`**。後加入者從 `Recent`／`Push` 看得到錨，知道「這裡有一則草稿」。
+1. **錨是真事件**：`Draft` 讓 server 寫一則明文的 service 事件（§3.1），它有 `event_id`、有 `g_seq`；**草稿就用它的 `g_seq` 命名**，在線上是 header `id` 裡型別 `0x02`（事件位置）的那個值（§3）。後加入者從 `Recent`／`Push` 看得到錨，知道「這裡有一則草稿」。
 2. **變化是暫態**：`Keypoint`／`Delta`／`Append` 只經 channel 廣播給訂閱者，server 不存、不重送；掉了用 `Demand` 要一次 `Keypoint`。
 3. **收尾是 client 的事**（維護者 2026-09-08）：真的要收掉草稿時，client **自己送 `Abandon`**（redact 佔位），然後**自己再送一則正常訊息**。
-   server 對這兩個 pack 照常處理就好，不做任何多餘的事：`Event/Send` 完全不動，沒有 `draft_id` 欄、沒有 `unsigned` 裡的對應、沒有順手 redact。正式訊息要不要對回草稿，是 client 在密文內容裡自己約定。
+   server 對這兩個 pack 照常處理就好，不做任何多餘的事：`Event/Send` 完全不動，沒有指回草稿的欄位、沒有 `unsigned` 裡的對應、沒有順手 redact。正式訊息要不要對回草稿，是 client 在密文內容裡自己約定。
 
 **server 對草稿仍是零記憶體狀態**：真相只有那則佔位事件（DB）；誰能發什麼，每次從它讀。
 
@@ -26,7 +26,8 @@
 kind `0x02 Stream`。**所有 subtype 的 meta 都是明文的 `room_id` 字串本身**（UTF-8，不是 JSON；維護者 2026-09-08：`g_seq` 已經有 header `id` 那格，meta 只剩房間）；
 data 是密文（E2EE 房）或明文，server 不讀。server 轉發時 **pack 原樣送**，不加 `sender`／`device`：接收者用 `g_seq` 找到佔位事件，作者就在它的 `sender` 裡；哪台裝置在寫，接收者不需要知道。
 
-header：`id`（8 byte）填 `g_seq`（`Draft` 填 0），它就是「這個 pack 屬於哪則草稿」。
+header：`id`（8 byte）＝ **`0x02 ‖ g_seq`** —— 型別 byte `0x02`（事件位置）加上七個 byte 的 `g_seq` 大端（[wbf-wire-format.md](wbf-wire-format.md) §2.2）。它就是「這個 pack 屬於哪則草稿」。
+⚠️ **`Draft` 自己的 `id` 是整整 0**（型別 `0x00`）：它還在請求那個 `g_seq`，此時還沒有草稿可指。組好的 `id` 由 server 在 `Ack` 裡給（§3.1）—— 🚫 client 不要自己把 `0x02` 疊上去，那條規則的存在就是為了讓「誰鑄的」看得出來。
 **`seq`（4 byte）= 作者對這則草稿遞增的片計數**（`Keypoint`／`Delta`／`Append`；同一個 `g_seq` 下永遠遞增，維護者 2026-09-08）。
 順序本身由 TCP 保，`seq` 不是拿來排序的，是拿來**發現洞**的：片會掉的地方不是 TCP，是 server 對某一個接收者的發送佇列滿了 `try_send` 丟掉（作者與其他人都不知道），
 沒有計數的話接收者少一段 `Append`、或把 `Delta` 套在錯的基底上，都是默默壞掉。接收者看到跳號就 `Demand`。server 不看 `seq` 的值。
@@ -64,7 +65,7 @@ Append    seq=3  prev=2    "!"
 
 | subtype | 誰發 | 進庫？ | data |
 |---|---|---|---|
-| `0x01 Draft` | 作者 | **是**：佔位事件 | 無。回 `Ack` `{ "event_id", "g_seq" }` |
+| `0x01 Draft` | 作者 | **是**：佔位事件 | 無。回 `Ack` `{ "event_id", "g_seq", "id" }` —— `id` 就是**之後每一片要填進 header 的那個組好的值**（`0x02 ‖ g_seq`），client 直接抄，不用自己算 |
 | `0x02 Abandon` | 作者 | **是**：redact 佔位事件 | 無。回 `Ack` `{ "redaction_event_id" }`；訂閱者從 `Push` 收到 redaction |
 | `0x03 Keypoint` | 作者 | 否 | `prev`(=0) ＋**完整字段**：接收者把這則草稿的 buffer 整個清空換成它。明文上限 **8 KiB**（client 約定），server 對 data 的 hard limit **10 KiB**（密文，含 4 byte 的 `prev` 與加密外框） |
 | `0x04 Delta` | 作者 | 否 | `prev` ＋相對於 `prev` 那個狀態的差異（格式是 client 約定，§5） |
@@ -179,9 +180,9 @@ leave／kick 必須算數（`relay_to`）。
 ### 5.1 中途進來的人（維護者的例子）
 
 房間 A、B、C、D。A 送 `Draft` → 佔位事件 `g_seq = 123`，`Push` 給 B、C（D 不在線）。A 不斷 `Append`／`Delta`，B、C 跟著改。
-D 上線、`Subscribe`、從 `Recent` 或 `Push` 看到 123 是一則草稿、接著收到 `Delta` 但沒有狀態 → D 送 `Demand(id = 123)`。
-server 讀 123 → 驗 D 是房間成員 → 跟其他片一樣**廣播給全房**（維護者 2026-09-08：不特別路由）；A 那台在寫草稿的裝置回一次
-`Keypoint(id = 123)`（超過 8 KiB 就再接幾個 `Append`），其他人收到 `Demand` 就忽略。B、C 也收到那個 `Keypoint`，等於重新對齊一次。
+D 上線、`Subscribe`、從 `Recent` 或 `Push` 看到 123 是一則草稿、接著收到 `Delta` 但沒有狀態 → D 送 `Demand`，header `id` ＝ `0x02 ‖ 123`（`0x0200_0000_0000_007B`）。
+server 讀 123 → 驗 D 是房間成員 → 跟其他片一樣**廣播給全房**（維護者 2026-09-08：不特別路由）；A 那台在寫草稿的裝置用同一個 `id` 回一次
+`Keypoint`（超過 8 KiB 就再接幾個 `Append`），其他人收到 `Demand` 就忽略。B、C 也收到那個 `Keypoint`，等於重新對齊一次。
 之後的 `Delta`／`Append` D 就跟得上。
 
 ## 6. 跟 channel 共用什麼
@@ -209,7 +210,7 @@ server 讀 123 → 驗 D 是房間成員 → 跟其他片一樣**廣播給全房
 ⚠️ **這一節是線上契約的一部分**：照它實作的 client 送出來的東西必須是 server 收的。所以每個例子裡的
 `seq`／`prev`／錯誤碼都跟 §3.0／§4 同一套 —— 一份規格自己前後不一致，比少寫一段更糟（審查者 cirno）。
 
-- alice、bob 訂閱；alice `Draft` → Ack 有 `event_id`、`g_seq`；bob 收到 `Push`，事件 type 是 `org.wbftw.wbfuwunel.draft`；alice 自己也 `Push` 到。
+- alice、bob 訂閱；alice `Draft`（`id` 整整 0）→ Ack 有 `event_id`、`g_seq`、`id`（＝ `0x02 ‖ g_seq`，之後每一片就填它）；`Draft` 的 `id` 不是 0 → `InvalidRequest`，片的 `id` 少了 `0x02` → `InvalidRequest`；bob 收到 `Push`，事件 type 是 `org.wbftw.wbfuwunel.draft`；alice 自己也 `Push` 到。
 - alice `Append`（`seq=1`、`prev=0`，從空字串起）、`Delta`（`seq=2`、`prev=1`）、`Keypoint`（`seq=3`、`prev=0`）
   → bob 依序收到三個，meta 是 room id、data 一個 byte 不差（含開頭那 4 byte 的 `prev`）；alice 發送那條連線**也**收到自己的（全域廣播）。
 - 鏈的三條檢查：`data` 不足 4 byte、片的 `seq=0`、`Keypoint` 的 `prev≠0` → 各回 `InvalidRequest`。
@@ -236,7 +237,7 @@ server 讀 123 → 驗 D 是房間成員 → 跟其他片一樣**廣播給全房
 1. **定案用 redact，而且是 client 自己做**：client 送 `Abandon`，再自己發一則新訊息；server 對這兩種 pack 照常處理，不做多餘的事（維護者 2026-09-08）。不用 `m.replace`。
 2. **佔位不帶 device**：`Demand` 是去跟發文者的**帳號**要，他的每台裝置都收到，正在寫草稿的那台才回。
 3. **佔位永不過期**：沒有 TTL，永遠可用。
-4. **meta 不用 JSON**：直接放 `room_id`，`g_seq` 在 header `id`。
+4. **meta 不用 JSON**：直接放 `room_id`，`g_seq` 在 header `id`（`0x02 ‖ g_seq`，§3）。
 5. **接收端可以落地**草稿內容（§3），server 是權威。
 
 自我審查後維護者再定的（同日）：
@@ -248,7 +249,7 @@ server 讀 123 → 驗 D 是房間成員 → 跟其他片一樣**廣播給全房
 10. **定案的順序**已經不是 server 的問題（見 1）：client 自己送 `Abandon` 與新訊息，哪個先都行。
 11. **registry 的鎖**是實作細節（`RwLock`，`publish` 拿讀鎖），不進協議。
 
-剩下的小事：`g_seq` 的型別——`PduCount` 是有號的（backfill 的事件為負），但佔位事件是本站新寫的、永遠正，塔進 u64 的 header `id` 沒問題；server 對讀不到的回 `NotFound`。
+剩下的小事：`g_seq` 的型別——`PduCount` 是有號的（backfill 的事件為負），但佔位事件是本站新寫的、永遠正，塞進 header `id` 型別 byte 底下那 56 bit 沒問題（7.2 × 10¹⁶ 則事件）；server 對讀不到的回 `NotFound`。
 
 ## 10. 這份文件的查證範圍
 

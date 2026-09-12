@@ -41,12 +41,21 @@ pub const ID_VALUE_BITS: u32 = 56;
 /// The largest value an `id` can carry.
 pub const ID_VALUE_MAX: u64 = (1 << ID_VALUE_BITS) - 1;
 
-/// A value too large for the seven bytes an `id` has for it.
-///
-/// ⚠️ Returned rather than truncated: a silently shortened id names a
-/// different thing, and the caller would not know which.
+/// Why a value cannot be made into an `id` of the type asked for.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct IdValueTooLarge(pub u64);
+pub enum IdValueRefused {
+	/// More than the seven bytes an `id` leaves under the type.
+	///
+	/// ⚠️ Returned rather than truncated: a silently shortened id names a
+	/// different thing, and the caller would not know which.
+	TooLargeForSevenBytes(u64),
+	/// A value under the `None` type, whose whole id must be 0 (§2.2).
+	///
+	/// ⚠️ The dispatcher refuses such an id on arrival, so composing one
+	/// could only ever produce a pack the next server rejects. It fails here
+	/// instead, where the caller still knows what it meant.
+	NoneTakesNoValue(u64),
+}
 
 impl IdType {
 	/// Every type, so a test can hold the whole table at once.
@@ -104,13 +113,21 @@ impl IdType {
 	/// Builds the wire `id` for a value of this type.
 	///
 	/// Args:
-	///     value: example: 123 (a `g_seq`)
+	///     value: example: 123 (a `g_seq`); under `None`, 0 is the only one
 	/// Return:
-	///     Result<u64, IdValueTooLarge>  the composed id; Err when the value
-	///     needs more than 56 bits.
-	pub const fn compose(self, value: u64) -> Result<u64, IdValueTooLarge> {
+	///     Result<u64, IdValueRefused>  the composed id;
+	///     `TooLargeForSevenBytes` when the value needs more than 56 bits;
+	///     `NoneTakesNoValue` when the type is `None` and the value is not 0.
+	pub const fn compose(self, value: u64) -> Result<u64, IdValueRefused> {
 		if value > ID_VALUE_MAX {
-			return Err(IdValueTooLarge(value));
+			return Err(IdValueRefused::TooLargeForSevenBytes(value));
+		}
+		// ⚠️ `None` does not mean "no type byte", it means the whole id is 0
+		// — which is what the dispatcher enforces on arrival. Composing a
+		// value under it would hand back an id every server refuses, so this
+		// refuses at the only point that still knows what was meant.
+		if matches!(self, Self::None) && value != 0 {
+			return Err(IdValueRefused::NoneTakesNoValue(value));
 		}
 		Ok(((self.byte() as u64) << ID_VALUE_BITS) | value)
 	}
@@ -127,7 +144,7 @@ pub const fn id_value(id: u64) -> u64 { id & ID_VALUE_MAX }
 
 #[cfg(test)]
 mod tests {
-	use super::{ID_VALUE_MAX, IdType, IdValueTooLarge, id_value};
+	use super::{ID_VALUE_MAX, IdType, IdValueRefused, id_value};
 
 	#[test]
 	fn every_type_has_its_own_byte_and_its_own_name() {
@@ -146,7 +163,10 @@ mod tests {
 
 	#[test]
 	fn a_composed_id_reads_back_as_what_went_in() {
-		for kind in IdType::ALL {
+		// ⚠️ `None` is not in this loop on purpose: it is the one type that
+		// carries no value, so "reads back as what went in" is not a property
+		// it has. `none_is_a_plain_zero_and_takes_nothing_else` is its test.
+		for kind in IdType::ALL.into_iter().filter(|kind| *kind != IdType::None) {
 			let id = kind.compose(123).expect("123 fits");
 			assert_eq!(IdType::of(id), Some(kind));
 			assert_eq!(id_value(id), 123);
@@ -154,11 +174,22 @@ mod tests {
 	}
 
 	#[test]
-	fn none_composed_with_nothing_is_a_plain_zero() {
-		// The one id every pack without a conversation sends, and the one
-		// the error path reads out of a frame that did not decode.
+	fn none_is_a_plain_zero_and_takes_nothing_else() {
+		// Zero is the one id every pack without a conversation sends, and the
+		// one the error path reads out of a frame that did not decode.
 		assert_eq!(IdType::None.compose(0), Ok(0));
 		assert_eq!(IdType::of(0), Some(IdType::None));
+
+		// 🚨 A value under `None` is the id the dispatcher refuses on
+		// arrival, so this constructor must not be able to build one: an id
+		// no server accepts is worse coming out of the type table than out of
+		// a client, because the table is what everything else trusts
+		// (PR #47 review, cirno).
+		assert_eq!(IdType::None.compose(1), Err(IdValueRefused::NoneTakesNoValue(1)));
+		assert_eq!(
+			IdType::None.compose(ID_VALUE_MAX),
+			Err(IdValueRefused::NoneTakesNoValue(ID_VALUE_MAX))
+		);
 	}
 
 	#[test]
@@ -168,7 +199,7 @@ mod tests {
 		assert_eq!(IdType::Upload.compose(ID_VALUE_MAX), Ok(0x03FF_FFFF_FFFF_FFFF));
 		assert_eq!(
 			IdType::Upload.compose(ID_VALUE_MAX + 1),
-			Err(IdValueTooLarge(ID_VALUE_MAX + 1))
+			Err(IdValueRefused::TooLargeForSevenBytes(ID_VALUE_MAX + 1))
 		);
 	}
 
