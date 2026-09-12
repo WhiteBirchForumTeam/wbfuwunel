@@ -22,6 +22,7 @@ mod redact_event;
 mod reject_invites;
 mod reset_password;
 mod set_profile_key;
+mod to_device_queue;
 mod unerase;
 
 use clap::{ArgGroup, Subcommand, ValueEnum};
@@ -157,6 +158,14 @@ pub(super) enum UserCommand {
 	/// - Lists all the rooms (local and remote) that the specified user is
 	///   joined in
 	ListJoinedRooms {
+		user_id: String,
+	},
+
+	/// - How much to-device each of a user's devices is holding.
+	///
+	/// A to-device item is kept until its device destroys it, so a device
+	/// that never comes back keeps its queue forever; this is how that shows.
+	ToDeviceQueue {
 		user_id: String,
 	},
 

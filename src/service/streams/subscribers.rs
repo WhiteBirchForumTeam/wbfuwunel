@@ -66,12 +66,56 @@ pub(super) struct Target {
 	pub(super) gap: bool,
 }
 
+/// How many connections one topic of this stream may hold.
+///
+/// ⚠️ This is declared when the stream is built, not checked at the call
+/// site: "look, then enter" is two lock acquisitions, and two connections
+/// arriving together both find the topic free and both enter it — the exact
+/// split-lock shape the join hook was fixed for in PR #42. Here the rule is a
+/// property of the registry, so it holds under the same write lock as the
+/// entry itself.
+pub(super) enum Occupancy {
+	/// Any number, each a separate listener: a room is listened to by as
+	/// many of a user's connections as they have open.
+	Many,
+	/// One, and **the later one wins**: it takes the topic over and whoever
+	/// held it is displaced. Who that was comes back from `subscribe` so the
+	/// policy can tell them — a subscription that ends in silence is one the
+	/// client keeps waiting on.
+	OneTheLatest,
+}
+
+/// A connection that lost an `OneTheLatest` topic to a later one, with what
+/// it takes to end that conversation properly: its own `id`, the next `seq`
+/// in it, and where to send.
+pub(super) struct Displaced {
+	pub(super) connection: ConnectionId,
+	pub(super) queue: Sender<Outgoing>,
+	pub(super) id: u64,
+	pub(super) seq: u32,
+}
+
+/// What a `subscribe` did: which topics this connection is newly in, and who
+/// it pushed out to get there.
+pub(super) struct Entered<Topic> {
+	/// The topics it was **not** already in. ⚠️ Which of them are worth
+	/// reporting to the client is the kind's business, not this module's:
+	/// the room channels enter a topic that is not a room (the one that
+	/// follows joins), and counting entries instead of naming them made a
+	/// new room read as none at all (PR #42 review).
+	pub(super) topics: Vec<Topic>,
+	/// Empty for an `Occupancy::Many` stream, and for the ordinary case of
+	/// nobody else holding it.
+	pub(super) displaced: Vec<Displaced>,
+}
+
 /// The subscribers of one stream, indexed by topic.
 ///
 /// `Topic` is whatever that stream subscribes by — a room for the event
 /// channels, a device for the to-device queue.
 pub(super) struct Subscribers<Topic> {
 	registry: RwLock<Registry<Topic>>,
+	occupancy: Occupancy,
 }
 
 struct Registry<Topic> {
@@ -86,13 +130,14 @@ impl<Topic> Subscribers<Topic>
 where
 	Topic: Clone + Eq + Hash,
 {
-	pub(super) fn new() -> Self {
+	pub(super) fn new(occupancy: Occupancy) -> Self {
 		Self {
 			registry: RwLock::new(Registry {
 				topics: HashMap::new(),
 				subscribers: HashMap::new(),
 				by_user: HashMap::new(),
 			}),
+			occupancy,
 		}
 	}
 
@@ -107,12 +152,10 @@ where
 	///     id: the client's `Subscribe` id, example: 42
 	///     topics: what to enter, example: every joined room
 	/// Return:
-	///     Vec<Topic>  the topics this connection was **not** already in.
-	///     ⚠️ Which of them are worth reporting is the kind's
-	///     business, not this module's: the room channels enter a topic that
-	///     is not a room (the one that follows joins), and counting entries
-	///     instead of naming them made a new room read as none at all
-	///     (PR #42 review).
+	///     Entered<Topic>  the topics this connection was not already in,
+	///     and — on an `OneTheLatest` stream — whoever it displaced to get
+	///     them. The caller owes every displaced connection a `Superseded`
+	///     (1505); nothing else tells it that it has stopped receiving.
 	pub(super) fn subscribe(
 		&self,
 		connection: ConnectionId,
@@ -120,7 +163,7 @@ where
 		queue: Sender<Outgoing>,
 		id: u64,
 		topics: &[Topic],
-	) -> Vec<Topic> {
+	) -> Entered<Topic> {
 		let mut registry = self.registry.write().expect("stream lock poisoned");
 
 		// A connection subscribing as somebody else (a `Login` that kept the
@@ -162,7 +205,11 @@ where
 			.insert(connection);
 
 		let mut entered = Vec::new();
+		let mut displaced = Vec::new();
 		for topic in topics {
+			if matches!(self.occupancy, Occupancy::OneTheLatest) {
+				displaced.extend(registry.take_topic_over(connection, topic));
+			}
 			if registry
 				.topics
 				.entry(topic.clone())
@@ -173,7 +220,7 @@ where
 			}
 		}
 
-		entered
+		Entered { topics: entered, displaced }
 	}
 
 	/// Takes `connection` out of `topics`; ones it is not in are no-ops. The
@@ -408,6 +455,46 @@ where
 		if listeners.is_empty() {
 			self.topics.remove(topic);
 		}
+	}
+
+	/// Empties `topic` of everyone but `newcomer`, and says who was turned
+	/// out — the `OneTheLatest` rule, applied where the entry happens so
+	/// there is no moment when two connections hold the same topic.
+	///
+	/// A displaced connection keeps its `Subscriber` entry and its other
+	/// topics: it lost this subscription, not its connection. Its `seq` is
+	/// taken here, so the pack that tells it so continues its own
+	/// conversation instead of restarting one.
+	///
+	/// Args:
+	///     newcomer: the connection taking the topic over, example: 7
+	///     topic: the one being taken over
+	/// Return:
+	///     Vec<Displaced>  empty when the topic was free, or held only by
+	///     `newcomer` already (a re-`Subscribe` does not displace itself).
+	fn take_topic_over(&mut self, newcomer: ConnectionId, topic: &Topic) -> Vec<Displaced> {
+		let Some(holders) = self.topics.get(topic) else {
+			return Vec::new();
+		};
+		let losers: Vec<ConnectionId> = holders
+			.iter()
+			.copied()
+			.filter(|holder| *holder != newcomer)
+			.collect();
+
+		let mut displaced = Vec::with_capacity(losers.len());
+		for loser in losers {
+			if let Some(subscriber) = self.subscribers.get(&loser) {
+				displaced.push(Displaced {
+					connection: loser,
+					queue: subscriber.queue.clone(),
+					id: subscriber.id,
+					seq: subscriber.seq.fetch_add(1, Ordering::Relaxed),
+				});
+			}
+			self.leave_topic(loser, topic);
+		}
+		displaced
 	}
 
 	fn remove_connection(&mut self, connection: ConnectionId) {

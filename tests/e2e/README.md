@@ -11,6 +11,7 @@
 | `e2e9.ps1` | 附件宣告（header 與 `Event/Send`）、四種拒送、共用附件、明文 fallback、bot 一次性警告、redact 保留備份後 purge、掃描不碰新上傳 | [media-attachments.md](../../docs/design/media-attachments.md) |
 | `e2e10.ps1` | 媒體持有者集合：刪房／redact 保留備份／備份到期／頭像／purge 範圍／重複操作、`WBFUWUNEL_MEDIA_GRACE_SECONDS` 下的掃描；情境 4（要 `E2E_OLD_EXE`）：既存媒體被生成縮圖後仍不受管、不被掃 | [media-holders.md](../../docs/design/media-holders.md)、[review-followups-2026-09-06.md](../../docs/design/review-followups-2026-09-06.md) §2.1 |
 | `e2e11.ps1` | WS 訂閱與推送（channel）：帳號層 `Subscribe` 只推給訂閱那條、自己送的也推、`cg_seq` 先補再推、新加入的房自動跟（點名訂閱不跟）、離房／被踢停推、ignore 不推、`Unsubscribe` 冪等、HTTP 回 `Unsupported`；情境 2：訂閱者停讀時 40 則送訊息不被擋、恢復後有 `gap: true`、`Recent` 補齊 | [wbf-event-push.md](../../docs/design/wbf-event-push.md) |
+| `e2e12.ps1` | **to-device 走通道（`0x16 Device`）**：`device_id` 對不上回 `Forbidden`、第二條連線回 `Conflict` 且 holder 不變、推送帶每則的 count 與訂閱的 `id`、`Fetch` 舊→新且 `r=0`、`ItemsDestroy` → `Ack`（收到）→ `ItemsDestroyed`（結果）、已經不在的仍算銷毀、`tc` 與 data 不符就一個都不刪、非 holder 銷毀回 `Forbidden`、HTTP 回 `Unsupported` | [wbf-to-device.md](../../docs/design/wbf-to-device.md) |
 | `wbf-helpers.ps1` | 共用：pack 編解碼（CRC-32C）、HTTP／WS 傳輸、起停 server、寫設定檔。不是測試 | [wbf-wire-format.md](../../docs/design/wbf-wire-format.md) |
 | `build-win.ps1` | 建 e2e profile 的 binary（MSVC 環境、Windows 的 feature 組） | [windows-build.md](../../docs/design/windows-build.md) |
 
@@ -43,6 +44,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\e2e\e2e10.ps1
 - ⚠️ 等 server 回應的接收要有時限（e2e8 的 `Ws-Recv-Bounded`；e2e7 的 `Recv-Frame`）：`ReceiveAsync().Result` 沒時限，server 不回就整支腳本卡住、沒有任何輸出。
 - ⚠️ **超時的 `ReceiveAsync` 不能丟掉**：.NET 的 `ClientWebSocket` 讓它繼續掛著，下一個 frame 會被它吃掉，之後的接收就永遠等不到（e2e11 第一版就這樣卡死）。
   e2e11 的 `Recv-Or-Null` 把還沒完成的 task 按 socket 記著、下次先等它。推送類的腳本（有 server 主動送的 frame）一定會撞到這條。
+- 🚨 **「跑不完」多半是跑完了，只是行程不退出**（2026-09-11 整晚都在這條上）。兩個原因，都修掉了：
+  (1) **server 沒被收乾淨** —— 一台活著的 server 會佔住 port 與 DB，而且它繼承的 handle 讓呼叫端的重導向不 EOF，
+  於是一個**已經寫完 RESULT 的 run** 看起來完全像 hang（實測：e2e11 寫完最後一行之後 server 還活了 11 分鐘）。
+  `Stop-Server` 現在會**掃到沒有任何 `tuwunel` 為止**，不是發一次 kill 就算。
+  (2) 腳本結尾補 `exit`，順便**讓 FAIL 反映在 exit code 上**（以前一律 0，只有文字看得出來）。
+  📎 修完之後 e2e11 是 **56 秒**、e2e12 18 秒、e2e9 46 秒、e2e8 47 秒 —— 之前每一輪都以為要等好幾分鐘。
 - 🚨 **build 之前也要先殺乾淨**：還在跑的 `tuwunel.exe` 鎖著 `target/e2e/tuwunel.exe`，linker 覆蓋不了就
   `存取被拒。(os error 5)`。⚠️ 更糟的是**接著跑的 e2e 會用舊的 binary**，看起來一切正常 —— 2026-09-10 的紅燈驗證就這樣白做了一輪。
   順序寫死：**殺乾淨 → build → 跑**。

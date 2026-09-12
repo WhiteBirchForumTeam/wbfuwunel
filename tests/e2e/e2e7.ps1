@@ -516,3 +516,7 @@ Log "[5.6] after Logout ($($ackF.kind) then $($closeF.kind)) on one PHONE connec
 Stop-Server $p
 
 Log ''; Log 'DONE'
+
+# Leave on purpose: a pending ReceiveAsync or an undisposed socket can keep this process alive
+# long after DONE is written, which makes a finished run look like a hang.
+exit 0

@@ -74,6 +74,7 @@ pub fn check(config: &Config) -> Result {
 	);
 
 	check_observability(config)?;
+	check_wbf_device_window(config)?;
 	check_network(config)?;
 	check_storage(config)?;
 	check_registration(config)?;
@@ -96,6 +97,43 @@ fn check_observability(config: &Config) -> Result {
 		return Err!(Config(
 			"sentry_endpoint",
 			"Sentry cannot be enabled without an endpoint set"
+		));
+	}
+
+	Ok(())
+}
+
+/// The to-device window must fit in the send queue, which
+/// `docs/design/wbf-to-device.md` §7 promised to assert at startup and did
+/// not: the three numbers have two degrees of freedom, so the pack count is
+/// derived rather than configured, and a configuration where it does not fit
+/// is a configuration error rather than something to discover at runtime
+/// (PR #43 review, rumia and salvia).
+///
+/// What goes wrong without it is not dropped packs — `Fetch` replies are
+/// awaited, not `try_send`'d — but a handler that parks mid-window waiting
+/// for a client to read, holding its slot while it does.
+fn check_wbf_device_window(config: &Config) -> Result {
+	if config.wbf_device_default_batch == 0 {
+		return Err!(Config(
+			"wbf_device_default_batch",
+			"a Device/Batch of zero items would never finish a window"
+		));
+	}
+
+	let packs_per_window = config
+		.wbf_device_fetch_max_limit
+		.div_ceil(config.wbf_device_default_batch);
+	if packs_per_window > config.wbf_ws_send_queue_len {
+		return Err!(Config(
+			"wbf_device_fetch_max_limit",
+			"a to-device window of {} items in packs of {} is {} packs, more than the {} the \
+			 send queue holds: lower wbf_device_fetch_max_limit, raise wbf_device_default_batch, \
+			 or raise wbf_ws_send_queue_len",
+			config.wbf_device_fetch_max_limit,
+			config.wbf_device_default_batch,
+			packs_per_window,
+			config.wbf_ws_send_queue_len,
 		));
 	}
 

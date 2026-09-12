@@ -88,9 +88,12 @@ registry（純記憶體，`Services.streams`）                          ← 所
 **跟其他人同一張索引**，而不是第二張會跟它不一致的表。
 ⚠️ 兩個 hook 都是**單一交易**（查與改在同一把 write lock 內）：拆成兩次取鎖時，中間關掉的連線會被放進一個
 沒有訂閱者在後面的 topic，而那筆**沒有任何東西會來清**（審查者 cirno，PR #42）。
-📎 房間的 topic 裝**多少條連線都行**（同一個人開幾條就訂幾條，集合去重）。
-🔲 之後的 to-device 佇列相反 —— 一個裝置同時只有一條連線在收 —— 那個「一個 topic 一條連線」的規則
-會跟它的使用者一起進來（`0x16 Device`），而且是**建構串流時宣告、由註冊表強制**，不是在呼叫點用 `if` 擋。
+📎 房間的 topic 裝**多少條連線都行**（同一個人開幾條就訂幾條，集合去重）—— 這是建構這個串流時宣告的
+`Occupancy::Many`。
+✅ to-device 佇列相反，宣告的是 `Occupancy::OneTheLatest`：一個裝置同時只有一條連線在收，而且**後來的接手**，
+被接手的那條收到 `Superseded`(1505)（[wbf-to-device.md](wbf-to-device.md) §4）。
+⭐ 兩邊的規則都**寫在建構的地方、由註冊表在同一把寫鎖內強制**，不是在呼叫點用 `if` 擋 ——
+呼叫點擋不住兩條同時進來的連線。
 
 - **`Subscribe`**：點名的房逐一 `is_joined`，是成員才進 channel，不是的列進 Ack 的 `skipped`；沒點名 = 帳號層：掃 `userroomid_joined` 的前綴 `(user, *)`（`Recent` 每次掃的同一張表，
   幾十到幾百個房，一次前綴讀），每個房進 `Room(room)`，另外進 `FollowsJoins(user)` —— 後者只做一件事：之後這個帳號 join 新房時，join hook 把它加進新房的 channel。

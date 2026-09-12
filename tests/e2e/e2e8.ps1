@@ -335,3 +335,9 @@ $wsE.Dispose()
 Stop-Server $p
 
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"
+
+# A pending ReceiveAsync or an undisposed socket can keep this process alive long after the
+# last line is written — every batch run this session looked like a hang for that reason, with
+# the results already on disk. Leave on purpose, and say in the exit code whether it passed:
+# a FAIL used to be invisible to anything that only looked at the exit status.
+exit $(if ($script:Fail -gt 0) { 1 } else { 0 })

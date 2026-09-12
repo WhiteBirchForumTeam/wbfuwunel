@@ -23,6 +23,8 @@ use tuwunel_core::{
 };
 use tuwunel_database::{Cbor, Deserialized, Ignore, Interfix, Json, Map, Txn};
 
+use crate::streams::PushedItem;
+
 /// generated device ID length
 const DEVICE_ID_LENGTH: usize = 10;
 
@@ -570,14 +572,20 @@ pub fn add_to_device_event(
 	let count = self.services.globals.next_count();
 
 	let key = (target_user_id, target_device_id, *count);
-	self.db.todeviceid_events.put(
-		key,
-		Json(json!({
-			"type": event_type,
-			"sender": sender,
-			"content": content,
-		})),
-	);
+	let item = json!({
+		"type": event_type,
+		"sender": sender,
+		"content": content,
+	});
+	self.db
+		.todeviceid_events
+		.put(key, Json(&item));
+
+	// The one write point, so the one place a subscribed device hears about
+	// it (`docs/design/wbf-to-device.md` §4). Pushing never blocks this: a
+	// device that is not connected costs a lookup, and a full queue drops
+	// the push and leaves `gap` for the client to fill in with `Fetch`.
+	self.push_to_device_stream(target_user_id, target_device_id, *count, &item);
 
 	trace!(
 		%target_user_id,
@@ -611,6 +619,75 @@ pub fn get_to_device_events<'a>(
 			user_id == *user_id_ && device_id == *device_id_ && to.is_none_or(|to| *count <= to)
 		})
 		.map(|((_, _, count), event)| (count, event))
+}
+
+/// Hands one just-stored item to the device's wbf subscriber, if it has one.
+///
+/// Args:
+///     count: the item's position, which the client destroys it by
+///     item: the stored form — the same bytes `Fetch` would return, so the
+///         two paths can never disagree about what an item is
+#[implement(super::Service)]
+fn push_to_device_stream(
+	&self,
+	target_user_id: &UserId,
+	target_device_id: &DeviceId,
+	count: u64,
+	item: &serde_json::Value,
+) {
+	if self
+		.services
+		.streams
+		.device_holder(target_user_id, target_device_id)
+		.is_none()
+	{
+		return;
+	}
+
+	let json = item.to_string();
+	self.services.streams.push_to_device(
+		target_user_id,
+		target_device_id,
+		&[PushedItem { count, json: json.as_bytes() }],
+		self.services.config.wbf_push_max_events_per_pack,
+		self.services.config.wbf_data_max_bytes,
+	);
+}
+
+/// Removes exactly the named to-device items, and reports which of them are
+/// gone (`docs/design/wbf-to-device.md` §5).
+///
+/// This is what `Device/ItemsDestroy` runs. Unlike `remove_to_device_events`
+/// it is not a prefix: the client names each item, because what it has
+/// durably stored is not always a prefix of what it was sent.
+///
+/// ⭐ **Gone is read back, not assumed.** A delete here returns nothing to
+/// check — this engine treats a failed write as fatal — so the honest test of
+/// "is it gone" is to look. What is reported destroyed is what is no longer
+/// there; anything else stays on the client's list and comes back next time.
+/// 📎 An item that was already gone counts as destroyed: the client asked for
+/// a state ("the server no longer has this"), not for an event.
+///
+/// Args:
+///     user_id: whose queue
+///     device_id: which device's queue, from the session
+///     counts: the items to destroy, example: `[500, 501]`
+/// Return:
+///     Vec<u64>  the counts confirmed gone, in the order they were given.
+#[implement(super::Service)]
+pub async fn destroy_to_device_items(&self, user_id: &UserId, device_id: &DeviceId, counts: &[u64]) -> Vec<u64> {
+	type Key<'a> = (&'a UserId, &'a DeviceId, u64);
+
+	let mut destroyed = Vec::with_capacity(counts.len());
+	for count in counts {
+		let key: Key<'_> = (user_id, device_id, *count);
+		self.db.todeviceid_events.del(&key);
+		if !self.db.todeviceid_events.contains(&key).await {
+			destroyed.push(*count);
+		}
+	}
+
+	destroyed
 }
 
 #[implement(super::Service)]

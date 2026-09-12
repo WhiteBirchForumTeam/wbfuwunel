@@ -115,7 +115,36 @@ function Start-Server([string]$cfg, [string]$tag) {
   Log "  !! server probe failed 40 times ($tag): last Invoke-WebRequest error: $lastError; $freshResult; process exited=$($p.HasExited)"
   throw "server did not come up ($tag)"
 }
-function Stop-Server($p) { Start-Sleep -Seconds 3; if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }; Start-Sleep -Seconds 2 }
+# Stops the server and does not return until no server is left.
+#
+# ⚠️ 2026-09-11 a run wrote its last line and left its server alive for eleven minutes, and a
+# live server wedges everything after it — it holds the port and the database, and its
+# inherited handles keep the caller's redirect open, so a run that finished looks exactly like
+# a hang. The cause was found on 2026-09-12: e2e11 reused `$p` at script scope for a received
+# pack, so this function was handed a pack instead of the process. A pack has no `HasExited`
+# (so it read as still running) and its `.Id` was 0 — the kill went to the Idle process and
+# the server was never touched. The caller was fixed; the two guards below stay, because the
+# argument is the one thing this function cannot verify for the next caller.
+#
+# So: only ever kill something that really is a live process we were handed, and then sweep by
+# name until nothing is left. One script runs at a time here (README), so a tuwunel that is
+# still up after its own script asked it to stop is that script's, whoever holds the handle.
+function Stop-Server($serverProcess) {
+	Start-Sleep -Seconds 3
+	$isRealProcess = $serverProcess -is [System.Diagnostics.Process] -and $serverProcess.Id -gt 0
+	if ($isRealProcess -and -not $serverProcess.HasExited) {
+		Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
+	} elseif ($serverProcess -and -not $isRealProcess) {
+		Log "  !! Stop-Server was handed a $($serverProcess.GetType().Name), not a process — sweeping by name instead"
+	}
+	for ($i = 0; $i -lt 20; $i++) {
+		$alive = @(Get-Process -Name tuwunel -ErrorAction SilentlyContinue)
+		if ($alive.Count -eq 0) { break }
+		$alive | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+		Start-Sleep -Milliseconds 500
+	}
+	Start-Sleep -Seconds 1
+}
 function Exec([string]$cfg, [string[]]$cmds, [string]$tag) {
   $cmds = $cmds + @('server shutdown'); $extra = @(); foreach ($c in $cmds) { $extra += @('--execute', ('"' + $c + '"')) }
   $p = Start-Process -FilePath $EXE -ArgumentList (@('-c', $cfg) + $extra) -PassThru -NoNewWindow -RedirectStandardOutput "$OUT\$tag.out" -RedirectStandardError "$OUT\$tag.err"
