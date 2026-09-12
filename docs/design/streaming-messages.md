@@ -206,15 +206,29 @@ server 讀 123 → 驗 D 是房間成員 → 跟其他片一樣**廣播給全房
 
 ## 8. 驗收（e2e11，接在 channel 的情境後面）
 
+⚠️ **這一節是線上契約的一部分**：照它實作的 client 送出來的東西必須是 server 收的。所以每個例子裡的
+`seq`／`prev`／錯誤碼都跟 §3.0／§4 同一套 —— 一份規格自己前後不一致，比少寫一段更糟（審查者 cirno）。
+
 - alice、bob 訂閱；alice `Draft` → Ack 有 `event_id`、`g_seq`；bob 收到 `Push`，事件 type 是 `org.wbftw.wbfuwunel.draft`；alice 自己也 `Push` 到。
-- alice `Append`（`seq` 0）、`Delta`（1）、`Keypoint`（2）→ bob 依序收到三個，pack 原樣（meta 是 room id、data 一個 byte 不差）；alice 發送那條連線**也**收到自己的（全域廣播）。
-- `Keypoint` data 10241 bytes → `TooLarge`；10240 → 過。meta 不是合法 room id → `Conflict`。
+- alice `Append`（`seq=1`、`prev=0`，從空字串起）、`Delta`（`seq=2`、`prev=1`）、`Keypoint`（`seq=3`、`prev=0`）
+  → bob 依序收到三個，meta 是 room id、data 一個 byte 不差（含開頭那 4 byte 的 `prev`）；alice 發送那條連線**也**收到自己的（全域廣播）。
+- 鏈的三條檢查：`data` 不足 4 byte、片的 `seq=0`、`Keypoint` 的 `prev≠0` → 各回 `InvalidRequest`。
+- `Keypoint` 的 data 10241 bytes → `TooLarge`；10240（含 4 byte `prev`）→ 過。meta 不是合法 room id → **`InvalidRequest`**。
+  任何 `Stream` pack 帶了 flags → `InvalidRequest`。
 - carol 沒訂閱 → 什麼都收不到；carol 訂閱後送 `Demand(id)` → alice、bob、carol 自己都收到（全域廣播）；alice 回 `Keypoint` → 三人都收到。
-- 片計數：alice 送 `seq` 5、6、8 → bob 在 8 看到跳號（e2e 只驗它原樣到達；跳號→Demand 是 client 的事）。
-- 房間 11 人（`wbf_draft_max_room_members` 預設 10）→ `Draft` 回 `Conflict`；設成 0 → 不限。
-- bob（非作者）送 `Append(id)` → `Forbidden`；不存在的 `id` → `NotFound`；HTTP → `Unsupported`；連送 100 片 → 一部分 `RateLimited`。
+- 片計數：alice 送 `seq` 5、6、8（`prev` 各指 4、5、7）→ bob 在 8 看到跳號（e2e 只驗它原樣到達；跳號→Demand 是 client 的事）。
+- 房間人數超過 `wbf_draft_max_room_members` → `Draft` 回 `Conflict`；設成 0 → 不限。
+- bob（非作者）送 `Append(id)` → `Forbidden`；不存在的 `id` → `NotFound`；不是草稿的事件 → `Conflict`；HTTP → `Unsupported`；連送 100 片 → 一部分 `RateLimited`。
+- **權限與可見性**（外部審查 2026-09-12 那七條，§4.1／§4.2）：
+  非成員對「開著的草稿」與「不存在的 `g_seq`」拿到**一模一樣**的 `Forbidden`；
+  一般 `Event/Send` 送錨的 type → 拒絕；
+  ignore 作者的人收不到他的片，其他人照收；
+  作者被降權之後、被停權之後的片都 `Forbidden`，但 `Abandon` 仍成功；
+  `Demand` 帶 data → 轉發時被剝掉，> 1 KiB → `InvalidRequest` 並關線；
+  重啟 server 之後同一個請求 `seq` 的 `Draft` 要寫出**新**錨，不是拿回上一輪那個。
 - 收尾（client 流程）：alice `Abandon` → Ack、bob 收到 redaction 的 `Push`、`Recent` 裡佔位已 redact；之後對 id 送 `Append` → `Conflict`；alice 再送一則普通 `Event/Send` → 普通的 `Push`，`unsigned` 裡沒有任何草稿欄位。
 - bob 停止讀 socket、alice 送 50 片 → alice 一片都沒被擋、bob 恢復後收到的是後面的片。
+  📎 這條**沒有單獨的 e2e**：草稿走的是跟房間推送同一個 `try_send`／掉了就掉的路徑，情境 2 已經釘住它（維護者 2026-09-12 同意草稿允許掉包）。
 - 關機中連線收到 Close 1001。
 
 ## 9. 維護者 2026-09-08 定的（原開放問題）
