@@ -491,8 +491,11 @@ const fn admission(kind: Kind, subtype: u8) -> Option<Admission> {
 /// which is exactly why the check belongs here — the day that changes, this
 /// says so instead of handing out a wrong id.
 fn compose_upload_id(value: u64) -> Result<u64, Reject> {
-	IdType::Upload.compose(value).map_err(|_| {
-		Reject::code(RejectCode::Internal, "this upload's id does not fit the wire format")
+	IdType::Upload.compose(value).map_err(|refused| {
+		Reject::code(
+			RejectCode::Internal,
+			format!("this upload's id does not fit the wire format: {refused}"),
+		)
 	})
 }
 

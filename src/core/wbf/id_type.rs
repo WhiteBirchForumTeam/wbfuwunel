@@ -12,6 +12,8 @@
 //! Adding a type is two edits in this order, the same rule the error
 //! vocabulary has: the row in §2.2 first, then the variant here.
 
+use std::fmt;
+
 /// The first byte of the header's `id`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IdType {
@@ -56,6 +58,19 @@ pub enum IdValueRefused {
 	/// instead, where the caller still knows what it meant.
 	NoneTakesNoValue(u64),
 }
+
+impl fmt::Display for IdValueRefused {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			| Self::TooLargeForSevenBytes(value) =>
+				write!(f, "an id carries {ID_VALUE_BITS} bits of value, and {value} needs more"),
+			| Self::NoneTakesNoValue(value) =>
+				write!(f, "a pack with no conversation has a zero id, so {value} cannot be one"),
+		}
+	}
+}
+
+impl std::error::Error for IdValueRefused {}
 
 impl IdType {
 	/// Every type, so a test can hold the whole table at once.
@@ -200,6 +215,20 @@ mod tests {
 		assert_eq!(
 			IdType::Upload.compose(ID_VALUE_MAX + 1),
 			Err(IdValueRefused::TooLargeForSevenBytes(ID_VALUE_MAX + 1))
+		);
+	}
+
+	#[test]
+	fn a_refused_value_says_which_rule_it_broke() {
+		// ⚠️ Both reasons reach a `RejectCode::Internal` message the operator
+		// reads in a log, so the two must not read the same (審查者 ariel).
+		assert_eq!(
+			IdType::Upload.compose(ID_VALUE_MAX + 1).unwrap_err().to_string(),
+			"an id carries 56 bits of value, and 72057594037927936 needs more"
+		);
+		assert_eq!(
+			IdType::None.compose(9).unwrap_err().to_string(),
+			"a pack with no conversation has a zero id, so 9 cannot be one"
 		);
 	}
 

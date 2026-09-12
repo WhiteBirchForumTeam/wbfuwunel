@@ -546,12 +546,23 @@ async fn refuse_room_too_large(services: &Services, room_id: &RoomId) -> Result<
 /// a shortened one would name another event in the same room. A server would
 /// have to have written 72 quadrillion events to see it.
 fn compose_anchor_id(g_seq: i64) -> Result<u64, Reject> {
-	u64::try_from(g_seq)
-		.ok()
-		.and_then(|position| IdType::EventPosition.compose(position).ok())
-		.ok_or_else(|| {
-			Reject::code(RejectCode::Internal, "this room's positions no longer fit a draft id")
-		})
+	// The two ways it can fail say different things about the room, so they
+	// do not share one message: a negative position means the anchor is a
+	// backfilled event (it cannot be — this server just wrote it), and a
+	// refused value means the room has outgrown the field.
+	let position = u64::try_from(g_seq).map_err(|_| {
+		Reject::code(
+			RejectCode::Internal,
+			format!("a draft's anchor is at {g_seq}, which is before this room's own history"),
+		)
+	})?;
+
+	IdType::EventPosition.compose(position).map_err(|refused| {
+		Reject::code(
+			RejectCode::Internal,
+			format!("this room's positions no longer fit a draft id: {refused}"),
+		)
+	})
 }
 
 /// The draft id of the anchor just written: its `g_seq`, which is the count
