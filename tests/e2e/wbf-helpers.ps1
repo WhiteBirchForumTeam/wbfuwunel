@@ -11,6 +11,16 @@ $B   = 'http://127.0.0.1:8015'
 $RESULT = "$OUT\results.txt"
 New-Item -ItemType Directory -Force $OUT | Out-Null
 '' | Out-File $RESULT -Encoding utf8
+
+# 🚨 `$B` is read-only because PowerShell variable names are case-insensitive: a script writing
+# `$b` for a moment's convenience — a received pack, a batch — silently replaces the base URL,
+# and the failure surfaces much later as "server did not come up", pointing at a host named
+# after a hashtable. That has cost three debugging sessions (2026-09-07, and twice today, in
+# this file and in e2e12). Read-only makes the assignment itself the error, and names it.
+#
+# ⚠️ Only `$B`: `$OUT`, `$RESULT` and `$EXE` are each script's own to set (its output directory,
+# and e2e10 swaps the binary on purpose), so those stay writable and `$b` is the one to avoid.
+Set-Variable -Name 'B' -Value $B -Option ReadOnly -Scope Script -Force
 function Log($m) { $m | Out-File $RESULT -Append -Encoding utf8; Write-Host $m }
 
 # ---------- CRC-32C (Castagnoli, reflected 0x82F63B78) ----------
@@ -69,13 +79,15 @@ Add-Type -AssemblyName System.Net.Http
 # (Hygiene, not a fix for anything observed: the 2026-09-07 "server did not come up" was a script clobbering $B,
 # see README.)
 [System.Net.ServicePointManager]::DefaultConnectionLimit = 64
-$script:Http = New-Object System.Net.Http.HttpClient
+# Not `$Http`: a test naming a variable after the thing it is testing (`$http = Send-Pack ...`)
+# replaced this client with a pack, and the next HTTP call in that run failed on a hashtable.
+$script:PackHttpClient = New-Object System.Net.Http.HttpClient
 function Send-Pack([byte[]]$pack, $tok) {
   $req = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::Post, "$B/_wbf/v1/pack")
   if ($tok) { $req.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $tok) }
   $req.Content = New-Object System.Net.Http.ByteArrayContent (,$pack)
   $req.Content.Headers.ContentType = New-Object System.Net.Http.Headers.MediaTypeHeaderValue('application/octet-stream')
-  $resp = $script:Http.SendAsync($req).Result
+  $resp = $script:PackHttpClient.SendAsync($req).Result
   $bytes = $resp.Content.ReadAsByteArrayAsync().Result
   $p = Read-Pack $bytes; $p.http = [int]$resp.StatusCode; $p
 }
@@ -91,7 +103,7 @@ function Get-Bytes($mxc, $tok) {
   $id = $mxc -replace '^mxc://localhost/', ''
   $req = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::Get, "$B/_matrix/client/v1/media/download/localhost/$id")
   $req.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $tok)
-  $resp = $script:Http.SendAsync($req).Result; @{ status = [int]$resp.StatusCode; bytes = $resp.Content.ReadAsByteArrayAsync().Result }
+  $resp = $script:PackHttpClient.SendAsync($req).Result; @{ status = [int]$resp.StatusCode; bytes = $resp.Content.ReadAsByteArrayAsync().Result }
 }
 
 function Write-Config([string]$db, [int]$uploadTtl, [long]$maxLen = 0, [long]$dataMax = 0) {

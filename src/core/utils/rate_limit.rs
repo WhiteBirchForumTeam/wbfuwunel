@@ -1,9 +1,17 @@
-//! Per-client-IP token buckets: one table, one question ("may this address
-//! do one more right now?"), shared by every throttle that keys on the peer
-//! address (OIDC endpoints, login over HTTP and over the wbf channel).
+//! Token buckets: one table, one question ("may this one do another right
+//! now?"), shared by every throttle in the server.
+//!
+//! The key is whatever the throttle counts by. Most count by peer address
+//! (OIDC endpoints, login over HTTP and over the wbf channel) and use
+//! `IpTokenBuckets`; draft pieces count by the device that writes them, so
+//! that one client cannot be slowed down by another on the same address.
+//! Only the key type differs — the refill arithmetic and the cap on the
+//! table are one implementation, because two copies of a throttle drift and
+//! the drift is invisible until someone is refused for the wrong reason.
 
 use std::{
 	collections::HashMap,
+	hash::Hash,
 	net::IpAddr,
 	sync::Mutex,
 	time::{Duration, Instant},
@@ -35,31 +43,41 @@ pub fn limit_exceeded(message: &'static str, retry_after: Duration) -> Error {
 /// a spray of source addresses cannot grow it without bound.
 const TABLE_CAP: usize = 1 << 16;
 
-/// Last refill instant and tokens left, per client address.
-pub struct IpTokenBuckets {
-	buckets: Mutex<HashMap<IpAddr, (Instant, f64)>>,
+/// Last refill instant and tokens left, per key.
+pub struct TokenBuckets<Key> {
+	buckets: Mutex<HashMap<Key, (Instant, f64)>>,
 }
 
-impl Default for IpTokenBuckets {
+/// The throttles that count by peer address.
+pub type IpTokenBuckets = TokenBuckets<IpAddr>;
+
+impl<Key> Default for TokenBuckets<Key>
+where
+	Key: Eq + Hash,
+{
 	fn default() -> Self { Self::new() }
 }
 
-impl IpTokenBuckets {
-	/// An empty table: every address starts with a full bucket.
+impl<Key> TokenBuckets<Key>
+where
+	Key: Eq + Hash,
+{
+	/// An empty table: every key starts with a full bucket.
 	#[must_use]
 	pub fn new() -> Self { Self { buckets: Mutex::new(HashMap::new()) } }
 
 	/// Takes one token from `client`'s bucket.
 	///
 	/// Args:
-	///     client: the peer address, example: 203.0.113.7
+	///     client: what this throttle counts by, example: 203.0.113.7, or
+	///         (@alice:localhost, PHONE)
 	///     rate_per_second: refill rate, example: 1.0
 	///     burst: bucket depth, example: 10.0
 	/// Return:
 	///     Result<(), Duration>  Ok when a token was taken, or when the
 	///     throttle is disabled (rate or burst not positive); Err with how long
 	///     until one token is back when the bucket is empty.
-	pub fn take(&self, client: IpAddr, rate_per_second: f64, burst: f64) -> Result<(), Duration> {
+	pub fn take(&self, client: Key, rate_per_second: f64, burst: f64) -> Result<(), Duration> {
 		if rate_per_second <= 0.0 || burst <= 0.0 {
 			return Ok(());
 		}

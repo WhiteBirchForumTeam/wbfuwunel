@@ -9,6 +9,7 @@ use tuwunel_database::Database;
 
 pub(crate) use crate::OnceServices;
 use crate::{
+	drafts::Drafts,
 	streams::Streams,
 	connections::Connections,
 	account_data, admin, appservice, client, config, deactivate, emergency, federation, fetcher,
@@ -81,6 +82,9 @@ pub struct Services {
 	pub connections: Connections,
 	/// Who listens to which room over a WebSocket, and the push to them.
 	pub streams: Arc<Streams>,
+	/// The throttles a draft's pieces pass through; the server keeps no
+	/// other draft state.
+	pub drafts: Arc<Drafts>,
 	pub server: Arc<Server>,
 	pub db: Arc<Database>,
 }
@@ -151,6 +155,7 @@ pub async fn build(server: Arc<Server>) -> Result<Arc<Self>> {
 		manager: Mutex::new(None),
 		connections: Connections::new(),
 		streams: Arc::new(Streams::new()),
+		drafts: Arc::new(Drafts::new()),
 		server,
 		db,
 	});

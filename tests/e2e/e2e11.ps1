@@ -6,7 +6,7 @@ $script:Pass = 0; $script:Fail = 0
 function Check([string]$name, [bool]$ok, [string]$detail) {
   if ($ok) { $script:Pass++; Log "  ok   $name  $detail" } else { $script:Fail++; Log "  FAIL $name  $detail" }
 }
-function Write-Config11([string]$db, [int]$queueLen = 32) {
+function Write-Config11([string]$db, [int]$queueLen = 32, [int]$draftMaxMembers = 0) {
   $cfg = "$S\e2e11.toml"
   # ⚠️ A to-device window must fit in the send queue (wbf-to-device.md 7, asserted at startup), so
   # shrinking the queue for the backpressure scenario shrinks the window with it: a queue of four
@@ -14,7 +14,8 @@ function Write-Config11([string]$db, [int]$queueLen = 32) {
   $deviceLimit = $queueLen * 100
   @('[global]','server_name = "localhost"',('database_path = "' + ($db.Replace([string][char]92, '/')) + '"'),'port = 8015','address = ["127.0.0.1"]',
     'allow_registration = true','yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse = true','allow_federation = false',
-    ('wbf_ws_send_queue_len = ' + $queueLen),('wbf_device_fetch_max_limit = ' + $deviceLimit),'wbf_ws_idle_timeout = 120','log = "info"') -join "`n" | Set-Content -Path $cfg -Encoding ascii
+    ('wbf_ws_send_queue_len = ' + $queueLen),('wbf_device_fetch_max_limit = ' + $deviceLimit),'wbf_ws_idle_timeout = 120','log = "info"') +
+    $(if ($draftMaxMembers -gt 0) { @(('wbf_draft_max_room_members = ' + $draftMaxMembers)) } else { @() }) -join "`n" | Set-Content -Path $cfg -Encoding ascii
   $cfg
 }
 function GSeqOf($ev) { if ($ev.unsigned -and ($ev.unsigned.PSObject.Properties.Name -contains $GSEQKEY)) { [int64]$ev.unsigned.$GSEQKEY } else { $null } }
@@ -84,6 +85,12 @@ function Unsubscribe($ws, [uint64]$id, $rooms) {
   Call $ws (Json-Pack 0x14 5 $id 1 $meta $null)
 }
 function Ids($packs) { @($packs | ForEach-Object { $_.events } | ForEach-Object { $_.event_id }) }
+# A Stream pack (0x02): the meta is the room id itself, as UTF-8 text rather than JSON, and the
+# header carries which draft (id) and the author's piece counter (seq).
+function Stream-Pack([byte]$subtype, [string]$room, [uint64]$draftId, [uint32]$seq, [byte[]]$data) {
+  New-Pack 0x02 $subtype 0 $draftId $seq ([Text.Encoding]::UTF8.GetBytes($room)) $data
+}
+function Draft-Pack([string]$room, [uint32]$seq) { Stream-Pack 0x01 $room 0 $seq $null }
 
 # ================= Scenario 1: subscribe, push, membership hooks, ignore =================
 Log '################ Scenario 1: channels and Push ################'
@@ -214,7 +221,10 @@ $sent += $mAfter
 # fill in with Recent from the watermark (the last event before the flood: the join); collect all windows
 $recentIds = @()
 Ws-Send $wsA (Json-Pack 0x14 1 99 0 @{ limit = 200; batch = 20 } $null)
-do { $b = Recv-Or-Null $wsA 5000; if ($null -eq $b) { break }; if ($b.kind -eq 0x14 -and $b.subtype -eq 3) { $recentIds += @(Push-Events ([byte[]]$b.data) | ForEach-Object { $_.event_id }) } } while ($b.meta.r -ne 0)
+# ⚠️ `$batch`, never `$b`: PowerShell variable names are case-insensitive, so `$b` is the helpers'
+# `$B` — the base URL — and overwriting it makes the next Start-Server probe an address named after
+# a hashtable. It stayed invisible while nothing after this line used $B (README, and e2e12 again).
+do { $batch = Recv-Or-Null $wsA 5000; if ($null -eq $batch) { break }; if ($batch.kind -eq 0x14 -and $batch.subtype -eq 3) { $recentIds += @(Push-Events ([byte[]]$batch.data) | ForEach-Object { $_.event_id }) } } while ($batch.meta.r -ne 0)
 $missing = @($sent | Where-Object { $recentIds -notcontains $_ }).Count
 Check '[2.3] Recent returns every flooded event (the truth is in the DB, the push only hinted)' ($missing -eq 0) "missing=$missing recent=$($recentIds.Count)"
 $wsA.Dispose()
@@ -252,6 +262,121 @@ for ($i = 0; $i -lt 8 -and $null -eq $closed -and $wsH.State -eq 'Open'; $i++) {
 if ($null -eq $closed) { $f = Recv-Or-Null $wsH 5000; if ($f -and $f.closed) { $closed = $f } }
 Check '[3.3] eight frames that do not decode -> Corrupt each, then the server closes the connection' ($null -ne $closed -and $errors -ge 7) "errors=$errors close=$($closed.code)"
 $wsH.Dispose()
+Stop-Server $server
+
+# ================= Scenario 4: drafts (streaming-messages.md, 0x02 Stream) =================
+Log '################ Scenario 4: drafts over the channel ################'
+$db4 = "$S\e2e11db-4"; Remove-Item -Recurse -Force $db4 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db4 | Out-Null
+# The member cap is set to 2 rather than filling a room with eleven accounts: the rule is
+# "more members than the cap refuses a Draft", and two sides of that are two sides of it.
+$cfg4 = Write-Config11 $db4 32 2
+$server = Start-Server $cfg4 's4'
+$regA = Register 'alice'; $tokA = $regA.access_token
+$regB = Register 'bob'; $tokB = $regB.access_token
+$regC = Register 'carol'; $tokC = $regC.access_token
+$room = Create-Room $tokA 'drafts'
+Invite $room $regB.user_id $tokA; Join $room $tokB
+
+$wsA = Ws-Open $tokA; $null = Call $wsA (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e11-a'; features = @() } $null)
+$wsB = Ws-Open $tokB; $null = Call $wsB (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e11-b'; features = @() } $null)
+$null = Subscribe $wsA 40 $null $null
+$null = Subscribe $wsB 41 $null $null
+
+# [4.1] Draft writes a real, pushed anchor event
+$draft = Call $wsA (Draft-Pack $room 1)
+$draftId = [uint64]$draft.meta.g_seq
+$anchorPushes = @(Drain-Pushes $wsB 1500)
+$anchorTypes = @($anchorPushes | ForEach-Object { $_.events } | ForEach-Object { $_.type })
+Check '[4.1a] Draft -> Ack with event_id and g_seq' ($draft.subtype -eq 2 -and $draft.meta.event_id -and $draftId -gt 0) (Describe $draft)
+Check '[4.1b] the anchor is a real event: bob is pushed it, type org.wbftw.wbfuwunel.draft' ($anchorTypes -contains 'org.wbftw.wbfuwunel.draft') "types=$($anchorTypes -join ',')"
+$null = Drain-Pushes $wsA 800
+
+# [4.2] the three piece subtypes reach the room unchanged — and the author's own connection too
+$appendData = [Text.Encoding]::UTF8.GetBytes('piece one')
+$deltaData = [Text.Encoding]::UTF8.GetBytes('piece two')
+$keyData = [Text.Encoding]::UTF8.GetBytes('the whole draft so far')
+Ws-Send $wsA (Stream-Pack 0x05 $room $draftId 0 $appendData)
+Ws-Send $wsA (Stream-Pack 0x04 $room $draftId 1 $deltaData)
+Ws-Send $wsA (Stream-Pack 0x03 $room $draftId 2 $keyData)
+$atB = @(Drain-Pushes $wsB 1500 | Where-Object { $_.kind -eq 0x02 })
+$atA = @(Drain-Pushes $wsA 1500 | Where-Object { $_.kind -eq 0x02 })
+$subtypesB = @($atB | ForEach-Object { $_.subtype })
+$bodiesB = @($atB | ForEach-Object { [Text.Encoding]::UTF8.GetString([byte[]]$_.data) })
+$metaB = @($atB | ForEach-Object { $_.metaText })
+Check '[4.2a] bob receives Append, Delta and Keypoint in order, data byte for byte' `
+  (($subtypesB -join ',') -eq '5,4,3' -and ($bodiesB -join '|') -eq 'piece one|piece two|the whole draft so far') `
+  "subtypes=$($subtypesB -join ',') bodies=$($bodiesB -join '|')"
+Check '[4.2b] the meta is the room id itself and the header carries the draft id and the piece counter' `
+  (($metaB | Select-Object -Unique) -eq $room -and (@($atB | ForEach-Object { $_.id }) -join ',') -eq "$draftId,$draftId,$draftId" -and (@($atB | ForEach-Object { $_.seq }) -join ',') -eq '0,1,2') `
+  "meta=$($metaB[0]) ids=$(@($atB | ForEach-Object { $_.id }) -join ',') seqs=$(@($atB | ForEach-Object { $_.seq }) -join ',')"
+Check '[4.2c] the author gets its own pieces back (one broadcast, no special case)' (@($atA).Count -eq 3) "at the author=$(@($atA).Count)"
+
+# [4.3] the size limit, both sides of it
+$tooBig = [byte[]]::new(10241)
+$justFits = [byte[]]::new(10240)
+$big = Call $wsA (Stream-Pack 0x03 $room $draftId 3 $tooBig)
+Check '[4.3a] a piece over wbf_draft_max_piece_bytes -> TooLarge' ($big.subtype -eq 3 -and $big.meta.code_id -eq 1103) (Describe $big)
+Ws-Send $wsA (Stream-Pack 0x03 $room $draftId 4 $justFits)
+$fitted = @(Drain-Pushes $wsB 1500 | Where-Object { $_.kind -eq 0x02 })
+Check '[4.3b] exactly the limit passes' (@($fitted).Count -eq 1 -and @($fitted)[0].data.Length -eq 10240) "packs=$(@($fitted).Count) bytes=$(@($fitted)[0].data.Length)"
+$null = Drain-Pushes $wsA 800
+
+# [4.4] the meta is a room id, not JSON
+$badMeta = Call $wsA (New-Pack 0x02 0x05 0 $draftId 5 ([Text.Encoding]::UTF8.GetBytes('{"room_id":"!x:localhost"}')) $appendData)
+Check '[4.4] meta that is not a room id -> InvalidRequest' ($badMeta.subtype -eq 3 -and $badMeta.meta.code_id -eq 1201) (Describe $badMeta)
+
+# [4.5] Demand is broadcast like any other piece; a connection that did not subscribe gets nothing
+$wsC = Ws-Open $tokC; $null = Call $wsC (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e11-c'; features = @() } $null)
+Invite $room $regC.user_id $tokA; Join $room $tokC
+$null = Subscribe $wsC 42 $null $null
+$null = Drain-Pushes $wsA 800; $null = Drain-Pushes $wsB 800; $null = Drain-Pushes $wsC 800
+Ws-Send $wsC (Stream-Pack 0x10 $room $draftId 0 $null)
+$demandA = @(Drain-Pushes $wsA 1500 | Where-Object { $_.kind -eq 0x02 -and $_.subtype -eq 0x10 })
+$demandC = @(Drain-Pushes $wsC 1500 | Where-Object { $_.kind -eq 0x02 -and $_.subtype -eq 0x10 })
+Check '[4.5] a Demand reaches the author and the asker alike (no special routing)' (@($demandA).Count -eq 1 -and @($demandC).Count -eq 1) "author=$(@($demandA).Count) asker=$(@($demandC).Count)"
+$null = Drain-Pushes $wsB 800
+
+# [4.6] the piece counter is the client's; the server carries it and does not renumber
+Ws-Send $wsA (Stream-Pack 0x05 $room $draftId 5 $appendData)
+Ws-Send $wsA (Stream-Pack 0x05 $room $draftId 6 $appendData)
+Ws-Send $wsA (Stream-Pack 0x05 $room $draftId 8 $appendData)
+$counted = @(Drain-Pushes $wsB 1500 | Where-Object { $_.kind -eq 0x02 })
+Check '[4.6] 5, 6, 8 arrive as 5, 6, 8 (the gap is the client''s to notice)' ((@($counted | ForEach-Object { $_.seq }) -join ',') -eq '5,6,8') "seqs=$(@($counted | ForEach-Object { $_.seq }) -join ',')"
+$null = Drain-Pushes $wsA 800
+
+# [4.7] who may write, and to what
+$notAuthor = Call $wsB (Stream-Pack 0x05 $room $draftId 0 $appendData)
+Check '[4.7a] a piece from somebody who is not the author -> Forbidden' ($notAuthor.subtype -eq 3 -and $notAuthor.meta.code_id -eq 1302) (Describe $notAuthor)
+$noSuchDraft = Call $wsA (Stream-Pack 0x05 $room 999999 0 $appendData)
+Check '[4.7b] a draft id nothing in the room has -> NotFound' ($noSuchDraft.subtype -eq 3 -and $noSuchDraft.meta.code_id -eq 1501) (Describe $noSuchDraft)
+$notADraft = Call $wsA (Stream-Pack 0x05 $room ([uint64](GSeqOf (Api Get "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($room))/event/$(Send-Msg $room 'an ordinary message' $tokA)" $null $tokA))) 0 $appendData)
+Check '[4.7c] an event that is not a draft -> Conflict' ($notADraft.subtype -eq 3 -and $notADraft.meta.code_id -eq 1502) (Describe $notADraft)
+$httpDraft = Send-Pack (Draft-Pack $room 9) $tokA
+Check '[4.7d] Stream over HTTP -> Unsupported' ($httpDraft.subtype -eq 3 -and $httpDraft.meta.code_id -eq 1102) (Describe $httpDraft)
+$null = Drain-Pushes $wsA 800; $null = Drain-Pushes $wsB 800; $null = Drain-Pushes $wsC 800
+
+# [4.8] the room is now three people, and this server's cap is two
+$tooBusy = Call $wsA (Draft-Pack $room 10)
+Check '[4.8] a room past wbf_draft_max_room_members -> Conflict' ($tooBusy.subtype -eq 3 -and $tooBusy.meta.code_id -eq 1502) (Describe $tooBusy)
+
+# [4.9] the throttle: 100 pieces at once is more than 30/s with a burst of 60
+$refused = 0
+for ($i = 0; $i -lt 100; $i++) { Ws-Send $wsA (Stream-Pack 0x05 $room $draftId ([uint32](100 + $i)) $appendData) }
+$answers = @(Drain-Pushes $wsA 2500)
+$refused = @($answers | Where-Object { $_.kind -eq 0x01 -and $_.subtype -eq 3 -and $_.meta.code_id -eq 1401 }).Count
+$relayed = @($answers | Where-Object { $_.kind -eq 0x02 }).Count
+Check '[4.9] a hundred pieces at once: some are relayed, the rest are RateLimited' ($refused -gt 0 -and $relayed -gt 0 -and ($refused + $relayed) -eq 100) "relayed=$relayed rateLimited=$refused"
+$null = Drain-Pushes $wsB 1500; $null = Drain-Pushes $wsC 1500
+
+# [4.10] the client's own ending: Abandon redacts the anchor, and the draft is closed for good
+$bye = Call $wsA (Stream-Pack 0x02 $room $draftId 11 $null)
+$redactions = @(Drain-Pushes $wsB 2000 | ForEach-Object { $_.events } | Where-Object { $_.type -eq 'm.room.redaction' })
+$afterAbandon = Call $wsA (Stream-Pack 0x05 $room $draftId 12 $appendData)
+Check '[4.10a] Abandon -> Ack with the redaction event id' ($bye.subtype -eq 2 -and $bye.meta.redaction_event_id) (Describe $bye)
+Check '[4.10b] subscribers see the redaction as an ordinary push' (@($redactions).Count -ge 1) "redactions=$(@($redactions).Count)"
+Check '[4.10c] a piece for an abandoned draft -> Conflict' ($afterAbandon.subtype -eq 3 -and $afterAbandon.meta.code_id -eq 1502) (Describe $afterAbandon)
+
+foreach ($w in @($wsA, $wsB, $wsC)) { try { $w.Dispose() } catch {} }
 Stop-Server $server
 
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"
