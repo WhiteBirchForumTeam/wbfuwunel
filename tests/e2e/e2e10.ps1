@@ -20,7 +20,7 @@ function Upload-Legacy($tok, [byte[]]$bytes, $name) {
   $req.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $tok)
   $req.Content = New-Object System.Net.Http.ByteArrayContent (,$bytes)
   $req.Content.Headers.ContentType = New-Object System.Net.Http.Headers.MediaTypeHeaderValue('application/octet-stream')
-  $resp = $script:Http.SendAsync($req).Result
+  $resp = $script:PackHttpClient.SendAsync($req).Result
   $json = $resp.Content.ReadAsStringAsync().Result | ConvertFrom-Json
   @{ status = [int]$resp.StatusCode; mxc = $json.content_uri }
 }
@@ -40,7 +40,7 @@ function Delete-Room($room, $tok) {
   $req = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::Delete, "$B/_synapse/admin/v1/rooms/$([uri]::EscapeDataString($room))")
   $req.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $tok)
   $req.Content = New-Object System.Net.Http.StringContent ('{"purge":true}', [Text.Encoding]::UTF8, 'application/json')
-  $resp = $script:Http.SendAsync($req).Result
+  $resp = $script:PackHttpClient.SendAsync($req).Result
   @{ status = [int]$resp.StatusCode; text = $resp.Content.ReadAsStringAsync().Result }
 }
 function Purge-Before($room, $eid, $tok) {
@@ -165,7 +165,7 @@ function Upload-Png($tok, [byte[]]$bytes, $name) {
   $req.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $tok)
   $req.Content = New-Object System.Net.Http.ByteArrayContent (,$bytes)
   $req.Content.Headers.ContentType = New-Object System.Net.Http.Headers.MediaTypeHeaderValue('image/png')
-  $resp = $script:Http.SendAsync($req).Result
+  $resp = $script:PackHttpClient.SendAsync($req).Result
   $json = $resp.Content.ReadAsStringAsync().Result | ConvertFrom-Json
   @{ status = [int]$resp.StatusCode; mxc = $json.content_uri }
 }
@@ -173,7 +173,7 @@ function Get-Thumbnail($mxc, $tok) {
   $id = $mxc -replace '^mxc://localhost/', ''
   $req = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::Get, "$B/_matrix/client/v1/media/thumbnail/localhost/${id}?width=32&height=32&method=scale")
   $req.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $tok)
-  $resp = $script:Http.SendAsync($req).Result; @{ status = [int]$resp.StatusCode; bytes = $resp.Content.ReadAsByteArrayAsync().Result }
+  $resp = $script:PackHttpClient.SendAsync($req).Result; @{ status = [int]$resp.StatusCode; bytes = $resp.Content.ReadAsByteArrayAsync().Result }
 }
 Add-Type -AssemblyName System.Drawing
 $bmp = New-Object System.Drawing.Bitmap 64, 64

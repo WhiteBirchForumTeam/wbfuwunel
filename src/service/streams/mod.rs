@@ -58,6 +58,16 @@ pub enum Outgoing {
 
 /// Every stream's subscribers, and the connection numbers they are keyed by.
 pub struct Streams {
+	/// Tells this run of the server apart from the last one.
+	///
+	/// ⚠️ Connection numbers restart at 1 every time the process does, so a
+	/// connection number alone names a different connection after a restart
+	/// — and anything that outlives the process must not be keyed by it. The
+	/// draft anchors were: their transaction ids were built from the
+	/// connection number, transaction ids are stored in the database, and
+	/// after a restart the first connection's first draft answered with the
+	/// anchor from before the restart (external review 2026-09-12, R1).
+	epoch: u64,
 	next_connection: AtomicU64,
 	/// The room channels (`0x14 Event`): a room may be listened to by as many
 	/// of a user's connections as the user has open.
@@ -85,6 +95,7 @@ impl Streams {
 	#[must_use]
 	pub fn new() -> Self {
 		Self {
+			epoch: rand::random(),
 			next_connection: AtomicU64::new(1),
 			rooms: Subscribers::new(Occupancy::Many),
 			// ⚠️ The one-connection rule of the to-device queue is declared
@@ -98,6 +109,18 @@ impl Streams {
 	/// The next connection's number. Handed out at upgrade, before anything
 	/// is subscribed.
 	pub fn next_connection_id(&self) -> ConnectionId { self.next_connection.fetch_add(1, Ordering::Relaxed) }
+
+	/// A name for one connection that no other connection of any run of this
+	/// server shares, for the things that are stored and outlive the process.
+	///
+	/// Args:
+	///     connection: the number `next_connection_id` handed out, example: 7
+	/// Return:
+	///     String  example: "9f3c1ab0d4e27615-7"
+	#[must_use]
+	pub fn connection_tag(&self, connection: ConnectionId) -> String {
+		format!("{:016x}-{connection}", self.epoch)
+	}
 
 	/// Args:
 	///     connection: the number `next_connection_id` handed out

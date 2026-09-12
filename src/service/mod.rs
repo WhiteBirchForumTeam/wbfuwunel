@@ -27,6 +27,7 @@ pub mod profile;
 pub mod pusher;
 pub mod registration_tokens;
 pub mod rendezvous;
+pub mod drafts;
 pub mod resolver;
 pub mod rooms;
 pub mod sending;

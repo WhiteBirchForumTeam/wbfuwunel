@@ -38,6 +38,7 @@ use tuwunel_service::{
 };
 
 mod device;
+mod draft;
 mod recent;
 mod send;
 mod session;
@@ -45,6 +46,7 @@ mod subscribe;
 mod ws;
 
 pub(crate) use self::ws::ws_route;
+use self::draft::stream;
 use crate::ClientIp;
 
 /// `Control` subtypes.
@@ -439,6 +441,18 @@ const fn admission(kind: Kind, subtype: u8) -> Option<Admission> {
 			Kind::Device,
 			device::FETCH | device::ITEMS_DESTROY | device::SUBSCRIBE | device::UNSUBSCRIBE,
 		) => Some(logged_in_websocket_only),
+		// A draft only means anything to connections that are listening to
+		// the room, and its pieces are broadcast rather than answered:
+		// WebSocket only, every subtype.
+		| (
+			Kind::Stream,
+			stream::DRAFT
+			| stream::ABANDON
+			| stream::KEYPOINT
+			| stream::DELTA
+			| stream::APPEND
+			| stream::DEMAND,
+		) => Some(logged_in_websocket_only),
 		| _ => None,
 	}
 }
@@ -564,6 +578,10 @@ async fn dispatch(
 			device::handle_device_items_destroy(services, ctx, view, reply).await?;
 			Ok(SessionChange::Keep)
 		},
+		| (Kind::Stream, subtype) => {
+			draft::handle(services, ctx, subtype, view, reply).await?;
+			Ok(SessionChange::Keep)
+		},
 		| _ => {
 			let pack = handle_one_reply(services, ctx.user()?, view).await?;
 			reply.send(pack).await?;
@@ -606,6 +624,13 @@ impl Reject {
 
 	fn with_extra(code: RejectCode, message: impl Into<String>, extra: Value) -> Self {
 		Self { code, message: message.into(), extra, closes_connection: false }
+	}
+
+	/// A refusal that also ends the connection: for a request so far outside
+	/// the protocol that the next one from the same sender is not worth
+	/// reading. The error still goes out first, so the client learns why.
+	fn closing(code: RejectCode, message: impl Into<String>) -> Self {
+		Self { code, message: message.into(), extra: Value::Null, closes_connection: true }
 	}
 
 	/// The device already holds `max` connections; this one is turned away

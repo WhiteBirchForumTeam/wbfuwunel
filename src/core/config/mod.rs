@@ -3741,6 +3741,62 @@ pub struct Config {
 	#[serde(default = "default_wbf_device_default_batch")]
 	pub wbf_device_default_batch: usize,
 
+	/// How many draft pieces (`Stream/Keypoint`, `Delta`, `Append`) one
+	/// device may send per second. A draft is a message still being written —
+	/// an LLM emitting tokens, a long message typed in parts — so pieces are
+	/// frequent and small, and each one costs a point read of the anchoring
+	/// event plus a broadcast to the room's subscribers.
+	///
+	/// 0 turns the throttle off.
+	///
+	/// default: 30
+	#[serde(default = "default_wbf_draft_pieces_per_second")]
+	pub wbf_draft_pieces_per_second: f64,
+
+	/// How many draft pieces one device may send in a burst before the
+	/// per-second rate applies. A writer that pauses and then pastes a
+	/// paragraph arrives in a burst.
+	///
+	/// default: 60
+	#[serde(default = "default_wbf_draft_pieces_burst")]
+	pub wbf_draft_pieces_burst: f64,
+
+	/// How many `Stream/Demand` packs one device may send per second. Much
+	/// slower than pieces on purpose: a demand asks the author to resend the
+	/// whole draft, so its cost lands on somebody else's connection.
+	///
+	/// 0 turns the throttle off.
+	///
+	/// default: 1
+	#[serde(default = "default_wbf_draft_demands_per_second")]
+	pub wbf_draft_demands_per_second: f64,
+
+	/// How many `Stream/Demand` packs one device may send in a burst.
+	///
+	/// default: 3
+	#[serde(default = "default_wbf_draft_demands_burst")]
+	pub wbf_draft_demands_burst: f64,
+
+	/// Largest `data` one draft piece may carry, in bytes. The client
+	/// convention is 8 KiB of plaintext per keypoint; this is the server's
+	/// hard limit and leaves room for the encryption envelope around it.
+	/// All three piece subtypes share it.
+	///
+	/// default: 10240
+	#[serde(default = "default_wbf_draft_max_piece_bytes")]
+	pub wbf_draft_max_piece_bytes: usize,
+
+	/// Largest room, in joined members, that a draft may be opened in. Every
+	/// piece is broadcast to every subscriber, so a draft in a large room is
+	/// a fan-out this server does not promise to afford; drafts are for bots
+	/// and small rooms.
+	///
+	/// 0 removes the limit.
+	///
+	/// default: 10
+	#[serde(default = "default_wbf_draft_max_room_members")]
+	pub wbf_draft_max_room_members: usize,
+
 	/// Most events one `Event/Push` pack carries. A new event is pushed on
 	/// its own; this bounds the packs a `Subscribe` with `cg_seq` uses to
 	/// catch the client up. A pack is also cut at `wbf_data_max_bytes`.
@@ -6035,6 +6091,18 @@ fn default_wbf_device_fetch_default_limit() -> usize { 1000 }
 fn default_wbf_device_fetch_max_limit() -> usize { 1000 }
 
 fn default_wbf_device_default_batch() -> usize { 100 }
+
+fn default_wbf_draft_pieces_per_second() -> f64 { 30.0 }
+
+fn default_wbf_draft_pieces_burst() -> f64 { 60.0 }
+
+fn default_wbf_draft_demands_per_second() -> f64 { 1.0 }
+
+fn default_wbf_draft_demands_burst() -> f64 { 3.0 }
+
+fn default_wbf_draft_max_piece_bytes() -> usize { 10240 }
+
+fn default_wbf_draft_max_room_members() -> usize { 10 }
 
 fn default_media_storage_providers() -> BTreeSet<String> { ["media".to_owned()].into() }
 

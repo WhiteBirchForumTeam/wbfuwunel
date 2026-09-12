@@ -177,7 +177,13 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 | | `0x02 Ack` | 各 kind 定的回應內容；`IS_RESPONSE = 1`，`id`、`seq` 抄請求 | 視 kind（`Download/Read` 的回應 data 是讀出的 bytes） |
 | | `0x03 Error` | `{ "code_id": <序號>, "code": "…", "message": "…" }` ＋ 該 code 定義的欄位；程式比對 `code_id`，`code` 是它的名字；**完整清單在 §3.4**，那張表是唯一的來源 | 無 |
 | | `0x04 Ping` / `0x05 Pong` | `{ "nonce": … }` | 無 |
-| `0x02 Stream` | `Open` `Fragment` `Close` `Abandon` | [streaming-messages.md](streaming-messages.md) §4 | 密文本體 |
+| `0x02 Stream`（草稿，[streaming-messages.md](streaming-messages.md)） | `0x01 Draft` | ⚠️ **這個 kind 的 meta 不是 JSON，是 room id 本身**（UTF-8 文字）——`id` 已經說了是哪則草稿，meta 只剩房間。`Draft` 的 `id` 填 0（還沒有草稿）；回應 `{ "event_id", "g_seq" }`，**`g_seq` 就是這則草稿的 id**，之後每包都填在 header 的 `id`；**只走 WS**。房間人數超過 `wbf_draft_max_room_members` → `Conflict` | 無 |
+| | `0x02 Abandon` | `id` = 草稿 id；只有作者能發；回應 `{ "redaction_event_id" }` —— 它就是 redact 那則錨，訂閱者從**普通的 `Event/Push`** 收到 | 無 |
+| | `0x03 Keypoint`（作者） | **完整內容**，接收者拿它換掉整個 buffer。`seq` 是作者的片計數（**從 1 起**，0 保留），⚠️ `prev` 必須是 **0**：它自己就是起點 | **`prev`(u32 大端) ‖ 密文** |
+| | `0x04 Delta`（作者） | 相對於 `prev` 那一片之後的狀態的差異；差異本身是 client 之間的約定，server 不讀 | 同上 |
+| | `0x05 Append`（作者） | 接在 `prev` 那一片之後的狀態末尾 | 同上 |
+| | `0x10 Demand` | **任何成員**都能發：向作者要一次完整內容。跟其他片一樣**廣播全房**（不特別路由），寫草稿的那台回 `Keypoint`，其他人忽略 | 無 |
+| | *三種片共同* | 片**不回 Ack**（盡快語意，掉了就掉了）；server 只做三個無狀態檢查：data ≥ 4 byte、`seq ≥ 1`、`Keypoint` 的 `prev` = 0，不合都是 `InvalidRequest`。⭐ `prev` 讓接收者**套之前**就知道自己對不對得上；中途加入或漏掉一片都會對不上 → 發 `Demand` | |
 | `0x03 Upload` | `Create` `Chunk` `Status` `Seal` `Abort` | [chunked-upload.md](chunked-upload.md) §4 | 塊 bytes（`Chunk`） |
 | `0x04 Download` | `Info` `Read` | [chunked-upload.md](chunked-upload.md) §5 | 回應的 data 是讀出的 bytes |
 | `0x10 Session`（§6.3） | `0x01 Login` | Matrix `/login` 的請求體原樣：`{ "type": "m.login.password" \| "m.login.token", "identifier", "password" \| "token", "device_id"?, "initial_device_display_name"?, "refresh_token"?: bool }`；回應 `{ "user_id", "device_id", "access_token", "refresh_token"?, "expires_in_ms"? }` | 無 |

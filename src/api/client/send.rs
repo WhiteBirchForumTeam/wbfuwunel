@@ -58,6 +58,7 @@ pub(crate) async fn send_message_event_route(
 		timestamp: body.timestamp,
 		declared_attachments: declared,
 		via_legacy_http: true,
+		may_write_reserved_type: false,
 	};
 
 	let event_id = send_message_event(&services, send).await?;
@@ -102,7 +103,23 @@ pub(crate) struct SendMessageEvent<'a> {
 	/// Whether this came through the legacy HTTP endpoint: an encrypted send
 	/// from there with nothing declared is what the one-time warning is for.
 	pub(crate) via_legacy_http: bool,
+	/// Set only by `Stream/Draft`, which is the one caller allowed to write a
+	/// draft anchor. See `RESERVED_EVENT_TYPES`.
+	pub(crate) may_write_reserved_type: bool,
 }
+
+/// Event types this server writes itself and refuses from clients.
+///
+/// 🚨 A draft anchor is not just an event: it is a standing permission to
+/// broadcast into its room until it is abandoned, and `Stream/Draft` is where
+/// the policy for handing that out lives (the room-size cap). A client that
+/// could write the same type through the ordinary send path would hold the
+/// permission without ever passing the policy — the cap would bind only the
+/// clients that chose to ask for it (external review 2026-09-12, R6).
+///
+/// ⚠️ Federation is not a hole here: an anchor written elsewhere carries a
+/// remote sender, and a piece is refused unless its sender is the anchor's.
+const RESERVED_EVENT_TYPES: [&str; 1] = ["org.wbftw.wbfuwunel.draft"];
 
 /// Args:
 ///     send: see `SendMessageEvent`
@@ -125,11 +142,19 @@ pub(crate) async fn send_message_event(
 		timestamp,
 		declared_attachments,
 		via_legacy_http,
+		may_write_reserved_type,
 	} = send;
 
 	// Forbid m.room.encrypted if encryption is disabled
 	if *event_type == MessageLikeEventType::RoomEncrypted && !services.config.allow_encryption {
 		return Err!(Request(Forbidden("Encryption has been disabled")));
+	}
+
+	if !may_write_reserved_type && RESERVED_EVENT_TYPES.contains(&event_type.to_string().as_str()) {
+		return Err!(Request(Forbidden(
+			"This event type is written by the server for its own protocol; send it through the \
+			 command that owns it."
+		)));
 	}
 
 	// A repeated transaction id answers with the stored event before anything
