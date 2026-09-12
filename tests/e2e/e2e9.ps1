@@ -20,7 +20,7 @@ function Upload-Legacy($tok, [byte[]]$bytes, $name) {
   $req.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $tok)
   $req.Content = New-Object System.Net.Http.ByteArrayContent (,$bytes)
   $req.Content.Headers.ContentType = New-Object System.Net.Http.Headers.MediaTypeHeaderValue('application/octet-stream')
-  $resp = $script:Http.SendAsync($req).Result
+  $resp = $script:PackHttpClient.SendAsync($req).Result
   $json = $resp.Content.ReadAsStringAsync().Result | ConvertFrom-Json
   @{ status = [int]$resp.StatusCode; mxc = $json.content_uri }
 }
@@ -30,7 +30,7 @@ function Send-Raw($room, $type, $body, $tok, $attachments) {
   $req.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $tok)
   if ($attachments) { $req.Headers.TryAddWithoutValidation('X-Wbf-Attachments', ($attachments -join ',')) | Out-Null }
   $req.Content = New-Object System.Net.Http.StringContent (($body | ConvertTo-Json -Compress -Depth 5), [Text.Encoding]::UTF8, 'application/json')
-  $resp = $script:Http.SendAsync($req).Result
+  $resp = $script:PackHttpClient.SendAsync($req).Result
   $text = $resp.Content.ReadAsStringAsync().Result
   $json = $null; try { $json = $text | ConvertFrom-Json } catch {}
   @{ status = [int]$resp.StatusCode; event_id = $json.event_id; errcode = $json.errcode; error = $json.error; text = $text }

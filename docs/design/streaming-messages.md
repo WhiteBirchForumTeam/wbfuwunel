@@ -87,6 +87,7 @@ Append    seq=3  prev=2    "!"
 - **不用 `m.room.message`**：E2EE 房間裡一則明文 `m.room.message` 會讓相容 client 顯示「未加密」警告；自訂 type 它們直接不顯示。
 - 沒有機密：裡面只有「這裡有一則草稿」。`body` 給不認識的工具看。
 - 走既有的 `send_message_event`（同一個 txn 冪等、同一個 append），所以有 `r_seq`／`g_seq`、會 `Push`、`Recent` 拿得到。
+  📎 `Draft` 沒有 `txn_id` 欄位，server 用 `(連線號, 請求 seq)` 組一個。⚠️ 所以**同一條連線把同一個請求 `seq` 用第二次＝重放**：拿回的是**第一次那則錨**（可能已經被 `Abandon` 掉），不是一則新草稿 —— 這就是 Matrix 交易 id 的既有語意（審查者 rumia，PR #45）。無序類的 `seq` 本來就由發送端保證不重複（§4），照著做就不會遇到。
 - **一則草稿一則佔位事件**，作者同時開幾則草稿就有幾個錨，server 不限。
 
 ### 3.2 收尾（client 的流程，server 沒有角色）
