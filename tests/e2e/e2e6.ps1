@@ -76,6 +76,20 @@ function Send-Pack([byte[]]$pack, $tok) {
   $p = Read-Pack $bytes; $p.http = [int]$resp.StatusCode; $p
 }
 function Describe($p) { $k = switch ($p.subtype) { 2 {'Ack'} 3 {'Error'} 5 {'Pong'} default {"sub$($p.subtype)"} }; "$k http=$($p.http) id=$($p.id) seq=$($p.seq) meta=$($p.metaText) data=$($p.data.Length)B" }
+# Two requests in flight at the same time: Start-Pack hands back the task, so
+# the caller can start a second one before the first has answered. Scenario 7
+# needs the overlap itself, not just the two answers.
+function Start-Pack([byte[]]$pack, $tok) {
+  $req = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::Post, "$B/_wbf/v1/pack")
+  if ($tok) { $req.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $tok) }
+  $req.Content = New-Object System.Net.Http.ByteArrayContent (,$pack)
+  $req.Content.Headers.ContentType = New-Object System.Net.Http.Headers.MediaTypeHeaderValue('application/octet-stream')
+  $script:Http.SendAsync($req)
+}
+function End-Pack($task) {
+  $resp = $task.Result
+  $p = Read-Pack ($resp.Content.ReadAsByteArrayAsync().Result); $p.http = [int]$resp.StatusCode; $p
+}
 
 function Api($method, $path, $body, $tok) {
   $h = @{}; if ($tok) { $h['Authorization'] = "Bearer $tok" }
@@ -314,6 +328,97 @@ Log "[5.9] Info -> $(Describe $r) description=$([Text.Encoding]::UTF8.GetString(
 $r = Send-Pack (Json-Pack 4 2 0 13 @{ mxc = $mxc8; pos = (3*16384 + 1) } @()) $tok
 Log "[5.10] Read pos=3*16384+1 -> $(Describe $r) identical=$([Linq.Enumerable]::SequenceEqual([byte[]]$r.data, [byte[]]$file8[49200..54199]))  (expect chunk=3 len=5000, True)"
 Stop-Server $p
+
+# ================= Scenario 6: a big local seal streams; it does not become a copy in memory =================
+# 🚨 Sealing used to collect the whole staging file into one buffer before
+# handing it to the local provider (its multipart threshold is usize::MAX, so
+# "put by size" always chose the single-part path). A 10 GiB upload is legal,
+# so the seal of one added 10 GiB of RSS.
+# ⭐ The baseline is taken AFTER every chunk has been sent, so the memory each
+# 16 MiB request needs is already inside it and the only new thing measured is
+# the seal. PeakWorkingSet64 is what makes this work without sampling: Windows
+# remembers the high-water mark, so a spike that is over before the request
+# answers still shows up.
+$cfg = Write-Config $db1 86400 0
+$srv6 = Start-Server $cfg 's6'
+$chunkBytes = 16 * 1024 * 1024
+$chunks6 = 16
+$total6 = [uint64]$chunkBytes * $chunks6
+$r = Send-Pack (Create-Pack 1 0 $chunkBytes 0 @()) $tok; $id9 = [uint64]$r.meta.id
+Log "[6.1] Create a stream with 16 MiB chunks -> $(Describe $r)  (expect Ack)"
+$blob = New-Object byte[] $chunkBytes; (New-Object Random 99).NextBytes($blob)
+for ($i = 0; $i -lt $chunks6; $i++) {
+  # Each chunk names itself in its first eight bytes, so reading one back
+  # proves the parts landed in the right order, not merely that they landed.
+  [Array]::Copy((BE64 ([uint64]$i)), 0, $blob, 0, 8)
+  $flags6 = if ($i -eq $chunks6 - 1) { 8 } else { 0 }
+  $r = Send-Pack (New-Pack 3 2 $flags6 $id9 $i @() $blob) $tok
+}
+Log "[6.2] $chunks6 chunks of 16 MiB ($total6 bytes) -> $(Describe $r)  (expect received=$chunks6 total_len=$total6 finished=true)"
+# ⚠️ Two measurements, and the assertion is on the larger. `PeakWorkingSet64`
+# alone would be worthless here: it is a high-water mark for the life of the
+# process, so a spike that stays under something earlier in this scenario
+# never shows. Sampling while the seal is in flight is the real measurement;
+# the peak delta only catches a spike too brief to sample.
+$baseline = (Get-Process -Id $srv6.Id).WorkingSet64
+$peakBefore = (Get-Process -Id $srv6.Id).PeakWorkingSet64
+$seal6 = Start-Pack (New-Pack 3 4 0 $id9 20 @() @()) $tok
+$duringMax = $baseline
+$samples = 0
+while (-not $seal6.IsCompleted) {
+  $ws = (Get-Process -Id $srv6.Id).WorkingSet64
+  if ($ws -gt $duringMax) { $duringMax = $ws }
+  $samples++
+  Start-Sleep -Milliseconds 30
+}
+$r = End-Pack $seal6; $mxc9 = $r.meta.mxc
+$peakAfter = (Get-Process -Id $srv6.Id).PeakWorkingSet64
+$grewDuring = $duringMax - $baseline
+$grewPeak = $peakAfter - $peakBefore
+$grew = [Math]::Max($grewDuring, $grewPeak)
+$streamed = $grew -lt 64MB
+Log "[6.3] Seal $([Math]::Round($total6/1MB)) MiB -> $(Describe $r)"
+Log "[6.4] over the seal the server grew $([Math]::Round($grewDuring/1MB,1)) MiB (sampled $samples times while it ran) / $([Math]::Round($grewPeak/1MB,1)) MiB of new peak; streamed=$streamed  (expect both well under 64, True — collecting the file instead of streaming it would be $([Math]::Round($total6/1MB)))"
+$r = Send-Pack (Json-Pack 4 1 0 21 @{ mxc = $mxc9 } @()) $tok
+Log "[6.5] Info -> $(Describe $r)  (expect total_len=$total6 chunk_count=$chunks6)"
+$r = Send-Pack (Json-Pack 4 2 0 22 @{ mxc = $mxc9; chunk = 5 } @()) $tok
+$index5 = if ($r.data.Length -ge 8) { RdBE64 ([byte[]]$r.data) 0 } else { 'none' }
+Log "[6.6] Read chunk=5 back: len=$($r.data.Length) its own index reads $index5  (expect $chunkBytes / 5 — a wrong part size would land the parts elsewhere)"
+Stop-Server $srv6
+
+# ================= Scenario 7: a cold Status beside a Seal does not put the upload back =================
+# 🚨 `hot_upload` writes the cache when it misses it, so a Status that arrives
+# with an empty cache is a write path. Racing a Seal, it could re-remember an
+# upload whose rows the Seal had just deleted — and a later Abort, trusting
+# that, discarded the mxc_chunk and mxc_chunked rows of media that was already
+# sealed. The restart below is what makes the cache cold on purpose.
+$srv7 = Start-Server $cfg 's7'
+$wire7 = 65552
+$file7 = New-Object byte[] (2 * $wire7); (New-Object Random 77).NextBytes($file7)
+$r = Send-Pack (Create-Pack 1 131072 65536 2 ([Text.Encoding]::UTF8.GetBytes('DESC-7'))) $tok; $id10 = [uint64]$r.meta.id
+$r = Send-Pack (New-Pack 3 2 0 $id10 0 @() ([byte[]]$file7[0..($wire7-1)])) $tok
+$r = Send-Pack (New-Pack 3 2 8 $id10 1 @() ([byte[]]$file7[$wire7..(2*$wire7-1)])) $tok
+Log "[7.1] an upload finished but not sealed -> $(Describe $r)  (expect received=2 finished=true)"
+Stop-Server $srv7
+$srv7 = Start-Server $cfg 's7b'
+Log '[7.2] restarted: nothing is in the cache, so the next reader loads from the rows'
+$statusTask = Start-Pack (New-Pack 3 3 0 $id10 30 @() @()) $tok
+$sealTask = Start-Pack (New-Pack 3 4 0 $id10 31 @() @()) $tok
+[Threading.Tasks.Task]::WaitAll(@($statusTask, $sealTask))
+$status7 = End-Pack $statusTask; $seal7 = End-Pack $sealTask
+Log "[7.3] Status and Seal in flight together -> Status: $(Describe $status7)"
+Log "[7.4]                                      Seal:   $(Describe $seal7)  (expect one Ack with the mxc; a Status either answers or is NotFound, both fine)"
+$mxc10 = $seal7.meta.mxc
+$r = Send-Pack (New-Pack 3 5 0 $id10 32 @() @()) $tok
+Log "[7.5] Abort after the seal -> $(Describe $r)  (expect Error NotFound: the rows are gone and no stale copy brought them back)"
+$r = Send-Pack (Json-Pack 4 1 0 33 @{ mxc = $mxc10 } @()) $tok
+$desc7 = if ($r.data.Length) { [Text.Encoding]::UTF8.GetString([byte[]]$r.data) } else { '(none)' }
+Log "[7.6] Info of the sealed media -> $(Describe $r) description=$desc7  (expect total_len=$(2*$wire7) chunk_count=2, DESC-7 — this is the row an Abort on stale state used to delete)"
+$r = Send-Pack (Json-Pack 4 2 0 34 @{ mxc = $mxc10; chunk = 1 } @()) $tok
+$same7 = [Linq.Enumerable]::SequenceEqual([byte[]]$r.data, [byte[]]$file7[$wire7..(2*$wire7-1)])
+Log "[7.7] Read chunk=1 of it -> $(Describe $r) identical=$same7  (expect len=$wire7, True — the chunk spans survived too)"
+Stop-Server $srv7
+
 Log ''; Log 'DONE'
 
 # Leave on purpose: a pending ReceiveAsync or an undisposed socket can keep this process alive

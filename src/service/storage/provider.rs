@@ -588,8 +588,13 @@ fn multipart_threshold(&self) -> usize {
 		.unwrap_or(usize::MAX)
 }
 
+/// How large one part of a multipart upload should be.
+///
+/// ⚠️ `usize::MAX` means the provider names no size of its own (everything
+/// but S3). A caller that streams its own parts has to clamp that to
+/// something it can hold in memory — see `STAGING_PART_BYTES_MAX`.
 #[implement(Provider)]
-fn multipart_part_size(&self) -> usize {
+pub(crate) fn multipart_part_size(&self) -> usize {
 	extract_variant!(&self.config, StorageProvider::s3)
 		.map(|config| config.multipart_part_size.as_u64())
 		.map(TryInto::try_into)

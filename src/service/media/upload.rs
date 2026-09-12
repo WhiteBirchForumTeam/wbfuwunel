@@ -364,8 +364,17 @@ pub async fn upload_chunk(
 
 /// Reports where an upload stands, so a client can resume from
 /// `received_count`.
+///
+/// 🚨 Under the upload's lock, even though it only reads. `hot_upload` puts
+/// what it read into `uploads_hot`, so this is a write path wearing a read
+/// path's clothes — and without the lock a cold `Status` could put a stale
+/// snapshot back after a concurrent `Seal` had deleted the rows and dropped
+/// the memory. A later `Abort` would then believe that snapshot and
+/// `discard_upload` the `mxc_chunk` and `mxc_chunked` rows of media that is
+/// already sealed, encrypted description included.
 #[implement(super::Service)]
 pub async fn upload_status(&self, user: &UserId, upload_id: u64) -> UploadResult<UploadStatus> {
+	let _one_at_a_time = self.upload_locks.lock(&upload_id).await;
 	let hot = self.owned_upload(user, upload_id).await?;
 
 	Ok(UploadStatus {
@@ -499,6 +508,23 @@ pub async fn sweep_uploads(&self) {
 		// Under the upload's lock, so a chunk arriving this instant cannot
 		// re-create the in-memory copy of rows being deleted.
 		let _one_at_a_time = self.upload_locks.lock(&upload_id).await;
+
+		// 🚨 And the progress is read again under it. The list above was
+		// taken outside the lock, so a chunk that arrived while this loop
+		// waited has already been written and acknowledged — discarding the
+		// upload on the strength of the older snapshot would throw away an
+		// upload the client was just told is fine. The row is the truth; the
+		// snapshot was only a candidate.
+		let still_active = self
+			.db
+			.find_progress(upload_id)
+			.await
+			.is_some_and(|progress| progress.last_chunk_at_secs.saturating_add(ttl) >= now_secs);
+
+		if still_active {
+			continue;
+		}
+
 		let Some(declared) = self.db.find_upload(upload_id).await else {
 			// Progress without a declaration: half a row set, sweep it too.
 			self.db.del_upload(upload_id);
@@ -567,6 +593,12 @@ async fn owned_upload(&self, user: &UserId, upload_id: u64) -> UploadResult<Uplo
 }
 
 /// The in-memory copy of an upload, loaded from its rows on first use.
+///
+/// ⚠️ **Every caller must already hold `upload_locks.lock(&upload_id)`**:
+/// missing the cache makes this a write (`remember_upload`), and two of those
+/// racing a `Seal` can put a deleted upload back. The lock is not taken here
+/// because every caller holds it for longer than this call — it has to, since
+/// what it does next depends on what this returned.
 #[implement(super::Service)]
 async fn hot_upload(&self, upload_id: u64) -> Option<UploadHot> {
 	if let Some(hot) = self
@@ -642,9 +674,26 @@ fn staging_dir(&self) -> PathBuf { self.get_media_dir().join("staging") }
 #[implement(super::Service)]
 fn staging_path(&self, upload_id: u64) -> PathBuf { self.staging_dir().join(format!("{upload_id:016x}")) }
 
+/// How much of the staging file a seal holds in memory at once when the
+/// provider does not name a part size of its own (the local filesystem
+/// returns `usize::MAX`, meaning "no limit" — which as a part size would be
+/// the whole file).
+///
+/// ⚠️ This is the number that decides a seal's memory, so it is a number:
+/// a 10 GiB upload is legal, and `media_upload_max_len` defaults to exactly
+/// that.
+const STAGING_PART_BYTES_MAX: usize = 8 * 1024 * 1024;
+
 /// Streams the first `len` bytes of the staging file into every configured
 /// provider as one object named for `key`, the way `create_media_file`
 /// stores a whole upload.
+///
+/// 🚨 Always streaming, and never by `size`. `Provider::put` takes a single
+/// part when it is told a size under the provider's multipart threshold, and
+/// the local filesystem's threshold is `usize::MAX` — so passing the real
+/// size meant every local seal collected the entire file into one buffer
+/// first. A sealed 10 GiB upload added 10 GiB of RSS, at the one moment the
+/// server is already holding that file on disk.
 #[implement(super::Service)]
 async fn store_staging_file(&self, key: &[u8], path: &PathBuf, len: u64) -> Result {
 	let name = self.get_media_name_sha256(key);
@@ -656,21 +705,24 @@ async fn store_staging_file(&self, key: &[u8], path: &PathBuf, len: u64) -> Resu
 			continue;
 		}
 
+		// 🚨 One item of this stream is one part of the upload to the
+		// provider, so the part size is the provider's, not a number chosen
+		// here: S3 refuses a completed multipart upload whose non-final parts
+		// are under 5 MiB, and these were 1 MiB. Sealing to S3 could not
+		// work, and the local half of the acceptance run could not see it.
+		let part_bytes = provider
+			.multipart_part_size()
+			.min(STAGING_PART_BYTES_MAX);
+
 		// `len` is the row's truth; the file is capped to it rather than trusted.
 		let file = fs::File::open(path).await?.take(len);
 		let chunks = stream::try_unfold(file, async |mut file| {
-			let mut buf = vec![0_u8; 1024 * 1024];
-			let read = file.read(&mut buf).await?;
-			if read == 0 {
-				return Ok::<_, tuwunel_core::Error>(None);
-			}
-			buf.truncate(read);
-			Ok(Some((Bytes::from(buf), file)))
+			let part = read_part(&mut file, part_bytes).await?;
+			Ok::<_, tuwunel_core::Error>(part.map(|part| (part, file)))
 		});
 
-		let size = usize::try_from(len).ok();
 		provider
-			.put(name.as_str(), size, chunks)
+			.put(name.as_str(), None, chunks)
 			.await
 			.map_err(|e| err!(Database(error!(?name, provider = ?provider.name, "Failed to store sealed upload: {e:?}"))))?;
 		stored = stored.saturating_add(1);
@@ -681,6 +733,42 @@ async fn store_staging_file(&self, key: &[u8], path: &PathBuf, len: u64) -> Resu
 	}
 
 	Ok(())
+}
+
+/// One part of a seal: `bytes` bytes of `file`, or the short last one, or
+/// `None` at the end.
+///
+/// 🚨 It fills the buffer rather than returning one read. A single `read` is
+/// allowed to return fewer bytes than asked for without being at the end of
+/// the file — and since each part this yields becomes one part of a multipart
+/// upload, a short read in the middle is a short part in the middle, which is
+/// exactly what S3 rejects at `complete()`. ⚠️ So this is not a tidier way to
+/// write the same loop: the loop is the point, and the only short part it can
+/// produce is the last one.
+///
+/// Args:
+///     file: the staging file, already capped to the row's length
+///     bytes: the part size, example: 8388608
+/// Return:
+///     Result<Option<Bytes>>  the next part; `None` once the file is spent.
+async fn read_part(file: &mut tokio::io::Take<fs::File>, bytes: usize) -> Result<Option<Bytes>> {
+	let mut buf = vec![0_u8; bytes];
+	let mut filled = 0;
+
+	while filled < bytes {
+		let read = file.read(&mut buf[filled..]).await?;
+		if read == 0 {
+			break;
+		}
+		filled = filled.saturating_add(read);
+	}
+
+	if filled == 0 {
+		return Ok(None);
+	}
+
+	buf.truncate(filled);
+	Ok(Some(Bytes::from(buf)))
 }
 
 fn stored(hot: &UploadHot) -> ChunkStored {
