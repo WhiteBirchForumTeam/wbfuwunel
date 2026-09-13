@@ -439,11 +439,15 @@ const NO_DATA_TOLERANCE: usize = 1024;
 /// noticing, and closes the connection with it (維護者 2026-09-12).
 ///
 /// ⚠️ Why closing: a `Demand` is broadcast to the whole room, so anything it
-/// carries is copied once per connection. The general pack limit is 16 MiB,
-/// which at three demands and ten listeners is most of a gigabyte of copying
-/// for a pack the specification says is empty (external review 2026-09-12,
-/// R3). Below the tolerance the payload is simply dropped on relay; above it,
-/// nothing about the sender is worth continuing with.
+/// carries is copied **once per connection** — `wbf_data_max_bytes` times the
+/// listeners times however many demands a sender is allowed, for a pack the
+/// specification says is empty (external review 2026-09-12, R3). 📎 The
+/// number that multiplies is configurable and has already changed once, so
+/// the rule is the multiplication rather than any figure: with the 2 MiB
+/// default, three demands to ten listeners is 60 MiB of copying; when the
+/// default was 16 MiB it was most of a gigabyte. Below the tolerance the
+/// payload is simply dropped on relay; above it, nothing about the sender is
+/// worth continuing with.
 fn refuse_oversized_payload(view: &PackView<'_>) -> Result<(), Reject> {
 	if view.data.len() <= NO_DATA_TOLERANCE {
 		return Ok(());

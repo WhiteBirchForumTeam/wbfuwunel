@@ -78,10 +78,13 @@ impl Outgoing {
 /// connection may hold in it at once.
 ///
 /// 🚨 **The count alone was the wrong bound.** A queue of 32 packs sounds
-/// small until a pack is `wbf_data_max_bytes` — 16 MiB of a media chunk —
-/// and then one connection holds 514 MiB, and four devices of four
-/// connections hold 9 GiB, without anything being wrong from the client's
-/// side (ask for 32 large chunks, read the socket slowly). The count stays
+/// small until a pack is `wbf_data_max_bytes`, which **was** 16 MiB of a
+/// media chunk — and then one connection held 514 MiB, and four devices of
+/// four connections 9 GiB, without anything being wrong from the client's
+/// side (ask for 32 large chunks, read the socket slowly). ⚠️ That default is
+/// 2 MiB now, but the byte budget is what holds the line: the limit is
+/// configurable and the count would be the wrong bound again the day
+/// somebody raises it. The count stays
 /// because a `Device/Fetch` window is counted in packs (`check_wbf_device_window`);
 /// the byte budget is what decides the memory.
 ///
