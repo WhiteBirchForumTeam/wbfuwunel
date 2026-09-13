@@ -216,6 +216,15 @@ Check '[1.6u] a room the caller is not in refuses the whole window rather than l
 $emptyList = Recent-Ws $ws 45 10 $null $null $null @()
 Check '[1.6v] rooms=[] asks about no rooms and gets one empty Batch' `
   ($emptyList.meta.tc -eq 0 -and $emptyList.meta.bc -eq 0 -and $emptyList.meta.r -eq 0) (Describe $emptyList)
+# 🚨 A name repeated is one room. Without deduplication the window opens two
+# reverse streams over the same prefix and hands the client every event of it
+# twice (PR #51 review, rumia and salvia).
+$twice = Recent-Ws $ws 46 100 $null $null $null @($r2, $r2)
+$twiceIds = @($twice.events | ForEach-Object { $_.event_id })
+$uniqueIds = @($twiceIds | Select-Object -Unique)
+Check '[1.6w] rooms naming the same room twice is that room once' `
+  ($twiceIds.Count -eq $uniqueIds.Count -and $twiceIds.Count -eq $onlyTwo.events.Count -and [int]$twice.meta.tc -eq [int]$onlyTwo.meta.tc) `
+  "events=$($twiceIds.Count) distinct=$($uniqueIds.Count) once=$($onlyTwo.events.Count) tc=$($twice.meta.tc)"
 
 # [1.7] bob sees only room one
 $wsB = Ws-Open $tokB

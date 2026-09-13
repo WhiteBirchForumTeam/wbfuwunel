@@ -88,6 +88,25 @@ function Drain-Pushes($ws, [int]$quietMs = 1500) {
   # becomes an empty array, longer ones pass through. (Returning `,$packs` on top of @() double-wraps.)
   $packs
 }
+# Opens a connection and proves it usable with a Hello round-trip, retrying
+# within $withinMs. A slot freed by closing another connection comes back
+# when that connection's task ends, and a connection with packs still queued
+# drains them first (DRAIN_TIMEOUT) -- so "I closed one, open another now" is
+# a race a fixed sleep only sometimes wins. Returns @{ ws; waitedMs }.
+function Ws-Open-Usable($tok, [int]$withinMs = 8000) {
+  $started = Get-Date
+  do {
+    $ws = Ws-Open $tok
+    Ws-Send $ws (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e11'; features = @() } $null)
+    $p = Recv-Or-Null $ws 2000
+    if ($null -ne $p -and -not $p.closed -and $p.subtype -eq 2) {
+      return @{ ws = $ws; waitedMs = [int]((Get-Date) - $started).TotalMilliseconds }
+    }
+    try { $ws.Dispose() } catch {}
+    Start-Sleep -Milliseconds 250
+  } while (((Get-Date) - $started).TotalMilliseconds -lt $withinMs)
+  throw "no usable connection within $withinMs ms"
+}
 function Subscribe($ws, [uint64]$id, $rooms, $cgSeq) {
   $meta = @{}; if ($null -ne $rooms) { $meta.rooms = @($rooms) }; if ($null -ne $cgSeq) { $meta.cg_seq = $cgSeq }
   Call $ws (Json-Pack 0x14 4 (Conv $id) 0 $meta $null)
@@ -183,13 +202,31 @@ $mBoth2 = Send-Msg $r2 'after the mark, room two' $tokB
 # $wsNamed) and four is `wbf_ws_max_connections_per_device`, so this needs a
 # slot rather than a fifth: $wsNot has done its job ([1.1c]) and goes.
 $wsNot.Dispose()
-Start-Sleep -Milliseconds 400
-$wsScoped = Ws-Open $tokA
+$wsScoped = (Ws-Open-Usable $tokA).ws
 $ackScoped = Subscribe $wsScoped 11 @($r1) $mark2
 $caughtScoped = Ids @(Drain-Pushes $wsScoped 1500)
 Check '[1.4c] a named subscription catching up is pushed its own rooms only' `
   (($caughtScoped -contains $mBoth1) -and -not ($caughtScoped -contains $mBoth2)) `
   "caught=$($caughtScoped -join ',') wanted=$mBoth1 not-wanted=$mBoth2"
+# 🚨 The same room named twice is one room, in the Ack's count and in the
+# catch-up: without deduplication the window scans it twice and every event
+# is pushed twice (PR #51 review, rumia and salvia).
+$wsNamed.Dispose()
+$openedDouble = Ws-Open-Usable $tokA
+$wsDouble = $openedDouble.ws
+Log "  (a slot came back $($openedDouble.waitedMs) ms after the subscribed connection was closed)"
+$ghost = '!nobody-is-in-this:localhost'
+$ackDouble = Subscribe $wsDouble 12 @($r1, $r1, $ghost, $ghost) $mark2
+$caughtDouble = Ids @(Drain-Pushes $wsDouble 1500)
+$distinctDouble = @($caughtDouble | Select-Object -Unique)
+$skippedDouble = @($ackDouble.meta.skipped)
+# 📎 `joined` is not what this discriminates: it comes from the registry,
+# whose topics are a set, and a red-light run with no deduplication still
+# said joined=1. What broke there was caught=2 (the catch-up scanned the room
+# twice). `skipped` is the list the request's own names build.
+Check '[1.4d] naming a room twice catches up once, and a missing room named twice is skipped once' `
+  ($caughtDouble.Count -eq $distinctDouble.Count -and ($caughtDouble -contains $mBoth1) -and $skippedDouble.Count -eq 1) `
+  "joined=$($ackDouble.meta.joined) caught=$($caughtDouble.Count) distinct=$($distinctDouble.Count) skipped=$($skippedDouble -join ',')"
 
 # [1.5] leaving a room stops its pushes; kick stops them too
 Leave $r2 $tokA

@@ -16,7 +16,11 @@
 //! events. The client pulls the next window with `before`; the server keeps
 //! nothing between windows.
 
-use std::{cmp::Ordering, collections::BinaryHeap, pin::Pin};
+use std::{
+	cmp::Ordering,
+	collections::{BinaryHeap, HashSet},
+	pin::Pin,
+};
 
 use futures::{Stream, StreamExt};
 use ruma::{OwnedRoomId, RoomId, UserId, events::AnyTimelineEvent, serde::Raw};
@@ -288,6 +292,25 @@ async fn collect_window(
 	request: &RecentRequest,
 	data_max: usize,
 ) -> Vec<WindowEvent> {
+	// 🚨 One stream per room, and each room **once**. A name repeated in the
+	// request would otherwise open two reverse streams over the same prefix,
+	// and the heap would rank the same event from both: every event of that
+	// room would reach the client twice, in a window whose whole contract is
+	// that it holds each event once (PR #51 review, rumia and salvia).
+	//
+	// ⚠️ Deduplicated here, not at each caller's parsing, because this is the
+	// place that turns a name into a scan — and there are two callers now
+	// (a `Recent` and a `Subscribe` catching up), which is exactly the shape
+	// where "every producer remembers to" fails.
+	let mut seen: HashSet<&str> = HashSet::with_capacity(rooms.len());
+	let mut once: Vec<&OwnedRoomId> = Vec::with_capacity(rooms.len());
+	for room_id in rooms {
+		if seen.insert(room_id.as_str()) {
+			once.push(room_id);
+		}
+	}
+	let rooms = once;
+
 	// One reverse stream per room, each already past `before`. The heads
 	// hold the event the heap is ranking; the streams wait behind them.
 	let mut streams: Vec<RoomStream<'_>> = rooms

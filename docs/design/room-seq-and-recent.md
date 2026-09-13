@@ -181,7 +181,7 @@ BinaryHeap 以 count 為鍵，每次彈最大的、再從那條串流補一個
     `cg_seq` 帶第三新的 `g_seq` 只回 2 則、一個 Batch；`cg_seq=最新` 回一個空 Batch（`tc=bc=r=0`）；`cg_seq=0` 等於沒設；
     `limit=1` 小於差距 → `tc==limit`，再帶 `before` 補到 `tc<limit`；空 meta = 預設（320／10）；`batch=1000` 夾成 100；`limit=10000` 夾成 500（`Hello` 說）；兩窗之間 `Ping` 立刻有 `Pong`。
   - 可見性：bob 只拿到自己加入的 room；alice ignore bob 後他的訊息在 `Recent` 與 `/messages` 同樣消失。
-  - HTTP → `Error(Unsupported)`；`cg_seq` 非整數 → `Error(Conflict)`；未知 subtype → `UnknownKind`。
+  - HTTP → `Error(Unsupported)`；`cg_seq` 非整數 → `Error(InvalidRequest)`（📎 這裡本來寫 `Conflict`，是錯誤詞表（wire-format §3.4）之前的舊語意：格式不對是 `InvalidRequest`，`Conflict` 留給狀態衝突）；`rooms` 不是房間 id 的陣列 → `Error(InvalidRequest)`；點名了不在的房 → `Error(Forbidden)`；未知 subtype → `UnknownKind`。
   - migration：PR #18 版 binary 建的庫（沒有任何號）換新 binary 啟動 → 每則 1..n 且帶 `g_seq`、下一則接 n+1、第二次啟動不重編。
   - byte 上限（review 要求的鑑別測試）：`wbf_data_max_bytes = 1500` → 一窗裝下全部，切成多個 Batch，每個 data ≤ 1500 B、每則恰一次、跨 Batch 仍新到舊、`fs`／`ls` 對得上 data；
     `= 200`（沒有任何事件放得下）→ 一個空 Batch（`tc=0`）。

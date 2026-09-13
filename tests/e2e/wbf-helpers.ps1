@@ -122,11 +122,33 @@ function Write-Config([string]$db, [int]$uploadTtl, [long]$maxLen = 0, [long]$da
   $cfg
 }
 function Start-Server([string]$cfg, [string]$tag) {
+  # 🚨 Refuse to start when something already answers on the port. A script
+  # that throws leaves its server behind, and the next run's server cannot bind
+  # the port and exits -- while the probe below happily gets an answer from
+  # the old one. Every check then runs against the wrong server and the wrong
+  # database: registrations fail as "user in use", or, worse, the run passes
+  # against a binary nobody meant to test. (Seen 2026-09-13: e2e11 reported
+  # connection_id=6 on what should have been a fresh server.)
+  $alreadyThere = try { $null = Invoke-WebRequest -Uri "$B/_matrix/client/versions" -TimeoutSec 2 -UseBasicParsing; $true } catch { $false }
+  if ($alreadyThere) {
+    $stale = @(Get-Process -Name tuwunel -ErrorAction SilentlyContinue | ForEach-Object { "pid $($_.Id) started $($_.StartTime)" }) -join '; '
+    Log "  !! a server already answers on $B before $tag started ($stale) -- a previous run did not stop it"
+    throw "port already in use before starting $tag"
+  }
   $p = Start-Process -FilePath $EXE -ArgumentList @('-c', $cfg) -PassThru -NoNewWindow -RedirectStandardOutput "$OUT\$tag.out" -RedirectStandardError "$OUT\$tag.err"
   $lastError = ''
   for ($i = 0; $i -lt 40; $i++) {
     Start-Sleep -Milliseconds 500
-    try { $null = Invoke-WebRequest -Uri "$B/_matrix/client/versions" -TimeoutSec 2 -UseBasicParsing; return $p } catch { $lastError = $_.Exception.Message }
+    try {
+      $null = Invoke-WebRequest -Uri "$B/_matrix/client/versions" -TimeoutSec 2 -UseBasicParsing
+      # An answer only counts if it can be ours: the process we started must
+      # still be running. If it exited, whatever answered is something else.
+      if ($p.HasExited) {
+        Log "  !! $tag exited (code $($p.ExitCode)) yet something answered on $B -- not the server this run started"
+        throw "the server started for $tag is not the one answering"
+      }
+      return $p
+    } catch { $lastError = $_.Exception.Message; if ($lastError -like 'the server started for*') { throw } }
   }
   # Before giving up, tell the two failure modes apart: a server that is not there, or this process's HTTP stack
   # (connection pool, stale keep-alives) refusing to reach a server that is. A fresh HttpClient bypasses the pool.
