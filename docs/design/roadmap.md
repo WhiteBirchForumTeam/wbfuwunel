@@ -110,8 +110,8 @@ Logout 後直接關線；同一條連線重複 Login 允許；**登入限速預�
 📎 那個模組 PR #42 之後叫 `service/streams`（共用核心 ＋ 房間政策），要找程式碼看那裡。
 ⚠️ 提案寫的 registry 是 `user → 連線`，實作定案是 **`connection_id` → 訂閱者**（訂閱者是連線，不是使用者也不是裝置）；channel 是 DB 成員資格的記憶體投影。
 client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
-🔲 **還沒做的**：`Subscribe{rooms, cg_seq}` 的補窗是**全域**的（`collect_window` 不分房），server 端依 `rooms` 過濾是另一個提案；
-目前靠 §2.1 要求 client 不拿非訂閱房的事件推進水位（審查者 rumia R4）。
+✅ **補窗依 `rooms` 過濾已完成（PR #51）**：本來 `Subscribe{rooms, cg_seq}` 的補窗是**全域**的（`collect_window` 不分房），靠 §2.1 要求 client 不拿非訂閱房的事件推進水位（審查者 rumia R4）—— 而那等於要求 client 不要相信 server 剛剛送給它的東西。
+同一支順便給 `Event/Recent` 加了 `rooms`，**一個房間 ＋ `before` 就是那個房間的歷史**（維護者 2026-09-13 問「WS 能不能拿單房歷史」）。
 
 **共用核心已合併（PR #42）**：推送的記帳從「每條連線一份」改成「**每段會話**一份」（`id` 是會話的名字、`seq` 是它裡面的計數，
 [wbf-wire-format.md](wbf-wire-format.md) §4.1），一條連線因此背得動好幾種訂閱 —— 這是**正常形狀**，不是一種訂閱開一條線。

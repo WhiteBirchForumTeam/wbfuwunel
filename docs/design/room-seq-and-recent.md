@@ -86,12 +86,16 @@ kind `0x14 Event`（wire-format §3.3 已分配給 send／messages／context 這
 ⚠️ **選的是那七個 byte 的值，第一個 byte 是型別 `0x01`**（client 的會話號，[wbf-wire-format.md](wbf-wire-format.md) §2.2，PR #47）：裸值（型別 `0x00`）在 handler 之前就被回 `InvalidRequest`。
 **只走 WebSocket**；HTTP 回 `Error(Unsupported)`。這一段自 [wbf-pack-pipeline.md](wbf-pack-pipeline.md) §6（維護者 2026-09-07 定）改寫，那份是權威。
 
-請求 meta（JSON，明文，server 要讀）；四個欄位都可省略：
+請求 meta（JSON，明文，server 要讀）；五個欄位都可省略：
 
 ```json
-{ "cg_seq": <g_seq>, "before": <g_seq>, "limit": 320, "batch": 10 }
+{ "rooms": ["!r:localhost"], "cg_seq": <g_seq>, "before": <g_seq>, "limit": 320, "batch": 10 }
 ```
 
+- `rooms`：只讀這幾個房間；省略（或 `null`）= **每個加入的房**（原本的行為）。⭐ **一個房間 ＋ `before` 就是那個房間的歷史** —— 不必另開一個 subtype，因為它跟「最近 N 則」本來就是同一個問題，只是窗窄了一點。
+  🚨 **點名了一個你不在的房，整個請求回 `Forbidden`**，而不是默默把它留白 —— `Subscribe` 把這種房間列進 `skipped` 照常登記（那是一個長期登記，部分成功有意義），但**一扇窗是一個問題的答案**，而缺了一個房間的答案是錯的、而且 client 看不出來。
+  ⚠️ 空陣列 `[]` 是一個陣列：問了零個房間，拿到一個空窗（跟 `Subscribe` 的 `[]` 一致）。
+  📎 **只有加入中的房**：離開過的房間的歷史是 HTTP `/messages` 的工作（它有 `history_visibility` 那一整套語意），`Recent` 從來就只看 `rooms_joined`。
 - `cg_seq`（cached g_seq）：client 裝置上存的最新 `g_seq`。server 從最新往舊拿，**碰到它就停**；省略或 0 = 沒有快取，直接拿最新的 `limit` 則。
 - `limit`：**這一窗**最多幾則。預設 `wbf_recent_default_limit`（320），上限 `wbf_recent_max_limit`（500，維護者 2026-09-07 從 10000 壓下來：一窗多大是 client 決定的，不夠就再要一段）。
 - `before`：只要比它舊的；下一窗帶上一窗最後一個 Batch 的 `ls`。
@@ -108,6 +112,11 @@ server **不記任何跨請求的狀態**，下一窗是 client 再叫一次 `Re
   - `bc`（batch count）：這個 Batch 幾則。
   - `fs`／`ls`（first／last g_seq）：這批最新與最舊那則的 `g_seq`；最後一個 Batch 的 `ls` 就是下一窗的 `before`。
   - `r`（remain）：這批之後這一窗還剩幾則；**`r = 0` 就是這一窗結束**，沒有 `IS_LAST`、沒有結束用的 pack。
+    ⚠️ **一窗結束、甚至空窗，講的是「本站這份副本沒有更舊的了」，不是「這個房間沒有更舊的了」。** Matrix 的房間沒有 home server：
+    每台有成員的伺服器各有一份副本，而**從別台開的房間加入時，拿到的是當下狀態加最近幾則**，更早的歷史在別人手上。
+    HTTP `/messages` 往回翻到邊界時會去聯邦抓（`backfill_if_required`），`Recent` **不會**。
+    📎 今天 `allow_federation = false`，每個房的第一則必然是本站寫的 `m.room.create`，所以兩者沒有差別；
+    等哪天開了聯邦，client 🚫 不要把「窗到底了」讀成「這個房間沒有更早的歷史」—— 那時最後一個 Batch 會多一個明確的邊界旗標（相容的增補），要更早的歷史走 `/messages`。
   - 不變量：`tc = 已送 + bc + r`。空窗（`tc = 0`）送一個 `bc = 0, r = 0, fs = ls = 0` 的 Batch。
 - data：`bc` 則事件，每則 **u32 大端長度 ＋ 事件 JSON bytes**（不是 JSON 陣列：client 切事件只看四個 byte，不掃逗號、不先 parse 整段），
   新到舊排。事件是完整的 `Pdu` 格式，含 `room_id`；`unsigned` 帶 `r_seq`、`g_seq`。一個 Batch 的 data 另受 `wbf_data_max_bytes` 限，
@@ -172,7 +181,7 @@ BinaryHeap 以 count 為鍵，每次彈最大的、再從那條串流補一個
     `cg_seq` 帶第三新的 `g_seq` 只回 2 則、一個 Batch；`cg_seq=最新` 回一個空 Batch（`tc=bc=r=0`）；`cg_seq=0` 等於沒設；
     `limit=1` 小於差距 → `tc==limit`，再帶 `before` 補到 `tc<limit`；空 meta = 預設（320／10）；`batch=1000` 夾成 100；`limit=10000` 夾成 500（`Hello` 說）；兩窗之間 `Ping` 立刻有 `Pong`。
   - 可見性：bob 只拿到自己加入的 room；alice ignore bob 後他的訊息在 `Recent` 與 `/messages` 同樣消失。
-  - HTTP → `Error(Unsupported)`；`cg_seq` 非整數 → `Error(Conflict)`；未知 subtype → `UnknownKind`。
+  - HTTP → `Error(Unsupported)`；`cg_seq` 非整數 → `Error(InvalidRequest)`（📎 這裡本來寫 `Conflict`，是錯誤詞表（wire-format §3.4）之前的舊語意：格式不對是 `InvalidRequest`，`Conflict` 留給狀態衝突）；`rooms` 不是房間 id 的陣列 → `Error(InvalidRequest)`；點名了不在的房 → `Error(Forbidden)`；未知 subtype → `UnknownKind`。
   - migration：PR #18 版 binary 建的庫（沒有任何號）換新 binary 啟動 → 每則 1..n 且帶 `g_seq`、下一則接 n+1、第二次啟動不重編。
   - byte 上限（review 要求的鑑別測試）：`wbf_data_max_bytes = 1500` → 一窗裝下全部，切成多個 Batch，每個 data ≤ 1500 B、每則恰一次、跨 Batch 仍新到舊、`fs`／`ls` 對得上 data；
     `= 200`（沒有任何事件放得下）→ 一個空 Batch（`tc=0`）。

@@ -16,10 +16,14 @@
 //! events. The client pulls the next window with `before`; the server keeps
 //! nothing between windows.
 
-use std::{cmp::Ordering, collections::BinaryHeap, pin::Pin};
+use std::{
+	cmp::Ordering,
+	collections::{BinaryHeap, HashSet},
+	pin::Pin,
+};
 
 use futures::{Stream, StreamExt};
-use ruma::{OwnedRoomId, UserId, events::AnyTimelineEvent, serde::Raw};
+use ruma::{OwnedRoomId, RoomId, UserId, events::AnyTimelineEvent, serde::Raw};
 use serde_json::{Value, json};
 use tuwunel_core::{
 	Result, debug_warn,
@@ -36,6 +40,13 @@ use crate::client::message::{ignored_filter, visibility_filter};
 
 /// What the client asks for.
 struct RecentRequest {
+	/// The rooms to read, or `None` for every room the user has joined.
+	///
+	/// ⭐ This is what makes a window a room's history: one room plus
+	/// `before` is "the events of this room older than that", which is the
+	/// question `/messages` answers over HTTP — without the opaque tokens,
+	/// because the events carry `r_seq` and the cursor is a `g_seq`.
+	rooms: Option<Vec<OwnedRoomId>>,
 	/// Most events in this window; clamped to `wbf_recent_max_limit`.
 	limit: usize,
 	/// Most events per `Batch`; clamped to `wbf_recent_max_batch`.
@@ -67,6 +78,7 @@ impl RecentRequest {
 		let meta = if view.meta.is_empty() { json!({}) } else { view.meta_json()? };
 
 		Ok(Self {
+			rooms: rooms_field(&meta)?,
 			limit: count_field(&meta, "limit", limits.default_limit, limits.max_limit),
 			// A client that asks for batches of 0 gets batches of 1 (a negative
 			// or non-numeric `batch` falls to the default instead): a window
@@ -91,6 +103,34 @@ fn count_field(meta: &Value, name: &str, default: usize, max: usize) -> usize {
 		.as_u64()
 		.and_then(|value| usize::try_from(value).ok())
 		.map_or(default, |value| value.min(max))
+}
+
+/// The rooms a window is about.
+///
+/// Args:
+///     meta: the request meta, example: `{"rooms":["!r:localhost"]}`
+/// Return:
+///     Result<Option<Vec<OwnedRoomId>>, Reject>  None when the field is
+///     absent or null, meaning every joined room; `InvalidRequest` when it is
+///     there but is not a list of room ids. ⚠️ An empty list is a list: it
+///     asks about no rooms and gets an empty window, the same way
+///     `Subscribe` with an empty list subscribes to nothing.
+fn rooms_field(meta: &Value) -> std::result::Result<Option<Vec<OwnedRoomId>>, Reject> {
+	match &meta["rooms"] {
+		| Value::Null => Ok(None),
+		| Value::Array(names) => names
+			.iter()
+			.map(|name| {
+				name.as_str()
+					.and_then(|name| RoomId::parse(name).ok())
+					.ok_or_else(|| {
+						Reject::code(RejectCode::InvalidRequest, "`rooms` holds something that is not a room id")
+					})
+			})
+			.collect::<std::result::Result<Vec<_>, _>>()
+			.map(Some),
+		| _ => Err(Reject::code(RejectCode::InvalidRequest, "`rooms` must be a list of room ids")),
+	}
 }
 
 /// Args:
@@ -139,12 +179,28 @@ pub(super) struct WindowEvent {
 /// The events newer than `cg_seq`, newest first, at most `limit`: what a
 /// `Subscribe` that asks to be caught up pushes before the live events.
 ///
+/// 🚨 `rooms` is the subscription's own list, not everything the user has
+/// joined. Catching up used to be **global** whatever the subscription said,
+/// so a connection subscribed to one room was pushed events of rooms it never
+/// asked about; the design document papered over it by asking clients not to
+/// advance their watermark on those (wbf-event-push §2.1, 審查者 rumia R4).
+/// Asking a client not to believe what the server just sent it is not a rule
+/// anybody can keep — this is the same filter `Recent` uses, applied where
+/// the promise was made.
+///
 /// Args:
+///     rooms: the rooms this subscription covers
 ///     cg_seq: the client's watermark, example: Some(4711); None = the newest `limit`
 ///     limit: example: `wbf_recent_max_limit`
-pub(super) async fn window_after(services: &Services, user: &UserId, cg_seq: Option<PduCount>, limit: usize) -> Vec<WindowEvent> {
-	let request = RecentRequest { limit, batch: 1, cg_seq, before: None };
-	collect_window(services, user, &request, services.config.wbf_data_max_bytes).await
+pub(super) async fn window_after(
+	services: &Services,
+	user: &UserId,
+	rooms: &[OwnedRoomId],
+	cg_seq: Option<PduCount>,
+	limit: usize,
+) -> Vec<WindowEvent> {
+	let request = RecentRequest { rooms: None, limit, batch: 1, cg_seq, before: None };
+	collect_window(services, user, rooms, &request, services.config.wbf_data_max_bytes).await
 }
 
 /// Args:
@@ -168,8 +224,9 @@ pub(super) async fn handle_event_recent(
 	};
 	let request = RecentRequest::parse(view, &limits)?;
 	let data_max = services.config.wbf_data_max_bytes;
+	let rooms = resolve_rooms(services, user, request.rooms.as_deref()).await?;
 
-	let window = collect_window(services, user, &request, data_max).await;
+	let window = collect_window(services, user, &rooms, &request, data_max).await;
 
 	for pack in build_batches(view.header.id, &window, request.batch, data_max)? {
 		reply.send(pack).await?;
@@ -178,16 +235,81 @@ pub(super) async fn handle_event_recent(
 	Ok(())
 }
 
+/// Which rooms a window covers.
+///
+/// 🚨 A named room the user is not in **refuses the whole request** rather
+/// than being left out of the answer. `Subscribe` lists such rooms in
+/// `skipped` and carries on, and that is right for a registration — but a
+/// window is an answer to a question, and an answer that quietly omits one of
+/// the rooms asked about is wrong in a way the client cannot see. It would
+/// show up much later as "where did that room's history go".
+///
+/// Args:
+///     named: the request's `rooms`, or None for every joined room
+/// Return:
+///     Result<Vec<OwnedRoomId>, Reject>  `Forbidden` naming the first room
+///     the user is not in.
+async fn resolve_rooms(
+	services: &Services,
+	user: &UserId,
+	named: Option<&[OwnedRoomId]>,
+) -> std::result::Result<Vec<OwnedRoomId>, Reject> {
+	let Some(named) = named else {
+		return Ok(services
+			.state_cache
+			.rooms_joined(user)
+			.map(ToOwned::to_owned)
+			.collect()
+			.await);
+	};
+
+	for room_id in named {
+		if !services.state_cache.is_joined(user, room_id).await {
+			return Err(Reject::code(
+				RejectCode::Forbidden,
+				format!("you are not in {room_id}, so it has no window for you"),
+			));
+		}
+	}
+
+	Ok(named.to_vec())
+}
+
 /// The window's events, newest first: at most `limit`, all newer than
 /// `cg_seq` and older than `before`, visible to `user`, and each small enough
 /// for a pack of its own.
-async fn collect_window(services: &Services, user: &UserId, request: &RecentRequest, data_max: usize) -> Vec<WindowEvent> {
-	let rooms: Vec<OwnedRoomId> = services
-		.state_cache
-		.rooms_joined(user)
-		.map(ToOwned::to_owned)
-		.collect()
-		.await;
+///
+/// 📎 One room is the cheap case, not a special case: the heap ranks one
+/// stream, so this becomes a single reverse scan of that room's prefix —
+/// which is the same iterator `/messages` uses.
+///
+/// Args:
+///     rooms: what this window covers, already checked (`resolve_rooms`)
+async fn collect_window(
+	services: &Services,
+	user: &UserId,
+	rooms: &[OwnedRoomId],
+	request: &RecentRequest,
+	data_max: usize,
+) -> Vec<WindowEvent> {
+	// 🚨 One stream per room, and each room **once**. A name repeated in the
+	// request would otherwise open two reverse streams over the same prefix,
+	// and the heap would rank the same event from both: every event of that
+	// room would reach the client twice, in a window whose whole contract is
+	// that it holds each event once (PR #51 review, rumia and salvia).
+	//
+	// ⚠️ Deduplicated here, not at each caller's parsing, because this is the
+	// place that turns a name into a scan — and there are two callers now
+	// (a `Recent` and a `Subscribe` catching up), which is exactly the shape
+	// where "every producer remembers to" fails.
+	let mut seen: HashSet<&str> = HashSet::with_capacity(rooms.len());
+	let mut once: Vec<&OwnedRoomId> = Vec::with_capacity(rooms.len());
+	for room_id in rooms {
+		if seen.insert(room_id.as_str()) {
+			once.push(room_id);
+		}
+	}
+	let rooms = once;
 
 	// One reverse stream per room, each already past `before`. The heads
 	// hold the event the heap is ranking; the streams wait behind them.

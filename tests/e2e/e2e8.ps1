@@ -49,8 +49,10 @@ function Batch-Events([byte[]]$data) {
 #   .meta     the last Batch's meta (tc, bc, fs, ls, r) plus, derived the way a client would:
 #             returned = tc; complete = (tc < limit asked); next = ls of the last batch when not complete, else $null
 # An Error pack ends the collection at once and comes back as-is (subtype 3, .events empty).
-function Recent-Ws($ws, [uint32]$id, $limit, $after, $before, $batch) {
+function Recent-Ws($ws, [uint32]$id, $limit, $after, $before, $batch, $rooms) {
   $meta = @{}; if ($null -ne $limit) { $meta.limit = $limit }; if ($null -ne $after) { $meta.cg_seq = $after }; if ($null -ne $before) { $meta.before = $before }; if ($null -ne $batch) { $meta.batch = $batch }
+  # A window narrowed to some rooms; one room plus `before` is that room's history.
+  if ($null -ne $rooms) { $meta.rooms = @($rooms) }
   # Conv: a Recent's id is a conversation number this client picked (wire-format 2.2).
   Ws-Send $ws (Json-Pack 0x14 1 (Conv $id) 0 $meta $null)
   $batches = @(); $events = @()
@@ -188,6 +190,41 @@ Check '[1.6k] cg_seq=0 behaves like no cache' ($zero.meta.returned -eq 3 -and $z
 $hole = Recent-Ws $ws 32 1 $mark $null
 $fill = Recent-Ws $ws 33 100 $mark $hole.meta.next
 Check '[1.6j] limit smaller than the gap: complete=false; cg_seq+before fills the rest to complete' ($hole.meta.returned -eq 1 -and $hole.meta.complete -eq $false -and $fill.meta.returned -eq 1 -and $fill.meta.complete -eq $true -and (GSeqOf $fill.events[0]) -lt (GSeqOf $hole.events[0]) -and (GSeqOf $fill.events[0]) -gt $mark) "hole=$(Describe $hole) fill=$(Describe $fill)"
+
+# [1.6r] a window narrowed to one room is that room's history: the same request
+# with `rooms`, paged by `before`, and the events carry r_seq so the client can
+# see whether it is missing any.
+$onlyTwo = Recent-Ws $ws 40 100 $null $null $null @($r2)
+$roomsOnlyTwo = @($onlyTwo.events | ForEach-Object { $_.room_id } | Select-Object -Unique)
+$allRooms = Recent-Ws $ws 41 100 $null $null
+$twoInAll = @($allRooms.events | Where-Object { $_.room_id -eq $r2 }).Count
+Check '[1.6r] rooms=[room two] returns that room only, and all of it' `
+  ($roomsOnlyTwo.Count -eq 1 -and $roomsOnlyTwo[0] -eq $r2 -and $onlyTwo.events.Count -eq $twoInAll -and $onlyTwo.events.Count -gt 0) `
+  "rooms=$($roomsOnlyTwo -join ' ') scoped=$($onlyTwo.events.Count) in-the-whole-window=$twoInAll"
+$rSeqs = @($onlyTwo.events | ForEach-Object { SeqOf $_ })
+$contiguous = ($rSeqs | Sort-Object) -join ',' -eq (1..$rSeqs.Count -join ',')
+Check '[1.6s] the room history comes back with contiguous r_seq, so a client can tell what it is missing' `
+  $contiguous "r_seq=$(($rSeqs | Sort-Object) -join ',')"
+$firstPage = Recent-Ws $ws 42 2 $null $null $null @($r2)
+$older = Recent-Ws $ws 43 2 $null $firstPage.meta.ls $null @($r2)
+Check '[1.6t] paging one room by `before` walks back through it' `
+  ($firstPage.events.Count -eq 2 -and $older.events.Count -ge 1 -and (GSeqOf $older.events[0]) -lt (GSeqOf $firstPage.events[1])) `
+  "first=$((GSeqOf $firstPage.events[0]),(GSeqOf $firstPage.events[1]) -join ',') older=$(GSeqOf $older.events[0])"
+$notMine = Recent-Ws $ws 44 10 $null $null $null @('!nobody-is-in-this:localhost')
+Check '[1.6u] a room the caller is not in refuses the whole window rather than leaving it out' `
+  ($notMine.subtype -eq 3 -and $notMine.meta.code_id -eq 1302) (Describe $notMine)
+$emptyList = Recent-Ws $ws 45 10 $null $null $null @()
+Check '[1.6v] rooms=[] asks about no rooms and gets one empty Batch' `
+  ($emptyList.meta.tc -eq 0 -and $emptyList.meta.bc -eq 0 -and $emptyList.meta.r -eq 0) (Describe $emptyList)
+# 🚨 A name repeated is one room. Without deduplication the window opens two
+# reverse streams over the same prefix and hands the client every event of it
+# twice (PR #51 review, rumia and salvia).
+$twice = Recent-Ws $ws 46 100 $null $null $null @($r2, $r2)
+$twiceIds = @($twice.events | ForEach-Object { $_.event_id })
+$uniqueIds = @($twiceIds | Select-Object -Unique)
+Check '[1.6w] rooms naming the same room twice is that room once' `
+  ($twiceIds.Count -eq $uniqueIds.Count -and $twiceIds.Count -eq $onlyTwo.events.Count -and [int]$twice.meta.tc -eq [int]$onlyTwo.meta.tc) `
+  "events=$($twiceIds.Count) distinct=$($uniqueIds.Count) once=$($onlyTwo.events.Count) tc=$($twice.meta.tc)"
 
 # [1.7] bob sees only room one
 $wsB = Ws-Open $tokB

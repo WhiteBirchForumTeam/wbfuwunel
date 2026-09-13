@@ -10,6 +10,8 @@
 //! duplicate is possible instead; the client drops it by `event_id`).
 //! `Unsubscribe` leaves the named channels, or all of them.
 
+use std::collections::HashSet;
+
 use ruma::{OwnedRoomId, UserId};
 use serde::Deserialize;
 use serde_json::json;
@@ -61,7 +63,19 @@ pub(super) async fn handle_subscribe(
 		| Some(named) => {
 			let mut rooms = Vec::with_capacity(named.len());
 			let mut skipped = Vec::new();
+			// ⚠️ A name repeated in the request is one room. What this
+			// protects is `skipped`, which is built from this list: a room the
+			// user is not in, named twice, would be reported twice. 📎 It is
+			// **not** what keeps `joined` right — that number comes from the
+			// registry, whose topics are a set, and the red-light run with
+			// this removed still answered `joined=1`. The catch-up is
+			// protected where the scan happens (`collect_window`), which is
+			// the repetition rumia and salvia found (PR #51 review).
+			let mut seen = HashSet::with_capacity(named.len());
 			for room in named {
+				if !seen.insert(room.clone()) {
+					continue;
+				}
 				if services.state_cache.is_joined(user, &room).await {
 					rooms.push(room);
 				} else {
@@ -117,7 +131,16 @@ pub(super) async fn handle_subscribe(
 		.await?;
 
 	if let Some(cg_seq) = meta.cg_seq.filter(|cg_seq| *cg_seq != 0) {
-		let window = recent::window_after(services, user, Some(PduCount::from_signed(cg_seq)), services.config.wbf_recent_max_limit).await;
+		// The rooms this subscription actually covers — the named ones that
+		// checked out, or every joined room when it named none.
+		let window = recent::window_after(
+			services,
+			user,
+			&rooms,
+			Some(PduCount::from_signed(cg_seq)),
+			services.config.wbf_recent_max_limit,
+		)
+		.await;
 		let events: Vec<PushedEvent<'_>> = window
 			.iter()
 			.map(|event| PushedEvent { g_seq: event.g_seq, json: &event.json })

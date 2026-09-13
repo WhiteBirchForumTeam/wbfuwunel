@@ -147,6 +147,9 @@ fn current() -> Value {
 			pack("recent_first_start", Kind::Event, 0x01, Flags::default(), conversation(10), 0, br#"{"limit":2,"batch":1}"#, b""),
 			pack("recent_with_cached_g_seq", Kind::Event, 0x01, Flags::default(), conversation(11), 0, br#"{"limit":320,"cg_seq":4700,"batch":10}"#, b""),
 			pack("recent_next_window", Kind::Event, 0x01, Flags::default(), conversation(12), 0, br#"{"limit":320,"cg_seq":4700,"before":4711,"batch":10}"#, b""),
+			// One room plus `before` is that room's history: the same request
+			// with the window narrowed, not a second way of asking.
+			pack("recent_one_room_history", Kind::Event, 0x01, Flags::default(), conversation(13), 0, br#"{"rooms":["!r:localhost"],"before":4711,"limit":50,"batch":10}"#, b""),
 			// The window for `recent_first_start` has two events and a batch of one,
 			// so it comes back as two Batch packs: seq 0 with r=1, seq 1 with r=0.
 			// Each event in data is a big-endian u32 length and then its JSON.
