@@ -922,6 +922,37 @@ fn the_default_send_queue_budget_holds_several_packs() {
 }
 
 #[test]
+fn a_window_budget_under_one_pack_of_data_is_refused_at_startup() {
+	// A window this small still makes progress (its first event always
+	// joins), but then "a window holds at most this many bytes" is false for
+	// exactly the events that make the bound matter.
+	let config = config_from_toml(
+		"[global]
+wbf_window_max_bytes = 1048576
+",
+	)
+	.expect("the value parses");
+
+	let err = check(&config)
+		.expect_err("a window budget under wbf_data_max_bytes must be refused")
+		.to_string();
+	assert!(err.contains("wbf_window_max_bytes"), "{err}");
+	assert!(err.contains("wbf_data_max_bytes"), "the message names the other knob: {err}");
+}
+
+#[test]
+fn the_default_window_budget_holds_a_default_window_of_ordinary_events() {
+	// ⭐ The byte cap is there for the pathological window, not the ordinary
+	// one: a full `Recent` of 500 events at 4 KiB each must still come back
+	// whole, or every client would page twice as often for nothing.
+	let config = config_from_toml("[global]\n").expect("defaults parse");
+
+	check(&config).expect("the defaults are a working configuration");
+	assert!(config.wbf_window_max_bytes >= config.wbf_recent_max_limit * 4096);
+	assert!(config.wbf_window_max_bytes >= config.wbf_device_fetch_max_limit * 4096);
+}
+
+#[test]
 fn an_s3_part_size_below_what_s3_accepts_is_refused_at_startup() {
 	// 🚨 The failure it replaces is the nastiest kind: S3 takes every
 	// undersized part without complaint and refuses the whole upload at

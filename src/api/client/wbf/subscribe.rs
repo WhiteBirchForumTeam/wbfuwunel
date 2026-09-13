@@ -142,6 +142,7 @@ pub(super) async fn handle_subscribe(
 		)
 		.await;
 		let events: Vec<PushedEvent<'_>> = window
+			.events
 			.iter()
 			.map(|event| PushedEvent { g_seq: event.g_seq, json: &event.json })
 			.collect();
@@ -150,6 +151,7 @@ pub(super) async fn handle_subscribe(
 			.push_window(
 				ctx.connection,
 				&events,
+				window.is_cut_short,
 				services.config.wbf_push_max_events_per_pack,
 				services.config.wbf_data_max_bytes,
 			);

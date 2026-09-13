@@ -20,7 +20,7 @@ use tuwunel_core::{
 	debug_warn,
 	wbf::{
 		Flags, Kind, PackBuilder, PackError, PackView, RejectCode,
-		events::{length_prefixed, list_pack_ranges},
+		events::{WindowBudget, length_prefixed, list_pack_ranges},
 	},
 };
 use tuwunel_service::{
@@ -66,6 +66,14 @@ struct DestroyMeta {
 struct Item {
 	count: u64,
 	json: Vec<u8>,
+}
+
+/// A window of the queue, oldest first, and whether it stopped at a cap.
+struct ItemWindow {
+	items: Vec<Item>,
+	/// True when the window stopped at `limit` or at `wbf_window_max_bytes`,
+	/// so newer items may follow; the wire's `more`.
+	is_cut_short: bool,
 }
 
 /// `Device/Subscribe`: take this device's queue and be pushed what arrives.
@@ -136,15 +144,17 @@ pub(super) async fn handle_device_subscribe(
 	// catch-up may therefore repeat an item, which costs the client an
 	// idempotent import.
 	if let Some(cd_seq) = meta.cd_seq {
-		let items = read_items(services, &session.user, &device, Some(cd_seq), services.config.wbf_device_fetch_default_limit).await;
-		let pushed: Vec<PushedItem<'_>> = items
+		let window = read_items(services, &session.user, &device, Some(cd_seq), services.config.wbf_device_fetch_default_limit).await;
+		let pushed: Vec<PushedItem<'_>> = window
+			.items
 			.iter()
 			.map(|item| PushedItem { count: item.count, json: &item.json })
 			.collect();
-		services.streams.push_to_device(
+		services.streams.push_device_window(
 			&session.user,
 			&device,
 			&pushed,
+			window.is_cut_short,
 			services.config.wbf_push_max_events_per_pack,
 			services.config.wbf_data_max_bytes,
 		);
@@ -178,7 +188,8 @@ pub(super) async fn handle_device_unsubscribe(
 ///     view: meta example: `{"limit":1000,"cd_seq":4711}` or `{}`
 /// Return:
 ///     Result<(), Failure>  a `Batch` per pack, `r = 0` on the last one; one
-///     empty `Batch` when there is nothing.
+///     empty `Batch` when there is nothing. `more: true` on every `Batch`
+///     when the window stopped at `limit` or `wbf_window_max_bytes`.
 pub(super) async fn handle_device_fetch(
 	services: &Services,
 	ctx: &PackContext<'_>,
@@ -198,14 +209,15 @@ pub(super) async fn handle_device_fetch(
 		.unwrap_or(services.config.wbf_device_fetch_default_limit)
 		.min(services.config.wbf_device_fetch_max_limit);
 
-	let items = read_items(services, &session.user, &session.device, meta.cd_seq, limit).await;
+	let window = read_items(services, &session.user, &session.device, meta.cd_seq, limit).await;
+	// One pack at a time: building them all first held the window twice.
 	for pack in build_batches(
 		view.header.id,
-		&items,
+		&window,
 		services.config.wbf_device_default_batch,
 		services.config.wbf_data_max_bytes,
-	)? {
-		reply.send(pack).await?;
+	) {
+		reply.send(pack?).await?;
 	}
 
 	Ok(())
@@ -288,55 +300,79 @@ fn parse_counts(tc: usize, data: &[u8]) -> Result<Vec<u64>, Reject> {
 		.collect())
 }
 
-/// The queue's items after `cd_seq`, oldest first.
+/// The queue's items after `cd_seq`, oldest first: at most `limit` and at
+/// most `wbf_window_max_bytes` of them, bytes asked first.
 async fn read_items(
 	services: &Services,
 	user: &UserId,
 	device: &DeviceId,
 	cd_seq: Option<u64>,
 	limit: usize,
-) -> Vec<Item> {
+) -> ItemWindow {
 	use futures::StreamExt;
 
-	services
+	let mut budget = WindowBudget::new(limit, services.config.wbf_window_max_bytes);
+	let mut items = Vec::new();
+	let stream = services
 		.users
-		.get_to_device_events(user, device, cd_seq, None)
-		.take(limit)
-		.map(|(count, event)| Item { count, json: event.json().get().as_bytes().to_vec() })
-		.collect()
-		.await
+		.get_to_device_events(user, device, cd_seq, None);
+	let mut stream = std::pin::pin!(stream);
+
+	while !budget.is_count_full() {
+		let Some((count, event)) = stream.next().await else {
+			break;
+		};
+		let json = event.json().get().as_bytes();
+		if !budget.try_admit(json.len()) {
+			// Full by bytes: this item is the next window's first, found again
+			// by the client's `cd_seq` (the last `nt` it was sent).
+			break;
+		}
+		items.push(Item { count, json: json.to_vec() });
+	}
+
+	ItemWindow { items, is_cut_short: budget.is_cut_short() }
 }
 
-/// Cuts a window into `Batch` packs answering request `id`.
+/// Cuts a window into `Batch` packs answering request `id`, building each
+/// one only when it is asked for.
 ///
 /// Args:
-///     items: oldest first
+///     window: oldest first
 ///     batch: `wbf_device_default_batch`
 ///     data_max: `wbf_data_max_bytes`; a pack is cut here too
 /// Return:
-///     Result<Vec<Vec<u8>>, PackError>  the packs in order, `seq` 0, 1, 2…;
-///     exactly one (empty) pack for an empty window, and the last one has
-///     `r = 0`.
-fn build_batches(id: u64, items: &[Item], batch: usize, data_max: usize) -> Result<Vec<Vec<u8>>, PackError> {
+///     impl Iterator<Item = Result<Vec<u8>, PackError>>  the packs in order,
+///     `seq` 0, 1, 2…; exactly one (empty) pack for an empty window, the last
+///     one has `r = 0`, and `more` is the same in all of them.
+fn build_batches(
+	id: u64,
+	window: &ItemWindow,
+	batch: usize,
+	data_max: usize,
+) -> impl Iterator<Item = Result<Vec<u8>, PackError>> + Send + '_ {
+	let items = &window.items;
 	let total = items.len();
-	if items.is_empty() {
-		return Ok(vec![batch_pack(id, 0, total, &[], 0)?]);
+
+	let mut ranges = list_pack_ranges(items.iter().map(|item| item.json.len()), batch, data_max);
+	if ranges.is_empty() {
+		// An empty window is still answered, by one empty Batch that ends it.
+		ranges.push(0..0);
 	}
 
-	let mut packs = Vec::new();
-	let mut seq: u32 = 0;
 	let mut sent: usize = 0;
-	for range in list_pack_ranges(items.iter().map(|item| item.json.len()), batch, data_max) {
-		let in_batch = &items[range];
-		sent = sent.saturating_add(in_batch.len());
-		packs.push(batch_pack(id, seq, total, in_batch, total.saturating_sub(sent))?);
-		seq = seq.saturating_add(1);
-	}
-
-	Ok(packs)
+	ranges
+		.into_iter()
+		.enumerate()
+		.map(move |(position, range)| {
+			let in_batch = &items[range];
+			sent = sent.saturating_add(in_batch.len());
+			let seq = u32::try_from(position).unwrap_or(u32::MAX);
+			batch_pack(id, seq, total, in_batch, total.saturating_sub(sent), window.is_cut_short)
+		})
 }
 
-fn batch_pack(id: u64, seq: u32, tc: usize, items: &[Item], remaining: usize) -> Result<Vec<u8>, PackError> {
+fn batch_pack(id: u64, seq: u32, tc: usize, items: &[Item], remaining: usize, more: bool) -> Result<Vec<u8>, PackError> {
 	let counts: Vec<u64> = items.iter().map(|item| item.count).collect();
 	let data = length_prefixed(items.iter().map(|item| item.json.as_slice()))?;
 
@@ -348,6 +384,7 @@ fn batch_pack(id: u64, seq: u32, tc: usize, items: &[Item], remaining: usize) ->
 			"nt": counts.last().copied().unwrap_or(0),
 			"counts": counts,
 			"r": remaining,
+			"more": more,
 		}))?
 		.data(&data)?
 		.finish())
@@ -376,9 +413,15 @@ fn items_destroyed_pack(id: u64, tc: usize, destroyed: &[u64]) -> Result<Vec<u8>
 mod tests {
 	use tuwunel_core::wbf::{Kind, decode, events::split_length_prefixed};
 
-	use super::{BATCH, ITEMS_DESTROYED, Item, build_batches, items_destroyed_pack, parse_counts};
+	use super::{BATCH, ITEMS_DESTROYED, Item, ItemWindow, build_batches, items_destroyed_pack, parse_counts};
 
 	fn item(count: u64, json: &str) -> Item { Item { count, json: json.as_bytes().to_vec() } }
+
+	fn packs(window: &ItemWindow, batch: usize) -> Vec<Vec<u8>> {
+		build_batches(7, window, batch, 4096)
+			.collect::<Result<_, _>>()
+			.expect("builds")
+	}
 
 	#[test]
 	fn counts_are_eight_bytes_each_and_the_meta_must_agree() {
@@ -395,7 +438,7 @@ mod tests {
 
 	#[test]
 	fn an_empty_window_is_one_empty_batch_that_ends_it() {
-		let packs = build_batches(7, &[], 100, 4096).expect("builds");
+		let packs = packs(&ItemWindow { items: Vec::new(), is_cut_short: false }, 100);
 
 		assert_eq!(packs.len(), 1);
 		let mut pack = packs.into_iter().next().expect("one");
@@ -406,13 +449,26 @@ mod tests {
 		assert_eq!(meta["tc"], 0);
 		assert_eq!(meta["bc"], 0);
 		assert_eq!(meta["r"], 0, "an empty window is already over");
+		assert_eq!(meta["more"], false, "and nothing is behind it");
+	}
+
+	#[test]
+	fn every_batch_of_a_window_cut_short_says_more() {
+		// A window full by bytes has fewer items than `limit`, which reads as
+		// "the queue is drained" unless something says otherwise.
+		let items: Vec<Item> = (0..5).map(|n| item(500 + n, "{}")).collect();
+
+		for mut pack in packs(&ItemWindow { items, is_cut_short: true }, 2) {
+			let view = decode(&mut pack).expect("decodes");
+			assert_eq!(view.meta_json().expect("meta")["more"], true);
+		}
 	}
 
 	#[test]
 	fn batches_run_oldest_first_and_carry_every_count() {
 		let items: Vec<Item> = (0..5).map(|n| item(500 + n, "{\"a\":1}")).collect();
 
-		let packs = build_batches(7, &items, 2, 4096).expect("builds");
+		let packs = packs(&ItemWindow { items, is_cut_short: false }, 2);
 
 		assert_eq!(packs.len(), 3, "five items, two to a pack");
 		let mut remaining_seen = Vec::new();

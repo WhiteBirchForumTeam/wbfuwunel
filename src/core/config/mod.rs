@@ -3766,6 +3766,23 @@ pub struct Config {
 	#[serde(default = "default_wbf_device_default_batch")]
 	pub wbf_device_default_batch: usize,
 
+	/// Most bytes of events one window may hold, in bytes: an `Event/Recent`,
+	/// a `Device/Fetch`, and the catch-up either `Subscribe` sends. A window is
+	/// read whole before its first pack goes out, so this is what one such
+	/// request may cost in memory; the event counts above (`limit`) only
+	/// bound it by how large each event happens to be.
+	///
+	/// It is checked before the count: a window full by bytes stops with fewer
+	/// events than asked for and says `more: true`, so the client asks again
+	/// rather than concluding it has everything.
+	///
+	/// Must be at least `wbf_data_max_bytes`, so the largest event a pack can
+	/// carry fits in a window; the server refuses to start below that.
+	///
+	/// default: 8388608
+	#[serde(default = "default_wbf_window_max_bytes")]
+	pub wbf_window_max_bytes: usize,
+
 	/// How many draft pieces (`Stream/Keypoint`, `Delta`, `Append`) one
 	/// device may send per second. A draft is a message still being written —
 	/// an LLM emitting tokens, a long message typed in parts — so pieces are
@@ -6131,6 +6148,8 @@ fn default_wbf_device_fetch_default_limit() -> usize { 1000 }
 fn default_wbf_device_fetch_max_limit() -> usize { 1000 }
 
 fn default_wbf_device_default_batch() -> usize { 100 }
+
+fn default_wbf_window_max_bytes() -> usize { 8 * 1024 * 1024 }
 
 fn default_wbf_draft_pieces_per_second() -> f64 { 30.0 }
 

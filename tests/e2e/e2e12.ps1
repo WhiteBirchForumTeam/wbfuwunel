@@ -136,6 +136,7 @@ Ws-Send $ws (Json-Pack 0x16 1 (Conv 12) 0 @{ cd_seq = 0 } $null)
 do { $batch = Recv-Or-Null $ws 5000; if ($null -eq $batch) { break }; if ($batch.kind -eq 0x16 -and $batch.subtype -eq 2) { $fetch += ,$batch } } while ($batch.meta.r -ne 0)
 $fetched = @($fetch | ForEach-Object { Counts $_ })
 Check '[1.5] Fetch returns the queue oldest first, r=0 on the last pack' ($fetched.Count -eq 2 -and $fetched[0] -lt $fetched[1] -and $fetch[-1].meta.r -eq 0) "counts=$($fetched -join ',')"
+Check '[1.5b] two items under a limit of 1000 and the window budget: more=false, nothing behind them' ($fetch.Count -gt 0 -and @($fetch | Where-Object { $_.meta.more -ne $false }).Count -eq 0) "more=$(@($fetch | ForEach-Object { $_.meta.more }) -join ',')"
 
 # [1.6] destroy: an Ack that the command arrived, then the result
 $destroy = Destroy $ws 13 $fetched

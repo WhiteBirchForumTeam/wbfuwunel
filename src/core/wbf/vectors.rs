@@ -153,9 +153,11 @@ fn current() -> Value {
 			// The window for `recent_first_start` has two events and a batch of one,
 			// so it comes back as two Batch packs: seq 0 with r=1, seq 1 with r=0.
 			// Each event in data is a big-endian u32 length and then its JSON.
-			pack("batch_first", Kind::Event, 0x03, Flags::IS_RESPONSE, conversation(10), 0, br#"{"bc":1,"fs":4712,"ls":4712,"r":1,"tc":2}"#, &length_prefixed(&[br#"{"content":{"body":"b","msgtype":"m.text"},"event_id":"$b:localhost","origin_server_ts":2,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":1,"org.wbftw.wbfuwunel.g_seq":4712,"org.wbftw.wbfuwunel.r_seq":2}}"#])),
-			pack("batch_last", Kind::Event, 0x03, Flags::IS_RESPONSE, conversation(10), 1, br#"{"bc":1,"fs":4711,"ls":4711,"r":0,"tc":2}"#, &length_prefixed(&[br#"{"content":{"body":"a","msgtype":"m.text"},"event_id":"$a:localhost","origin_server_ts":1,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":2,"org.wbftw.wbfuwunel.g_seq":4711,"org.wbftw.wbfuwunel.r_seq":1}}"#])),
-			pack("batch_empty_window", Kind::Event, 0x03, Flags::IS_RESPONSE, conversation(11), 0, br#"{"bc":0,"fs":0,"ls":0,"r":0,"tc":0}"#, b""),
+			// `more` is true in both: two events filled a `limit` of two, so older
+			// ones may follow. A window full by bytes says the same with fewer.
+			pack("batch_first", Kind::Event, 0x03, Flags::IS_RESPONSE, conversation(10), 0, br#"{"bc":1,"fs":4712,"ls":4712,"more":true,"r":1,"tc":2}"#, &length_prefixed(&[br#"{"content":{"body":"b","msgtype":"m.text"},"event_id":"$b:localhost","origin_server_ts":2,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":1,"org.wbftw.wbfuwunel.g_seq":4712,"org.wbftw.wbfuwunel.r_seq":2}}"#])),
+			pack("batch_last", Kind::Event, 0x03, Flags::IS_RESPONSE, conversation(10), 1, br#"{"bc":1,"fs":4711,"ls":4711,"more":true,"r":0,"tc":2}"#, &length_prefixed(&[br#"{"content":{"body":"a","msgtype":"m.text"},"event_id":"$a:localhost","origin_server_ts":1,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":2,"org.wbftw.wbfuwunel.g_seq":4711,"org.wbftw.wbfuwunel.r_seq":1}}"#])),
+			pack("batch_empty_window", Kind::Event, 0x03, Flags::IS_RESPONSE, conversation(11), 0, br#"{"bc":0,"fs":0,"ls":0,"more":false,"r":0,"tc":0}"#, b""),
 			pack("subscribe_account_wide", Kind::Event, 0x04, Flags::default(), conversation(20), 0, br#"{"cg_seq":4700}"#, b""),
 			pack("subscribe_rooms", Kind::Event, 0x04, Flags::default(), conversation(21), 0, br#"{"rooms":["!r:localhost"]}"#, b""),
 			pack("ack_subscribe", Kind::Control, 0x02, Flags::IS_RESPONSE, conversation(20), 0, br#"{"joined":3,"latest_g_seq":4712,"skipped":[]}"#, b""),
@@ -172,7 +174,7 @@ fn current() -> Value {
 			pack("device_subscribe", Kind::Device, 0x04, Flags::default(), conversation(30), 0, br#"{"cd_seq":4711,"device_id":"RJYKSTBOIE"}"#, b""),
 			pack("ack_device_subscribe", Kind::Control, 0x02, Flags::IS_RESPONSE, conversation(30), 0, br#"{"latest_cd_seq":4730}"#, b""),
 			pack("device_fetch", Kind::Device, 0x01, Flags::default(), conversation(31), 0, br#"{"cd_seq":4711,"limit":1000}"#, b""),
-			pack("device_batch", Kind::Device, 0x02, Flags::IS_RESPONSE, conversation(31), 0, br#"{"bc":1,"counts":[4712],"nt":4712,"ot":4712,"r":0,"tc":1}"#, &length_prefixed(&[OLM_ITEM])),
+			pack("device_batch", Kind::Device, 0x02, Flags::IS_RESPONSE, conversation(31), 0, br#"{"bc":1,"counts":[4712],"more":false,"nt":4712,"ot":4712,"r":0,"tc":1}"#, &length_prefixed(&[OLM_ITEM])),
 			pack("device_push", Kind::Device, 0x06, Flags::IS_RESPONSE, conversation(30), 0, br#"{"bc":1,"counts":[4713],"gap":false,"nt":4713,"ot":4713}"#, &length_prefixed(&[OLM_ITEM])),
 			// The destroy command and its result carry counts as raw big-endian
 			// u64s, eight bytes each with no separator: a separator byte would

@@ -82,6 +82,79 @@ where
 	ranges
 }
 
+/// Where a window stops: the one rule `Event/Recent`, `Device/Fetch` and the
+/// catch-up of both subscriptions share. A window is gathered whole before
+/// its first pack goes out, so what it may hold is what one request may cost
+/// in memory — and that is counted in bytes, not only in events: 500 events
+/// of a pack's width each would be a gigabyte.
+///
+/// 🚨 **Bytes are asked first.** A window full by bytes stops even when it
+/// holds fewer than `count_max` events, and that is exactly the case a client
+/// must be told about, because "fewer than I asked for" used to mean "there
+/// are no more". Whoever uses this reports `is_cut_short` on the wire.
+///
+/// ⚠️ The first event always joins, whatever its size: a window that could
+/// refuse its first event would answer every later request with the same
+/// empty window, and the client would page forever or give up with events
+/// still ahead of it. The configuration keeps that event inside the budget
+/// anyway (`wbf_window_max_bytes` is at least `wbf_data_max_bytes`).
+///
+/// 🚨 **Once it refuses, it refuses everything after.** The event it refused
+/// is the next one the client pages to; a smaller event slipping in behind it
+/// would put a hole in the window that the cursor has already walked past.
+// Not `Copy` on purpose: a copy is a second counter that has not seen what
+// the first one admitted, and a window checked against it would overflow.
+#[expect(missing_copy_implementations)]
+#[derive(Debug)]
+pub struct WindowBudget {
+	count_max: usize,
+	bytes_max: usize,
+	count: usize,
+	bytes: usize,
+	is_closed: bool,
+}
+
+impl WindowBudget {
+	/// Args:
+	///     count_max: the request's `limit`, example: 320
+	///     bytes_max: `wbf_window_max_bytes`, example: 8388608
+	#[must_use]
+	pub const fn new(count_max: usize, bytes_max: usize) -> Self { Self { count_max, bytes_max, count: 0, bytes: 0, is_closed: false } }
+
+	/// Args:
+	///     event_len: the event's JSON length, example: 1200
+	/// Return:
+	///     bool  true when the event joins the window (and is counted); false
+	///     when the window is full by bytes or by count, and then nothing is
+	///     counted and every later call is false too.
+	pub fn try_admit(&mut self, event_len: usize) -> bool {
+		let framed = framed_len(event_len);
+		let is_over_bytes = self.count > 0 && self.bytes.saturating_add(framed) > self.bytes_max;
+		if self.is_closed || is_over_bytes || self.is_count_full() {
+			self.is_closed = true;
+			return false;
+		}
+
+		self.bytes = self.bytes.saturating_add(framed);
+		self.count = self.count.saturating_add(1);
+		true
+	}
+
+	/// Return:
+	///     bool  true once `count_max` events have joined (at once for a
+	///     `count_max` of 0).
+	#[must_use]
+	pub const fn is_count_full(&self) -> bool { self.count >= self.count_max }
+
+	/// Return:
+	///     bool  true when the window stopped at one of its caps, so there may
+	///     be more behind it (the wire's `more`); false when it has not been
+	///     refused and is not full, which, once the caller has run out of
+	///     events, means it ran out before the caps did.
+	#[must_use]
+	pub const fn is_cut_short(&self) -> bool { self.is_closed || self.is_count_full() }
+}
+
 /// The inverse, for tests and tooling.
 ///
 /// Args:
@@ -110,7 +183,7 @@ pub fn split_length_prefixed(data: &[u8]) -> Result<Vec<&[u8]>, PackError> {
 
 #[cfg(test)]
 mod tests {
-	use super::{framed_len, length_prefixed, list_pack_ranges, split_length_prefixed};
+	use super::{WindowBudget, framed_len, length_prefixed, list_pack_ranges, split_length_prefixed};
 
 	#[test]
 	fn round_trips_and_keeps_order() {
@@ -149,5 +222,61 @@ mod tests {
 		// packs is not on the wire, so it goes out alone rather than with a
 		// neighbour.
 		assert_eq!(list_pack_ranges([4, 9_000, 4], 10, 100), vec![0..1, 1..2, 2..3]);
+	}
+
+	#[test]
+	fn a_window_full_by_bytes_stops_before_its_count() {
+		// Room for two events by bytes, twenty by count: the third is refused
+		// although the count is nowhere near, and so is anything after it.
+		let mut budget = WindowBudget::new(20, 2 * framed_len(100));
+		assert!(budget.try_admit(100));
+		assert!(budget.try_admit(100));
+		assert!(!budget.try_admit(100), "bytes are asked first");
+		assert!(!budget.is_count_full(), "and the count was not what stopped it");
+		assert!(budget.is_cut_short(), "so the client must be told there may be more");
+	}
+
+	#[test]
+	fn a_refused_window_stays_refused_even_for_an_event_that_would_fit() {
+		// 4 bytes of room are left after the first event; the 100-byte one is
+		// refused, and the 0-byte one behind it must not slip into the hole.
+		let mut budget = WindowBudget::new(20, framed_len(100) + framed_len(0));
+		assert!(budget.try_admit(100));
+		assert!(!budget.try_admit(100));
+		assert!(!budget.try_admit(0), "the cursor is already past the refused event");
+	}
+
+	#[test]
+	fn a_window_full_by_count_refuses_even_a_tiny_event() {
+		let mut budget = WindowBudget::new(2, 1 << 20);
+		assert!(budget.try_admit(1));
+		assert!(budget.try_admit(1));
+		assert!(budget.is_count_full());
+		assert!(!budget.try_admit(1));
+		assert!(budget.is_cut_short());
+	}
+
+	#[test]
+	fn a_window_that_ran_out_of_events_is_not_cut_short() {
+		let mut budget = WindowBudget::new(10, 1 << 20);
+		assert!(!budget.is_cut_short(), "nothing asked for yet");
+		assert!(budget.try_admit(1));
+		assert!(budget.try_admit(1));
+		assert!(!budget.is_cut_short(), "two of ten, both caps far away");
+	}
+
+	#[test]
+	fn the_first_event_joins_whatever_its_size() {
+		// Refusing it would give every later request the same empty window.
+		let mut budget = WindowBudget::new(10, 100);
+		assert!(budget.try_admit(9_000));
+		assert!(!budget.try_admit(1), "but nothing joins after it");
+	}
+
+	#[test]
+	fn a_count_of_zero_is_full_before_anything_joins() {
+		let mut budget = WindowBudget::new(0, 1 << 20);
+		assert!(budget.is_count_full());
+		assert!(!budget.try_admit(1));
 	}
 }

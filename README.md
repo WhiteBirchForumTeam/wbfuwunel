@@ -64,13 +64,13 @@ fork 專屬的文件都在 [`docs/design/`](docs/design/)。它們刻意不進�
 | E2EE 下的媒體引用：送訊息時宣告 `attachments`（header 或 `Event/Send`）、驗證、對舊 client 的一次性警告 | [docs/design/media-attachments.md](docs/design/media-attachments.md) |
 | **媒體持有者集合**：以外鍵取代引用計數，重做是 no-op；五張表、一個管理器、收集器與 7 天掃描 | [docs/design/media-holders.md](docs/design/media-holders.md) |
 | PR #24 合併後的再審與外部審查（2026-09-05 兩輪）的逐條驗證：哪些已修、哪些仍在、建議怎麼修 | [docs/design/review-followups-2026-09-06.md](docs/design/review-followups-2026-09-06.md) |
-| 分塊上傳、續傳、range 下載（提案，以塊加密、CRC、先 HTTP 後 WebSocket） | [docs/design/chunked-upload.md](docs/design/chunked-upload.md) |
+| 分塊上傳、續傳、range 下載（提案，已實作：PR #16、#18；以塊加密、CRC、先 HTTP 後 WebSocket） | [docs/design/chunked-upload.md](docs/design/chunked-upload.md) |
 | **分塊上傳／下載規格書**（給 client 開發者：byte 排法、每個訊息、錯誤碼、流程） | [docs/design/chunked-upload-spec.md](docs/design/chunked-upload-spec.md) |
 | 規格的黃金測試向量（server 實作產生，client 複製一份對著測；漂移在測試階段被抓到） | [docs/design/wbf-vectors.json](docs/design/wbf-vectors.json) |
-| **WS 訂閱與推送**（已實作，PR #36；註冊表 PR #42 抽成所有串流共用的核心）：一房一個純記憶體 channel、訂閱者是連線、推送絕不阻塞 append（掉了記 `gap`、用 `Recent` 補）；§2.1 是 **client 的三條契約**（水位認 `ls`、沒收到 `gap` 不等於沒漏過、點名訂閱不拿非訂閱房推水位） | [docs/design/wbf-event-push.md](docs/design/wbf-event-push.md) |
+| **WS 訂閱與推送**（已實作，PR #36；註冊表 PR #42 抽成所有串流共用的核心）：一房一個純記憶體 channel、訂閱者是連線、推送絕不阻塞 append（掉了記 `gap`、用 `Recent` 補）；§2.1 是 **client 的契約**（水位認 `ls`、沒收到 `gap` 不等於沒漏過；點名訂閱的補窗從 PR #51 起只含它自己的房、被上限截斷的補窗從 PR #53 起帶 `gap`） | [docs/design/wbf-event-push.md](docs/design/wbf-event-push.md) |
 | **to-device 走通道**（`0x16 Device`，已實作，PR #43）：訂閱一個裝置、推送、`Fetch` 補洞；**銷毀是帶結果的命令**（`ItemsDestroy` → `Ack` 收到 → `ItemsDestroyed` 真的沒了的那些），沒銷毀的永遠留著；一個裝置同時只有一條連線在收，而且**後來的接手**，被接手的那條收到 `Superseded`(1505) | [docs/design/wbf-to-device.md](docs/design/wbf-to-device.md) |
-| 📄 Draft Message 第四版：佔位事件當錨（`draft_id = g_seq`）、`Keypoint`（≤ 8 KiB，換掉整個 buffer）／`Delta`／`Append` 只廣播、`Demand` 要全文、收尾是 client 自己 `Abandon` 再送正常訊息（草案） | [docs/design/streaming-messages.md](docs/design/streaming-messages.md) |
-| pack 處理管線（§1–§6 已實作，PR #33）：連線即佇列、每 device 4 條 WS（發 token 前的 `admit` 閘門）、發送 task、handler 契約與准入表、`Recent` 的 client 拉窗 ＋ `Event/Batch` 串流、HTTP→WS 搬遷的模子；§8 第二部分未開 | [docs/design/wbf-pack-pipeline.md](docs/design/wbf-pack-pipeline.md) |
+| **Draft Message**（`0x02 Stream`，已實作，PR #45）：佔位事件當錨（草稿用它的 `g_seq` 命名）、`Keypoint`（≤ 8 KiB，換掉整個 buffer）／`Delta`／`Append` 只廣播、`Demand` 要全文、收尾是 client 自己 `Abandon` 再送正常訊息 | [docs/design/streaming-messages.md](docs/design/streaming-messages.md) |
+| pack 處理管線（§1–§6 已實作，PR #33；§8 第二部分 PR #48）：連線即佇列、每 device 4 條 WS（發 token 前的 `admit` 閘門）、發送 task 與**以 bytes 計的佇列預算**（PR #50）、handler 契約與准入表、`Recent` 的 client 拉窗 ＋ `Event/Batch` 串流（**窗的 bytes 上限與 `more`**，PR #53）、HTTP→WS 搬遷的模子 | [docs/design/wbf-pack-pipeline.md](docs/design/wbf-pack-pipeline.md) |
 | WebSocket 通道的二進位封包外框（兩者共用）；**§2.1 連線健康計數器**（連續 8 個解不開的框就關線）；**§3.4 錯誤詞表**（每個 `code` 的序號、意思、client 該怎麼辦；不認得就不認得）；§6.1 連線背後的 session（每個 message 重驗、關機 join）；§6.3 `Session` kind：`Login`／`Refresh`／`Logout` 走通道、匿名升級 30 秒、HTTP 與通道共用的登入限速 | [docs/design/wbf-wire-format.md](docs/design/wbf-wire-format.md) |
 | 每房連續序號 `r_seq`、全域序號 `g_seq`，與跨房間的 `Event/Recent`（client 帶快取水位、只拿差異） | [docs/design/room-seq-and-recent.md](docs/design/room-seq-and-recent.md) |
 
