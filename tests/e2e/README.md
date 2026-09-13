@@ -5,13 +5,13 @@
 
 | 腳本 | 驗什麼 | 設計文件 |
 |---|---|---|
-| `e2e6.ps1` | 分塊上傳／下載（HTTP 一包一請求）：Create、有序塊、續傳、Seal、截斷、串流模式、按塊與明文位置讀、Abort、sweeper。**舊式**：每行印預期值，沒有 pass／fail 總結，看 `results.txt` | [chunked-upload-spec.md](../../docs/design/chunked-upload-spec.md) |
-| `e2e7.ps1` | WebSocket 通道：Hello、Ping、一 message 一 pack、HTTP 與 WS 交錯續傳、idle 關線；情境 3：鎖定帳號兩個傳輸都拒、登出後下一個 pack 被拒並關線、連線開著時 `!admin server shutdown` 正常退出無 dangling；情境 4（Session kind）：匿名升級只能 Hello／Ping、3 秒沒登入被關、`Login`／`Refresh`／`Logout`、錯密碼、HTTP 與 channel 共用的登入限速、同一連線換帳號、logout-all 關掉另一條、鎖定帳號不能登入；情境 5（每 device 連線上限，設 2）：第三條 Bearer 升級 429、另一 device 不受影響、匿名 Login 滿了回 `TooManyConnections` 並被關且**不發 token**（原連線的 token 仍可用）、關一條後名額回來、同連線再登入不多佔、Logout 放回名額。舊式同上 | [wbf-wire-format.md](../../docs/design/wbf-wire-format.md) §6.1、§6.3、[review-followups-2026-09-06.md](../../docs/design/review-followups-2026-09-06.md) §2.3／2.4 |
-| `e2e8.ps1` | 每房 `r_seq`、全域 `g_seq`、`Event/Recent` 的 `Batch` 串流（一窗、`tc`／`bc`／`fs`／`ls`／`r`、`cg_seq`／`before` 翻窗、`batch`／`limit` 夾值、byte 上限切 Batch、HTTP 回 `Unsupported`、兩窗之間 Ping）、舊庫啟動的一次性編號；情境 4：30 個房間的一窗 first byte 量測（冷／暖，門檻只有「冷 < 2 秒」） | [room-seq-and-recent.md](../../docs/design/room-seq-and-recent.md) |
+| `e2e6.ps1` | 分塊上傳／下載（HTTP 一包一請求）：Create、有序塊、續傳、Seal、截斷、串流模式、按塊與明文位置讀、Abort、sweeper；情境 6：本地 Seal 256 MiB（128 × 2 MiB）時**在 Seal 還在飛的時候取樣** server 的 working set（沒修漲 256 MiB、修了 ~10 MiB）；情境 7：重啟讓快取變冷後 `Status` 與 `Seal` 同時在飛，已封存媒體的列不被誤刪（PR #48）。**舊式**：每行印預期值，沒有 pass／fail 總結，看 `results.txt` | [chunked-upload-spec.md](../../docs/design/chunked-upload-spec.md) |
+| `e2e7.ps1` | WebSocket 通道：Hello、Ping、一 message 一 pack、HTTP 與 WS 交錯續傳、idle 關線；情境 3：鎖定帳號兩個傳輸都拒、登出後下一個 pack 被拒並關線、連線開著時 `!admin server shutdown` 正常退出無 dangling；情境 4（Session kind）：匿名升級只能 Hello／Ping、3 秒沒登入被關、`Login`／`Refresh`／`Logout`、錯密碼、HTTP 與 channel 共用的登入限速、同一連線換帳號、logout-all 關掉另一條、鎖定帳號不能登入；情境 5（每 device 連線上限，設 2）：第三條 Bearer 升級 429、另一 device 不受影響、匿名 Login 滿了回 `TooManyConnections` 並被關且**不發 token**（原連線的 token 仍可用）、關一條後名額回來、同連線再登入不多佔、Logout 放回名額。超過單包上限的 frame 被 socket 層丟掉（送 3 MiB：上限是 `wbf_meta_max_bytes` ＋ `wbf_data_max_bytes` ＋ 外框，PR #50 之後約 2.1 MiB）。舊式同上 | [wbf-wire-format.md](../../docs/design/wbf-wire-format.md) §6.1、§6.3、[review-followups-2026-09-06.md](../../docs/design/review-followups-2026-09-06.md) §2.3／2.4 |
+| `e2e8.ps1` | 每房 `r_seq`、全域 `g_seq`、`Event/Recent` 的 `Batch` 串流（一窗、`tc`／`bc`／`fs`／`ls`／`r`、`cg_seq`／`before` 翻窗、`batch`／`limit` 夾值、byte 上限切 Batch、HTTP 回 `Unsupported`、兩窗之間 Ping）、`rooms` 點名（PR #51：一個房 ＋ `before` 就是那個房的歷史、`r_seq` 連續、不在的房 `Forbidden`、`[]` 空窗、同一個房點兩次只算一次）、舊庫啟動的一次性編號；情境 4：30 個房間的一窗 first byte 量測（冷／暖，門檻只有「冷 < 2 秒」） | [room-seq-and-recent.md](../../docs/design/room-seq-and-recent.md) |
 | `e2e9.ps1` | 附件宣告（header 與 `Event/Send`）、四種拒送、共用附件、明文 fallback、bot 一次性警告、redact 保留備份後 purge、掃描不碰新上傳 | [media-attachments.md](../../docs/design/media-attachments.md) |
 | `e2e10.ps1` | 媒體持有者集合：刪房／redact 保留備份／備份到期／頭像／purge 範圍／重複操作、`WBFUWUNEL_MEDIA_GRACE_SECONDS` 下的掃描；情境 4（要 `E2E_OLD_EXE`）：既存媒體被生成縮圖後仍不受管、不被掃 | [media-holders.md](../../docs/design/media-holders.md)、[review-followups-2026-09-06.md](../../docs/design/review-followups-2026-09-06.md) §2.1 |
-| `e2e11.ps1` | WS 訂閱與推送（channel）：帳號層 `Subscribe` 只推給訂閱那條、自己送的也推、`cg_seq` 先補再推、新加入的房自動跟（點名訂閱不跟）、離房／被踢停推、ignore 不推、`Unsubscribe` 冪等、HTTP 回 `Unsupported`；情境 2：訂閱者停讀時 40 則送訊息不被擋、恢復後有 `gap: true`、`Recent` 補齊 | [wbf-event-push.md](../../docs/design/wbf-event-push.md) |
-| `e2e12.ps1` | **to-device 走通道（`0x16 Device`）**：`device_id` 對不上回 `Forbidden`、第二條連線回 `Conflict` 且 holder 不變、推送帶每則的 count 與訂閱的 `id`、`Fetch` 舊→新且 `r=0`、`ItemsDestroy` → `Ack`（收到）→ `ItemsDestroyed`（結果）、已經不在的仍算銷毀、`tc` 與 data 不符就一個都不刪、非 holder 銷毀回 `Forbidden`、HTTP 回 `Unsupported` | [wbf-to-device.md](../../docs/design/wbf-to-device.md) |
+| `e2e11.ps1` | WS 訂閱與推送（channel）：帳號層 `Subscribe` 只推給訂閱那條、自己送的也推、`cg_seq` 先補再推、新加入的房自動跟（點名訂閱不跟）、**點名訂閱的補窗只含它自己的房、重複點名只算一次**（PR #51）、離房／被踢停推、ignore 不推、`Unsubscribe` 冪等、HTTP 回 `Unsupported`；情境 2：訂閱者停讀時 100 則 60 KB 的訊息不被擋、恢復後有 `gap: true`、`Recent` 補齊；情境 3：連線健康計數器；情境 4：草稿（`0x02 Stream`，PR #45）—— 錨點是真事件、片的 `prev` 鏈、`id` 型別 byte、權限與可見性的外部審查七條 | [wbf-event-push.md](../../docs/design/wbf-event-push.md)、[streaming-messages.md](../../docs/design/streaming-messages.md) |
+| `e2e12.ps1` | **to-device 走通道（`0x16 Device`）**：`device_id` 對不上回 `Forbidden`、**同一裝置後來的連線接手佇列，被接手的那條收到 `Superseded`(1505)（帶它自己的訂閱 id、`IS_LAST`）**、換成另一個帳號登入時舊裝置的佇列被放掉、推送帶每則的 count 與訂閱的 `id`、`Fetch` 舊→新且 `r=0`、`ItemsDestroy` → `Ack`（收到）→ `ItemsDestroyed`（結果）、已經不在的仍算銷毀、`tc` 與 data 不符就一個都不刪、非 holder 銷毀回 `Forbidden`、HTTP 回 `Unsupported` | [wbf-to-device.md](../../docs/design/wbf-to-device.md) |
 | `wbf-helpers.ps1` | 共用：pack 編解碼（CRC-32C）、HTTP／WS 傳輸、起停 server、寫設定檔。不是測試 | [wbf-wire-format.md](../../docs/design/wbf-wire-format.md) |
 | `build-win.ps1` | 建 e2e profile 的 binary（MSVC 環境、Windows 的 feature 組） | [windows-build.md](../../docs/design/windows-build.md) |
 
@@ -26,7 +26,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\e2e\e2e10.ps1
 ```
 
 - 所有產物（設定檔、資料庫、server log、`results.txt`）在 `target\e2e-runs\<腳本>-out\`，不會寫到腳本旁邊。
-- server 固定聽 `127.0.0.1:8015`；三支腳本要**依序**跑，不要並行。
+- server 固定聽 `127.0.0.1:8015`；每支腳本要**依序**跑，不要並行。
 - 環境變數：`E2E_EXE` 換 binary；`E2E_OLD_EXE` 給 e2e8 情境 2 與 e2e10 情境 4（要一個 PR #22 之前的 binary，沒有就跳過）；
   `WBFUWUNEL_MEDIA_GRACE_SECONDS` 由 e2e10 情境 3 自己設與清。
 - 沒有機密：帳號密碼是固定的測試字串，只連 localhost。
@@ -55,8 +55,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\e2e\e2e10.ps1
   順序寫死：**殺乾淨 → build → 跑**。
 - 🚨 **一次只跑一支，起跑前先確認沒有殘留的 `tuwunel` 進程**（`Get-Process tuwunel`）。每支腳本用**同一個 port**，
   所以前一支沒收乾淨的 server 會讓下一支看起來「卡住不動」或「大量 `Unauthorized`」——2026-09-10 兩種都踩到了，
-  而且第二種**不會失敗、會假裝通過**。⚠️ 卡住時先看 `target/e2e-runs/<腳本>-out/results.txt`（它寫到哪一步），
+  而且第二種**不會失敗、會假裝通過**。
+  ✅ **2026-09-13 起 `Start-Server` 自己擋這件事**：port 已經有人回應就拒絕啟動，探測成功時自己啟動的行程已經退出也拒絕（那代表回應的不是它）。
+  起因是一支腳本中途 `throw`、**沒跑到 `Stop-Server`**，下一輪整輪對著舊 server 與舊資料庫跑（破綻是新 server 卻報 `connection_id=6`）。
+  ⚠️ 卡住時先看 `target/e2e-runs/<腳本>-out/results.txt`（它寫到哪一步），
   不要只看被 `Select-String` 過濾過的 tail —— 那次我就據此把停住的位置判斷錯了一步。
 - ⚠️ **`gap: true` 是下一個「推得進去」的 `Push` 才帶的**：flood 之後要再送一則訊息才看得到它。推論也成立 —— 掉包之後那個房如果再無新事件，這個旗標**永遠不會到**，所以測試（與 client）都不能把「沒收到 `gap`」當成「沒漏過」。
 - ⚠️ 函式回傳單元素陣列會被攤平成那個元素；呼叫端用 `@()` 包，函式裡**不要**再 `return ,$x`（兩邊都包會變成陣列裡包陣列，`.Count` 是 1、`[0]` 是整個陣列）。
   hashtable 的屬性存了單一物件時 `.Count` 是空的，判斷用 `@($x.events).Count`。
+- 🚨 **被拒絕或已關閉的 WS 會讓接收迴圈空轉**（2026-09-13）：`ReceiveAsync` 立刻回「0 byte、`EndOfMessage` 為 false」，
+  而且一直這樣回，所以依 `EndOfMessage` 的 `do…while` 永遠轉、每次 `Wait($ms)` 都立刻成功、逾時永遠不觸發 ——
+  **腳本 100% CPU、server 閒著、沒有任何輸出**。e2e11 的 `Recv-Or-Null` 現在把這種讀取當成連線已關並把狀態印出來。
+  ⭐ 判斷「在等」還是「在空轉」看 CPU：那次 PowerShell 燒了 1454 秒，server 只用了 0.5 秒。
+- ⚠️ **關掉一條連線不代表名額立刻回來**：有推播還排著的連線會先把佇列排空（`DRAIN_TIMEOUT`）才結束、才還名額 ——
+  實測兩次都是 **5.1 秒**。在 `wbf_ws_max_connections_per_device` 的邊上要換一條新連線，**不要用固定 sleep 猜**，
+  用 e2e11 的 `Ws-Open-Usable`：開連線、`Hello` 來回證明可用、在期限內重試，並把等了多久記下來。
