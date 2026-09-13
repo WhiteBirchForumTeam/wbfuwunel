@@ -222,9 +222,11 @@ $r = Ws-Call $ws (New-Pack 3 4 0 $idD 18 @() @())
 $dl = Get-Bytes $mxcD $tok
 Log "[1.29] Seal D, download identical=$([Linq.Enumerable]::SequenceEqual([byte[]]$dl.bytes, [byte[]]$fileD))  (expect True)"
 
-# oversized frame is refused by the socket layer
-$huge = New-Pack 3 2 0 $idC 5 @() (New-Object byte[] (17*1024*1024))
-try { Ws-Send $ws $huge; $r = Ws-Recv $ws; Log "[1.25] 17 MiB frame -> $(Describe $r) state=$($ws.State)" } catch { Log "[1.25] 17 MiB frame -> connection dropped: $($_.Exception.InnerException.Message)  (expect refused/closed)" }
+# oversized frame is refused by the socket layer. 3 MiB rather than something
+# wildly over: the limit is wbf_meta_max_bytes + wbf_data_max_bytes + frame,
+# about 2.1 MiB since 2026-09-13, so this is the first size past it.
+$huge = New-Pack 3 2 0 $idC 5 @() (New-Object byte[] (3*1024*1024))
+try { Ws-Send $ws $huge; $r = Ws-Recv $ws; Log "[1.25] 3 MiB frame (over the limit) -> $(Describe $r) state=$($ws.State)" } catch { Log "[1.25] 3 MiB frame (over the limit) -> connection dropped: $($_.Exception.InnerException.Message)  (expect refused/closed)" }
 try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, 'bye', [Threading.CancellationToken]::None).Wait(3000) | Out-Null } catch {}
 Stop-Server $p
 # ================= Scenario 2: idle timeout =================

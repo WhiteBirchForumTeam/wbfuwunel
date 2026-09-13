@@ -20,6 +20,7 @@ use url::Url;
 use super::{DEPRECATED_KEYS, IdentityProvider, IpSource, KNOWN_KEYS, S3_MIN_PART_SIZE, StorageProvider};
 use crate::{
 	Config, Err, Result, debug, debug_info, err, error,
+	wbf::pack::OVERHEAD as PACK_OVERHEAD,
 	utils::{
 		is_secret_set,
 		sys::storage::{Filesystem, filesystem_from_path},
@@ -75,6 +76,7 @@ pub fn check(config: &Config) -> Result {
 
 	check_observability(config)?;
 	check_wbf_device_window(config)?;
+	check_wbf_send_queue_bytes(config)?;
 	check_s3_part_size(config)?;
 	check_network(config)?;
 	check_storage(config)?;
@@ -135,6 +137,43 @@ fn check_wbf_device_window(config: &Config) -> Result {
 			config.wbf_device_default_batch,
 			packs_per_window,
 			config.wbf_ws_send_queue_len,
+		));
+	}
+
+	Ok(())
+}
+
+/// A connection's byte budget must hold one whole pack.
+///
+/// 🚨 Below that, a legal pack could never be queued: `PackQueue::send` would
+/// be waiting for room that nothing can ever give back, and the symptom would
+/// be one connection hanging on a request that looks ordinary. The queue
+/// refuses such a pack rather than waiting forever, but refusing every large
+/// reply is not a server anyone wants either — the configuration is the thing
+/// that is wrong, so it is refused here.
+///
+/// ⚠️ This is only the floor. Above it the budget is a policy: with the
+/// defaults it holds about eight full packs, and a handler producing more
+/// than that at once (a `Device/Fetch` window of large items) simply waits
+/// for the client to read — that is backpressure working, not a deadlock,
+/// because the client waiting for those packs is the one that must read them.
+fn check_wbf_send_queue_bytes(config: &Config) -> Result {
+	let one_pack = config
+		.wbf_meta_max_bytes
+		.saturating_add(config.wbf_data_max_bytes)
+		.saturating_add(PACK_OVERHEAD);
+
+	if config.wbf_ws_send_queue_bytes < one_pack {
+		return Err!(Config(
+			"wbf_ws_send_queue_bytes",
+			"a connection may hold {} bytes of queued packs, but one pack can be {} bytes \
+			 (wbf_meta_max_bytes {} + wbf_data_max_bytes {} + {} of frame), so a pack that size \
+			 could never be queued: raise wbf_ws_send_queue_bytes, or lower wbf_data_max_bytes",
+			config.wbf_ws_send_queue_bytes,
+			one_pack,
+			config.wbf_meta_max_bytes,
+			config.wbf_data_max_bytes,
+			PACK_OVERHEAD,
 		));
 	}
 

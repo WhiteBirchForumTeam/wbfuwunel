@@ -25,7 +25,6 @@ use ruma::{
 	api::error::{ErrorKind, UnknownTokenErrorData},
 };
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
 use tuwunel_core::{
 	Error, Result, debug, err, error,
 	wbf::{
@@ -35,7 +34,7 @@ use tuwunel_core::{
 };
 use tuwunel_service::{
 	Services,
-	streams::{ConnectionId, Outgoing},
+	streams::{ConnectionId, Outgoing, PackQueue},
 	connections::ConnectionSlot,
 	media::{UploadError, UploadRequest},
 };
@@ -342,7 +341,7 @@ pub(crate) struct Reply {
 }
 
 enum ReplySink {
-	WebSocket(mpsc::Sender<Outgoing>),
+	WebSocket(PackQueue),
 	/// `Some` once the one pack has been sent.
 	Http(Option<Vec<u8>>),
 }
@@ -359,7 +358,7 @@ pub(crate) enum ReplyError {
 }
 
 impl Reply {
-	pub(crate) fn for_websocket(queue: mpsc::Sender<Outgoing>) -> Self { Self { sink: ReplySink::WebSocket(queue) } }
+	pub(crate) fn for_websocket(queue: PackQueue) -> Self { Self { sink: ReplySink::WebSocket(queue) } }
 
 	fn for_http() -> Self { Self { sink: ReplySink::Http(None) } }
 
@@ -372,6 +371,10 @@ impl Reply {
 			| ReplySink::WebSocket(queue) => queue
 				.send(Outgoing::Pack(pack))
 				.await
+				// ⚠️ Waiting for room is the backpressure; the only errors
+				// left are "the connection went away" and "this pack could
+				// never fit", and neither is worth telling the client,
+				// which either cannot hear it or is not at fault.
 				.map_err(|_| ReplyError::ConnectionGone),
 			| ReplySink::Http(held) => {
 				if held.is_some() {
@@ -385,7 +388,7 @@ impl Reply {
 
 	/// The connection's send queue, for a handler that registers it with the
 	/// channels; None on HTTP, where there is no connection to push to.
-	fn websocket_queue(&self) -> Option<mpsc::Sender<Outgoing>> {
+	fn websocket_queue(&self) -> Option<PackQueue> {
 		match &self.sink {
 			| ReplySink::WebSocket(queue) => Some(queue.clone()),
 			| ReplySink::Http(_) => None,

@@ -186,7 +186,7 @@ client：在清單裡的 → 本地是唯一真相；不在清單裡的 → 遠�
 - ⭐ 於是得到一個免費的 fail-closed 檢查：**`tc * 8 != data.len()` → `Error(InvalidRequest)`，一個都不刪。**
   兩邊對不上代表有一端的編碼壞了，那種時候不准動手。
 - 大小：**典型是一個包一個呼叫** —— 100 × 8 = **800 byte**（§5.4 的節奏）。
-  上限是 `tc` 受 `wbf_data_max_bytes` 自然限制（16 MiB ÷ 8 ≈ 2M 筆）；client 若選擇積整窗再送，也不過 1000 × 8 = 8 KB。
+  上限是 `tc` 受 `wbf_data_max_bytes` 自然限制（2 MiB ÷ 8 ≈ 26 萬筆）；client 若選擇積整窗再送，也不過 1000 × 8 = 8 KB。
 
 ### 5.2 結果的 data：同一個格式
 
@@ -275,7 +275,7 @@ to-device 一則約 1 KB 又不需要逐則渲染，包大一點反而省來回�
 | `wbf_recent_max_batch` | **100** | **一包則數的上限**：client 帶的 `batch` 夾到這裡（`.max(1)`，0 會變 1） | 同上 |
 | `wbf_push_max_events_per_pack` | **10** | **一個 `Event/Push` 幾則**：live 推送本來就一則；它實際上界的是 `Subscribe{cg_seq}` 補窗那一輪 | `push_window` |
 | `wbf_ws_send_queue_len` | **32** | **一條連線的出站佇列裝幾個 pack**（數的是 pack，不是則） | `serve` |
-| `wbf_data_max_bytes` | **16 MiB + 4096** | 一個 pack 的 data 上限；所有切包都同時受它 | `list_pack_ranges` |
+| `wbf_data_max_bytes` | **2 MiB + 4096** | 一個 pack 的 data 上限；所有切包都同時受它 | `list_pack_ranges` |
 
 📎 **包數從來不是旋鈕**：它是 `ceil(limit ÷ 每包則數)` 算出來的（預設 320 ÷ 10 = 32 = 佇列剛好滿）。
 維護者 2026-09-11 問過要不要加一個「一次最多幾包」的上限（例如 50）——**不加**，理由兩條：
@@ -306,7 +306,7 @@ olm 封裝再 base64 之後**一則大約 1 KB**；SAS 驗證與 `m.secret.send`
 | 一窗（1000 則） | ~1 MB |
 
 ⚠️ **這是估算，不是量測** —— 實作那支要量一次真實數據再回來改這裡。
-📎 一包 ~100 KB **遠低於 `wbf_data_max_bytes`（16 MiB）**，所以實際切包的是 100 這個則數；
+📎 一包 ~100 KB **遠低於 `wbf_data_max_bytes`（2 MiB）**，所以實際切包的是 100 這個則數；
 byte 上限仍然要接（規則只有一份，[wbf-wire-format.md](wbf-wire-format.md) §2.1 那條教訓），只是幾乎不會觸發。
 理論上界仍是 `wbf_ws_send_queue_len` × `wbf_data_max_bytes`，跟其他 kind 同一條，不是這裡新增的風險。
 🔲 這幾個數字**先這樣定**（維護者 2026-09-11），量過再調。

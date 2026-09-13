@@ -27,7 +27,7 @@ client 把檔案切成**明文固定大小**的塊，每塊自己加密，一塊
 同一個上傳可以一半走 HTTP、一半走 WebSocket：進度在 server 的 DB，不在連線上。
 
 連上 WebSocket 後建議先送一個 `Hello`（kind `0x01` Control、subtype `0x01`，meta JSON `{ "protocol": 1, "client": "…", "features": [] }`），
-server 回 Ack meta `{ "protocol": 1, "server": "<server name>", "features": ["upload", "download"], "chunk_size_default": 65536, "chunk_size_large": 1048576, "data_max_bytes": 16781312 }`。
+server 回 Ack meta `{ "protocol": 1, "server": "<server name>", "features": ["upload", "download"], "chunk_size_default": 65536, "chunk_size_large": 1048576, "data_max_bytes": 2101248 }`。
 `Ping`（subtype `0x04`，meta 任意）回 `Pong`（subtype `0x05`）把 meta 原樣還回。
 
 ## 2. pack
@@ -49,7 +49,7 @@ server 回 Ack meta `{ "protocol": 1, "server": "<server name>", "features": ["u
 | 28+n | m | `data` | 見各訊息 |
 | 28+n+m | 4 | `data_crc` | CRC-32C 只蓋 data（空 data 時為 `00 00 00 00`） |
 
-上限（server 預設，config 可調）：`meta_len ≤ 65536`，`data_len ≤ 16 MiB + 4096`。超過整個 pack 拒收（`TooLarge`）。
+上限（server 預設，config 可調）：`meta_len ≤ 65536`，`data_len ≤ 2 MiB + 4096`。超過整個 pack 拒收（`TooLarge`）。⚠️ 這個數字 2026-09-13 從 16 MiB 降下來：它同時是每條連線的收包緩衝與送包佇列的單位（`wbf_ws_send_queue_bytes`）。📌 **拿 `Hello` 回的 `data_max_bytes`，不要寫死。**
 
 回應 pack：`kind = 0x01`，`subtype = 0x02 Ack` 或 `0x03 Error`，`flags` 帶 `IS_RESPONSE`，`id` 與 `seq` **抄請求的**。
 Ack 的 meta 是 JSON（各訊息定義）；Error 的 meta 是 JSON `{ "code_id": <序號>, "code": "...", "message": "...", ...該 code 定義的欄位 }` ——
@@ -78,7 +78,7 @@ server 檢查（任一不過就 `Error`，一個 byte 都還沒收）：
 | `meta_len ≠ 16` | `Conflict` |
 | `file_size = 0` 而 `chunk_count ≠ 0`（反之亦然） | `Conflict` |
 | `file_size > media_upload_max_len`（預設 10 GiB） | `TooLarge` |
-| `chunk_size` 不在 `[4 KiB, 16 MiB]` | `Conflict` |
+| `chunk_size` 不在 `[4 KiB, 2 MiB]` | `Conflict` |
 | `chunk_count ≠ ceil(file_size / chunk_size)` | `Conflict` |
 | data 超過 64 KiB | `TooLarge` |
 | 這個使用者進行中的上傳（含舊式 pending）≥ `max_pending_media_uploads`（預設 5） | `TooLarge` |
@@ -224,12 +224,12 @@ Read(mxc, pos=p)     → Ack{chunk=i, pos=i×chunk_size, data=ct_i} → 解密�
 | 名稱 | 預設 | 作用 |
 |---|---|---|
 | `media_chunk_size_default` | 64 KiB | `chunk_size = 0` 時 |
-| `media_chunk_size_min` / `max` | 4 KiB / 16 MiB | `chunk_size` 範圍 |
+| `media_chunk_size_min` / `max` | 4 KiB / 2 MiB | `chunk_size` 範圍 |
 | `media_chunk_overhead_max` | 4 KiB | 每塊 data 可比 `chunk_size` 多出多少 |
 | `media_upload_max_len` | 10 GiB | 單檔上限（線上 bytes）；0 = 不限 |
 | `media_upload_ttl` | 86400 秒 | 最後一塊後多久沒動視為遺棄 |
 | `max_pending_media_uploads` | 5 | 每人同時進行中的上傳數 |
-| `wbf_meta_max_bytes` / `wbf_data_max_bytes` | 64 KiB / 16 MiB + 4 KiB | 單包硬上限 |
+| `wbf_meta_max_bytes` / `wbf_data_max_bytes` | 64 KiB / 2 MiB + 4 KiB | 單包硬上限 |
 | `wbf_ws_idle_timeout` | 300 秒 | WebSocket 連線沉默多久被關 |
 
 ## 9. 實際 bytes（由 e2e 的組包函式印出）

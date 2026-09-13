@@ -50,7 +50,7 @@ offset  size  欄位          說明
   軟體 fallback 也有。zlib 那個沒有硬體指令。**這是效能上唯一該挑的點**：CRC 是 pack 處理裡唯一線性的成本。
 - **拒收**：`version ≠ 1`、保留旗標非 0、長度與實際對不上、任一 CRC 不合 → 丟掉，回 `Control/Error`（§3）。
   關不關連線見 §2.1。
-- **上限**：`meta_len ≤ wbf_meta_max_bytes`（預設 64 KiB）、`data_len ≤ wbf_data_max_bytes`（預設 **16 MiB**，要放得下大塊，
+- **上限**：`meta_len ≤ wbf_meta_max_bytes`（預設 64 KiB）、`data_len ≤ wbf_data_max_bytes`（預設 **2 MiB**，要放得下大塊，
   [chunked-upload.md](chunked-upload.md) §2.2）。
 - 📎 **CRC 不抓竄改**（那是 data 裡的 AEAD 標籤的事），**也不是在替 TLS 補位**。維護者 2026-09-10 問「CRC 對不上的機會有多高」，
   答案要講清楚，否則下一個人會以為它在防網路雜訊：
@@ -67,7 +67,7 @@ offset  size  欄位          說明
   而不是一句 `Corrupt`。
 - 📎 **`data_crc` 還有一件只有它能做的事**：E2EE 的塊本身有 AEAD 標籤，但那是**收檔的 client** 驗的，server 解不開也驗不了。
   沒有 `data_crc`，server 只能把壞掉的密文原樣存起來，等幾個月後有人下載才發現。有它，當下就能拒收那一塊。
-  成本方面不必擔心：硬體指令大約每核 10–20 GB/s，小 pack 是奈秒級，只有 16 MiB 的大塊會到毫秒級。
+  成本方面不必擔心：硬體指令大約每核 10–20 GB/s，小 pack 是奈秒級，只有整個 2 MiB 的大塊會到十分之幾毫秒。
 
 ### 2.1 連線健康計數器：什麼時候關掉一條講不通的連線
 
