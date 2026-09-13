@@ -5255,8 +5255,12 @@ pub struct StorageProviderS3 {
 	/// parts of this size, each sent as a separate HTTP PUT. Smaller values
 	/// keep individual requests under per-request timeouts on slow uplinks at
 	/// the cost of more round-trips. S3 requires every part except the last
-	/// to be at least 5 MiB. The value is a parsed string allowing SI or IEC
-	/// units for convenience.
+	/// to be at least 5 MiB, and the server refuses to start below that: S3
+	/// accepts undersized parts one at a time and then rejects the whole
+	/// upload at the end, so a value under it fails every large upload at its
+	/// very last step. Note that a seal streams one part at a time, so this
+	/// is also how much memory one upload to this provider holds. The value
+	/// is a parsed string allowing SI or IEC units for convenience.
 	///
 	/// default: 10 MiB
 	#[serde(default = "default_multipart_part_size")]
@@ -5610,6 +5614,15 @@ pub const MEDIA_UNREFERENCED_GRACE_MIN_SECONDS: u64 = 7 * 24 * 60 * 60;
 /// floor does not apply to it. Unset in production, where the config value
 /// (floored at seven days) is the rule.
 pub const MEDIA_UNREFERENCED_GRACE_ENV: &str = "WBFUWUNEL_MEDIA_GRACE_SECONDS";
+
+/// The smallest part S3 accepts in a completed multipart upload, for every
+/// part but the last (`multipart_part_size`).
+///
+/// 🚨 It is the protocol's number, not a preference: S3 takes undersized
+/// parts one at a time without complaint and then refuses the **whole**
+/// upload at `complete()`. So a value below this does not make uploads slow,
+/// it makes every large upload fail at the very last step.
+pub const S3_MIN_PART_SIZE: usize = 5 * 1024 * 1024;
 
 impl Config {
 	/// The protection period in effect: `WBFUWUNEL_MEDIA_GRACE_SECONDS` if set

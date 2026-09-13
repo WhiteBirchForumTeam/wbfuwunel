@@ -21,7 +21,7 @@ use object_store::{
 };
 use tuwunel_core::{
 	Error, Result,
-	config::StorageProvider,
+	config::{S3_MIN_PART_SIZE, StorageProvider},
 	debug, err, error,
 	error::error_chain,
 	extract_variant, implement, info, trace,
@@ -149,7 +149,10 @@ where
 		return self.put_single(path, payload).await;
 	}
 
-	let part_size = self.multipart_part_size();
+	// A provider that names no part size takes the payload whole: this path
+	// is only reached past its multipart threshold, and everything but S3
+	// has no threshold to cross.
+	let part_size = self.multipart_part_size().unwrap_or(usize::MAX);
 
 	debug!(
 		len = ?payload.content_length(),
@@ -588,18 +591,25 @@ fn multipart_threshold(&self) -> usize {
 		.unwrap_or(usize::MAX)
 }
 
-/// How large one part of a multipart upload should be.
+/// How large one part of a multipart upload must be for this provider.
 ///
-/// ⚠️ `usize::MAX` means the provider names no size of its own (everything
-/// but S3). A caller that streams its own parts has to clamp that to
-/// something it can hold in memory — see `STAGING_PART_BYTES_MAX`.
+/// ⚠️ The floor lives here rather than at the call sites: there are two of
+/// them (a sealed chunked upload and an ordinary large media file), and a
+/// rule that each caller has to remember is a rule one of them will not
+/// (PR #48 review, cirno, rumia and salvia).
+///
+/// Return:
+///     Option<usize>  `Some` for a provider that names a size — S3, never
+///     below what its own protocol requires, whatever the configuration
+///     says; `None` when the provider names none, and the caller decides
+///     what a part is. ⚠️ For S3 the number is also a memory setting: a
+///     caller that streams holds one part at a time.
 #[implement(Provider)]
-pub(crate) fn multipart_part_size(&self) -> usize {
-	extract_variant!(&self.config, StorageProvider::s3)
-		.map(|config| config.multipart_part_size.as_u64())
-		.map(TryInto::try_into)
-		.flat_ok()
-		.unwrap_or(usize::MAX)
+pub(crate) fn multipart_part_size(&self) -> Option<usize> {
+	extract_variant!(&self.config, StorageProvider::s3).map(|config| {
+		let configured = usize::try_from(config.multipart_part_size.as_u64()).unwrap_or(usize::MAX);
+		configured.max(S3_MIN_PART_SIZE)
+	})
 }
 
 fn chunked(payload: PutPayload, part_size: usize) -> impl Iterator<Item = PutPayload> {

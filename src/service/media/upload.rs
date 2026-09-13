@@ -675,13 +675,13 @@ fn staging_dir(&self) -> PathBuf { self.get_media_dir().join("staging") }
 fn staging_path(&self, upload_id: u64) -> PathBuf { self.staging_dir().join(format!("{upload_id:016x}")) }
 
 /// How much of the staging file a seal holds in memory at once when the
-/// provider does not name a part size of its own (the local filesystem
-/// returns `usize::MAX`, meaning "no limit" — which as a part size would be
-/// the whole file).
+/// provider names no part size of its own — everything but S3, where there
+/// is no protocol to satisfy and the only question is how much to hold.
 ///
-/// ⚠️ This is the number that decides a seal's memory, so it is a number:
-/// a 10 GiB upload is legal, and `media_upload_max_len` defaults to exactly
-/// that.
+/// ⚠️ This is the number that decides such a seal's memory, so it is a
+/// number: a 10 GiB upload is legal, and `media_upload_max_len` defaults to
+/// exactly that. 📎 A provider that does name one (S3) is honoured instead,
+/// and its `multipart_part_size` is therefore a memory setting too.
 const STAGING_PART_BYTES_MAX: usize = 8 * 1024 * 1024;
 
 /// Streams the first `len` bytes of the staging file into every configured
@@ -706,13 +706,19 @@ async fn store_staging_file(&self, key: &[u8], path: &PathBuf, len: u64) -> Resu
 		}
 
 		// 🚨 One item of this stream is one part of the upload to the
-		// provider, so the part size is the provider's, not a number chosen
-		// here: S3 refuses a completed multipart upload whose non-final parts
-		// are under 5 MiB, and these were 1 MiB. Sealing to S3 could not
-		// work, and the local half of the acceptance run could not see it.
+		// provider, so the part size is the provider's own, not a number
+		// chosen here: S3 refuses a completed multipart upload whose
+		// non-final parts are under 5 MiB, and these were 1 MiB. Sealing to
+		// S3 could not work, and the local half of the acceptance run could
+		// not see it.
+		//
+		// ⚠️ `None` means the provider names no size, which is the only case
+		// this file decides: clamping a size the provider did name would
+		// quietly overrule what the operator configured (PR #48 review,
+		// salvia).
 		let part_bytes = provider
 			.multipart_part_size()
-			.min(STAGING_PART_BYTES_MAX);
+			.unwrap_or(STAGING_PART_BYTES_MAX);
 
 		// `len` is the row's truth; the file is capped to it rather than trusted.
 		let file = fs::File::open(path).await?.take(len);
