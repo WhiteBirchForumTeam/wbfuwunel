@@ -308,7 +308,8 @@ olm 封裝再 base64 之後**一則大約 1 KB**；SAS 驗證與 `m.secret.send`
 ⚠️ **這是估算，不是量測** —— 實作那支要量一次真實數據再回來改這裡。
 📎 一包 ~100 KB **遠低於 `wbf_data_max_bytes`（2 MiB）**，所以實際切包的是 100 這個則數；
 byte 上限仍然要接（規則只有一份，[wbf-wire-format.md](wbf-wire-format.md) §2.1 那條教訓），只是幾乎不會觸發。
-理論上界仍是 `wbf_ws_send_queue_len` × `wbf_data_max_bytes`，跟其他 kind 同一條，不是這裡新增的風險。
+理論上界是每條連線 **`wbf_ws_send_queue_bytes`**（預設 16 MiB）加上正在寫出與正在收的那兩個 pack，跟其他 kind 同一條，不是這裡新增的風險（[wbf-pack-pipeline.md](wbf-pack-pipeline.md) §5）。
+⚠️ 這裡原本寫的是 `wbf_ws_send_queue_len` × `wbf_data_max_bytes` —— 那是 PR #50 之前**數包數**的界（32 × 16 MiB ＝ 512 MiB），而佇列現在數的是 bytes；包數仍在，但它已經不是決定記憶體的那個（審查者 rumia，PR #50）。
 🔲 這幾個數字**先這樣定**（維護者 2026-09-11），量過再調。
 
 ## 8. client 端會怎麼用（給讀 server 的人理解脈絡）

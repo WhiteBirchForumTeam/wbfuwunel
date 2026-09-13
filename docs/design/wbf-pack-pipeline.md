@@ -193,7 +193,7 @@ enum Outgoing { Pack(Bytes), Close(CloseFrame) }
   最壞的記憶體界：一條連線 **`wbf_ws_send_queue_bytes`（預設 16 MiB）**，加上正在寫的那個與正在收的那個。
   ⚠️ **原本這個界是「幾個 pack」而不是「幾 bytes」**（`wbf_ws_send_queue_len × wbf_data_max_bytes` ＝ 32 × 16 MiB ＝ **512 MiB**，而且這行字就這樣寫著、沒有人把它乘出來）——
   一個 client 只要要求 32 個大塊再慢慢讀，就能讓一條連線扣住半 GB。現在包數與 bytes 兩個界誰先用完誰擋；包數留著是因為有些東西本來就是按包數算的（`Device/Fetch` 的一窗）。
-  📎 同一次把 `wbf_data_max_bytes` 從 16 MiB 降到 **2 MiB**：那樣一個滿包在 16 MiB 的預算裡放得下八個，pipeline 仍然成立（維護者 2026-09-13）。
+  📎 同一次把 `wbf_data_max_bytes` 從 16 MiB 降到 **2 MiB**：那樣一個滿包（meta 64 KiB ＋ data 2 MiB ＋ 32 byte 外框 ＝ 2,166,816 bytes）在 16 MiB 的預算裡放得下 **7** 個，pipeline 仍然成立。⚠️ 反過來，**data 上限若留在 16 MiB，一個滿包（16,846,880 bytes）根本放不進 16 MiB 的預算** —— 那個組合啟動檢查會直接拒絕，而不是「只放得下兩個」（維護者 2026-09-13）。
 - 現在 `ws.rs` 裡每一處 `sink.send(...)` 都改成入隊。改完 `serve` 裡不該再看得到 `sink`。
 
 ## 6. `Event/Recent` 串流與 `Event/Batch`

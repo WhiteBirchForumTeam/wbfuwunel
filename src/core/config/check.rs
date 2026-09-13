@@ -153,7 +153,8 @@ fn check_wbf_device_window(config: &Config) -> Result {
 /// that is wrong, so it is refused here.
 ///
 /// ⚠️ This is only the floor. Above it the budget is a policy: with the
-/// defaults it holds about eight full packs, and a handler producing more
+/// defaults it holds seven full packs (one is `wbf_meta_max_bytes` +
+/// `wbf_data_max_bytes` + the frame, 2,166,816 bytes), and a handler producing more
 /// than that at once (a `Device/Fetch` window of large items) simply waits
 /// for the client to read — that is backpressure working, not a deadlock,
 /// because the client waiting for those packs is the one that must read them.
