@@ -64,7 +64,9 @@ enum FileOrigin { NewMedia, DerivedOfExisting }
 連被引用的既存圖都被掃掉；還原後再綠。e2e9 26、e2e8 37 回歸綠。單元：`holder.rs` 加 `a_media_prefix_does_not_match_a_longer_uri`（§2.6）；
 `create_file_metadata` 兩種 origin 的真 DB 單元測試**沒做**（`media/data.rs` 的測試夾具只有 CBOR round-trip，沒有開 DB 的），由 e2e 情境 4 涵蓋。
 
-### 2.2 🔴 P1：Seal 在本地儲存收整檔進記憶體；S3 的 parts 太小
+### 2.2 🔴 P1：Seal 在本地儲存收整檔進記憶體；S3 的 parts 太小（✅ `wbf/upload-lifecycle`，PR #48）
+
+> 📎 **實作跟下面寫的不同的地方**：(1) 驗收沒有用 `WorkingSet64`／`PeakWorkingSet64` 的前後差 —— peak 是行程生命期的高水位，**對著沒修的 code 報「漲 0 MiB」**，改成「Seal 還在飛的時候取樣」才量得到（沒修 256.4 MiB／修了 10.3 MiB）；檔案是 256 MiB 不是 512 MiB。(2) part 大小沒有「本地夾成 8 MiB」這條規則的原樣：`multipart_part_size()` 改回傳 `Option<usize>`，S3 是設定值且**不低於 5 MiB**（忘了這個下限是審查抓到的），其他回 `None` 由呼叫端決定；設定低於 5 MiB 啟動時就拒絕。(3) 多一個 review 沒提到的同族錯誤：`read_part` 要**填滿** buffer 才交出去，一次 `read` 少讀就是一個短 part。⚠️ S3 那半仍然**沒有實跑**（沒有 MinIO）。
 
 **現況**（`upload.rs:644-668`）：讀 1 MiB 一塊做成 stream，但 `provider.put(name, Some(len), chunks)`：本地 provider 的門檻是 `usize::MAX`，
 `size < threshold` 永遠成立 → `try_collect::<Vec<_>>()` 把整個 stream 收進記憶體再 `put_single`（`provider.rs:117-125`）。10 GiB 的合法上傳
@@ -118,7 +120,9 @@ log `Waiting for long-lived connections to end... open=2` → `Long-lived connec
 ⚠️ `release_max_log_level` 把 `debug!` 編譯掉，e2e binary 看不到 `debug_error!("dangling references")` 那個探針，
 「沒有懸空」是靠「追蹤器 join 完 → 程序乾淨退出」間接證；直接證要 debug build，沒做。
 
-### 2.5 🔴 P2：上傳 `Status` 冷載入不持鎖；sweeper 鎖下不重讀進度
+### 2.5 🔴 P2：上傳 `Status` 冷載入不持鎖；sweeper 鎖下不重讀進度（✅ `wbf/upload-lifecycle`，PR #48）
+
+> 📎 **驗收跟下面寫的不同**：`Status`∥`Seal` 那條是「先重啟讓快取變冷、再讓兩個請求同時在飛」（e2e6 情境 7），⚠️ 它是回歸網不是紅燈測試 —— 舊 code 要在幾個指令的窗口內交錯。**sweeper 重讀那條沒有 e2e**：sweep 只在啟動與每小時跑，腳本塞不進「掃完清單、還沒拿到鎖」那個縫。
 
 - `upload_status`（`upload.rs:363`）→ `hot_upload`（`:566`）：快取沒中就讀 DB 再 `remember_upload` 寫回，**全程沒拿 `upload_locks`**。
   交錯：重啟後快取空 → Status 讀到已收完的宣告與進度 → 另一條線 Seal 成功、刪列、`forget_upload` → 延遲的 Status 把舊快照 `remember` 回去 →
@@ -133,7 +137,7 @@ log `Waiting for long-lived connections to end... open=2` → `Long-lived connec
 **驗收**：單元不好做交錯；e2e 加「Chunk 到最後一塊 → 立刻 Status ＋ Seal 並行（PowerShell 兩個 job）→ Abort 回 NotFound、媒體 Info 正常」；
 sweeper 用 `media_upload_ttl=2`：「等 3 秒 → 同時送 Chunk 與觸發 sweep → 上傳仍在、Status 正確」。
 
-### 2.6 🟡 P2：`(mxc,)` 前綴少了 `Interfix`
+### 2.6 🟡 P2：`(mxc,)` 前綴少了 `Interfix`（✅ `media/managed-origin`，PR #26）
 
 `has_holders`（`media_refs/mod.rs:478-483`）與 `forget_media`（`:237`）用 `(mxc,)` 當前綴。一元 tuple 序列化**沒有尾端分隔符**（`ser.rs:151-171`，
 分隔符只寫在元素之間），所以 `mxc://s/abc` 的前綴也匹配 `mxc://s/abcd‖…`。這個 repo 的慣例是 `(mxc, Interfix)`（`media/data.rs:544`）。
@@ -145,7 +149,7 @@ sweeper 用 `media_upload_ttl=2`：「等 3 秒 → 同時送 Chunk 與觸發 sw
 PR #26 review（rumia）再抓到同形的第三處：`release_room` 掃 `room_mxc` 用 `(room,)`，兩個 room id 一個是另一個的位元組前綴時（`!x:server` 與 `!x:server2`）
 刪房會連後者的媒體一起釋放。同支補成 `(room, Interfix)`。`media_refs` 裡其餘前綴都是雙元素以上。
 
-### 2.7 🟡 P2：頭像併發更新留下幽靈持有者
+### 2.7 🟡 P2：頭像併發更新留下幽靈持有者（✅ `media/managed-origin`，PR #26）
 
 `set_profile_keys`（`profile/mod.rs:372-374`）在交易外讀舊頭像 A；兩個並行更新 A→B、A→C 都讀到 A，各自 `hold(B)`／`hold(C)`、`release(A)`。
 profile 最後是 B 或 C 其中之一，**輸的那個 mxc 掛著 `(Avatar, u)` 永遠不釋放**：下次換頭像 `release(old)` 讀的是 profile 現值，不是它。
@@ -158,7 +162,9 @@ profile 最後是 B 或 C 其中之一，**輸的那個 mxc 掛著 `(Avatar, u)`
 **驗收**：單元（真 DB）：對同一 user 連續 `set_avatar_ref(A→B)`、`set_avatar_ref(A→C)`（模擬都讀到舊值 A）→ `list_holders(B)` 為空、
 `list_holders(C)` 只有 `(Avatar, u)`。
 
-### 2.8 🟡 P2：升級前的舊上傳沒有清理路徑
+### 2.8 🟡 P2：升級前的舊上傳沒有清理路徑（🚫 **不做**）
+
+> 維護者 2026-09-13 回答了下面那個問題：**這個 fork 從未真實上線過**，所以不可能有任何資料庫存著 #16～#18 之間那種舊格式的上傳列。為一個不存在的資料狀態加一段永遠不會執行的清理程式，不划算；哪天要拿既有資料庫上線再說。
 
 若有 #16 之後、#18 之前建的庫，`mediaid_upload` 裡有帶進度的舊格式宣告、沒有 `mediaid_upload_progress` 列。現在：`hot_upload` 讀不到進度回 `None`
 → Status／Chunk／Seal／Abort 全 NotFound；sweeper 只掃進度表不會碰它；staging 檔因「宣告還在」不刪（`:517-519`）；`count_uploads_for_user`
@@ -169,7 +175,7 @@ span、staging）。不做格式轉換 —— 那批上傳續不了也沒關係�
 `find_upload` 現在回 `None` 就會被當「沒有宣告」→ 走原本的「進度沒宣告」分支，但那條只 `del_upload`，要確認它也刪 staging。
 **維護者先答**：你的伺服器有沒有跑過 #16～#18 之間的版本？沒有的話這條只是防禦，優先度最低。
 
-### 2.9 🟡 文件講反話：墓碑的「365 天 TTL」不會刪 key
+### 2.9 🟡 文件講反話：墓碑的「365 天 TTL」不會刪 key（✅ `media/managed-origin`，PR #26；media-gc.md §6 與 `maps.rs` 註解已改成「永久保留」）
 
 `mxc_tombstone`（`maps.rs:277-283`）設 `ttl: 365 天`，但 `RANDOM_SMALL` 是 Universal compaction（`descriptor.rs:167-168`）；RocksDB 的
 `Options::ttl` 在 Leveled／Universal 下只是「超過 ttl 的檔案排進 compaction」，**不刪 key**；只有 FIFO 會把整個過期檔刪掉（`RANDOM_SMALL_CACHE`

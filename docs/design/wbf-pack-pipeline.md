@@ -43,8 +43,9 @@ client ◀─── WebSocket ◀──── 發送 task ◀──── 有界
 - **發送 task** 一條連線一個（**新**，wire-format §5 早寫了、`ws.rs` 一直沒做，因為到 §6 之前沒有 handler 需要送第二個 pack）：
   從有界 `mpsc` 讀 pack、寫進 WebSocket sink。誰要往 client 送東西都經這裡：handler 的回應、關卡的 `Error`、`Close` frame、
   以後 server 主動推的東西。**只有一個寫 sink 的地方**，順序就不會亂（A4：一個路徑起點）。
-- **背壓**：`mpsc` 有界（`wbf_ws_send_queue_len`，預設 32 個 pack）。client 收得慢 → 佇列滿 → handler 的 `send().await` 停住 →
-  接收 loop 不讀下一個 → TCP 視窗關上。全鏈路靜止，記憶體有上界：一條連線最多佇列長度 × 一個 pack 上限。
+- **背壓**：佇列有**兩個**界（`PackQueue`，PR #50）：包數 `wbf_ws_send_queue_len`（預設 32）與 bytes `wbf_ws_send_queue_bytes`（預設 16 MiB），誰先用完誰擋。client 收得慢 → 佇列滿 → handler 的 `send().await` 停住 →
+  接收 loop 不讀下一個 → TCP 視窗關上。全鏈路靜止，記憶體有上界：**一條連線最多 `wbf_ws_send_queue_bytes`**，加上正在寫出與正在收的那兩個 pack（§5）。
+  📎 這裡原本寫「佇列長度 × 一個 pack 上限」—— 那是數包數時代的界，32 × 16 MiB ≈ 512 MiB。
 - **一條連線不保存任何業務狀態**（wire-format §6.1 已定）：上傳進度在 DB、session 在 `Session` 一個 struct。連線死了什麼都不會丟。
 
 client 那邊「開幾條、哪條走什麼、pending → sending → sent」是 client 的設計，這份不寫。
@@ -177,11 +178,15 @@ impl Reply {
 ## 5. 發送 task
 
 ```rust
-// serve() 裡
-let (tx, rx) = mpsc::channel::<Outgoing>(config.wbf_ws_send_queue_len);
-enum Outgoing { Pack(Bytes), Close(CloseFrame) }
-// 一個 task：loop { rx.recv() → sink.send(...) }；收到 Close 送完就結束；sink 錯了就結束並讓 rx 的 sender 端看到 closed。
+// serve() 裡（實作在 src/service/streams/mod.rs 的 PackQueue）
+let (queue, rx) = PackQueue::new(config.wbf_ws_send_queue_len, config.wbf_ws_send_queue_bytes);
+enum Outgoing { Pack(Vec<u8>), Close { code, reason } }
+struct Queued { outgoing: Outgoing, _room: Option<OwnedSemaphorePermit> }  // 額度跟著 pack 排隊
+// 一個 task：loop { rx.recv() → sink.send(item.outgoing) → drop(item) 還額度 }；收到 Close 送完就結束；sink 錯了就結束。
 ```
+
+⭐ **額度在送出任務寫完、drop 掉這個 item 之後才還**，所以這個數字是「這條連線現在握著多少」，不是「它可以塞進去多少」。
+三個 fail-closed 的決定：close frame 成本 0（滿了也要掛得了電話）；比整個預算還大的 pack **拒絕而不是等**（`QueueError::TooLargeForBudget`，設定上由 `check_wbf_send_queue_bytes` 讓它不可能發生）；push 放不下就丟並記 `gap`。
 
 - 接收 loop 持有 `tx`，`Reply::WebSocket` 是它的 clone。接收 loop 結束時 drop `tx`，發送 task 把佇列**送完**再退出：`Logout` 的 Ack、
   `Error(Unauthorized)`、最後的 Close 都不會被截掉。這也是為什麼 Close 走佇列而不是直接寫 sink。
@@ -200,16 +205,19 @@ enum Outgoing { Pack(Bytes), Close(CloseFrame) }
 
 ### 6.1 一次 `Recent` 是一窗
 
-client 送 `Recent { limit, cg_seq, before?, batch? }`：
+client 送 `Recent { rooms?, limit, cg_seq, before?, batch? }`：
 
 | 欄 | 意思 | 預設／上限 |
 |---|---|---|
+| `rooms` | 只讀這幾個房間（PR #51）。⭐ **一個房 ＋ `before` 就是那個房的歷史** | 沒帶 = 每個加入的房；`[]` = 空窗；**點名了不在的房 → 整個請求 `Forbidden`**；同一個房點兩次是一個房 |
 | `limit` | **這一窗**最多幾條 | 沒帶 `wbf_recent_default_limit`（320）；上限 `wbf_recent_max_limit`（**預設改 500**，原 10000） |
 | `cg_seq` | client 已有的最新 `g_seq`，這窗不會回到它或比它舊 | 沒帶或 0 = 沒有快取 |
 | `before` | 只要比這個舊的（上一窗最後一條的 `ls`） | 沒帶 = 從最新開始 |
 | `batch` | 每個 Batch 幾條 | 預設 `wbf_recent_default_batch`（10）；上限 `wbf_recent_max_batch`（100），超過夾 |
 
 server 在 `(cg_seq, before)` 之間從最新往舊，**只數這一窗**的 `limit` 條（§6.3），然後每 `batch` 條送一個 `Batch`。
+📎 點名一個房間是**最便宜**的情況：`collect_window` 對每個房開一條倒序串流、用 heap 合併，所以一個房是 k 路合併退化成單路掃描（跟 `/messages` 同一個迭代器）。
+⚠️ **一窗結束講的是「本站這份副本沒有更舊的了」，不是「這個房間沒有更舊的了」** —— `Recent` 不會像 `/messages` 那樣去聯邦 backfill（[room-seq-and-recent.md](room-seq-and-recent.md) §2.1）。
 下一窗由 client 帶 `before = 這窗最後一個 Batch 的 ls` 再叫一次 `Recent`；server 不記任何跨請求的狀態，`id` 由 client 決定要不要沿用。
 兩窗之間那條連線是空的，`Ping` 或別的請求可以插進去 —— 這是拉式視窗換來的，也是 §4.3-5「一次一個 handler」不會餓死別人的原因。
 
@@ -315,6 +323,7 @@ wire-format §3.3 已經把 kind 按 Matrix 章節占好號。搬一個端點 = 
 
 新錯碼兩個：`Unsupported`、`TooManyConnections`（wire-format §3.2 Error 那列補）。
 新 config 五個：`wbf_ws_max_connections_per_device`（4）、`wbf_ws_send_queue_len`（32）、`wbf_recent_default_limit`（320）、`wbf_recent_default_batch`（10）、`wbf_recent_max_batch`（100）。
+📎 之後加的：`wbf_ws_send_queue_bytes`（16 MiB，PR #50）；同一支把 `wbf_data_max_bytes` 從 16 MiB 降到 **2 MiB + 4096**、`media_chunk_size_max` 從 16 MiB 降到 **2 MiB**。
 既有 config 改預設一個：`wbf_recent_max_limit` 10000 → **500**（§0-11）。
 
 ## 10. 驗收（e2e7 加情境 5、e2e9 改）

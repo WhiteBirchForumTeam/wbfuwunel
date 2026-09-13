@@ -229,6 +229,7 @@ client：在清單裡的 → 本地是唯一真相；不在清單裡的 → 遠�
 ⭐ **`limit` 不是隨便挑的數字，是算出來的**（維護者 2026-09-11 指正）。關鍵是：
 **佔發送佇列的是「包數」，不是則數** —— `wbf_ws_send_queue_len`（32）數的是 pack，
 所以一窗切出來的包數必須放得進去，server 送完一窗才不會卡在佇列上等 client 讀。
+📎 PR #50 之後佇列還有一個 **bytes** 的界（`wbf_ws_send_queue_bytes`，16 MiB）。包數這條規則仍成立（`check_wbf_device_window` 比的就是它），但一窗的大項目多到超過 byte 預算時，handler 會在半窗等 client 讀 —— 那是背壓，不是死鎖：等這些包的正是要讀它們的那個 client。一包 ~100 KB 的常態裡碰不到。
 
 ```
 Recent：  一包  10 則 × 32 包 = 一窗  320 則     32 包 = 佇列剛好滿
@@ -275,6 +276,7 @@ to-device 一則約 1 KB 又不需要逐則渲染，包大一點反而省來回�
 | `wbf_recent_max_batch` | **100** | **一包則數的上限**：client 帶的 `batch` 夾到這裡（`.max(1)`，0 會變 1） | 同上 |
 | `wbf_push_max_events_per_pack` | **10** | **一個 `Event/Push` 幾則**：live 推送本來就一則；它實際上界的是 `Subscribe{cg_seq}` 補窗那一輪 | `push_window` |
 | `wbf_ws_send_queue_len` | **32** | **一條連線的出站佇列裝幾個 pack**（數的是 pack，不是則） | `serve` |
+| `wbf_ws_send_queue_bytes` | **16 MiB** | **同一個佇列裝幾 bytes**（PR #50）：決定記憶體的是這個；兩個界誰先用完誰擋 | `PackQueue` |
 | `wbf_data_max_bytes` | **2 MiB + 4096** | 一個 pack 的 data 上限；所有切包都同時受它 | `list_pack_ranges` |
 
 📎 **包數從來不是旋鈕**：它是 `ceil(limit ÷ 每包則數)` 算出來的（預設 320 ÷ 10 = 32 = 佇列剛好滿）。

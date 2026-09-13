@@ -122,6 +122,10 @@ client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
 **工作 3 Draft Message ✅ PR #45（2026-09-13 合併）**：照 [streaming-messages.md](streaming-messages.md) §3–§8（`Stream` kind、server 零狀態、每片從佔位事件點讀驗作者、`wbf_draft_max_room_members`）。審查期間維護者加了片的 `prev` 指標（每片指向它接在哪一片之後），外部審查另外抓到七條「開著的草稿是一張不會過期的許可證」型的漏洞，全部修掉。
 ✅ **發送佇列的記憶體界已修（PR #50）**（起於維護者 2026-09-13 問「4 個 client 的記憶體高峰」）：原本 `wbf_ws_send_queue_len` 數的是**包數**（32），而一個 pack 最大 16.07 MiB → **每條連線 514 MiB**、4 裝置 × 4 條 ≈ 9 GiB。現在多一個 **`wbf_ws_send_queue_bytes`（預設 16 MiB）**，額度跟著 pack 排隊、寫完才還；同時把 `wbf_data_max_bytes` 從 16 MiB 降到 **2 MiB**（維護者定），所以一個滿包（meta 64 KiB ＋ data ＋ 32 byte 外框 ＝ 2,166,816 bytes）在預算裡放得下 **7** 個。每條連線的最壞值 ≈ **20 MiB**，4 裝置 × 4 條 ≈ 0.3 GiB。
 📍 **同家族還沒做的**：`Event/Recent` 的窗（最多 500 **筆**，每筆只要求小於一個 pack）與 `Device/Fetch`（一整窗先收齊、再一次造完所有 pack，等於整窗兩份）—— 兩者都還是**數筆數、不數 bytes**。另外維護者提過**大塊懶加載**（佇列裡只放指標，寫的時候才讀檔），那個要先寫提案：它會改 `Outgoing` 的語意、要給送出任務發 `Error` 的能力（檔案可能在排隊期間消失）。📎 實測的另一端：空資料庫、沒人連線時閒置 **42 MiB**（6 核）。
+🔲 **兩件 PR #51 的 e2e 量到、還沒處理的**（等維護者決定要不要做）：
+- **連線死掉之後名額要 ~5 秒才回來**：有推播還排著的連線結束時會先把佇列排空（`DRAIN_TIMEOUT` 5 秒）才還 `wbf_ws_max_connections_per_device` 的名額，實測兩次都是 **5.1 秒**。
+  ⚠️ 影響是實際的：手機切網路時舊連線來不及正常關，若它們還有推播沒送出，**新連線可能在這幾秒內被 `TooManyConnections` 拒絕**。可能的方向是「對端已經不在時就不必排空」，要先確認送出任務能不能分辨這件事。
+- **`Hello` 的 `features` 沒有列出後來加的 kind**：目前是 `["upload","download","recent","batch","seq","attachments","login","push"]`，**沒有草稿（`0x02 Stream`，#45）也沒有 to-device（`0x16 Device`，#43）**。靠 `features` 偵測能力的 client 會以為這台 server 不支援它們。加字串是相容的增補，但它是線上契約，要維護者點頭（也要跟 client repo 對一下名字）。
 
 ### 2.10 ✅ 錯誤詞表：`code_id` ＋ `RejectCode` ＋ 連線健康計數器（文件 ✅ PR #37，實作 ✅ PR #38，2026-09-11 合併）
 

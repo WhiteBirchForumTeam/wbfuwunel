@@ -27,7 +27,8 @@ client 把檔案切成**明文固定大小**的塊，每塊自己加密，一塊
 同一個上傳可以一半走 HTTP、一半走 WebSocket：進度在 server 的 DB，不在連線上。
 
 連上 WebSocket 後建議先送一個 `Hello`（kind `0x01` Control、subtype `0x01`，meta JSON `{ "protocol": 1, "client": "…", "features": [] }`），
-server 回 Ack meta `{ "protocol": 1, "server": "<server name>", "features": ["upload", "download"], "chunk_size_default": 65536, "chunk_size_large": 1048576, "data_max_bytes": 2101248 }`。
+server 回 Ack meta，**跟上傳有關的**是這幾個：`{ "protocol": 1, "server": "<server name>", "features": […], "chunk_size_default": 65536, "chunk_size_large": 1048576, "data_max_bytes": 2101248 }`。
+📎 回應還有其他欄位（引擎版本、`Recent` 的預設與上限、每裝置連線上限……），完整清單在 [wbf-wire-format.md](wbf-wire-format.md) §3.2 的 `Hello` 列；`features` 實際上不只 `upload`／`download`，要偵測能力就看那個清單。⚠️ **`data_max_bytes` 照 server 回的切包，不要寫死** —— 它是設定項，預設在 2026-09-13 從 16 MiB 降到 2 MiB。
 `Ping`（subtype `0x04`，meta 任意）回 `Pong`（subtype `0x05`）把 meta 原樣還回。
 
 ## 2. pack

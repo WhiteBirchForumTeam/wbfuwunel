@@ -186,7 +186,7 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 
 | kind | subtype | meta（JSON） | data |
 |---|---|---|---|
-| `0x01 Control` | `0x01 Hello` | `{ "protocol": 1, "client": "…", "features": [...] }` | 無 |
+| `0x01 Control` | `0x01 Hello` | `{ "protocol": 1, "client": "…", "features": [...] }`（client 的 `features` server 目前不讀）。回應 `{ "protocol", "server", "engine", "engine_version", "features", "connection_id", "recent_default_limit", "recent_max_limit", "recent_default_batch", "recent_max_batch", "max_connections_per_device", "chunk_size_default", "chunk_size_large", "data_max_bytes" }` —— `features` 目前是 `["upload","download","recent","batch","seq","attachments","login","push"]`；`connection_id` 只給除錯（HTTP 上是 0）；**`data_max_bytes` 是這台 server 的單包 data 上限，client 照它切包，🚫 不要寫死**（預設在 PR #50 從 16 MiB 降到 2 MiB） | 無 |
 | | `0x02 Ack` | 各 kind 定的回應內容；`IS_RESPONSE = 1`，`id`、`seq` 抄請求 | 視 kind（`Download/Read` 的回應 data 是讀出的 bytes） |
 | | `0x03 Error` | `{ "code_id": <序號>, "code": "…", "message": "…" }` ＋ 該 code 定義的欄位；程式比對 `code_id`，`code` 是它的名字；**完整清單在 §3.4**，那張表是唯一的來源 | 無 |
 | | `0x04 Ping` / `0x05 Pong` | `{ "nonce": … }` | 無 |
@@ -392,7 +392,7 @@ WebSocket 本身保證到達順序，所以**順序錯一定是邏輯錯誤**，
   —— **切片指回原緩衝**，沒有複製。接收端要解密就在 `data` 上原地解。
 - **派發**：按 kind 查表（陣列索引，不是 match 字串）交給 handler；有序類先過 `next_seq` 檢查。handler 要送回應就走封裝那條。
 
-**server 端**（實作見 [wbf-pack-pipeline.md](wbf-pack-pipeline.md)，2026-09-07 起）：一條 WebSocket 連線 = 一個接收 loop ＋ 一個發送 task（有界 `mpsc`，`wbf_ws_send_queue_len`）；
+**server 端**（實作見 [wbf-pack-pipeline.md](wbf-pack-pipeline.md)，2026-09-07 起）：一條 WebSocket 連線 = 一個接收 loop ＋ 一個發送 task（有界佇列 `PackQueue`：包數 `wbf_ws_send_queue_len` **與** bytes `wbf_ws_send_queue_bytes`，誰先用完誰擋，PR #50）；
 **沒有**每連線的順序狀態表（有序類由上傳服務從 DB 判，§6.1）。handler 的契約是 `(services, ctx, view, reply) -> Result<SessionChange, Failure>`，
 回應全部經 `Reply` 進發送佇列，可以送 0..n 個 pack（`Recent` 的 Batch 串流就是 n 個）；HTTP 的 `POST /_wbf/v1/pack` 呼叫同一條派發，`Reply` 在 HTTP 上只裝得下一個 pack，
 串流型的 kind 由准入表擋在 HTTP 之外（`Error(Unsupported)`）。有序類在 HTTP 上仍要 `seq` 正確 —— server 從 DB 讀 `next_seq`。
