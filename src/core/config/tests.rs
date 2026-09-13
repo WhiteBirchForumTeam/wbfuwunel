@@ -887,6 +887,45 @@ fn eval_int(body: &str) -> Option<u64> {
 		.try_fold(0_u64, |acc, term| acc.checked_add(term?))
 }
 
+#[test]
+fn an_s3_part_size_below_what_s3_accepts_is_refused_at_startup() {
+	// 🚨 The failure it replaces is the nastiest kind: S3 takes every
+	// undersized part without complaint and refuses the whole upload at
+	// `complete()`, so the operator would see "every large upload fails at
+	// the very end" and nothing pointing at this line of their config
+	// (PR #48 review, cirno and rumia).
+	let config = config_from_toml(
+		"[global]
+[global.storage_provider.media_on_s3.s3]
+bucket = \"media\"
+multipart_part_size = \"1 MiB\"
+",
+	)
+	.expect("an s3 provider parses");
+
+	let err = check(&config)
+		.expect_err("a part size S3 will not accept must be refused")
+		.to_string();
+	assert!(err.contains("multipart_part_size"), "{err}");
+	assert!(err.contains("media_on_s3"), "the message names the provider: {err}");
+}
+
+#[test]
+fn the_smallest_part_size_s3_accepts_is_accepted() {
+	// The boundary itself, so the check cannot drift into refusing a legal
+	// configuration.
+	let config = config_from_toml(&format!(
+		"[global]
+[global.storage_provider.media_on_s3.s3]
+bucket = \"media\"
+multipart_part_size = \"{S3_MIN_PART_SIZE} B\"
+"
+	))
+	.expect("an s3 provider parses");
+
+	check(&config).expect("exactly the minimum is a part size S3 accepts");
+}
+
 /// `1024_u16`, `60`, `10_000`; anything else yields None.
 fn int_literal(token: &str) -> Option<u64> {
 	const INT_SUFFIX: [&str; 11] =

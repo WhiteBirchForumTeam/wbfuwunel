@@ -4352,8 +4352,12 @@
 # parts of this size, each sent as a separate HTTP PUT. Smaller values
 # keep individual requests under per-request timeouts on slow uplinks at
 # the cost of more round-trips. S3 requires every part except the last
-# to be at least 5 MiB. The value is a parsed string allowing SI or IEC
-# units for convenience.
+# to be at least 5 MiB, and the server refuses to start below that: S3
+# accepts undersized parts one at a time and then rejects the whole
+# upload at the end, so a value under it fails every large upload at its
+# very last step. Note that a seal streams one part at a time, so this
+# is also how much memory one upload to this provider holds. The value
+# is a parsed string allowing SI or IEC units for convenience.
 #
 #multipart_part_size = 10 MiB
 

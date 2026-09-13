@@ -17,7 +17,7 @@ use itertools::Itertools;
 use regex::RegexSet;
 use url::Url;
 
-use super::{DEPRECATED_KEYS, IdentityProvider, IpSource, KNOWN_KEYS};
+use super::{DEPRECATED_KEYS, IdentityProvider, IpSource, KNOWN_KEYS, S3_MIN_PART_SIZE, StorageProvider};
 use crate::{
 	Config, Err, Result, debug, debug_info, err, error,
 	utils::{
@@ -75,6 +75,7 @@ pub fn check(config: &Config) -> Result {
 
 	check_observability(config)?;
 	check_wbf_device_window(config)?;
+	check_s3_part_size(config)?;
 	check_network(config)?;
 	check_storage(config)?;
 	check_registration(config)?;
@@ -135,6 +136,41 @@ fn check_wbf_device_window(config: &Config) -> Result {
 			packs_per_window,
 			config.wbf_ws_send_queue_len,
 		));
+	}
+
+	Ok(())
+}
+
+/// An S3 provider's part size must be one S3 will accept.
+///
+/// 🚨 Refused here rather than quietly raised, because the operator asked for
+/// something the protocol cannot do and silently doing something else is how
+/// a setting stops meaning anything. The accessor floors it as well — this
+/// check is the one that *tells* somebody (PR #48 review, cirno and rumia).
+///
+/// ⚠️ What it prevents is not slow uploads: S3 accepts every undersized part
+/// happily and then refuses the whole upload at `complete()`, so the symptom
+/// is "every large upload fails at the very end", which is about the worst
+/// place to learn about a typo in a configuration file.
+fn check_s3_part_size(config: &Config) -> Result {
+	for (name, provider) in &config.storage_provider {
+		let Some(s3) = (match provider {
+			| StorageProvider::s3(s3) => Some(s3),
+			| _ => None,
+		}) else {
+			continue;
+		};
+
+		let configured = s3.multipart_part_size.as_u64();
+		if configured < S3_MIN_PART_SIZE as u64 {
+			return Err!(Config(
+				"multipart_part_size",
+				"storage provider {name:?} sets multipart_part_size to {configured} bytes, but S3 \
+				 requires every part but the last to be at least {} bytes and refuses the whole \
+				 upload when one is smaller",
+				S3_MIN_PART_SIZE,
+			));
+		}
 	}
 
 	Ok(())
