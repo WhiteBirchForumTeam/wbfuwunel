@@ -48,6 +48,13 @@ function Recv-Or-Null($ws, [int]$ms) {
     $script:PendingRecv.Remove($key); $script:PendingBuf.Remove($key)
     $r = $t.Result
     if ($r.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close) { return @{ closed = $true; code = "$($r.CloseStatus)" } }
+    # A socket the server refused or already closed answers immediately with
+    # nothing, forever: zero bytes and EndOfMessage false, so this loop turns
+    # without ever finishing a message and the $ms timeout never fires because
+    # every Wait succeeds at once. That is a 100%-CPU hang with no output --
+    # the worst kind to diagnose -- and it is how a connection over
+    # wbf_ws_max_connections_per_device shows up. Treat it as closed.
+    if ($r.Count -eq 0 -and -not $r.EndOfMessage) { return @{ closed = $true; code = "no data (refused or closed: $($ws.State))" } }
     $stream.Write($buf, 0, $r.Count)
   } while (-not $r.EndOfMessage)
   $p = Read-Pack ($stream.ToArray()); $p.http = 'ws'; $p
@@ -163,6 +170,26 @@ $inNamed = @(Drain-Pushes $wsNamed 800)
 $namedGot = @($inNamed | Where-Object { (Ids @($_)) -contains $m5 }).Count
 Check '[1.4a] account-wide connection gets the new room''s event' ((Ids $inSub) -contains $m5) (Ids $inSub)
 Check '[1.4b] named-room connection does not (it only asked for room one)' ($ackNamed.meta.joined -eq 1 -and $namedGot -eq 0) "named joined=$($ackNamed.meta.joined) got=$namedGot"
+
+# [1.4c] the catch-up window of a named subscription holds only those rooms.
+# 🚨 It used to be the account's whole window whatever the subscription said,
+# and the design document asked clients not to advance their watermark on the
+# rooms they had not asked for (wbf-event-push 2.1, rumia R4) — a rule that
+# asks a client not to believe what the server just sent it.
+$mark2 = [int64]$ackNamed.meta.latest_g_seq
+$mBoth1 = Send-Msg $r1 'after the mark, room one' $tokB
+$mBoth2 = Send-Msg $r2 'after the mark, room two' $tokB
+# ⚠️ alice already holds four connections here ($wsSub, $wsNot, $wsLate,
+# $wsNamed) and four is `wbf_ws_max_connections_per_device`, so this needs a
+# slot rather than a fifth: $wsNot has done its job ([1.1c]) and goes.
+$wsNot.Dispose()
+Start-Sleep -Milliseconds 400
+$wsScoped = Ws-Open $tokA
+$ackScoped = Subscribe $wsScoped 11 @($r1) $mark2
+$caughtScoped = Ids @(Drain-Pushes $wsScoped 1500)
+Check '[1.4c] a named subscription catching up is pushed its own rooms only' `
+  (($caughtScoped -contains $mBoth1) -and -not ($caughtScoped -contains $mBoth2)) `
+  "caught=$($caughtScoped -join ',') wanted=$mBoth1 not-wanted=$mBoth2"
 
 # [1.5] leaving a room stops its pushes; kick stops them too
 Leave $r2 $tokA

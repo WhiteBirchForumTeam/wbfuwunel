@@ -202,7 +202,7 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 | `0x10 Session`（§6.3） | `0x01 Login` | Matrix `/login` 的請求體原樣：`{ "type": "m.login.password" \| "m.login.token", "identifier", "password" \| "token", "device_id"?, "initial_device_display_name"?, "refresh_token"?: bool }`；回應 `{ "user_id", "device_id", "access_token", "refresh_token"?, "expires_in_ms"? }` | 無 |
 | | `0x02 Refresh` | `{ "refresh_token" }`；回應同 `Login` | 無 |
 | | `0x03 Logout` | `{ "all"?: bool }`；回應 `{}`，緊接 server 送 Close 1000 關線 | 無 |
-| `0x14 Event` | `0x01 Recent` | `{ "limit": 320?, "cg_seq": <g_seq>?, "before": <g_seq>?, "batch": 10? }`，**`id` 由 client 選**（回應抄它）；回應是一串 `0x03 Batch`，不是 `Ack`；**只走 WS**，HTTP 回 `Error(Unsupported)` | 無 |
+| `0x14 Event` | `0x01 Recent` | `{ "rooms"?: ["!…"], "limit": 320?, "cg_seq": <g_seq>?, "before": <g_seq>?, "batch": 10? }`（沒帶 `rooms` = 每個加入的房；**一個房 ＋ `before` 就是那個房的歷史**；點名了不在的房→ `Forbidden`），**`id` 由 client 選**（回應抄它）；回應是一串 `0x03 Batch`，不是 `Ack`；**只走 WS**，HTTP 回 `Error(Unsupported)` | 無 |
 | `0x14 Event` | `0x03 Batch`（只有 server → client） | `{ "tc", "bc", "fs", "ls", "r" }`：這一窗總則數、這批則數、這批最新／最舊的 g_seq、這批之後還剩幾則；`r = 0` 就是這窗結束。`id` 抄 `Recent`，`seq` 從 0 嚴格 +1 | `bc` 則事件，每則 u32 大端長度 ＋ 事件 JSON（含 `room_id`；`unsigned` 帶 `org.wbftw.wbfuwunel.r_seq` 與 `…g_seq`），新到舊，見 [room-seq-and-recent.md](room-seq-and-recent.md) §2、[wbf-pack-pipeline.md](wbf-pack-pipeline.md) §6 |
 | `0x14 Event` | `0x04 Subscribe` | `{ "rooms"?: ["!…"], "cg_seq"?: <g_seq> }`，**`id` 由 client 選**（之後每個 `Push` 抄它）；沒帶 `rooms` = 帳號層（所有加入的房，含之後加入的）；回應 `{ "latest_g_seq", "joined", "skipped": […] }`；**只走 WS** | 無 |
 | | `0x05 Unsubscribe` | `{ "rooms"?: ["!…"] }`；沒帶 = 全退；回應 `{}`；退不存在的是 no-op。**退訂退的是當下的 channel，不是黑名單**：帳號層訂閱者（`Subscribe` 沒帶 `rooms`）點名退掉某房之後，**再加入那個房時仍會被自動加回來** | 無 |

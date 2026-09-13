@@ -117,7 +117,16 @@ pub(super) async fn handle_subscribe(
 		.await?;
 
 	if let Some(cg_seq) = meta.cg_seq.filter(|cg_seq| *cg_seq != 0) {
-		let window = recent::window_after(services, user, Some(PduCount::from_signed(cg_seq)), services.config.wbf_recent_max_limit).await;
+		// The rooms this subscription actually covers — the named ones that
+		// checked out, or every joined room when it named none.
+		let window = recent::window_after(
+			services,
+			user,
+			&rooms,
+			Some(PduCount::from_signed(cg_seq)),
+			services.config.wbf_recent_max_limit,
+		)
+		.await;
 		let events: Vec<PushedEvent<'_>> = window
 			.iter()
 			.map(|event| PushedEvent { g_seq: event.g_seq, json: &event.json })
