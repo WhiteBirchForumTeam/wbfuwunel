@@ -24,10 +24,9 @@ use std::{
 };
 
 use ruma::{OwnedUserId, UserId};
-use tokio::sync::mpsc::{Sender, error::TrySendError};
 use tuwunel_core::{debug, wbf::PackError};
 
-use super::{ConnectionId, Outgoing};
+use super::{ConnectionId, Outgoing, PackQueue, QueueError};
 
 /// One connection's subscription to one stream: a long-lived **conversation**
 /// in the wire format's sense (`id` names it, `seq` counts inside it).
@@ -46,7 +45,7 @@ use super::{ConnectionId, Outgoing};
 /// resending a numbered packet.
 struct Subscriber {
 	user: OwnedUserId,
-	queue: Sender<Outgoing>,
+	queue: PackQueue,
 	/// The client's `Subscribe` id: the conversation's name, copied into
 	/// every push of it.
 	id: u64,
@@ -60,7 +59,7 @@ struct Subscriber {
 /// What one push to one subscriber needs, taken under the read lock.
 pub(super) struct Target {
 	pub(super) connection: ConnectionId,
-	pub(super) queue: Sender<Outgoing>,
+	pub(super) queue: PackQueue,
 	pub(super) id: u64,
 	pub(super) seq: u32,
 	pub(super) gap: bool,
@@ -90,7 +89,7 @@ pub(super) enum Occupancy {
 /// in it, and where to send.
 pub(super) struct Displaced {
 	pub(super) connection: ConnectionId,
-	pub(super) queue: Sender<Outgoing>,
+	pub(super) queue: PackQueue,
 	pub(super) id: u64,
 	pub(super) seq: u32,
 }
@@ -160,7 +159,7 @@ where
 		&self,
 		connection: ConnectionId,
 		user: &UserId,
-		queue: Sender<Outgoing>,
+		queue: PackQueue,
 		id: u64,
 		topics: &[Topic],
 	) -> Entered<Topic> {
@@ -363,9 +362,11 @@ where
 			};
 			match target.queue.try_send(Outgoing::Pack(pack)) {
 				| Ok(()) => {},
-				| Err(TrySendError::Full(_)) => dropped.push(target.connection),
+				// Out of packs or out of bytes: the receiver is behind, so the
+				// pack goes and the gap is recorded.
+				| Err(QueueError::Full | QueueError::TooLargeForBudget) => dropped.push(target.connection),
 				// The connection is gone; its guard cleans the registry.
-				| Err(TrySendError::Closed(_)) => {},
+				| Err(QueueError::Gone) => {},
 			}
 		}
 		self.mark_gap(&dropped);

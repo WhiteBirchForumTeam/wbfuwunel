@@ -48,7 +48,7 @@ use tuwunel_core::{
 	wbf::{HEADER_LEN, PackError, RejectCode, decode},
 };
 
-use tuwunel_service::streams::{ConnectionId, Outgoing};
+use tuwunel_service::streams::{ConnectionId, Outgoing, PackQueue, Queued};
 
 use super::{
 	CloseReason, PackContext, Reply, Session, SessionChange, Transport, authenticate, error_pack, handle_pack,
@@ -166,11 +166,19 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 	let connection: ConnectionId = services.streams.next_connection_id();
 	let _streams_guard = services.streams.connection_guard(connection);
 
-	// The send queue and its task. Bounded: a handler that produces faster
-	// than the peer reads waits in `Reply::send`, and with it the receive
-	// loop, and with that the peer's own sending. Memory per connection is
-	// bounded by the queue length times a pack's size limit.
-	let (queue, outgoing) = mpsc::channel::<Outgoing>(services.config.wbf_ws_send_queue_len.max(1));
+	// The send queue and its task. Bounded twice: by how many packs may wait
+	// and by how many bytes they may add up to. A handler that produces
+	// faster than the peer reads waits in `Reply::send`, and with it the
+	// receive loop, and with that the peer's own sending.
+	//
+	// 🚨 The byte budget is the one that decides memory. With the count
+	// alone, 32 packs of `wbf_data_max_bytes` was 512 MiB for one connection
+	// — a number the configuration comment stated outright and nobody
+	// multiplied out (維護者 2026-09-13).
+	let (queue, outgoing) = PackQueue::new(
+		services.config.wbf_ws_send_queue_len,
+		services.config.wbf_ws_send_queue_bytes,
+	);
 	let mut send_task = tokio::spawn(send_queued(sink, outgoing));
 	let mut reply = Reply::for_websocket(queue.clone());
 	let mut health = FrameHealth::new(services.config.wbf_ws_corrupt_budget);
@@ -346,9 +354,12 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 /// or when the socket refuses a write. Holds the socket's sink and nothing
 /// else, so it may outlive the receive loop for the drain and is never a
 /// borrow of `Services`.
-async fn send_queued(mut sink: futures::stream::SplitSink<WebSocket, Message>, mut outgoing: mpsc::Receiver<Outgoing>) {
+async fn send_queued(mut sink: futures::stream::SplitSink<WebSocket, Message>, mut outgoing: mpsc::Receiver<Queued>) {
+	// ⚠️ `item` is dropped at the end of each turn, and dropping it gives the
+	// connection its room back — which is why that happens here, after the
+	// write, and not where the pack was queued.
 	while let Some(item) = outgoing.recv().await {
-		match item {
+		match item.outgoing {
 			| Outgoing::Pack(pack) =>
 				if sink.send(Message::Binary(pack.into())).await.is_err() {
 					break;
@@ -404,7 +415,7 @@ impl FrameHealth {
 /// socket is dropped, which closes it (review of PR #33, rumia: without this
 /// bound a stopped reader could hold the loop, and its queue's memory, for
 /// as long as it liked).
-async fn enqueue_close(queue: &mpsc::Sender<Outgoing>, frame: Outgoing) {
+async fn enqueue_close(queue: &PackQueue, frame: Outgoing) {
 	if tokio::time::timeout(DRAIN_TIMEOUT, queue.send(frame))
 		.await
 		.is_err()

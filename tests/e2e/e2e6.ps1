@@ -335,17 +335,19 @@ Stop-Server $p
 # "put by size" always chose the single-part path). A 10 GiB upload is legal,
 # so the seal of one added 10 GiB of RSS.
 # ⭐ The baseline is taken AFTER every chunk has been sent, so the memory each
-# 16 MiB request needs is already inside it and the only new thing measured is
-# the seal. PeakWorkingSet64 is what makes this work without sampling: Windows
+# request needs is already inside it and the only new thing measured is the
+# seal. PeakWorkingSet64 is what makes this work without sampling: Windows
 # remembers the high-water mark, so a spike that is over before the request
 # answers still shows up.
 $cfg = Write-Config $db1 86400 0
 $srv6 = Start-Server $cfg 's6'
-$chunkBytes = 16 * 1024 * 1024
-$chunks6 = 16
+# The largest chunk the server takes since 2026-09-13 (`media_chunk_size_max`),
+# so the file is made of many more of them than it used to be.
+$chunkBytes = 2 * 1024 * 1024
+$chunks6 = 128
 $total6 = [uint64]$chunkBytes * $chunks6
 $r = Send-Pack (Create-Pack 1 0 $chunkBytes 0 @()) $tok; $id9 = [uint64]$r.meta.id
-Log "[6.1] Create a stream with 16 MiB chunks -> $(Describe $r)  (expect Ack)"
+Log "[6.1] Create a stream with 2 MiB chunks -> $(Describe $r)  (expect Ack)"
 $blob = New-Object byte[] $chunkBytes; (New-Object Random 99).NextBytes($blob)
 for ($i = 0; $i -lt $chunks6; $i++) {
   # Each chunk names itself in its first eight bytes, so reading one back
@@ -354,7 +356,7 @@ for ($i = 0; $i -lt $chunks6; $i++) {
   $flags6 = if ($i -eq $chunks6 - 1) { 8 } else { 0 }
   $r = Send-Pack (New-Pack 3 2 $flags6 $id9 $i @() $blob) $tok
 }
-Log "[6.2] $chunks6 chunks of 16 MiB ($total6 bytes) -> $(Describe $r)  (expect received=$chunks6 total_len=$total6 finished=true)"
+Log "[6.2] $chunks6 chunks of 2 MiB ($total6 bytes) -> $(Describe $r)  (expect received=$chunks6 total_len=$total6 finished=true)"
 # ⚠️ Two measurements, and the assertion is on the larger. `PeakWorkingSet64`
 # alone would be worthless here: it is a high-water mark for the life of the
 # process, so a spike that stays under something earlier in this scenario

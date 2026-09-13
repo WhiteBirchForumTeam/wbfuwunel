@@ -17,7 +17,7 @@
 
 use ruma::{DeviceId, OwnedDeviceId, OwnedUserId, UserId};
 use serde_json::json;
-use tokio::sync::mpsc::Sender;
+
 use tuwunel_core::{
 	debug,
 	wbf::{
@@ -26,7 +26,7 @@ use tuwunel_core::{
 	},
 };
 
-use super::{ConnectionId, Outgoing, Streams};
+use super::{ConnectionId, Outgoing, PackQueue, Streams};
 
 /// `Device/Push`, server to client only.
 pub const DEVICE_PUSH_SUBTYPE: u8 = 0x06;
@@ -87,7 +87,7 @@ impl Streams {
 		connection: ConnectionId,
 		user: &UserId,
 		device: &DeviceId,
-		queue: Sender<Outgoing>,
+		queue: PackQueue,
 		id: u64,
 	) -> Option<ConnectionId> {
 		let topic = DeviceTopic::new(user, device);
@@ -241,12 +241,14 @@ mod tests {
 	use tuwunel_core::wbf::{CONTROL_ERROR_SUBTYPE, Kind, decode, events::split_length_prefixed};
 
 	use super::{DEVICE_PUSH_SUBTYPE, PushedItem};
-	use crate::streams::{Outgoing, Streams};
+	use crate::streams::{Outgoing, PackQueue, Queued, Streams};
 
-	fn queue(capacity: usize) -> (mpsc::Sender<Outgoing>, mpsc::Receiver<Outgoing>) { mpsc::channel(capacity) }
+	/// A test queue: the count is what these tests exercise, so the byte
+	/// budget is set far above anything they send.
+	fn queue(capacity: usize) -> (PackQueue, mpsc::Receiver<Queued>) { PackQueue::new(capacity, 16 * 1024 * 1024) }
 
-	fn next_pack(rx: &mut mpsc::Receiver<Outgoing>) -> Vec<u8> {
-		match rx.try_recv().expect("a pack was queued") {
+	fn next_pack(rx: &mut mpsc::Receiver<Queued>) -> Vec<u8> {
+		match rx.try_recv().expect("a pack was queued").outgoing {
 			| Outgoing::Pack(pack) => pack,
 			| Outgoing::Close { .. } => panic!("expected a pack, got a close"),
 		}
@@ -320,7 +322,7 @@ mod tests {
 		];
 		streams.push_to_device(alice, phone, &items, 10, 1024);
 
-		let mut pack = match rx.try_recv().expect("a pack was queued") {
+		let mut pack = match rx.try_recv().expect("a pack was queued").outgoing {
 			| Outgoing::Pack(pack) => pack,
 			| Outgoing::Close { .. } => panic!("expected a pack, got a close"),
 		};

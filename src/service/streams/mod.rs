@@ -33,6 +33,8 @@ use std::sync::{
 	atomic::{AtomicU64, Ordering},
 };
 
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, mpsc};
+
 pub use self::{
 	devices::{DEVICE_PUSH_SUBTYPE, PushedItem},
 	rooms::{EVENT_PUSH_SUBTYPE, PushedEvent, Subscribed},
@@ -54,6 +56,160 @@ pub enum Outgoing {
 	/// The close frame that ends the connection after everything queued
 	/// before it.
 	Close { code: u16, reason: &'static str },
+}
+
+impl Outgoing {
+	/// What holding this in the queue costs.
+	///
+	/// Return:
+	///     usize  the pack's length; 0 for a close frame, which is a few
+	///     bytes the connection must always be able to queue — refusing it
+	///     for want of room is refusing to hang up.
+	#[must_use]
+	pub fn queued_bytes(&self) -> usize {
+		match self {
+			| Self::Pack(pack) => pack.len(),
+			| Self::Close { .. } => 0,
+		}
+	}
+}
+
+/// One connection's send queue: a bounded channel, and the bytes the
+/// connection may hold in it at once.
+///
+/// 🚨 **The count alone was the wrong bound.** A queue of 32 packs sounds
+/// small until a pack is `wbf_data_max_bytes`, which **was** 16 MiB of a
+/// media chunk — and then one connection held 514 MiB, and four devices of
+/// four connections 9 GiB, without anything being wrong from the client's
+/// side (ask for 32 large chunks, read the socket slowly). ⚠️ That default is
+/// 2 MiB now, but the byte budget is what holds the line: the limit is
+/// configurable and the count would be the wrong bound again the day
+/// somebody raises it. The count stays
+/// because a `Device/Fetch` window is counted in packs (`check_wbf_device_window`);
+/// the byte budget is what decides the memory.
+///
+/// ⚠️ The room is booked before the pack joins the queue and given back when
+/// the send task drops it, which is **after** it has been written — so the
+/// number really is "how much this connection can be holding", not "how much
+/// it may enqueue".
+#[derive(Clone)]
+pub struct PackQueue {
+	packs: mpsc::Sender<Queued>,
+	budget: Arc<Semaphore>,
+	/// What the budget started at, so an oversized pack can be refused
+	/// rather than awaited forever.
+	capacity_bytes: usize,
+}
+
+/// A pack waiting in a send queue, holding the room it booked.
+///
+/// ⚠️ The permit travels with the pack instead of being released where it was
+/// taken: the memory is occupied until the pack has been written, and the
+/// send task is what knows when that is.
+pub struct Queued {
+	pub outgoing: Outgoing,
+	_room: Option<OwnedSemaphorePermit>,
+}
+
+/// Why a pack did not join a send queue.
+#[derive(Debug, Eq, PartialEq)]
+pub enum QueueError {
+	/// The connection's send task is gone.
+	Gone,
+	/// The queue is full — of packs, or of bytes. For a push this means the
+	/// receiver is not keeping up and the pack is dropped (and a `gap`
+	/// recorded); for a reply it is backpressure and the caller waits.
+	Full,
+	/// The pack alone is larger than the whole budget, so no amount of
+	/// waiting would ever make room. 🚨 Refused rather than awaited: this is
+	/// a configuration that cannot work, and blocking forever would look
+	/// like a hung client.
+	TooLargeForBudget,
+}
+
+impl PackQueue {
+	/// Args:
+	///     packs: how many packs may wait, example: 32
+	///     bytes: how many bytes they may add up to, example: 33554432
+	/// Return:
+	///     (PackQueue, mpsc::Receiver<Queued>)  the sender half, cloned by
+	///     everything that can queue for this connection, and the receiver
+	///     the send task owns.
+	#[must_use]
+	pub fn new(packs: usize, bytes: usize) -> (Self, mpsc::Receiver<Queued>) {
+		let (sender, receiver) = mpsc::channel(packs.max(1));
+		let queue = Self {
+			packs: sender,
+			budget: Arc::new(Semaphore::new(bytes.max(1))),
+			capacity_bytes: bytes.max(1),
+		};
+
+		(queue, receiver)
+	}
+
+	/// Queues a pack, waiting for room: the caller is a handler answering a
+	/// request, and waiting here is the backpressure that stops the whole
+	/// connection from running ahead of the socket.
+	pub async fn send(&self, outgoing: Outgoing) -> Result<(), QueueError> {
+		let room = self.book(outgoing.queued_bytes()).await?;
+		self.packs
+			.send(Queued { outgoing, _room: room })
+			.await
+			.map_err(|_| QueueError::Gone)
+	}
+
+	/// Queues a pack only if there is room right now: the caller is a push,
+	/// and a push never blocks the thing that produced the event.
+	pub fn try_send(&self, outgoing: Outgoing) -> Result<(), QueueError> {
+		let room = self.book_now(outgoing.queued_bytes())?;
+		self.packs
+			.try_send(Queued { outgoing, _room: room })
+			.map_err(|error| match error {
+				| mpsc::error::TrySendError::Full(_) => QueueError::Full,
+				| mpsc::error::TrySendError::Closed(_) => QueueError::Gone,
+			})
+	}
+
+	/// Return:
+	///     Result<Option<OwnedSemaphorePermit>, QueueError>  None when the
+	///     item costs nothing (a close frame).
+	async fn book(&self, bytes: usize) -> Result<Option<OwnedSemaphorePermit>, QueueError> {
+		let Some(bytes) = self.bookable(bytes)? else {
+			return Ok(None);
+		};
+
+		Arc::clone(&self.budget)
+			.acquire_many_owned(bytes)
+			.await
+			.map(Some)
+			.map_err(|_| QueueError::Gone)
+	}
+
+	fn book_now(&self, bytes: usize) -> Result<Option<OwnedSemaphorePermit>, QueueError> {
+		let Some(bytes) = self.bookable(bytes)? else {
+			return Ok(None);
+		};
+
+		match Arc::clone(&self.budget).try_acquire_many_owned(bytes) {
+			| Ok(permit) => Ok(Some(permit)),
+			| Err(TryAcquireError::NoPermits) => Err(QueueError::Full),
+			| Err(TryAcquireError::Closed) => Err(QueueError::Gone),
+		}
+	}
+
+	/// The permit count for `bytes`, or `None` when it costs nothing.
+	fn bookable(&self, bytes: usize) -> Result<Option<u32>, QueueError> {
+		if bytes == 0 {
+			return Ok(None);
+		}
+		if bytes > self.capacity_bytes {
+			return Err(QueueError::TooLargeForBudget);
+		}
+
+		u32::try_from(bytes)
+			.map(Some)
+			.map_err(|_| QueueError::TooLargeForBudget)
+	}
 }
 
 /// Every stream's subscribers, and the connection numbers they are keyed by.
@@ -150,9 +306,61 @@ mod tests {
 	use std::sync::Arc;
 
 	use ruma::{device_id, room_id, user_id};
-	use tokio::sync::mpsc;
 
-	use super::{Outgoing, Streams};
+	use super::{Outgoing, PackQueue, QueueError, Streams};
+
+	/// 🚨 The bound the count never was. Four packs of a megabyte each fit
+	/// the count (four) and not the budget (2 MiB), and before this the
+	/// queue would have held all four — which is how 32 packs of 16 MiB
+	/// became half a gigabyte of one connection's memory.
+	#[test]
+	fn the_queue_runs_out_of_bytes_before_it_runs_out_of_packs() {
+		let (queue, mut packs) = PackQueue::new(4, 2 * 1024 * 1024);
+		let megabyte = || Outgoing::Pack(vec![0_u8; 1024 * 1024]);
+
+		assert_eq!(queue.try_send(megabyte()), Ok(()));
+		assert_eq!(queue.try_send(megabyte()), Ok(()));
+		assert_eq!(
+			queue.try_send(megabyte()),
+			Err(QueueError::Full),
+			"two megabytes is the whole budget, and the count still had room for two more"
+		);
+
+		// Room comes back when a pack is taken **and dropped**, not when it
+		// is taken: what holds the memory is the pack itself.
+		let taken = packs.try_recv().expect("a pack was queued");
+		assert_eq!(queue.try_send(megabyte()), Err(QueueError::Full));
+		drop(taken);
+		assert_eq!(queue.try_send(megabyte()), Ok(()));
+	}
+
+	/// A close frame costs nothing, because refusing to queue one is
+	/// refusing to hang up on a connection that is already misbehaving.
+	#[test]
+	fn a_close_frame_fits_in_a_queue_with_no_room_left() {
+		let (queue, _packs) = PackQueue::new(4, 1024);
+		assert_eq!(queue.try_send(Outgoing::Pack(vec![0_u8; 1024])), Ok(()));
+
+		assert_eq!(queue.try_send(Outgoing::Pack(vec![0_u8; 1])), Err(QueueError::Full));
+		assert_eq!(
+			queue.try_send(Outgoing::Close { code: 1000, reason: "bye" }),
+			Ok(())
+		);
+	}
+
+	/// 🚨 Refused, not awaited: waiting for room that can never exist is a
+	/// connection that hangs on an ordinary-looking request. The startup
+	/// check (`check_wbf_send_queue_bytes`) is what keeps a server from
+	/// being configured this way at all.
+	#[test]
+	fn a_pack_larger_than_the_whole_budget_is_refused_rather_than_queued() {
+		let (queue, _packs) = PackQueue::new(4, 1024);
+
+		assert_eq!(
+			queue.try_send(Outgoing::Pack(vec![0_u8; 1025])),
+			Err(QueueError::TooLargeForBudget)
+		);
+	}
 
 	#[test]
 	fn a_dropped_guard_leaves_every_stream() {
@@ -160,7 +368,7 @@ mod tests {
 		let alice = user_id!("@alice:localhost");
 		let a = room_id!("!a:localhost").to_owned();
 		let b = room_id!("!b:localhost").to_owned();
-		let (tx, _rx) = mpsc::channel::<Outgoing>(4);
+		let (tx, _rx) = PackQueue::new(4, 1024 * 1024);
 		let connection = streams.next_connection_id();
 		let guard = streams.connection_guard(connection);
 		streams.subscribe(connection, alice, tx, 1, &[a.clone(), b.clone()], true);
@@ -185,7 +393,7 @@ mod tests {
 		let alice = user_id!("@alice:localhost");
 		let phone = device_id!("PHONE");
 		let room = room_id!("!a:localhost").to_owned();
-		let (tx, _rx) = mpsc::channel::<Outgoing>(4);
+		let (tx, _rx) = PackQueue::new(4, 1024 * 1024);
 		let connection = streams.next_connection_id();
 		streams.subscribe(connection, alice, tx.clone(), 1, &[room.clone()], true);
 		streams.subscribe_device(connection, alice, phone, tx, 2);
@@ -209,7 +417,7 @@ mod tests {
 		let alice = user_id!("@alice:localhost");
 		let phone = device_id!("PHONE");
 		let room = room_id!("!a:localhost").to_owned();
-		let (tx, _rx) = mpsc::channel::<Outgoing>(4);
+		let (tx, _rx) = PackQueue::new(4, 1024 * 1024);
 		let connection = streams.next_connection_id();
 		streams.subscribe(connection, alice, tx.clone(), 1, &[room.clone()], true);
 		streams.subscribe_device(connection, alice, phone, tx, 2);

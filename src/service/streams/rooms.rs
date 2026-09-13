@@ -11,7 +11,7 @@
 
 use ruma::{OwnedRoomId, OwnedUserId, RoomId, UserId};
 use serde_json::json;
-use tokio::sync::mpsc::Sender;
+
 use tuwunel_core::{
 	debug,
 	wbf::{
@@ -20,7 +20,7 @@ use tuwunel_core::{
 	},
 };
 
-use super::{ConnectionId, Outgoing, Streams};
+use super::{ConnectionId, PackQueue, Streams};
 
 /// `Event/Push`, server to client only.
 pub const EVENT_PUSH_SUBTYPE: u8 = 0x06;
@@ -71,7 +71,7 @@ impl Streams {
 		&self,
 		connection: ConnectionId,
 		user: &UserId,
-		queue: Sender<Outgoing>,
+		queue: PackQueue,
 		id: u64,
 		rooms: &[OwnedRoomId],
 		account_wide: bool,
@@ -261,12 +261,14 @@ mod tests {
 	};
 
 	use super::{EVENT_PUSH_SUBTYPE, PushedEvent};
-	use crate::streams::{Outgoing, Streams};
+	use crate::streams::{Outgoing, PackQueue, Queued, Streams};
 
-	fn queue(capacity: usize) -> (mpsc::Sender<Outgoing>, mpsc::Receiver<Outgoing>) { mpsc::channel(capacity) }
+	/// A test queue: the count is what these tests exercise, so the byte
+	/// budget is set far above anything they send.
+	fn queue(capacity: usize) -> (PackQueue, mpsc::Receiver<Queued>) { PackQueue::new(capacity, 16 * 1024 * 1024) }
 
-	fn take_pack(rx: &mut mpsc::Receiver<Outgoing>) -> Vec<u8> {
-		match rx.try_recv().expect("a pack was queued") {
+	fn take_pack(rx: &mut mpsc::Receiver<Queued>) -> Vec<u8> {
+		match rx.try_recv().expect("a pack was queued").outgoing {
 			| Outgoing::Pack(pack) => pack,
 			| Outgoing::Close { .. } => panic!("expected a pack, got a close"),
 		}
@@ -458,7 +460,10 @@ mod tests {
 
 		// The connection is still subscribed, so a push of its own arrives.
 		streams.push(&listeners, &[PushedEvent { g_seq: 11, json: b"{}" }]);
-		assert!(matches!(rx.try_recv(), Ok(Outgoing::Pack(_))));
+		assert!(matches!(
+			rx.try_recv().map(|queued| queued.outgoing),
+			Ok(Outgoing::Pack(_))
+		));
 	}
 
 	#[test]

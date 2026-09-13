@@ -3569,7 +3569,12 @@ pub struct Config {
 	/// Largest chunk size a client may choose, in bytes. Also bounded by
 	/// `wbf_data_max_bytes` less `media_chunk_overhead_max`.
 	///
-	/// default: 16777216
+	/// ⚠️ Raising it means raising `wbf_data_max_bytes` with it, and that one
+	/// is what a connection buffers and queues — so this is a memory setting
+	/// as much as a transfer one. The server suggests `media_chunk_size_large`
+	/// to clients, which is well under it.
+	///
+	/// default: 2097152
 	#[serde(default = "default_media_chunk_size_max")]
 	pub media_chunk_size_max: usize,
 
@@ -3616,7 +3621,13 @@ pub struct Config {
 	/// Largest data section a wbf pack may carry, in bytes. Must hold a
 	/// chunk of `media_chunk_size_max` plus `media_chunk_overhead_max`.
 	///
-	/// default: 16781312
+	/// This is the size of everything that crosses the channel in one piece:
+	/// an upload chunk, a chunk handed back by a download, the content of one
+	/// event, a batch of them. A connection buffers one whole incoming pack
+	/// before the server sees it, and `wbf_ws_send_queue_bytes` decides how
+	/// many outgoing ones it can hold — so raising this raises both.
+	///
+	/// default: 2101248
 	#[serde(default = "default_wbf_data_max_bytes")]
 	pub wbf_data_max_bytes: usize,
 
@@ -3653,18 +3664,32 @@ pub struct Config {
 	pub wbf_ws_max_connections_per_device: u32,
 
 	/// How many outgoing packs one wbf WebSocket connection may have queued
-	/// for sending before the handler producing them waits. Bounds the memory
-	/// a slow reader can pin on the server to this many packs of at most
-	/// `wbf_data_max_bytes` each; the connection stalls instead of growing.
-	/// Worst case per connection is therefore this times `wbf_data_max_bytes`
-	/// (32 x 16 MiB = 512 MiB at the defaults, only if a peer stops reading
-	/// in the middle of a stream of maximal packs), times
-	/// `wbf_ws_max_connections_per_device` per device. Lower it on a small
-	/// host; `Recent` batches are a few KiB each, so 8 is plenty for events.
+	/// for sending before the handler producing them waits. This is the count
+	/// half of the bound; `wbf_ws_send_queue_bytes` is the one that decides
+	/// memory, and whichever runs out first stalls the connection rather than
+	/// letting the queue grow.
+	///
+	/// Some things are counted in packs rather than bytes — a `Device/Fetch`
+	/// window is cut into a known number of them — which is why this stays.
 	///
 	/// default: 32
 	#[serde(default = "default_wbf_ws_send_queue_len")]
 	pub wbf_ws_send_queue_len: usize,
+
+	/// How many bytes of queued packs one wbf WebSocket connection may hold
+	/// at once, in bytes. This is the number that decides how much memory a
+	/// slow reader can pin: the room is taken before a pack joins the queue
+	/// and given back after it has been written, so the worst case per
+	/// connection is this plus the pack being written plus the one being
+	/// read, times `wbf_ws_max_connections_per_device` per device.
+	///
+	/// Must be at least one whole pack (`wbf_meta_max_bytes` plus
+	/// `wbf_data_max_bytes` plus the frame), or a legal pack could never be
+	/// queued; the server refuses to start below that.
+	///
+	/// default: 16777216
+	#[serde(default = "default_wbf_ws_send_queue_bytes")]
+	pub wbf_ws_send_queue_bytes: usize,
 
 	/// How many frames in a row a wbf WebSocket may send that do not decode
 	/// as a pack — a bad checksum, a version this server does not speak, a
@@ -6061,7 +6086,7 @@ fn default_media_chunk_size_large() -> usize { 1024 * 1024 }
 
 fn default_media_chunk_size_min() -> usize { 4 * 1024 }
 
-fn default_media_chunk_size_max() -> usize { 16 * 1024 * 1024 }
+fn default_media_chunk_size_max() -> usize { 2 * 1024 * 1024 }
 
 fn default_media_chunk_overhead_max() -> usize { 4096 }
 
@@ -6073,7 +6098,7 @@ fn default_media_download_default_len() -> usize { 1024 * 1024 }
 
 fn default_wbf_meta_max_bytes() -> usize { 64 * 1024 }
 
-fn default_wbf_data_max_bytes() -> usize { 16 * 1024 * 1024 + 4096 }
+fn default_wbf_data_max_bytes() -> usize { 2 * 1024 * 1024 + 4096 }
 
 fn default_wbf_ws_idle_timeout() -> u64 { 300 }
 
@@ -6086,6 +6111,8 @@ fn default_login_rc_burst_count() -> u32 { 10 }
 fn default_wbf_ws_max_connections_per_device() -> u32 { 4 }
 
 fn default_wbf_ws_send_queue_len() -> usize { 32 }
+
+fn default_wbf_ws_send_queue_bytes() -> usize { 16 * 1024 * 1024 }
 
 fn default_wbf_ws_corrupt_budget() -> u32 { 8 }
 

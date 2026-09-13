@@ -44,7 +44,7 @@ pub const fn framed_len(event_len: usize) -> usize { EVENT_LEN_PREFIX.saturating
 /// Args:
 ///     event_lens: each event's JSON length, in wire order, example: [7, 4096]
 ///     count_max: most events in one pack, example: 10 (0 is read as 1)
-///     data_max: `wbf_data_max_bytes`, example: 16777216
+///     data_max: `wbf_data_max_bytes`, example: 2101248
 /// Return:
 ///     Vec<Range<usize>>  one range per pack, in order, together covering
 ///     every event; empty when there are no events. An event that alone is

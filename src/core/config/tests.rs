@@ -888,6 +888,40 @@ fn eval_int(body: &str) -> Option<u64> {
 }
 
 #[test]
+fn a_send_queue_budget_that_cannot_hold_one_pack_is_refused_at_startup() {
+	// 🚨 Below one pack, a legal reply could never be queued: the handler
+	// would wait for room that nothing gives back, and the operator would
+	// see one connection hanging on an ordinary request.
+	let config = config_from_toml(
+		"[global]
+wbf_ws_send_queue_bytes = 1048576
+",
+	)
+	.expect("the value parses");
+
+	let err = check(&config)
+		.expect_err("a budget under one pack must be refused")
+		.to_string();
+	assert!(err.contains("wbf_ws_send_queue_bytes"), "{err}");
+	assert!(err.contains("wbf_data_max_bytes"), "the message names the other knob: {err}");
+}
+
+#[test]
+fn the_default_send_queue_budget_holds_several_packs() {
+	// ⭐ Not just the floor: the defaults must leave room to pipeline, or
+	// every large reply would stall the connection behind the one before it.
+	let config = config_from_toml("[global]\n").expect("defaults parse");
+	let one_pack = config.wbf_meta_max_bytes + config.wbf_data_max_bytes + crate::wbf::pack::OVERHEAD;
+
+	check(&config).expect("the defaults are a working configuration");
+	assert!(
+		config.wbf_ws_send_queue_bytes / one_pack >= 4,
+		"the budget holds {} full packs; a client asking for several large chunks would stall",
+		config.wbf_ws_send_queue_bytes / one_pack
+	);
+}
+
+#[test]
 fn an_s3_part_size_below_what_s3_accepts_is_refused_at_startup() {
 	// 🚨 The failure it replaces is the nastiest kind: S3 takes every
 	// undersized part without complaint and refuses the whole upload at
