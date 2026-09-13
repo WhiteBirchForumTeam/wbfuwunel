@@ -97,9 +97,9 @@ Logout 後直接關線；同一條連線重複 Login 允許；**登入限速預�
 定案：client 多連線分工（server 不知道）；每個 (user, device) 最多 4 條 WS，超過踢新的，匿名不算、HTTP 不算；一條連線依序處理、落地才 Ack；
 `Recent` 是 client 拉的視窗（預設 320 條），在 WS 上拆成 `Event/Batch` 串流（meta `{tc, bc, fs, ls, r}`，`tc` 是一窗的條數、`r = 0` 一窗結束），下一窗帶 `before`，HTTP 回 `Unsupported`。
 第一部分（§1–§6）已合併；三處跟提案不同（名額在發 token 前拿、一趟收齊一窗、一問一答 handler 保留簽名）在文件裡標 📎。
-**第二部分**（§8：review-followups §2.5 → §2.2 → §2.8，上傳生命週期）🔲 未開，順序與同支／另開由維護者定。client 端要跟的東西：wbf-matrix-client #15。
+**第二部分**（§8：review-followups §2.2／§2.5，上傳生命週期）✅ **PR #48（2026-09-13 合併）**：Seal 一律串流（本地不再整檔進記憶體、送 S3 的 part 不再違反 5 MiB 下限）、`upload_status` 補鎖、sweeper 在鎖下重讀進度。📎 §2.8（#16～#18 之間的舊格式上傳列）**不做** —— 維護者 2026-09-13 確認這個 fork 從未真實上線，不可能有那種列。client 端要跟的東西：wbf-matrix-client #15。
 
-### 2.9 🔧 WS 訂閱與推送（工作 2 ✅ PR #36）――共用核心 ✅ PR #42、to-device ✅ PR #43（皆 2026-09-12 合併）＋ Draft Message（工作 3 🔲 下一步）
+### 2.9 ✅ WS 訂閱與推送（工作 2 PR #36）――共用核心 PR #42、to-device PR #43（2026-09-12）、Draft Message（工作 3 PR #45）、`id` 型別 byte（提案 PR #46 → 實作 #47，2026-09-13）
 
 維護者 2026-09-08 定方向：先做重點功能，`media/upload-lifecycle` 晚點。三件工作：(1) 一般訊息走 WS——已是 `Event/Send`；(2) 連線訂閱自己的帳號，
 在的任何房間的新事件推過來——`Event/Subscribe`／`Unsubscribe`／`Push`，接在 `append_pdu` 提交後，`try_send` 掉了記 `gap` 用 `Recent` 補；
@@ -119,8 +119,8 @@ client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
 **to-device 已合併（PR #43）**：`0x16 Device` 的訂閱、推送、`Fetch` 補洞與銷毀的閉環（[wbf-to-device.md](wbf-to-device.md)）。
 ⚠️ 裝置綁定是「**後來的接手**」（維護者 2026-09-12 推翻提案原本的拒絕規則），被接手的那條收到 `Superseded`(1505)。
 
-**工作 3 Draft Message 🔲 下一步**：照 [streaming-messages.md](streaming-messages.md) §3–§8（`Stream` kind、server 零狀態、每片從佔位事件點讀驗作者、`wbf_draft_max_room_members`）。
-⚠️ 那份文件的狀態還是「📄 草案，**等維護者同意**」，所以開工前要先拿到同意。
+**工作 3 Draft Message ✅ PR #45（2026-09-13 合併）**：照 [streaming-messages.md](streaming-messages.md) §3–§8（`Stream` kind、server 零狀態、每片從佔位事件點讀驗作者、`wbf_draft_max_room_members`）。審查期間維護者加了片的 `prev` 指標（每片指向它接在哪一片之後），外部審查另外抓到七條「開著的草稿是一張不會過期的許可證」型的漏洞，全部修掉。
+📍 **接下來還沒做的**（維護者 2026-09-13 問「4 個 client 的記憶體高峰」時算出來的）：**發送佇列是數個數、不是數 bytes** —— `wbf_ws_send_queue_len` 是 32 個 pack，而一個 pack 最大 16.07 MiB，所以**每條連線的上限是 514 MiB**（4 個裝置 × 4 條 ≈ 9 GiB）。同家族的還有 `Event/Recent` 的窗（最多 500 **筆**，每筆只要求小於一個 pack）與 `Device/Fetch`（一整窗先收齊、再一次造完所有 pack，等於整窗兩份）。📎 實測的另一端：空資料庫、沒人連線時閒置 **42 MiB**（6 核）。
 
 ### 2.10 ✅ 錯誤詞表：`code_id` ＋ `RejectCode` ＋ 連線健康計數器（文件 ✅ PR #37，實作 ✅ PR #38，2026-09-11 合併）
 
