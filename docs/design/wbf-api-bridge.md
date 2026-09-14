@@ -59,7 +59,7 @@ pack（kind＝領域、subtype＝操作；meta＝變數；data＝body 的 bytes�
        axum 比對路徑 → 填 path 參數 → Args::from_request（token、鎖定、暫停、UIAA、ruma 解析）
        → route 函式（原封不動）
   → http::Response：2xx → 狀態碼與 header 進 Ack 的 meta、body 的 bytes 進 Ack 的 data
-                    其他 → Error，照狀態碼與 Matrix 的 errcode 對應（§2.3）
+                    其他 → Error，照狀態碼與 Matrix 的 errcode 對應（§2.4）
 ```
 
 ⭐ **這一版比「自己呼叫 route 函式」好在哪**：
@@ -120,7 +120,30 @@ data = {"topic":"大家好"} 的 bytes
 - 更窄的別名（「設 topic」這種）以後真的常用再加，不要一開始就讓同一個端點有兩個入口。
 - 📎 **變數的名字就用 ruma 模板裡的名字**（`room_id`、`event_type`、`state_key`），不另取一套 —— 另取一套就是第二份會漂移的對照表。每一列的變數名寫進 wire-format §3.2。
 
-### 2.3 錯誤：現在的對應表會把大部分 Matrix 錯誤變成 `Internal`
+### 2.3 旗標 bit4 `IS_BRIDGED`：這個 pack 是不是走橋（維護者 2026-09-14 定）
+
+旗標位組現在用到 bit3（`META_ENCRYPTED`、`WANT_ACK`、`IS_RESPONSE`、`IS_LAST`），**bit4 給橋**：設了就是「這個 pack 是一個轉成 HTTP 請求的 Matrix 端點呼叫」。
+
+🚨 **兩個方向都要「正面認得」，認不得就 `Unsupported`**（全域原則 A5：不是正面認得，就落到安全值）：
+
+| 進來的 pack | 處理 |
+|---|---|
+| **bit4 = 1**，而 kind／subtype **在分配表裡** | 走橋（§2.1） |
+| **bit4 = 1**，而 kind／subtype **不在表裡** | `Error(Unsupported)` —— 🚫 不要回頭去試原生的 handler |
+| **bit4 = 0**，而 kind／subtype 只存在於分配表（沒有原生 handler） | `Error(Unsupported)` —— 🚫 不要「幫它補上」當成橋請求 |
+| bit4 = 0，kind／subtype 有原生 handler | 照舊（`Recent`、`Send`、`Upload/*` ……） |
+
+📌 **號碼空間只有一個**：一個 (kind, subtype) **不是分給原生 handler，就是分給橋，不會兩個都有**。bit4 是 client 的**聲明**，要跟分配對得上；它不是第二個號碼空間（不會出現「`0x14/0x05` 在 bit4=0 時是 A、bit4=1 時是 B」）。一個號碼一個意思，向量與 client 的程式碼才不會有歧義。
+
+為什麼兩邊都要擋：這個旗標是 **client 說它在跟哪一個東西講話**。寬容地「猜它的意思」會讓同一個號碼在不同版本的 server 上跑到不同的地方，而那種錯誤不會報錯，只會做錯事。
+
+⭐ **副作用是免費的向下相容保護**：`Flags::KNOWN` 從 `0b0000_1111` 擴成 `0b0001_1111`，而舊規則是「**保留位元非 0 就拒收**」（wire-format §2）—— 所以一個會說橋的 client 碰到**舊版 server** 時，拿到的是 `Corrupt`（1002）而不是一個被當成別的意思執行的請求。這正是 fail closed 要的形狀。
+
+📌 **回應也帶 bit4**：橋的 `Ack` 跟一般的 `Ack` **形狀不同**（meta 是狀態碼與 header、data 是 body 的 bytes，§2.2），所以回應把 bit4 抄回去，client 不必靠「我記得我剛才發的是橋請求」來解讀。
+
+⚠️ 要改的地方：`core/wbf/pack.rs` 的 `Flags`（新常數、`KNOWN`、`is_bridged()`）、wire-format §2 那張欄位表與「其餘保留」那句、§3.4 的 `Unsupported` 那列要講到這兩種情形，以及向量（一個橋請求、一個橋回應）。
+
+### 2.4 錯誤：現在的對應表會把大部分 Matrix 錯誤變成 `Internal`
 
 `Reject::from(Error)`（`wbf/mod.rs`）只認 404／410、400、413，**其餘一律 `Internal`** —— 包括 403（`M_FORBIDDEN`）、401（`M_UNKNOWN_TOKEN`、`M_USER_LOCKED`）、429（`M_LIMIT_EXCEEDED`）。之前的 handler 碰不到這些，橋會大量碰到。
 
@@ -129,7 +152,7 @@ data = {"topic":"大家好"} 的 bytes
 2. `Error` 的 meta **多帶 Matrix 的 `errcode`**（例如 `M_ROOM_IN_USE`、`M_USER_SUSPENDED`）。wire 的 `code` 是這條通道的詞表、分類得很粗；client 要顯示「房間別名已被使用」這種訊息，需要 Matrix 的那一個。📎 這是 wire-format §3.4 的增補，要寫進那張表。
 3. UIAA 的 401 帶 `flows`／`session`／`completed`：那是批 3 的事（§3）。
 
-### 2.4 HTTP 准不准
+### 2.5 HTTP 准不准
 
 pack 也能走 `POST /_wbf/v1/pack`。橋上的操作**准走 HTTP**：它們本來就是 HTTP 端點，擋掉沒有好處，而且 debug 時方便（pipeline §0-12：HTTP pack 是 debug／fallback）。
 **例外**：會改變「這條連線是誰」的操作（批 2 的 `Register`）跟 `Login` 一樣只走 WS —— HTTP 上沒有連線可以改。
@@ -184,8 +207,8 @@ pack 也能走 `POST /_wbf/v1/pack`。橋上的操作**准走 HTTP**：它們本
 
 1. ~~**橋，還是手搬？**~~ ✅ **定了**（維護者 2026-09-14）：用橋，而且是**把 pack 轉成內部的 HTTP request 丟進 Router**這一版（§2.1）。上游檔案一個都不用動。
 2. ~~**meta 三段分開還是攤平？**~~ ✅ **都不是**（維護者 2026-09-14）：body 根本不進 meta —— **data 就是 body**，meta 只放模板的變數（§2.2）。撞名問題因此消失；五條規則與「一個 subtype 對一個端點」也一併定了。
-3. **`Error` 多帶 Matrix `errcode`**（§2.3）。這是線上格式的增補，client 要跟。
-4. **橋上的操作准走 HTTP pack**（§2.4）？我建議准，`Register` 除外。
+3. **`Error` 多帶 Matrix `errcode`**（§2.4）。這是線上格式的增補，client 要跟。
+4. **橋上的操作准走 HTTP pack**（§2.5）？我建議准，`Register` 除外。
 5. **批 1 的清單**（§3）要增要減？
 6. **subtype 號什麼時候給？** 我照 Matrix 規格章節裡端點出現的順序排，寫進 wire-format §3.2；分配了就不改（§3.3 的規矩）。要不要先給號、還是批 1 寫程式時一起給？📌 粒度（一個 subtype 對一個端點）已定。
 
