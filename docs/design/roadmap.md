@@ -137,6 +137,12 @@ client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
 連帶把「連兩次壞就關線」換成**連線健康計數器**（解不開的框 −1、解得開的 pack 歸零、到 `wbf_ws_corrupt_budget`（8）Close 1002）——📎 舊那條**從來沒被實作過**。
 表與規則在 [wbf-wire-format.md](wbf-wire-format.md) §2.1／§3.4。⚠️ 歸位（格式錯的請求 `Conflict`／`Corrupt` → `InvalidRequest`）與 `code_id` 是**線上看得見的改動**，client 要跟。
 
+### 2.11 📄 常用 Matrix API 走通道（[wbf-api-bridge.md](wbf-api-bridge.md)，提案）
+
+維護者 2026-09-14：account 註冊／登入／登出、session、room、device 這些常用端點改成 WS pack，「看能做多少、多快，慢慢移植」。
+提案的核心是**一座通用的橋**而不是一支一支手搬：pack 轉成一個**內部的 HTTP request（不走網路）**丟進 axum 的 `Router`（維護者 2026-09-14 定的形狀）—— 認證、關卡（鎖定、暫停、UIAA）、ruma 解析、route 函式全部是 HTTP 那條路本身，只有一份，WS 不會漏抄，上游檔案也不用動。
+分三批：批 1 一般的已登入端點（約 35 支，每支＝分配表一列）、批 2 註冊（改變連線身份，手寫 `Session/Register`）、批 3 要 UIAA 的（停用帳號、改密碼、刪裝置）。等維護者決定 §5 的六件事。
+
 ## 3. 候選（要不要做，由維護者決定）
 
 | 項目 | 一句話 | 前提 / 觸發條件 |
