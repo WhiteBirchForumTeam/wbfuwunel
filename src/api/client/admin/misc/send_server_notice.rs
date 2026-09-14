@@ -285,10 +285,12 @@ async fn create_notice_room(services: &Services, target: &UserId) -> Result<Owne
 		.boxed()
 		.await?;
 
-	let pdu = PduBuilder::state(
-		String::from(server_user),
-		&services.globals.server_user_join(),
-	);
+	let mut join = RoomMemberEventContent::new(MembershipState::Join);
+	services
+		.profile
+		.fill_profile_data(server_user, &mut join)
+		.await;
+	let pdu = PduBuilder::state(String::from(server_user), &join);
 
 	services
 		.timeline

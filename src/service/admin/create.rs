@@ -2,13 +2,14 @@ use std::collections::BTreeMap;
 
 use futures::FutureExt;
 use ruma::{
-	RoomId, RoomVersionId,
+	RoomId, RoomVersionId, UserId,
 	events::room::{
 		canonical_alias::RoomCanonicalAliasEventContent,
 		create::RoomCreateEventContent,
 		guest_access::{GuestAccess, RoomGuestAccessEventContent},
 		history_visibility::{HistoryVisibility, RoomHistoryVisibilityEventContent},
 		join_rules::{JoinRule, RoomJoinRulesEventContent},
+		member::{MembershipState, RoomMemberEventContent},
 		name::RoomNameEventContent,
 		power_levels::RoomPowerLevelsEventContent,
 		preview_url::RoomPreviewUrlsEventContent,
@@ -28,8 +29,9 @@ const SERVER_USER_MARKER: &[u8] = b"server_user";
 /// only place it is created.
 ///
 /// Return:
-///     Result  Err when an account of that name already exists: creating
-///     over it would reset its password and make its owner an admin
+///     Result  Ok once the account exists with its displayname; Err when an
+///     account of that name already exists (creating over it would reset
+///     its password and make its owner an admin), or when a write fails
 pub async fn create_server_user(services: &Services) -> Result {
 	let server_user = services.globals.server_user.as_ref();
 	if services.users.exists(server_user).await {
@@ -57,8 +59,11 @@ pub async fn create_server_user(services: &Services) -> Result {
 /// server; brings its displayname up to date.
 ///
 /// Return:
-///     Result  Err (the server does not start) when the account exists
-///     without this server's marker
+///     Result  Ok when the account is this server's and its displayname is
+///     current, or was just created or updated; also Ok in read-only mode
+///     when it is missing or out of date (a warning is logged instead of a
+///     write). Err (the server does not start) when the account exists
+///     without this server's marker, or a write fails
 pub async fn ensure_server_user(services: &Services) -> Result {
 	let server_user = services.globals.server_user.as_ref();
 	let read_only = services.globals.is_read_only();
@@ -116,11 +121,10 @@ pub async fn create_admin_room(services: &Services) -> Result {
 
 	let state_lock = services.state.mutex.lock(&room_id).await;
 
-	// Create a user for the server
-	let server_user = services.globals.server_user.as_ref();
-	if !services.users.exists(server_user).await {
-		create_server_user(services).await?;
-	}
+	// Only a fresh database gets here (migrations::fresh), so the server user
+	// does not exist yet; create_server_user refuses if it somehow does.
+	let server_user: &UserId = services.globals.server_user.as_ref();
+	create_server_user(services).await?;
 
 	let create_content = if !room_version_rules
 		.authorization
@@ -149,13 +153,15 @@ pub async fn create_admin_room(services: &Services) -> Result {
 		.await?;
 
 	// 2. Make server user/bot join
+	let mut join = RoomMemberEventContent::new(MembershipState::Join);
+	services
+		.profile
+		.fill_profile_data(server_user, &mut join)
+		.await;
 	services
 		.timeline
 		.build_and_append_pdu(
-			PduBuilder::state(
-				String::from(server_user),
-				&services.globals.server_user_join(),
-			),
+			PduBuilder::state(String::from(server_user), &join),
 			server_user,
 			&room_id,
 			&state_lock,

@@ -10,18 +10,8 @@ $script:Pass = 0; $script:Fail = 0
 function Check([string]$name, [bool]$ok, [string]$detail) {
   if ($ok) { $script:Pass++; Log "  ok   $name  $detail" } else { $script:Fail++; Log "  FAIL $name  $detail" }
 }
-function Http([string]$method, [string]$path, $body, $tok) {
-  $req = New-Object System.Net.Http.HttpRequestMessage ((New-Object System.Net.Http.HttpMethod $method), "$B$path")
-  if ($tok) { $req.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $tok) }
-  if ($null -ne $body) { $req.Content = New-Object System.Net.Http.StringContent ((ConvertTo-Json $body -Compress -Depth 20), [Text.Encoding]::UTF8, 'application/json') }
-  $resp = $script:PackHttpClient.SendAsync($req).Result
-  $text = $resp.Content.ReadAsStringAsync().Result
-  $json = $null; if ($text) { try { $json = $text | ConvertFrom-Json } catch {} }
-  @{ status = [int]$resp.StatusCode; text = $text; json = $json }
-}
 function Enc([string]$text) { [uri]::EscapeDataString($text) }
 function Register([string]$name) { Http POST '/_matrix/client/v3/register' @{ username = $name; password = 'correct-horse-battery'; auth = @{ type = 'm.login.dummy' } } $null }
-function Log-Text([string]$tag) { ((Get-Content "$OUT\$tag.out","$OUT\$tag.err" -Raw -ErrorAction SilentlyContinue) -join "`n") -replace "`e\[[0-9;]*m", '' }
 
 $SYSTEM = '@system:localhost'
 $DISPLAYNAME = '[SYS] localhost'
@@ -79,9 +69,8 @@ else {
 
   $refused = $false
   try { $server = Start-Server $cfg2 's2-new' } catch { $refused = $true; Log "  (start refused as expected: $($_.Exception.Message))" }
-  if (-not $refused) { Stop-Server $server }
-  Stop-Server $null
-  $text = Log-Text 's2-new'
+  Stop-Server $server
+  $text = Read-ServerLog 's2-new'
   Check '[2.2] the new binary refuses to start: that @system would be made an admin' `
     ($refused -and $text.Contains('is an account this server did not create')) `
     "refused=$refused log=$((($text -split "`n") | Where-Object { $_ -match 'system' } | Select-Object -First 3) -join ' | ')"

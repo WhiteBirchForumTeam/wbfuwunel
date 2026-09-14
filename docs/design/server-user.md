@@ -22,9 +22,8 @@
 ## 3. 顯示名稱
 
 - 值：`[SYS] ` 加上 `server_name` 原樣（`globals::server_user_displayname`）。`server_name` 設定後不能改（資料庫有記號），所以這個值也不會漂移。
-- **寫在兩個地方，缺一不可**：
-  1. **profile**（`/profile` 查到的）：建立帳號時設；每次啟動時比對，不一樣就改。
-  2. **它自己的 join 事件**：client 在房間裡顯示的是 `m.room.member` 事件裡的 `displayname`，不是 profile。所以它加入房間的三個地方（開管理員房間、開公告房間、開附件警告房間）都用同一個 `globals::server_user_join()` 產生內容，帶著顯示名稱。
+- **profile 是唯一來源**（`/profile` 查到的）：建立帳號時設；每次啟動時比對，不一樣就改。
+- client 在房間裡顯示的是 `m.room.member` 事件裡的 `displayname`，不是 profile。所以它加入房間的三個地方（開管理員房間、開公告房間、開附件警告房間）跟所有人的 join 一樣，用 `profile::fill_profile_data` 把 profile 的顯示名稱與頭像抄進 join 事件 —— 不另寫一份「伺服器帳號的 join 長什麼樣」，兩份實作遲早漂移（例如之後有人替它設頭像，只有一邊會顯示）。
 - 啟動時如果改了 profile，照 `Propagation::All` 更新它已經加入的房間。
 
 ## 4. 🚨 防止「別人的帳號變成伺服器帳號」
@@ -56,9 +55,9 @@
 
 | 做什麼 | 落點 |
 |---|---|
-| 名字、顯示名稱、join 事件內容 | `src/service/globals/mod.rs` |
+| 名字、顯示名稱 | `src/service/globals/mod.rs` |
 | 建立時寫記號與顯示名稱；啟動閘門 | `src/service/admin/create.rs` 的 `create_server_user`、`ensure_server_user` |
 | 呼叫閘門 | `src/service/services.rs` 的 `start`，在 `migrations` 之後 |
-| 三個 join 事件 | `admin/create.rs`、`admin/attachments_notice.rs`、`api/client/admin/misc/send_server_notice.rs` |
+| 三個 join 事件（從 profile 填） | `admin/create.rs`、`admin/attachments_notice.rs`、`api/client/admin/misc/send_server_notice.rs` |
 | 文件裡的 `@conduit` | `docs/authentication/legacy.md`、`docs/troubleshooting.md`、`config/mod.rs` 的註解（`tuwunel-example.toml` 由它產生） |
 | e2e | `tests/e2e/e2e9.ps1` 比對的 sender 改成 `@system:localhost`；加一條：伺服器發的邀請，邀請事件裡的 sender 顯示名稱是 `[SYS] localhost` |

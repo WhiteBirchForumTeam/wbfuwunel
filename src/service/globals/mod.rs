@@ -3,10 +3,7 @@ mod data;
 use std::{ops::Range, sync::Arc};
 
 pub use data::Data;
-use ruma::{
-	OwnedUserId, RoomAliasId, ServerName, UserId,
-	events::room::member::{MembershipState, RoomMemberEventContent},
-};
+use ruma::{OwnedUserId, RoomAliasId, ServerName, UserId};
 use tuwunel_core::{
 	Result, Server, err,
 	utils::{Secret, resolve_secret},
@@ -77,20 +74,13 @@ impl Service {
 	#[must_use]
 	pub fn server_name(&self) -> &ServerName { self.server.name.as_ref() }
 
+	/// The server user's profile displayname. Its join events take the name
+	/// from the profile like everyone else's (`profile::fill_profile_data`).
+	///
 	/// Return:
 	///     String  example: "[SYS] matrix.org"
 	#[must_use]
 	pub fn server_user_displayname(&self) -> String { format!("[SYS] {}", self.server_name()) }
-
-	/// The server user's own join event. It carries the displayname because a
-	/// client names a room member from this event, not from the profile.
-	#[must_use]
-	pub fn server_user_join(&self) -> RoomMemberEventContent {
-		RoomMemberEventContent {
-			displayname: Some(self.server_user_displayname()),
-			..RoomMemberEventContent::new(MembershipState::Join)
-		}
-	}
 
 	/// checks if `user_id` is local to us via server_name comparison
 	#[inline]

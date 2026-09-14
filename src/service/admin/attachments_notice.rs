@@ -30,10 +30,8 @@ use crate::media_refs::attachments::UNDECLARED_ATTACHMENTS_WARNING;
 ///     affected).
 #[implement(super::Service)]
 pub async fn send_attachment_warning(&self, user: &UserId) -> Result {
+	// The server user exists: ensure_server_user ran before any worker.
 	let server_user = self.services.globals.server_user.as_ref();
-	if !self.services.users.exists(server_user).await {
-		super::create::create_server_user(&self.services).await?;
-	}
 
 	let room_id = RoomId::new_v1(self.services.globals.server_name());
 	let _short_id = self
@@ -57,11 +55,12 @@ pub async fn send_attachment_warning(&self, user: &UserId) -> Result {
 		..RoomCreateEventContent::new_v11()
 	}))
 	.await?;
-	append(PduBuilder::state(
-		String::from(server_user),
-		&self.services.globals.server_user_join(),
-	))
-	.await?;
+	let mut join = RoomMemberEventContent::new(MembershipState::Join);
+	self.services
+		.profile
+		.fill_profile_data(server_user, &mut join)
+		.await;
+	append(PduBuilder::state(String::from(server_user), &join)).await?;
 	append(PduBuilder::state(String::new(), &RoomJoinRulesEventContent::new(JoinRule::Invite))).await?;
 	append(PduBuilder::state(
 		String::new(),
