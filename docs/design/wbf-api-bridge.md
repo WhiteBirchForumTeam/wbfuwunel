@@ -6,7 +6,8 @@
 
 ## 0. 一句話
 
-**不一支一支手寫 handler。** 做一座通用的橋：pack 的 meta 帶那個端點的 path 參數、query、body，橋把它組成 ruma 的 request，**走 HTTP 那條完全相同的認證與解析**（`Args::from_request` 的那一段），再呼叫**原本的 route 函式**，回應原樣放進 `Ack`。之後搬一個端點＝**分配表加一列**（一個 subtype 號對一個 route），外加向量與 e2e。
+**不一支一支手寫 handler。** 做一座通用的橋：把 pack 轉成一個**內部的 `http::Request`（不走網路）**，直接丟進 axum 的 `Router` 跑一次 —— 認證、關卡、ruma 解析、route 函式全部是 HTTP 進來時的同一條路，回應的 JSON 原樣放進 `Ack`。之後搬一個端點＝**分配表加一列**（一個 subtype 號對一個 ruma 的 Request 型別），外加向量與 e2e。
+📌 這個形狀是維護者 2026-09-14 定的（「內部做一個 ws pack 轉換成內部 http request 的方法，直接塞進去 route，不走網路丟一次」）；比提案原本寫的「自己呼叫 route 函式」少動一個上游檔案，理由在 §2.1。
 
 ## 1. 為什麼不照 `Login` 那樣手搬
 
@@ -39,24 +40,43 @@ HTTP 請求進 route 之前，`router/auth.rs` 會依 **route 的型別**（`Typ
 
 手搬一支，就要記得把這幾條**再寫一次**；搬三十幾支就是三十幾份。漏掉的那一支不會 fail closed —— 例如被暫停的帳號在 WS 上照樣能 `createRoom`。這正是 [room-seq-and-recent.md](room-seq-and-recent.md) §2 剛修掉的那種洞：`Event/Recent` 只抄了 `/messages` 三道關卡裡的兩道（PR #54）。
 
-⭐ 橋的做法是**不抄關卡，走同一段程式**：橋呼叫的就是 `Args::from_request` 裡的那段認證與解析，上游之後在 `auth.rs` 加的政策，WS 自動有。
+⭐ 橋的做法是**不抄關卡，走同一條路**：請求經過的就是 HTTP 進來時的那個 Router 與 `Args::from_request`，上游之後在 `auth.rs` 加的政策，WS 自動有。
 
 ## 2. 橋怎麼接
 
-### 2.1 一個 pack 的路
+### 2.1 一個 pack 的路：組成一個內部的 HTTP request，丟進 Router，不走網路
+
+維護者 2026-09-14 定的做法：**pack 轉成一個 `http::Request`，直接交給 axum 的 `Router` 跑一次**，不開 socket、不繞回自己的 port。
 
 ```
 pack（kind＝領域、subtype＝操作，meta＝{ path?, query?, body? }）
-  → 分配表：subtype → (ruma Request 型別, route 函式)
-  → 組 http::Request：method 與 path 模板取自 ruma 的 METADATA，path 參數從 meta.path 填入
+  → 分配表：subtype → ruma 的 Request 型別（只用它的 METADATA 拿 method 與 path 模板）
+  → 組 http::Request：path 模板填上 meta.path、query 串上 meta.query、body ＝ meta.body
                       Authorization: Bearer <這條連線 session 的 access token>
-  → Args::<Request>::from_pack(...)  ← 跟 from_request 共用：auth（token、鎖定、暫停、UIAA）＋ make_body
-  → route 函式（原封不動）
-  → Ok(response)：try_into_http_response → body 的 JSON 就是 Ack 的 meta
-    Err(error)   ：Error，帶 Matrix 的 errcode（§2.3）
+                      extensions: ConnectInfo(<這條連線的對端位址>)   ← 限速與 client IP 照常
+  → Router::call(request)                      ← 就是 HTTP 進來時走的那一條，一條都不少
+       axum 比對路徑 → 填 path 參數 → Args::from_request（token、鎖定、暫停、UIAA、ruma 解析）
+       → route 函式（原封不動）
+  → http::Response：2xx → body 的 JSON 原樣當 Ack 的 meta
+                    其他 → Error，照狀態碼與 Matrix 的 errcode 對應（§2.3）
 ```
 
-⚠️ **為什麼不能直接把組好的 request 丟給 `Args::from_request`**：它用 axum 的 `Path` extractor 取 path 參數，而那個值是 axum 的 Router 比對路徑時才塞進 request 的；一個沒經過 Router 的 request 拿不到。所以要在 `router/args.rs` 旁邊加一個 `from_pack`，把「取 path 參數」換成直接給，**其餘（auth、`make_body`、UIAA 的 body 處理）呼叫同一批函式**。這是這個提案唯一要動上游檔案的地方，改動是把 `from_request` 的中段抽成兩者共用的函式。
+⭐ **這一版比「自己呼叫 route 函式」好在哪**：
+
+| | 自己呼叫 route 函式 | 丟進 Router |
+|---|---|---|
+| path 參數 | ⚠️ axum 的 `Path` extractor 只替**經過 Router 比對過**的 request 填參數，所以要另寫一個 `from_pack`，把 `Args::from_request` 的中段抽成共用 | ✅ Router 自己填，`Args::from_request` **一個字都不用改** |
+| 關卡（token、鎖定、暫停、UIAA） | 走同一段程式，但接縫是我新開的 | ✅ 走的就是 HTTP 那條路本身 |
+| 要動的上游檔案 | `router/args.rs` | ✅ **零**（下面那個 seam 是 fork 自己的檔案） |
+| 每支端點的成本 | 分配表一列（型別 ＋ route 函式） | 分配表一列（只要型別） |
+
+📎 **層級沒有問題**：Matrix 的路由表是 **`api` crate 自己的** `tuwunel_api::router::build()` 組的（`router` crate 只是接上 fallback、掛 middleware、`with_state`）。所以橋可以在 `api` 裡組一份自己的 `Router<State>`，不必反過來依賴 `router` crate。**唯一的 seam**：`State` 裡那個 Services 指標是 `router` crate 建的，所以由它在啟動時呼叫一次 `wbf::install_bridge_router(state)`，把組好的 Router 交給橋。一行，方向還是 `api ← router`。
+
+📎 **橋用的是自己組的那份 Router，不是對外服務的那份** —— 對外那份掛著 CORS、壓縮、逾時這些 HTTP 的 middleware，對一個內部呼叫沒有意義（壓縮還要再解一次）。
+
+🚨 **分配表是白名單，pack 不帶自由的 path**。client 送的是 kind ＋ subtype，method 與 path 由 server 這邊的表決定。反過來做（pack 裡直接寫 method 與 path）等於把**每一個** HTTP 端點都開到通道上 —— 包括 `/sync`（會佔住這條連線的 handler 幾十秒）、舊的媒體上傳、以及規格裡刻意標成「HTTP 不可」的那幾個（`Recent`、`Stream`）。認不得的 subtype 一律拒絕（fail closed）。
+
+⚠️ **代價：路徑對不對從編譯期變成執行期**。所以分配表存的是 **ruma 的 Request 型別**，method 與 path 模板從它的 `METADATA` 取 —— 上游改路徑或改型別名字，**建置就會壞**，不是上線才壞。另外加一條啟動檢查／測試：分配表每一列都對橋的 Router 打一次不帶 token 的請求，**回 401 才算這條路存在**（回 404 就是表寫錯了）。
 
 ### 2.2 meta 的形狀
 
@@ -127,11 +147,11 @@ pack 也能走 `POST /_wbf/v1/pack`。橋上的操作**准走 HTTP**：它們本
 
 ## 4. 會不會跟正在進行的 PR 撞
 
-`wbf/recent-erasure`（#54）改的是 `wbf/recent.rs` 的 `collect_window`、兩份設計文件、e2e8、CHANGELOG。這個提案要動的是 `wbf/mod.rs` 的派發、新檔、`router/args.rs`、wire-format §3.2／§3.3／§3.4、pipeline §7 —— **沒有同一個檔案的同一段**。CHANGELOG 照慣例合併後才寫，不會同時改。實作分支等這份文件同意之後才開，從當時的 main 開。
+`wbf/recent-erasure`（#54）改的是 `wbf/recent.rs` 的 `collect_window`、兩份設計文件、e2e8、CHANGELOG。這個提案要動的是 `wbf/mod.rs` 的派發、新檔 `wbf/bridge.rs`、`router/router.rs` 一行、wire-format §3.2／§3.3／§3.4、pipeline §7 —— **沒有同一個檔案的同一段**。CHANGELOG 照慣例合併後才寫，不會同時改。實作分支等這份文件同意之後才開，從當時的 main 開。
 
 ## 5. 要維護者決定的
 
-1. **橋，還是手搬？** 我建議橋（§1）。代價是動上游的 `router/args.rs`：把 `from_request` 的中段抽成共用函式 —— 跟上游 merge 時多一個可能衝突的點，但只有一處。
+1. ~~**橋，還是手搬？**~~ ✅ **定了**（維護者 2026-09-14）：用橋，而且是**把 pack 轉成內部的 HTTP request 丟進 Router**這一版（§2.1）。上游檔案一個都不用動。
 2. **meta 三段分開**（§2.2）還是攤平？我建議分開。
 3. **`Error` 多帶 Matrix `errcode`**（§2.3）。這是線上格式的增補，client 要跟。
 4. **橋上的操作准走 HTTP pack**（§2.4）？我建議准，`Register` 除外。
@@ -142,8 +162,9 @@ pack 也能走 `POST /_wbf/v1/pack`。橋上的操作**准走 HTTP**：它們本
 
 | 做什麼 | 落點 |
 |---|---|
-| `from_pack` 與共用的解析／認證 | `src/api/router/args.rs`（抽出共用函式）、`auth.rs` 不動 |
-| 分配表、meta 解析、回應轉換 | `src/api/client/wbf/bridge.rs`（新） |
+| 橋自己的 Router（`tuwunel_api::router::build` 組一份，不掛 middleware）、分配表、meta ↔ request／ response 轉換 | `src/api/client/wbf/bridge.rs`（新） |
+| 把組好的 Router 交給橋（啟動時一行，因為 `State` 是那邊建的） | `src/router/router.rs` 呼叫 `wbf::install_bridge_router(state)` |
+| 上游的 `router/args.rs`、`auth.rs` | **不動** |
 | 錯誤對應補齊、`errcode` | `src/api/client/wbf/mod.rs` 的 `Reject::from(Error)`；wire-format §3.4 |
 | 派發 | `wbf/mod.rs` 的 `dispatch`：`0x11`／`0x13`／`0x15` 與 `0x14`、`0x16` 裡新的 subtype 進橋 |
 | 契約 | wire-format §3.2 每支一列；pipeline §7 改寫成「搬一個端點＝分配表一列」 |

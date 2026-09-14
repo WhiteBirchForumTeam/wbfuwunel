@@ -140,7 +140,7 @@ client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
 ### 2.11 📄 常用 Matrix API 走通道（[wbf-api-bridge.md](wbf-api-bridge.md)，提案）
 
 維護者 2026-09-14：account 註冊／登入／登出、session、room、device 這些常用端點改成 WS pack，「看能做多少、多快，慢慢移植」。
-提案的核心是**一座通用的橋**而不是一支一支手搬：pack 走 HTTP 那段完全相同的認證與解析（`Args::from_request`），呼叫原本的 route 函式 —— 關卡（鎖定、暫停、UIAA）只有一份，WS 不會漏抄。
+提案的核心是**一座通用的橋**而不是一支一支手搬：pack 轉成一個**內部的 HTTP request（不走網路）**丟進 axum 的 `Router`（維護者 2026-09-14 定的形狀）—— 認證、關卡（鎖定、暫停、UIAA）、ruma 解析、route 函式全部是 HTTP 那條路本身，只有一份，WS 不會漏抄，上游檔案也不用動。
 分三批：批 1 一般的已登入端點（約 35 支，每支＝分配表一列）、批 2 註冊（改變連線身份，手寫 `Session/Register`）、批 3 要 UIAA 的（停用帳號、改密碼、刪裝置）。等維護者決定 §5 的六件事。
 
 ## 3. 候選（要不要做，由維護者決定）
