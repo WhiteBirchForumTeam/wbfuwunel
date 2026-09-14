@@ -2454,7 +2454,7 @@ pub struct Config {
 	pub rocksdb_allow_fallocate: bool,
 
 	/// This is a password that can be configured that will let you login to the
-	/// server bot account (currently `@conduit`) for emergency troubleshooting
+	/// server bot account (`@system`) for emergency troubleshooting
 	/// purposes such as recovering/recreating your admin room, or inviting
 	/// yourself back.
 	///

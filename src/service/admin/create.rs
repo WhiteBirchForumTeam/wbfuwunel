@@ -9,31 +9,94 @@ use ruma::{
 		guest_access::{GuestAccess, RoomGuestAccessEventContent},
 		history_visibility::{HistoryVisibility, RoomHistoryVisibilityEventContent},
 		join_rules::{JoinRule, RoomJoinRulesEventContent},
-		member::{MembershipState, RoomMemberEventContent},
 		name::RoomNameEventContent,
 		power_levels::RoomPowerLevelsEventContent,
 		preview_url::RoomPreviewUrlsEventContent,
 		topic::{RoomTopicEventContent, TopicContentBlock},
 	},
 };
-use tuwunel_core::{Result, matrix::room_version, pdu::PduBuilder};
+use tuwunel_core::{Err, Result, matrix::room_version, pdu::PduBuilder, warn};
 
-use crate::Services;
+use crate::{Services, profile::Propagation};
 
-/// Create the server user.
+/// The `global` key naming the server user this server created itself. An
+/// account under the server user's name without it was made by someone else
+/// (`docs/design/server-user.md` §4).
+const SERVER_USER_MARKER: &[u8] = b"server_user";
+
+/// Creates the server user: the marker, the account, its displayname. The
+/// only place it is created.
 ///
-/// This should be the first user on the server and created prior to the
-/// admin room.
+/// Return:
+///     Result  Err when an account of that name already exists: creating
+///     over it would reset its password and make its owner an admin
 pub async fn create_server_user(services: &Services) -> Result {
 	let server_user = services.globals.server_user.as_ref();
+	if services.users.exists(server_user).await {
+		return Err!("{server_user} already exists; the server user is not created over it");
+	}
 
-	// Create a user for the server
+	// The marker goes first: a crash after it and before the account leaves a
+	// name the next start creates, never an account the next start refuses.
+	services.db["global"].insert(SERVER_USER_MARKER, server_user.as_str());
+
 	services
 		.users
 		.create(server_user, None, None)
 		.await?;
 
-	Ok(())
+	services
+		.profile
+		.set_displayname(server_user, Some(&services.globals.server_user_displayname()), Some(Propagation::None))
+		.await
+}
+
+/// Startup gate for the server user, after migrations and before any worker:
+/// creates it when missing, so its name is taken from the first moment;
+/// refuses to start when an account of that name was not created by this
+/// server; brings its displayname up to date.
+///
+/// Return:
+///     Result  Err (the server does not start) when the account exists
+///     without this server's marker
+pub async fn ensure_server_user(services: &Services) -> Result {
+	let server_user = services.globals.server_user.as_ref();
+	let read_only = services.globals.is_read_only();
+
+	if !services.users.exists(server_user).await {
+		if read_only {
+			warn!(%server_user, "The server user does not exist and cannot be created in read-only mode");
+			return Ok(());
+		}
+
+		return create_server_user(services).await;
+	}
+
+	let is_created_by_this_server = services.db["global"]
+		.get(SERVER_USER_MARKER)
+		.await
+		.is_ok_and(|marker| *marker == *server_user.as_bytes());
+	if !is_created_by_this_server {
+		return Err!(
+			"{server_user} is an account this server did not create, and the server user would make its \
+			 owner an admin. Refusing to start. See docs/design/server-user.md"
+		);
+	}
+
+	let displayname = services.globals.server_user_displayname();
+	if services.profile.displayname(server_user).await.ok().as_deref() == Some(displayname.as_str()) {
+		return Ok(());
+	}
+
+	if read_only {
+		warn!(%server_user, %displayname, "The server user's displayname is out of date and cannot be set in read-only mode");
+		return Ok(());
+	}
+
+	services
+		.profile
+		.set_displayname(server_user, Some(&displayname), Some(Propagation::All))
+		.await
 }
 
 /// Create the admin room.
@@ -91,7 +154,7 @@ pub async fn create_admin_room(services: &Services) -> Result {
 		.build_and_append_pdu(
 			PduBuilder::state(
 				String::from(server_user),
-				&RoomMemberEventContent::new(MembershipState::Join),
+				&services.globals.server_user_join(),
 			),
 			server_user,
 			&room_id,

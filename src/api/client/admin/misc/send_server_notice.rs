@@ -287,7 +287,7 @@ async fn create_notice_room(services: &Services, target: &UserId) -> Result<Owne
 
 	let pdu = PduBuilder::state(
 		String::from(server_user),
-		&RoomMemberEventContent::new(MembershipState::Join),
+		&services.globals.server_user_join(),
 	);
 
 	services

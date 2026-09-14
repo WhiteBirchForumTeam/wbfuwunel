@@ -59,7 +59,7 @@ pub async fn send_attachment_warning(&self, user: &UserId) -> Result {
 	.await?;
 	append(PduBuilder::state(
 		String::from(server_user),
-		&RoomMemberEventContent::new(MembershipState::Join),
+		&self.services.globals.server_user_join(),
 	))
 	.await?;
 	append(PduBuilder::state(String::new(), &RoomJoinRulesEventContent::new(JoinRule::Invite))).await?;

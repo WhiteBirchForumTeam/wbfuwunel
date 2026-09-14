@@ -3,13 +3,19 @@ mod data;
 use std::{ops::Range, sync::Arc};
 
 pub use data::Data;
-use ruma::{OwnedUserId, RoomAliasId, ServerName, UserId};
+use ruma::{
+	OwnedUserId, RoomAliasId, ServerName, UserId,
+	events::room::member::{MembershipState, RoomMemberEventContent},
+};
 use tuwunel_core::{
 	Result, Server, err,
 	utils::{Secret, resolve_secret},
 };
 
 use crate::service;
+
+/// The localpart of the server's own account (`docs/design/server-user.md`).
+const SERVER_USER_LOCALPART: &str = "system";
 
 pub struct Service {
 	pub db: Data,
@@ -26,10 +32,10 @@ impl crate::Service for Service {
 			db,
 			server: args.server.clone(),
 			server_user: UserId::parse_with_server_name(
-				String::from("conduit"),
+				String::from(SERVER_USER_LOCALPART),
 				&args.server.name,
 			)
-			.expect("@conduit:server_name is valid"),
+			.expect("@system:server_name is valid"),
 		}))
 	}
 
@@ -70,6 +76,21 @@ impl Service {
 	#[inline]
 	#[must_use]
 	pub fn server_name(&self) -> &ServerName { self.server.name.as_ref() }
+
+	/// Return:
+	///     String  example: "[SYS] matrix.org"
+	#[must_use]
+	pub fn server_user_displayname(&self) -> String { format!("[SYS] {}", self.server_name()) }
+
+	/// The server user's own join event. It carries the displayname because a
+	/// client names a room member from this event, not from the profile.
+	#[must_use]
+	pub fn server_user_join(&self) -> RoomMemberEventContent {
+		RoomMemberEventContent {
+			displayname: Some(self.server_user_displayname()),
+			..RoomMemberEventContent::new(MembershipState::Join)
+		}
+	}
 
 	/// checks if `user_id` is local to us via server_name comparison
 	#[inline]
