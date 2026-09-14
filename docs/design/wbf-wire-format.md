@@ -223,6 +223,8 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 所以 kind 按 **API 領域**分、subtype 是領域內的操作；一個領域不超過 256 個操作，一個 kind 就夠。領域照 Matrix client-server 規格的章節切，
 這樣遷移時一章對一個 kind，不用猜。先占號、不先定 subtype；**已分配的號不改**。
 
+📌 **走橋的 subtype（flags bit4 `IS_BRIDGED`）不列在 §3.2**：它們的號碼、對應的 Matrix 端點與變數，唯一的權威是 [../bridge-specs/index.md](../bridge-specs/index.md)（設計在 [wbf-api-bridge.md](wbf-api-bridge.md)）。§3.2 只列原生的。每個 kind 裡 `0x01`–`0x1F` 給原生、`0x20`–`0x9F` 給橋、`0xA0` 以上保留。
+
 | kind | 領域 | 對應的 Matrix 章節 / 現在的 `src/api/client/` |
 |---|---|---|
 | `0x01` | Control | 通道自己的事 |
