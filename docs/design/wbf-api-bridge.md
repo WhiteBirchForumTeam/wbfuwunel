@@ -52,7 +52,7 @@ HTTP 請求進 route 之前，`router/auth.rs` 會依 **route 的型別**（`Typ
   → 看 flags bit4 分流
        bit4 = 1（走橋）  → 查「橋的分配表」→ 轉成內部 HTTP request → Router → 轉回 pack（§2.1–§2.3）
        bit4 = 0（原生）  → 查「原生的准入表」→ wbf 自己的 handler（`Recent`、`Send`、`Upload/*`…）
-       任一張表查不到   → Error pack（§2.3 的錯誤碼表）
+       自己那張表查不到 → Error pack（UnknownKind；每條路只查自己的表，§2.3）
   → 原路返回：WebSocket 進來的從同一條 WebSocket 回；HTTP pack 進來的，回應 pack 放在同一個 HTTP response 的 body
 ```
 
@@ -140,18 +140,31 @@ data = {"topic":"大家好"} 的 bytes
 
 旗標位組現在用到 bit3（`META_ENCRYPTED`、`WANT_ACK`、`IS_RESPONSE`、`IS_LAST`），**bit4 給橋**：設了就是「這個 pack 是一個轉成 HTTP 請求的 Matrix 端點呼叫」。
 
-🚨 **兩個方向都要「正面認得」，認不得就回錯誤，不猜**（全域原則 A5：不是正面認得，就落到安全值）：
+🚨 **兩條路各自「正面認得」，認不得就回錯誤，不猜**（全域原則 A5：不是正面認得，就落到安全值）。**每條路只查自己那張表**（維護者 2026-09-14 定）：
 
-| 進來的 pack | 回應 |
-|---|---|
-| **bit4 = 1**，在**橋的分配表**裡 | 走橋（§2.1） |
-| **bit4 = 1**，不在橋的表、但**原生准入表有** | `Error(Unsupported)`（1102）—— 有這個操作，但不是走橋的；🚫 不要回頭去試原生 handler |
-| **bit4 = 0**，不在原生准入表、但**橋的表有** | `Error(Unsupported)`（1102）—— 有這個操作，但要帶 bit4；🚫 不要「幫它補上」當成橋請求 |
-| **兩張表都沒有**（不論 bit4） | `Error(UnknownKind)`（1101）—— 這台 server 沒有這個操作 |
-| bit4 = 0，原生准入表有 | 照舊（`Recent`、`Send`、`Upload/*` ……；「HTTP 不可」等規則照准入表） |
-| 走橋，但**轉換不了**：變數缺、多、不是字串（§2.2 規則 3、4） | `Error(InvalidRequest)` —— 操作存在、路也對，是請求本身寫錯 |
+```
+bit4 分流之後：
 
-📎 **跟維護者原話的差別，待確認**：維護者說「不在清單＝不支援，回 Unsupported」。這張表把「查不到」細分成兩種，因為 wire-format §3.4 的兩個碼**叫 client 做不同的事**：`Unsupported`（1102）是「**有**這個操作，你走錯路了 —— 換一種送法」，`UnknownKind`（1101）是「**沒有**這個操作 —— 別重試」。全部回 `Unsupported` 的話，client 對一個根本不存在的操作會照 1102 的指示去換路重試。「轉換失敗」同理：變數寫錯是 `InvalidRequest`（格式錯的請求，§3.4 既有的歸位），不是路走錯。
+橋的路（bit4 = 1）
+  防呆：bit4 不是 1 → Unsupported（1102）      ← 分流已經保證了，基本上進不來
+  橋的分配表查得到 (kind, subtype)？ 查不到 → UnknownKind（1101）
+  轉換：變數缺、多、不是字串（§2.2 規則 3、4） → InvalidRequest
+  → 走橋（§2.1）
+
+原生的路（bit4 = 0）
+  防呆：bit4 不是 0 → Unsupported（1102）      ← 同上
+  原生准入表查得到 (kind, subtype)？ 查不到 → UnknownKind（1101）
+  → 准入表其餘的規則照舊（「HTTP 不可」→ Unsupported、未登入 → Unauthorized、id 型別）
+  → 原生 handler（`Recent`、`Send`、`Upload/*` ……）
+```
+
+⭐ **為什麼不跨表查**：提案先前一版在查不到時會再去查**另一張表**，有就回 `Unsupported`（「你走錯路了」）。那讓兩條路互相知道對方的表 —— 為了一個比較貼心的錯誤訊息，在兩張表之間開了一道接縫（全域原則 A4）。每條路只認得自己的表，兩張表才能各自增減、互不牽動。
+
+📎 **代價與為什麼可以接受**：client 帶錯 bit4（例如 `Recent` 帶了 bit4）收到的是 `UnknownKind` 而不是「走錯路」。那是 client 程式的 bug，開發時第一次打就會看到，而且在改程式之前重試本來就沒用 —— `UnknownKind` 的「別重試」並不誤導。
+
+📎 **`Unsupported` 的意思因此保持單純**：它只在原生准入表的「這個 kind 不走這個傳輸」時出現（例：`Recent` 從 HTTP pack 送來），以及上面兩個防呆。橋本身不看傳輸層（§2.5），所以橋的路上不會因為傳輸回 `Unsupported`。
+
+📎 **防呆為什麼留著**：分流那一行保證了 bit4 跟路一致，但那是**別處的承諾**（全域原則 A6：消費端自己再問一次）。以後有人改了分流，這兩行會把 bit4 不對的 pack 擋下來，而不是讓它被另一條路默默處理掉。
 
 📌 **號碼空間只有一個**：一個 (kind, subtype) **不是分給原生 handler，就是分給橋，不會兩個都有**。bit4 是 client 的**聲明**，要跟分配對得上；它不是第二個號碼空間（不會出現「`0x14/0x05` 在 bit4=0 時是 A、bit4=1 時是 B」）。一個號碼一個意思，向量與 client 的程式碼才不會有歧義。
 
