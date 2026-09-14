@@ -17,7 +17,14 @@ use axum::{
 	extract::ConnectInfo,
 };
 use http::{HeaderValue, Method, Request, StatusCode, header};
-use ruma::api::{IncomingRequest, path_builder::PathBuilder};
+use ruma::api::{
+	IncomingRequest,
+	client::{
+		account, alias, config, context, device, membership, profile, read_marker, receipt, redact, room, state,
+		tag, typing,
+	},
+	path_builder::PathBuilder,
+};
 use serde_json::{Map, Value, json};
 use tower::ServiceExt;
 use tuwunel_core::wbf::{Flags, IdType, Kind, PackBuilder, PackView, RejectCode};
@@ -53,15 +60,70 @@ pub(super) struct EndpointShape {
 	pub(super) path_template: &'static str,
 }
 
-/// Every bridged endpoint. ⚠️ Empty until the first batch lands; the layer
-/// above it is what this commit adds.
-static BRIDGED_ENDPOINTS: &[BridgedEndpoint] = &[];
+/// Every bridged endpoint, in the order of `docs/bridge-specs/index.md` §2.
+/// ⚠️ That table is the authority for the numbers; this one must agree with
+/// it row for row. Numbers are never reused.
+static BRIDGED_ENDPOINTS: &[BridgedEndpoint] = &[
+	// 0x11 Account
+	row(Kind::Account, 0x20, "WhoAmI", shape_of::<account::whoami::v3::Request>, NO_QUERY),
+	row(Kind::Account, 0x21, "GetProfile", shape_of::<profile::get_profile::v3::Request>, NO_QUERY),
+	row(Kind::Account, 0x22, "GetProfileField", shape_of::<profile::get_profile_field::v3::Request>, NO_QUERY),
+	row(Kind::Account, 0x23, "SetProfileField", shape_of::<profile::set_profile_field::v3::Request>, NO_QUERY),
+	row(Kind::Account, 0x24, "DeleteProfileField", shape_of::<profile::delete_profile_field::v3::Request>, NO_QUERY),
+	row(Kind::Account, 0x25, "GetAccountData", shape_of::<config::get_global_account_data::v3::Request>, NO_QUERY),
+	row(Kind::Account, 0x26, "SetAccountData", shape_of::<config::set_global_account_data::v3::Request>, NO_QUERY),
+	row(Kind::Account, 0x27, "GetRoomAccountData", shape_of::<config::get_room_account_data::v3::Request>, NO_QUERY),
+	row(Kind::Account, 0x28, "SetRoomAccountData", shape_of::<config::set_room_account_data::v3::Request>, NO_QUERY),
+	row(Kind::Account, 0x29, "GetTags", shape_of::<tag::get_tags::v3::Request>, NO_QUERY),
+	row(Kind::Account, 0x2A, "SetTag", shape_of::<tag::create_tag::v3::Request>, NO_QUERY),
+	row(Kind::Account, 0x2B, "DeleteTag", shape_of::<tag::delete_tag::v3::Request>, NO_QUERY),
+	// 0x13 Room
+	row(Kind::Room, 0x20, "CreateRoom", shape_of::<room::create_room::v3::Request>, NO_QUERY),
+	row(Kind::Room, 0x21, "Join", shape_of::<membership::join_room_by_id_or_alias::v3::Request>, &["via", "server_name"]),
+	row(Kind::Room, 0x22, "Leave", shape_of::<membership::leave_room::v3::Request>, NO_QUERY),
+	row(Kind::Room, 0x23, "Forget", shape_of::<membership::forget_room::v3::Request>, NO_QUERY),
+	row(Kind::Room, 0x24, "Invite", shape_of::<membership::invite_user::v3::Request>, NO_QUERY),
+	row(Kind::Room, 0x25, "Kick", shape_of::<membership::kick_user::v3::Request>, NO_QUERY),
+	row(Kind::Room, 0x26, "Ban", shape_of::<membership::ban_user::v3::Request>, NO_QUERY),
+	row(Kind::Room, 0x27, "Unban", shape_of::<membership::unban_user::v3::Request>, NO_QUERY),
+	row(Kind::Room, 0x28, "JoinedRooms", shape_of::<membership::joined_rooms::v3::Request>, NO_QUERY),
+	row(Kind::Room, 0x29, "Members", shape_of::<membership::get_member_events::v3::Request>, &["at", "membership", "not_membership"]),
+	row(Kind::Room, 0x2A, "GetAlias", shape_of::<alias::get_alias::v3::Request>, NO_QUERY),
+	row(Kind::Room, 0x2B, "SetAlias", shape_of::<alias::create_alias::v3::Request>, NO_QUERY),
+	row(Kind::Room, 0x2C, "DeleteAlias", shape_of::<alias::delete_alias::v3::Request>, NO_QUERY),
+	// 0x14 Event
+	row(Kind::Event, 0x20, "GetEvent", shape_of::<room::get_room_event::v3::Request>, NO_QUERY),
+	row(Kind::Event, 0x21, "GetState", shape_of::<state::get_state_events::v3::Request>, NO_QUERY),
+	row(Kind::Event, 0x22, "GetStateEvent", shape_of::<state::get_state_event_for_key::v3::Request>, NO_QUERY),
+	row(Kind::Event, 0x23, "SetStateEvent", shape_of::<state::send_state_event::v3::Request>, NO_QUERY),
+	row(Kind::Event, 0x24, "Redact", shape_of::<redact::redact_event::v3::Request>, NO_QUERY),
+	row(Kind::Event, 0x25, "Context", shape_of::<context::get_context::v3::Request>, &["limit", "filter"]),
+	// 0x15 Receipt
+	row(Kind::Receipt, 0x20, "Typing", shape_of::<typing::create_typing_event::v3::Request>, NO_QUERY),
+	row(Kind::Receipt, 0x21, "ReadMarkers", shape_of::<read_marker::set_read_marker::v3::Request>, NO_QUERY),
+	row(Kind::Receipt, 0x22, "Receipt", shape_of::<receipt::create_receipt::v3::Request>, NO_QUERY),
+	// 0x16 Device
+	row(Kind::Device, 0x20, "ListDevices", shape_of::<device::get_devices::v3::Request>, NO_QUERY),
+	row(Kind::Device, 0x21, "GetDevice", shape_of::<device::get_device::v3::Request>, NO_QUERY),
+	row(Kind::Device, 0x22, "UpdateDevice", shape_of::<device::update_device::v3::Request>, NO_QUERY),
+];
+
+const NO_QUERY: &[&str] = &[];
+
+const fn row(
+	kind: Kind,
+	subtype: u8,
+	name: &'static str,
+	shape: fn() -> Option<EndpointShape>,
+	query: &'static [&'static str],
+) -> BridgedEndpoint {
+	BridgedEndpoint { kind, subtype, name, shape, query }
+}
 
 /// Args:
 ///     Request: the ruma request type of the endpoint, example: `leave_room::v3::Request`
 /// Return:
 ///     Option<EndpointShape>  None when the type has no v3 path.
-#[cfg_attr(not(test), expect(dead_code))]
 fn shape_of<Request: IncomingRequest>() -> Option<EndpointShape> {
 	let path_template = Request::PATH_BUILDER
 		.all_paths()
@@ -575,6 +637,82 @@ mod tests {
 		let meta = view.meta_json().expect("meta");
 		assert_eq!(meta["code"], "Internal");
 		assert_eq!(meta.get("errcode"), None, "absent, not an empty string");
+	}
+
+	/// The golden vectors are what clients test their decoders against, so
+	/// the two bridge replies in them must be exactly what this server sends —
+	/// not a hand-written example that happens to decode.
+	#[test]
+	fn the_bridge_reply_vectors_are_what_the_server_builds() {
+		const VECTORS: &str = include_str!("../../../../docs/design/wbf-vectors.json");
+		let vectors: serde_json::Value = serde_json::from_str(VECTORS).expect("the vectors file is JSON");
+		let bytes_of = |name: &str| -> Vec<u8> {
+			let hex = vectors["packs"]
+				.as_array()
+				.expect("a packs list")
+				.iter()
+				.find(|vector| vector["name"] == name)
+				.unwrap_or_else(|| panic!("no vector named {name}"))["bytes_hex"]
+				.as_str()
+				.expect("hex")
+				.to_owned();
+			(0..hex.len())
+				.step_by(2)
+				.map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("hex digit"))
+				.collect()
+		};
+
+		let ack = build_reply_pack(0, 50, StatusCode::OK, Some(&HeaderValue::from_static("application/json")), br#"{"event_id":"$t0p1c:localhost"}"#)
+			.expect("builds");
+		assert_eq!(ack, bytes_of("bridge_ack"));
+
+		let forbidden = build_reply_pack(
+			0,
+			51,
+			StatusCode::FORBIDDEN,
+			None,
+			br#"{"errcode":"M_FORBIDDEN","error":"You don't have permission to post that to the room."}"#,
+		)
+		.expect("builds");
+		assert_eq!(forbidden, bytes_of("bridge_error_forbidden"));
+	}
+
+	/// 🚨 The specs index is the authority for bridged numbers, and this table
+	/// repeats them — two lists of the same facts drift, and nobody is told.
+	/// So the index is read here and every row is compared: kind, subtype, the
+	/// first four bytes it prints, the name, and the endpoint against the ruma
+	/// type's method and path. A failure here is the documentation and the
+	/// server disagreeing.
+	#[test]
+	fn the_specs_index_and_this_table_list_the_same_endpoints() {
+		const INDEX: &str = include_str!("../../../../docs/bridge-specs/index.md");
+
+		let mut kind_byte: Option<u8> = None;
+		let mut documented = Vec::new();
+		for line in INDEX.lines() {
+			if let Some(heading) = line.strip_prefix("### `0x") {
+				kind_byte = u8::from_str_radix(&heading[..2], 16).ok();
+				continue;
+			}
+			let Some(rest) = line.strip_prefix("| `0x") else {
+				continue;
+			};
+			let cells: Vec<&str> = rest.split(" | ").map(str::trim).collect();
+			let subtype = u8::from_str_radix(&cells[0][..2], 16).expect("a subtype cell");
+			let kind = kind_byte.expect("a row under a kind heading");
+			documented.push((kind, subtype, cells[1].trim_matches('`').to_owned(), cells[2].to_owned(), cells[4].to_owned()));
+		}
+
+		assert_eq!(documented.len(), BRIDGED_ENDPOINTS.len(), "the index and the table have different row counts");
+		for (endpoint, (kind, subtype, first_bytes, name, endpoint_cell)) in BRIDGED_ENDPOINTS.iter().zip(&documented) {
+			assert_eq!((endpoint.kind as u8, endpoint.subtype), (*kind, *subtype), "row order or numbers differ at {}", endpoint.name);
+			assert_eq!(*first_bytes, format!("01 {:02X} {:02X} 10", *kind, *subtype), "{} prints the wrong first bytes", endpoint.name);
+			assert_eq!(endpoint.name, name, "the index names 0x{kind:02X}/0x{subtype:02X} differently");
+
+			let shape = (endpoint.shape)().expect("a v3 path");
+			let expected = format!("`{} {}`", shape.method, shape.path_template.trim_start_matches("/_matrix/client/v3"));
+			assert_eq!(*endpoint_cell, expected, "the index gives {} the wrong endpoint", endpoint.name);
+		}
 	}
 
 	#[test]

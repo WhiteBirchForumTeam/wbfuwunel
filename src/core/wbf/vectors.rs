@@ -208,12 +208,25 @@ fn current() -> Value {
 			pack("error_unsupported", Kind::Control, 0x03, Flags::IS_RESPONSE, conversation(10), 0, br#"{"code":"Unsupported","code_id":1102,"message":"this kind is only served over the WebSocket channel; POST /_wbf/v1/pack is for one-pack requests"}"#, b""),
 			pack("error_too_many_connections", Kind::Control, 0x03, Flags::IS_RESPONSE, 0, 14, br#"{"code":"TooManyConnections","code_id":1402,"max_connections":4,"message":"this device already holds 4 wbf connections; close one before opening another"}"#, b""),
 			pack("error_invalid_request", Kind::Control, 0x03, Flags::IS_RESPONSE, 0, 18, br#"{"code":"InvalidRequest","code_id":1201,"message":"Subscribe meta: invalid type: string, expected a sequence"}"#, b""),
+			// The bridge (docs/bridge-specs/index.md). Flags bit4 IS_BRIDGED:
+			// the first four bytes `01 KK SS 10` name the Matrix endpoint, meta
+			// is the path's variables, data is the HTTP body as it is. The id
+			// is zero: one request, one reply, paired by seq.
+			pack("bridge_set_state_event", Kind::Event, 0x23, Flags::IS_BRIDGED, 0, 50, br#"{"room_id":"!r:localhost","event_type":"m.room.topic","state_key":""}"#, br#"{"topic":"hello"}"#),
+			// A 2xx is Control/Ack with IS_RESPONSE and IS_BRIDGED: the status
+			// and the forwarded headers in meta, the Matrix response body in data.
+			pack("bridge_ack", Kind::Control, 0x02, Flags::IS_RESPONSE.union(Flags::IS_BRIDGED), 0, 50, br#"{"headers":{"content-type":"application/json"},"status":200}"#, br#"{"event_id":"$t0p1c:localhost"}"#),
+			// Anything else is Control/Error, with Matrix's own errcode beside
+			// the channel's code and the Matrix error body in data.
+			pack("bridge_error_forbidden", Kind::Control, 0x03, Flags::IS_RESPONSE.union(Flags::IS_BRIDGED), 0, 51, br#"{"code":"Forbidden","code_id":1302,"errcode":"M_FORBIDDEN","message":"You don't have permission to post that to the room.","status":403}"#, br#"{"errcode":"M_FORBIDDEN","error":"You don't have permission to post that to the room."}"#),
 			pack("empty", Kind::Control, 0x04, Flags::default(), 0, 0, b"", b""),
 		],
 		"rejected": [
 			damaged("version_zero", &|b| b[0] = 0, "UnsupportedVersion"),
 			damaged("unknown_kind", &|b| b[1] = 0x7f, "UnknownKind"),
 			damaged("reserved_flag", &|b| b[3] = 0x80, "ReservedFlags"),
+			// The lowest bit still reserved after the bridge took bit4.
+			damaged("reserved_flag_bit5", &|b| b[3] = 0x20, "ReservedFlags"),
 			damaged("header_bit_flipped", &|b| b[5] ^= 1, "MetaCrc"),
 			damaged("data_bit_flipped", &|b| { let n = b.len(); b[n - 5] ^= 0xff; }, "DataCrc"),
 			damaged("truncated", &|b| { b.pop(); }, "Truncated"),
