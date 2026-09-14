@@ -29,11 +29,11 @@ offset  bytes              意思
 | 結果 | 前 4 byte | meta | data |
 |---|---|---|---|
 | 成功（HTTP 2xx） | `01 01 02 14`（`Control/Ack`，flags ＝ `IS_RESPONSE` ＋ `IS_BRIDGED`） | `{"status": 200, "headers": {"content-type": "application/json"}}` —— 只有表上宣告要轉的 header（橋的設計 §2.2） | Matrix 回應的 body，原樣 bytes |
-| 失敗 | `01 01 03 14`（`Control/Error`，同樣帶 `IS_BRIDGED`） | `{"code_id", "code", "message", "errcode", "status"}`，限速時多 `retry_after_ms`（橋的設計 §2.4） | Matrix 錯誤回應的 body，原樣 bytes（見 §4 待確認 1） |
+| 失敗 | `01 01 03 14`（`Control/Error`，同樣帶 `IS_BRIDGED`） | `{"code_id", "code", "message", "status"}`，Matrix body 裡有的話再帶 `errcode`、`retry_after_ms`、`soft_logout`（橋的設計 §2.4；規則跟原生的錯誤共用，wire-format §3.4） | Matrix 錯誤回應的 body，原樣 bytes（見 §4 待確認 1） |
 
 `id`、`seq` 抄請求。
 
-⚠️ **有一種拒絕比橋還早**：WebSocket 在**每個 pack 解碼之前**先問 session 還算不算數（登出、裝置被撤、token 過期、帳號被鎖，`ws.rs` 的 `revalidate`）。不算數就回通道自己的 `Error`（`01 01 03 04`：**沒有** `IS_BRIDGED`，因為那時 pack 還沒解）、`code` 是 `Unauthorized`、Matrix 的 errcode 只在 `message` 裡（例 `"M_USER_LOCKED: This account has been locked."`）、**沒有** `errcode` 與 `status` 欄位，然後**關連線**。這條不分走不走橋，e2e13 [1.27] 驗過。
+⚠️ **有一種拒絕比橋還早**：WebSocket 在**每個 pack 解碼之前**先問 session 還算不算數（登出、裝置被撤、token 過期、帳號被鎖，`ws.rs` 的 `revalidate`）。不算數就回通道自己的 `Error`（`01 01 03 04`：**沒有** `IS_BRIDGED`，因為那時 pack 還沒解；data 是空的）然後**關連線**。meta 一樣帶 Matrix 的欄位，例：`{"code":"Unauthorized","code_id":1301,"errcode":"M_USER_LOCKED","message":"M_USER_LOCKED: This account has been locked.","soft_logout":true,"status":401}`（向量 `error_session_locked`）。這條不分走不走橋，e2e13 [1.27] 驗過；欄位規則見 [wire-format §3.4](../design/wbf-wire-format.md)。
 
 ### 1.3 meta 的變數
 

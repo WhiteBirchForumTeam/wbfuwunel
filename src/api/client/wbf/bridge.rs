@@ -31,7 +31,9 @@ use tuwunel_core::wbf::{Flags, IdType, Kind, PackBuilder, PackView, RejectCode};
 use tuwunel_service::Services;
 use url::{Url, form_urlencoded};
 
-use super::{Failure, PackContext, Reject, Reply, control, refuse_wrong_id_type, reject_code_for_status};
+use super::{
+	Failure, PackContext, Reject, Reply, control, matrix_error_fields, refuse_wrong_id_type, reject_code_for_status,
+};
 
 /// The path every bridged endpoint is reached by. ruma lists each endpoint's
 /// paths across versions; the bridge always uses the stable v3 one.
@@ -417,8 +419,9 @@ fn to_query_text(name: &str, value: &Value) -> Result<String, Reject> {
 ///     body: example: `{"errcode":"M_FORBIDDEN","error":"You are not invited"}`
 /// Return:
 ///     Result<Vec<u8>, Reject>  the pack. An `Ack`'s meta is `{status,
-///     headers}`; an `Error`'s is `{code_id, code, message, status}` plus
-///     `errcode` and `retry_after_ms` when the body has them.
+///     headers}`; an `Error`'s is `{code_id, code, message}` plus
+///     `matrix_error_fields` (`status`, and `errcode`, `retry_after_ms`,
+///     `soft_logout` when the body has them).
 fn build_reply_pack(
 	id: u64,
 	seq: u32,
@@ -442,25 +445,15 @@ fn build_reply_pack(
 	}
 
 	let code = reject_code_for_status(status);
-	let matrix_error = serde_json::from_slice::<Value>(body).ok();
-	let matrix_field = |name: &str| matrix_error.as_ref().and_then(|error| error.get(name));
-
-	let message = matrix_field("error")
-		.and_then(Value::as_str)
-		.map(ToOwned::to_owned)
+	let message = serde_json::from_slice::<Value>(body)
+		.ok()
+		.and_then(|error| error.get("error").and_then(Value::as_str).map(ToOwned::to_owned))
 		.unwrap_or_else(|| format!("the endpoint answered {status}"));
 	let mut meta = Map::new();
 	meta.insert("code_id".into(), json!(code.id()));
 	meta.insert("code".into(), json!(code.name()));
 	meta.insert("message".into(), Value::String(message));
-	meta.insert("status".into(), json!(status.as_u16()));
-	// Present only when the body has one: a missing errcode is absent, not "".
-	if let Some(errcode) = matrix_field("errcode").and_then(Value::as_str) {
-		meta.insert("errcode".into(), Value::String(errcode.to_owned()));
-	}
-	if let Some(retry_after_ms) = matrix_field("retry_after_ms").and_then(Value::as_u64) {
-		meta.insert("retry_after_ms".into(), json!(retry_after_ms));
-	}
+	meta.extend(matrix_error_fields(status, body));
 
 	Ok(PackBuilder::new(Kind::Control, control::ERROR, flags, id, seq)
 		.json_meta(&Value::Object(meta))?

@@ -273,8 +273,8 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 | 1102 | `Unsupported` | 有 handler，但**不走這個傳輸**（例：`Recent`／`Subscribe`／`Session` 只走 WS）。📎 另外是橋與原生兩條路各自的防呆：bit4 跟走到的路不符（分流已經保證，實務上不會出現） | 准入表、兩條路的防呆 | | 換傳輸（開 WS），不是重試 |
 | 1103 | `TooLarge` | 超過 `wbf_meta_max_bytes`／`wbf_data_max_bytes`，或上傳宣告的大小上限 | 准入表、上傳 | | 切小再送 |
 | 1201 | `InvalidRequest` | pack 解得開，但 **meta／data 不是這個 subtype 要的**：JSON 壞、型別錯、缺欄位、值超出範圍、mxc 解不出來 | 各 handler | | client 的 bug；照 `message` 修，重送同樣的東西一定再錯 |
-| 1301 | `Unauthorized` | 沒登入，或身分**不再**有效（token 到期、被撤、帳號被鎖） | session 閘門 | `soft_logout`?（Refresh） | 重新登入；WS 通常隨即被關（Close 1008） |
-| 1302 | `Forbidden` | 身分驗過了但**不准**：憑證錯、帳號停用、不支援的登入 `type` | 登入 | | 不要自動重試；`message` 帶 Matrix 的 errcode |
+| 1301 | `Unauthorized` | 沒登入，或身分**不再**有效（token 到期、被撤、帳號被鎖） | session 閘門 | `errcode`、`status`、`soft_logout`?（見表下） | 重新登入；WS 通常隨即被關（Close 1008） |
+| 1302 | `Forbidden` | 身分驗過了但**不准**：憑證錯、帳號停用、不支援的登入 `type` | 登入 | | 不要自動重試；看 `errcode` |
 | 1401 | `RateLimited` | 太快了 | 限速閘門 | `retry_after_ms` | 等那麼久再試，🚫 不要立刻重打 |
 | 1402 | `TooManyConnections` | 這個 device 的 WS 名額滿了（`wbf_ws_max_connections_per_device`） | `admit` 閘門 | `max_connections` | 關掉一條舊的再連；這條連線隨即被關 |
 | 1501 | `NotFound` | 指名的東西不存在（上傳 id、媒體） | 各 handler | | 重建那個東西，或放棄 |
@@ -286,7 +286,11 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 
 📌 **Matrix 的錯誤怎麼對到這張表**（`wbf/mod.rs` 的 `reject_code_for_status`，原生 handler 的 `Error` 與走橋的回應共用這一份）：400 → `InvalidRequest`、401 → `Unauthorized`、403 → `Forbidden`、404／410 → `NotFound`、409 → `Conflict`、413 → `TooLarge`、429 → `RateLimited`，**其餘一律 `Internal`**。
 ⚠️ 橋之前這張對應只認 404／410、400、413，401／403／429 全被報成 `Internal`（「server 自己的錯」）—— 原生 handler 很少碰到，所以沒被發現；橋每天都會碰到（wbf-api-bridge.md §2.4）。這是**原生 kind 也看得見的改變**。
-📌 **走橋的 `Error` 多帶三樣**（../bridge-specs/index.md §1.2）：`status`（Matrix 的 HTTP 狀態碼）、`errcode`（Matrix 的，body 裡有才有，沒有就**不出現**，不填空字串）、限速時的 `retry_after_ms`；**data 是 Matrix 錯誤回應的 body 原樣**，UIAA 的 `flows`／`session` 也在裡面。
+📌 **從 Matrix 錯誤來的 `Error` 都多帶 Matrix 的欄位**（`wbf/mod.rs` 的 `matrix_error_fields`，走橋的回覆、原生 handler 的 `Reject::from(Error)`、session 閘門的拒絕共用這一份規則）：`status`（Matrix 的 HTTP 狀態碼，一定有）、`errcode`、`retry_after_ms`、`soft_logout` —— 後三個 Matrix 的 body 裡有才有，沒有就**不出現**，不填空字串。原生的錯誤是把 `Error` 照 HTTP 會回的樣子轉成 body 再讀，所以同一個錯誤，走橋與不走橋的 `errcode` 一樣。
+- `message` 不變：原生的仍是 `"M_USER_LOCKED: This account has been locked."` 這種帶前綴的字串；走橋的是 body 的 `error`。
+- **走橋的另外把 data 放 Matrix 錯誤回應的 body 原樣**（../bridge-specs/index.md §1.2），UIAA 的 `flows`／`session` 也在裡面；原生的 data 是空的。
+- ⭐ **session 閘門的拒絕**（token 缺、錯、過期、被撤、帳號被鎖；HTTP pack 的認證、WS 升級時的認證、WS 每個 pack 之前的 `revalidate`）一律是 `Unauthorized`，不管 Matrix 的狀態碼是幾 —— 帶的 `errcode` 讓 client 分得出被鎖（`M_USER_LOCKED`，`soft_logout: true`）、過期（`M_UNKNOWN_TOKEN`，`soft_logout: true`）、被登出或撤銷（`M_UNKNOWN_TOKEN`，`soft_logout` 不是 `true`：要重新登入，不是 refresh）、沒帶 token（`M_MISSING_TOKEN`）。向量 `error_session_locked`。
+- 📎 這是原生 kind 也看得見的**加欄位**（維護者 2026-09-14 同意）；舊的 client 不認得就略過，不破壞。
 
 **序號怎麼編**（新增的照這個範圍放，範圍本身就說了是哪一家）：
 

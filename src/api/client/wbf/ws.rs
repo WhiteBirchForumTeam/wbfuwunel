@@ -53,7 +53,7 @@ use tuwunel_service::streams::{ConnectionId, Outgoing, PackQueue, Queued};
 
 use super::{
 	CloseReason, PackContext, Reply, Session, SessionChange, Transport, authenticate, error_pack, handle_pack,
-	header_id_seq, pack_response, reserve_connection_slot, revalidate,
+	header_id_seq, pack_response, refuse_session, reserve_connection_slot, revalidate,
 };
 use crate::{ClientIp, router::BridgeRouter};
 
@@ -96,7 +96,7 @@ pub(crate) async fn ws_route(
 		let mut session = match authenticate(&services, &headers).await {
 			| Ok(session) => session,
 			| Err(error) => {
-				let reply = error_pack(0, 0, RejectCode::Unauthorized, &error.to_string());
+				let reply = refuse_session(error).into_pack(0, 0);
 				return pack_response(StatusCode::UNAUTHORIZED, reply);
 			},
 		};
@@ -255,7 +255,7 @@ async fn serve(
 			// Header fields read without any CRC check: they only address the
 			// refusal, they decide nothing.
 			let (id, seq) = header_id_seq(&bytes);
-			let refused = error_pack(id, seq, RejectCode::Unauthorized, &error.to_string());
+			let refused = refuse_session(error).into_pack(id, seq);
 			if queue.try_send(Outgoing::Pack(refused)).is_err() {
 				// A full queue means a peer that is not reading; the close
 				// frame matters more than the explanation.

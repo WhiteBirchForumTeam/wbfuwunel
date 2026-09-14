@@ -23,9 +23,13 @@ use axum::{
 };
 use ruma::{
 	DeviceId, Mxc, OwnedDeviceId, OwnedUserId, UserId,
-	api::error::{ErrorKind, UnknownTokenErrorData},
+	api::{
+		OutgoingResponse,
+		client::uiaa::UiaaResponse,
+		error::{ErrorKind, UnknownTokenErrorData},
+	},
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tuwunel_core::{
 	Error, Result, debug, err, error,
 	wbf::{
@@ -105,7 +109,7 @@ pub(crate) async fn pack_route(
 	let session = match authenticate(&services, &headers).await {
 		| Ok(session) => session,
 		| Err(error) => {
-			let reply = error_pack(0, 0, RejectCode::Unauthorized, &error.to_string());
+			let reply = refuse_session(error).into_pack(0, 0);
 			return Ok(pack_response(StatusCode::UNAUTHORIZED, reply));
 		},
 	};
@@ -826,7 +830,64 @@ impl From<UploadError> for Reject {
 }
 
 impl From<Error> for Reject {
-	fn from(error: Error) -> Self { Self::code(reject_code_for_status(error.status_code()), error.to_string()) }
+	/// The Matrix error is rendered the way HTTP would answer it and read back
+	/// with the rule the bridge uses (`matrix_error_fields`), so a native
+	/// refusal and a bridged one name the same `errcode` for the same error.
+	fn from(error: Error) -> Self {
+		let message = error.to_string();
+		let (status, body) = render_matrix_error(error);
+
+		Self::with_extra(reject_code_for_status(status), message, Value::Object(matrix_error_fields(status, &body)))
+	}
+}
+
+/// The refusal for a session that is not (or no longer) good: always
+/// `Unauthorized`, whatever status the Matrix error carries, with that error's
+/// `errcode` and `soft_logout` so a client can tell a lock from a logout.
+fn refuse_session(error: Error) -> Reject {
+	let mut refusal = Reject::from(error);
+	refusal.code = RejectCode::Unauthorized;
+	refusal
+}
+
+/// Return:
+///     (StatusCode, Vec<u8>)  the status and JSON body a Matrix HTTP endpoint
+///     answers this error with; (500, empty) if ruma cannot render it
+fn render_matrix_error(error: Error) -> (StatusCode, Vec<u8>) {
+	let response: UiaaResponse = error.into();
+
+	match response.try_into_http_response::<Vec<u8>>() {
+		| Ok(http) => (http.status(), http.into_body()),
+		| Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Vec::new()),
+	}
+}
+
+/// The Matrix facts an `Error` pack's meta carries besides `code_id`, `code`
+/// and `message`: the one rule for a native refusal and a bridged reply.
+///
+/// Args:
+///     status: example: StatusCode::UNAUTHORIZED
+///     body: example: `{"errcode":"M_USER_LOCKED","error":"…","soft_logout":true}`
+/// Return:
+///     Map  always `status`; `errcode`, `retry_after_ms` and `soft_logout`
+///     only when the body has them with the right type (absent, never "")
+fn matrix_error_fields(status: StatusCode, body: &[u8]) -> Map<String, Value> {
+	let matrix_error = serde_json::from_slice::<Value>(body).ok();
+	let matrix_field = |name: &str| matrix_error.as_ref().and_then(|error| error.get(name));
+
+	let mut fields = Map::new();
+	fields.insert("status".into(), json!(status.as_u16()));
+	if let Some(errcode) = matrix_field("errcode").and_then(Value::as_str) {
+		fields.insert("errcode".into(), json!(errcode));
+	}
+	if let Some(retry_after_ms) = matrix_field("retry_after_ms").and_then(Value::as_u64) {
+		fields.insert("retry_after_ms".into(), json!(retry_after_ms));
+	}
+	if let Some(soft_logout) = matrix_field("soft_logout").and_then(Value::as_bool) {
+		fields.insert("soft_logout".into(), json!(soft_logout));
+	}
+
+	fields
 }
 
 /// The wire's code for a Matrix error's HTTP status: what a native handler's
@@ -1121,7 +1182,14 @@ fn pack_response(status: StatusCode, pack: Vec<u8>) -> Response {
 mod tests {
 	use tuwunel_core::wbf::{IdType, Kind, RejectCode, decode};
 
-	use super::{Reject, admission, control, refuse_wrong_id_type, reject_code_for_status};
+	use axum::http::StatusCode;
+	use serde_json::{Value, json};
+	use tuwunel_core::err;
+
+	use super::{
+		Reject, admission, control, matrix_error_fields, refuse_session, refuse_wrong_id_type, reject_code_for_status,
+		unknown_token,
+	};
 
 	#[test]
 	fn matrix_statuses_map_to_the_code_that_names_them_and_nothing_else_is_guessed() {
@@ -1251,5 +1319,76 @@ mod tests {
 		let view = decode(&mut pack).expect("decodes");
 
 		assert_eq!(view.meta_json().expect("json")["expected_seq"], 12);
+	}
+
+	fn meta_of(reject: Reject) -> Value {
+		let mut pack = reject.into_pack(0, 1);
+		decode(&mut pack).expect("decodes").meta_json().expect("json")
+	}
+
+	#[test]
+	fn a_locked_session_is_refused_with_the_errcode_and_soft_logout_http_gives() {
+		let meta = meta_of(refuse_session(err!(Request(UserLocked("This account has been locked.")))));
+
+		assert_eq!(meta["code"], "Unauthorized");
+		assert_eq!(meta["errcode"], "M_USER_LOCKED");
+		assert_eq!(meta["soft_logout"], true);
+		assert_eq!(meta["status"], 401);
+		// The message is what it was before the fields were added.
+		assert_eq!(meta["message"], "M_USER_LOCKED: This account has been locked.");
+
+		const VECTORS: &str = include_str!("../../../../docs/design/wbf-vectors.json");
+		let vectors: Value = serde_json::from_str(VECTORS).expect("the vectors file is JSON");
+		let hex = vectors["packs"]
+			.as_array()
+			.expect("a packs list")
+			.iter()
+			.find(|vector| vector["name"] == "error_session_locked")
+			.expect("the error_session_locked vector")["bytes_hex"]
+			.as_str()
+			.expect("hex")
+			.to_owned();
+		let built: String = refuse_session(err!(Request(UserLocked("This account has been locked."))))
+			.into_pack(0, 60)
+			.iter()
+			.map(|byte| format!("{byte:02x}"))
+			.collect();
+		assert_eq!(built, hex, "the vector is what the server sends");
+	}
+
+	#[test]
+	fn an_expired_token_and_a_missing_one_are_told_apart_by_errcode_and_soft_logout() {
+		let expired = meta_of(refuse_session(unknown_token(true, "Access token expired.")));
+		assert_eq!(expired["errcode"], "M_UNKNOWN_TOKEN");
+		assert_eq!(expired["soft_logout"], true);
+
+		let missing = meta_of(refuse_session(err!(Request(MissingToken("Missing access token.")))));
+		assert_eq!(missing["errcode"], "M_MISSING_TOKEN");
+		assert_eq!(missing.get("soft_logout"), None, "absent when the Matrix body has none");
+	}
+
+	#[test]
+	fn a_session_refusal_is_unauthorized_even_when_the_matrix_status_is_not_401() {
+		let meta = meta_of(refuse_session(err!(Request(Forbidden("not yours")))));
+
+		assert_eq!(meta["code"], "Unauthorized", "fail closed: a session failure never reads as anything milder");
+		assert_eq!(meta["errcode"], "M_FORBIDDEN");
+		assert_eq!(meta["status"], 403);
+	}
+
+	#[test]
+	fn a_native_handlers_matrix_error_carries_its_errcode_like_a_bridged_one() {
+		let meta = meta_of(Reject::from(err!(Request(NotFound("Profile was not found.")))));
+
+		assert_eq!(meta["code"], "NotFound");
+		assert_eq!(meta["errcode"], "M_NOT_FOUND");
+		assert_eq!(meta["status"], 404);
+	}
+
+	#[test]
+	fn a_body_without_matrix_fields_adds_only_the_status() {
+		let fields = matrix_error_fields(StatusCode::BAD_GATEWAY, b"<html>bad gateway</html>");
+
+		assert_eq!(Value::Object(fields), json!({ "status": 502 }));
 	}
 }

@@ -219,6 +219,7 @@ fn current() -> Value {
 			// Anything else is Control/Error, with Matrix's own errcode beside
 			// the channel's code and the Matrix error body in data.
 			pack("bridge_error_forbidden", Kind::Control, 0x03, Flags::IS_RESPONSE.union(Flags::IS_BRIDGED), 0, 51, br#"{"code":"Forbidden","code_id":1302,"errcode":"M_FORBIDDEN","message":"You don't have permission to post that to the room.","status":403}"#, br#"{"errcode":"M_FORBIDDEN","error":"You don't have permission to post that to the room."}"#),
+			pack("error_session_locked", Kind::Control, 0x03, Flags::IS_RESPONSE, 0, 60, br#"{"code":"Unauthorized","code_id":1301,"errcode":"M_USER_LOCKED","message":"M_USER_LOCKED: This account has been locked.","soft_logout":true,"status":401}"#, b""),
 			pack("empty", Kind::Control, 0x04, Flags::default(), 0, 0, b"", b""),
 		],
 		"rejected": [
