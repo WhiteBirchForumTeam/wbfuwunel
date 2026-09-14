@@ -5,11 +5,11 @@ $script:Pass = 0; $script:Fail = 0
 function Check([string]$name, [bool]$ok, [string]$detail) {
   if ($ok) { $script:Pass++; Log "  ok   $name  $detail" } else { $script:Fail++; Log "  FAIL $name  $detail" }
 }
-function Write-Config12([string]$db) {
+function Write-Config12([string]$db, [string[]]$extra = @()) {
   $cfg = "$S\e2e12.toml"
-  @('[global]','server_name = "localhost"',('database_path = "' + ($db.Replace([string][char]92, '/')) + '"'),'port = 8015','address = ["127.0.0.1"]',
+  (@('[global]','server_name = "localhost"',('database_path = "' + ($db.Replace([string][char]92, '/')) + '"'),'port = 8015','address = ["127.0.0.1"]',
     'allow_registration = true','yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse = true','allow_federation = false',
-    'wbf_ws_idle_timeout = 120','log = "info"') -join "`n" | Set-Content -Path $cfg -Encoding ascii
+    'wbf_ws_idle_timeout = 120','log = "info"') + $extra) -join "`n" | Set-Content -Path $cfg -Encoding ascii
   $cfg
 }
 function Register($name) { Api Post '/_matrix/client/v3/register' ('{"username":"' + $name + '","password":"pw-pw-pw-pw","auth":{"type":"m.login.dummy"}}') $null }
@@ -136,6 +136,10 @@ Ws-Send $ws (Json-Pack 0x16 1 (Conv 12) 0 @{ cd_seq = 0 } $null)
 do { $batch = Recv-Or-Null $ws 5000; if ($null -eq $batch) { break }; if ($batch.kind -eq 0x16 -and $batch.subtype -eq 2) { $fetch += ,$batch } } while ($batch.meta.r -ne 0)
 $fetched = @($fetch | ForEach-Object { Counts $_ })
 Check '[1.5] Fetch returns the queue oldest first, r=0 on the last pack' ($fetched.Count -eq 2 -and $fetched[0] -lt $fetched[1] -and $fetch[-1].meta.r -eq 0) "counts=$($fetched -join ',')"
+$zero = @()
+Ws-Send $ws (Json-Pack 0x16 1 (Conv 23) 0 @{ cd_seq = 0; limit = 0 } $null)
+do { $batch = Recv-Or-Null $ws 5000; if ($null -eq $batch) { break }; if ($batch.kind -eq 0x16 -and $batch.subtype -eq 2) { $zero += ,$batch } } while ($batch.meta.r -ne 0)
+Check '[1.5c] limit=0 asks for none: one empty Batch with more=false (PR #53 review, rumia)' ($zero.Count -eq 1 -and $zero[0].meta.bc -eq 0 -and $zero[0].meta.more -eq $false) "batches=$($zero.Count) more=$($zero[0].meta.more)"
 Check '[1.5b] two items under a limit of 1000 and the window budget: more=false, nothing behind them' ($fetch.Count -gt 0 -and @($fetch | Where-Object { $_.meta.more -ne $false }).Count -eq 0) "more=$(@($fetch | ForEach-Object { $_.meta.more }) -join ',')"
 
 # [1.6] destroy: an Ack that the command arrived, then the result
@@ -195,6 +199,20 @@ Check '[1.13] after a Login as another user, the old device queue is let go and 
 $ws3.Dispose()
 
 $ws.Dispose(); $ws2.Dispose()
+Stop-Server $server
+
+# ================= Scenario 2: a catch-up configured to zero leaves no gap behind =================
+# wbf_device_fetch_default_limit = 0 makes Device/Subscribe{cd_seq} catch up nothing. Nothing was cut short, so
+# the next live Push -- about an item that arrived afterwards -- must say gap=false (PR #53 review, rumia).
+Log '################ Scenario 2: zero catch-up ################'
+$cfg2 = Write-Config12 $db @('wbf_device_fetch_default_limit = 0')
+$server = Start-Server $cfg2 's2'
+$wsZ = Ws-Open $tokA
+$heldZ = Call $wsZ (Json-Pack 0x16 4 (Conv 40) 0 @{ device_id = $devA; cd_seq = 0 } $null)
+$null = Send-ToDevice $tokB $regA.user_id $devA 'live after a zero catch-up'
+$livePushes = @(Drain $wsZ 2000 | Where-Object { $_.kind -eq 0x16 -and $_.subtype -eq 6 })
+Check '[2.1] catch-up limit of 0: the first live Push says gap=false' ($heldZ.subtype -eq 2 -and $livePushes.Count -ge 1 -and $livePushes[0].meta.gap -eq $false) "subscribe=$($heldZ.subtype) pushes=$($livePushes.Count) gap=$($livePushes[0].meta.gap)"
+$wsZ.Dispose()
 Stop-Server $server
 
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"

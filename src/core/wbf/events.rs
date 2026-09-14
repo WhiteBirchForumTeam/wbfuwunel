@@ -150,9 +150,21 @@ impl WindowBudget {
 	///     bool  true when the window stopped at one of its caps, so there may
 	///     be more behind it (the wire's `more`); false when it has not been
 	///     refused and is not full, which, once the caller has run out of
-	///     events, means it ran out before the caps did.
+	///     events, means it ran out before the caps did. ⚠️ Always false for
+	///     a `count_max` of 0: nothing was asked for, so nothing was cut.
 	#[must_use]
-	pub const fn is_cut_short(&self) -> bool { self.is_closed || self.is_count_full() }
+	pub const fn is_cut_short(&self) -> bool {
+		// 🚨 `limit: 0` means "none" (PR #43) and is full before it starts.
+		// Reporting that as cut short told the client to ask again for the
+		// nothing it had just been given, and made a catch-up configured to
+		// zero mark a `gap` that the next unrelated live push carried (PR #53
+		// review, rumia).
+		if self.count_max == 0 {
+			return false;
+		}
+
+		self.is_closed || self.is_count_full()
+	}
 }
 
 /// The inverse, for tests and tooling.
@@ -278,5 +290,10 @@ mod tests {
 		let mut budget = WindowBudget::new(0, 1 << 20);
 		assert!(budget.is_count_full());
 		assert!(!budget.try_admit(1));
+		assert!(
+			!budget.is_cut_short(),
+			"asking for none is answered, not cut short: `more: true` would send the client back for nothing, \
+			 and a catch-up would mark a gap the next live push carries"
+		);
 	}
 }

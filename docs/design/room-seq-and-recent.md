@@ -178,6 +178,7 @@ BinaryHeap 以 count 為鍵，每次彈最大的、再從那條串流補一個
 - 單元：計數器同一交易；redact 前後 `r_seq` 不變；`into_outgoing_federation` 剝掉 `r_seq`；k 路合併順序（三個 room 交錯的 count）
   與 byte 上限截斷後 `next` 正確。
 - e2e（真伺服器，Windows release build，腳本 `tests/e2e/e2e8.ps1`，2026-09-06 **37 個檢查點全綠**）：
+  📎 下面是**當時的**驗收紀錄，裡面的 `tc < limit`／`tc == limit` 是 PR #53 之前判斷「翻不翻下一窗」的規則；現在看 `more`（§2 的 client 水位）。
   - `r_seq`：兩個 room 各 1..n 連續、`m.room.create` 是 1、同一事件在 `/event`／`/messages`／`/context`／`/sync` 同號、redact 後不變且
     redaction 事件拿下一號。
   - `Event/Recent`（WS，2026-09-07 起是 Batch 串流）：`limit=3, batch=1` → 三個 Batch、`tc=3`、`r` 2,1,0、`seq` 0,1,2、每個 `fs=ls=` 該則的 `g_seq`；

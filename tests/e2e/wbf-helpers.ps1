@@ -114,11 +114,12 @@ function Get-Bytes($mxc, $tok) {
   $resp = $script:PackHttpClient.SendAsync($req).Result; @{ status = [int]$resp.StatusCode; bytes = $resp.Content.ReadAsByteArrayAsync().Result }
 }
 
-function Write-Config([string]$db, [int]$uploadTtl, [long]$maxLen = 0, [long]$dataMax = 0, [long]$windowMax = 0) {
+# $extra: whole `key = value` lines for [global], for a scenario that needs one more setting.
+function Write-Config([string]$db, [int]$uploadTtl, [long]$maxLen = 0, [long]$dataMax = 0, [long]$windowMax = 0, [string[]]$extra = @()) {
   $cfg = "$S\e2e8.toml"
   @('[global]','server_name = "localhost"',('database_path = "' + ($db -replace '\\','/') + '"'),'port = 8015','address = ["127.0.0.1"]',
     'allow_registration = true','yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse = true','allow_federation = false',
-    ('media_upload_ttl = ' + $uploadTtl),('media_upload_max_len = ' + $maxLen),'log = "info"') + $(if ($dataMax -gt 0) { @(('wbf_data_max_bytes = ' + $dataMax)) } else { @() }) + $(if ($windowMax -gt 0) { @(('wbf_window_max_bytes = ' + $windowMax)) } else { @() }) -join "`n" | Set-Content -Path $cfg -Encoding ascii
+    ('media_upload_ttl = ' + $uploadTtl),('media_upload_max_len = ' + $maxLen),'log = "info"') + $(if ($dataMax -gt 0) { @(('wbf_data_max_bytes = ' + $dataMax)) } else { @() }) + $(if ($windowMax -gt 0) { @(('wbf_window_max_bytes = ' + $windowMax)) } else { @() }) + $extra -join "`n" | Set-Content -Path $cfg -Encoding ascii
   $cfg
 }
 function Start-Server([string]$cfg, [string]$tag) {

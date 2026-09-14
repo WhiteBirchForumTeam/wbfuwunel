@@ -238,7 +238,7 @@ server 在 `(cg_seq, before)` 之間從最新往舊，**只收這一窗**：收�
 | `fs` | first g_seq：這批第一條（最新那條）的 `g_seq` |
 | `ls` | last g_seq：這批最後一條（最舊那條）的 `g_seq`；最後一個 Batch 的 `ls` 就是下一窗的 `before` |
 | `r` | remain：這批之後這一窗還剩幾條。**`r = 0` 就是這一窗結束** |
-| `more` | **這一窗是被上限截斷的**（收滿 `limit` 條，或收滿 `wbf_window_max_bytes`），所以更舊的可能還有。`false` = 這窗是因為**沒有事件了**才停的（到了 `cg_seq` 或本站副本的最舊）。同一窗每個 Batch 都一樣。⚠️ client **沒看到這個欄位要當 `true`**（多問一次是一個來回，少問一次是漏事件） |
+| `more` | **這一窗是被上限截斷的**（收滿 `limit` 條，或收滿 `wbf_window_max_bytes`），所以更舊的可能還有。`false` = 這窗是因為**沒有事件了**才停的（到了 `cg_seq` 或本站副本的最舊）。同一窗每個 Batch 都一樣。⚠️ client **沒看到這個欄位要當 `true`**（多問一次是一個來回，少問一次是漏事件）。📎 **`limit: 0` 是 `false`**：什麼都沒要，就沒有被截斷（PR #53 審查，rumia；原本回 `true`，會把 client 叫回來再要一次「什麼都不要」） |
 
 不變量：每個 Batch `tc = 已送 + bc + r`；最後一個 `r = 0`；**空窗**（`tc = 0`）送一個 `bc = 0, r = 0, fs = ls = 0` 的 Batch。
 事件 JSON 跟現在一樣（含 `room_id`，`unsigned` 帶 `org.wbftw.wbfuwunel.r_seq`／`g_seq`），見 room-seq-and-recent.md §2。

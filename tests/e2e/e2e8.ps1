@@ -357,12 +357,34 @@ $walkedIds = @($walked | ForEach-Object { $_.event_id } | Sort-Object)
 $walkedDup = $walkedIds.Count - @($walkedIds | Select-Object -Unique).Count
 Check '[3.6] paging with `before` while more=true walks every event exactly once, and the last window says more=false' ($null -eq $cursor -and $windows -gt 1 -and (($walkedIds -join ',') -eq ($wantIds -join ',')) -and $walkedDup -eq 0) "windows=$windows got=$($walkedIds.Count) want=$($wantIds.Count) dupes=$walkedDup cursor=$cursor"
 
+# limit=0 asks for none: one empty Batch that says more=false. Saying more=true sent the client back for
+# the nothing it had just been given (PR #53 review, rumia).
+$none = Recent-Ws $wsC 60 0 $null $null
+Check '[3.8] limit=0: one empty Batch with more=false' ($none.subtype -eq 3 -and $none.batches.Count -eq 1 -and $none.meta.tc -eq 0 -and $none.meta.more -eq $false) "more=$($none.meta.more) tc=$($none.meta.tc) batches=$($none.batches.Count)"
+
 # a Subscribe catch-up cut by the same budget is only the newest part of what is missing, so its first
 # Push says gap=true: the client moves its watermark on every Push and would otherwise step over the rest
 Ws-Send $wsC (Json-Pack 0x14 4 (Conv 90) 0 @{ cg_seq = 1 } $null)
 $firstPush = $null
 for ($i = 0; $i -lt 10 -and $null -eq $firstPush; $i++) { $pk = Ws-Recv-Bounded $wsC 5000; if ($pk.kind -eq 0x14 -and $pk.subtype -eq 6) { $firstPush = $pk } }
 Check '[3.7] a catch-up cut short by the window budget: its first Push carries gap=true' ($null -ne $firstPush -and $firstPush.meta.gap -eq $true) "gap=$($firstPush.meta.gap) bc=$($firstPush.meta.bc)"
+$wsC.Dispose()
+Stop-Server $p
+
+# a catch-up configured to zero (wbf_recent_max_limit = 0) catches up nothing and was not cut short: it must not
+# leave a gap behind for the next, unrelated live Push to carry (PR #53 review, rumia)
+$cfg3d = Write-Config $db3 86400 0 0 0 @('wbf_recent_max_limit = 0')
+$p = Start-Server $cfg3d 's3d'
+$wsC = Ws-Open $tokC
+Ws-Send $wsC (Json-Pack 0x14 4 (Conv 91) 0 @{ cg_seq = 1 } $null)
+$subAck = Ws-Recv-Bounded $wsC 5000
+$liveId = Send-Msg $rC 'live after a zero catch-up' $tokC
+$livePush = $null
+for ($i = 0; $i -lt 10 -and $null -eq $livePush; $i++) { $pk = Ws-Recv-Bounded $wsC 5000; if ($pk.kind -eq 0x14 -and $pk.subtype -eq 6) { $livePush = $pk } }
+# @(...) around the whole `if`: assigning from an `if` unwraps a one-element array into the element, and 5.1's
+# PSCustomObject has no Count of 1 -- the first run of this check failed on exactly that, with the right event.
+$liveEvents = @(if ($null -ne $livePush) { Batch-Events ([byte[]]$livePush.data) })
+Check '[3.9] catch-up limit of 0: no catch-up, and the first live Push says gap=false' ($subAck.subtype -eq 2 -and $null -ne $livePush -and $livePush.meta.gap -eq $false -and $liveEvents.Count -eq 1 -and $liveEvents[0].event_id -eq $liveId) "ack=$($subAck.subtype) gap=$($livePush.meta.gap) first=$($liveEvents[0].event_id) want=$liveId"
 $wsC.Dispose()
 Stop-Server $p
 
