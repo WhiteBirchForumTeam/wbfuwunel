@@ -15,6 +15,7 @@
 use std::net::IpAddr;
 
 use axum::{
+	Extension,
 	body::Bytes,
 	extract::State,
 	http::{HeaderMap, StatusCode, header},
@@ -39,6 +40,7 @@ use tuwunel_service::{
 	media::{UploadError, UploadRequest},
 };
 
+mod bridge;
 mod device;
 mod draft;
 mod recent;
@@ -49,7 +51,7 @@ mod ws;
 
 pub(crate) use self::ws::ws_route;
 use self::draft::stream;
-use crate::ClientIp;
+use crate::{ClientIp, router::BridgeRouter};
 
 /// `Control` subtypes.
 mod control {
@@ -96,6 +98,7 @@ mod event {
 pub(crate) async fn pack_route(
 	State(services): State<crate::State>,
 	ClientIp(client): ClientIp,
+	bridge: Option<Extension<BridgeRouter>>,
 	headers: HeaderMap,
 	body: Bytes,
 ) -> Result<Response> {
@@ -111,7 +114,13 @@ pub(crate) async fn pack_route(
 	let reply = match decode(&mut body) {
 		| Ok(view) => {
 			let (id, seq) = (view.header.id, view.header.seq);
-			let ctx = PackContext { session: Some(&session), client, transport: Transport::Http, connection: 0 };
+			let ctx = PackContext {
+				session: Some(&session),
+				client,
+				transport: Transport::Http,
+				connection: 0,
+				bridge: bridge.as_ref().map(|Extension(bridge)| bridge),
+			};
 			let mut reply = Reply::for_http();
 			// The session change is dropped: no kind admitted on HTTP makes one.
 			match handle_pack(&services, &ctx, view, &mut reply).await {
@@ -294,6 +303,9 @@ pub(crate) struct PackContext<'a> {
 	/// The WebSocket connection's number (`Channels::next_connection_id`);
 	/// 0 on HTTP, which has no connection to subscribe.
 	pub(crate) connection: ConnectionId,
+	/// Where bridge calls go (`bridge.rs`). `None` only when the served router
+	/// was built without one, and then every bridge call is refused.
+	pub(crate) bridge: Option<&'a BridgeRouter>,
 }
 
 impl PackContext<'_> {
@@ -594,28 +606,60 @@ pub(crate) async fn handle_pack(
 	reply: &mut Reply,
 ) -> Result<SessionChange, ReplyError> {
 	let (id, seq) = (view.header.id, view.header.seq);
+	// A bridge call's refusal says it answers a bridge call, the way its
+	// success does (`docs/design/wbf-api-bridge.md` §2.3).
+	let reply_flags = if view.header.flags.is_bridged() {
+		Flags::IS_RESPONSE.union(Flags::IS_BRIDGED)
+	} else {
+		Flags::IS_RESPONSE
+	};
 	match dispatch(services, ctx, &view, reply).await {
 		| Ok(change) => Ok(change),
 		| Err(Failure::Reply(error)) => Err(error),
 		| Err(Failure::Reject(reject)) => {
 			let closes_connection = reject.closes_connection;
-			reply.send(reject.into_pack(id, seq)).await?;
+			reply.send(reject.into_reply_pack(id, seq, reply_flags)).await?;
 			Ok(if closes_connection { SessionChange::Close(CloseReason::Refused) } else { SessionChange::Keep })
 		},
 	}
 }
 
+/// Splits the two roads a pack can take, on `IS_BRIDGED` and nothing else:
+/// a bridge call goes to `bridge::handle` and its table, everything else to
+/// the native handlers and theirs. Neither road looks at the other's table
+/// (`docs/design/wbf-api-bridge.md` §2.3).
 async fn dispatch(
 	services: &Services,
 	ctx: &PackContext<'_>,
 	view: &PackView<'_>,
 	reply: &mut Reply,
 ) -> Result<SessionChange, Failure> {
-	let header = view.header;
 	let limits_ok = view.meta.len() <= services.config.wbf_meta_max_bytes
 		&& view.data.len() <= services.config.wbf_data_max_bytes;
 	if !limits_ok {
 		return Err(Reject::code(RejectCode::TooLarge, "meta or data exceeds the configured limit").into());
+	}
+
+	if view.header.flags.is_bridged() {
+		bridge::handle(services, ctx, view, reply).await?;
+		return Ok(SessionChange::Keep);
+	}
+
+	dispatch_native(services, ctx, view, reply).await
+}
+
+async fn dispatch_native(
+	services: &Services,
+	ctx: &PackContext<'_>,
+	view: &PackView<'_>,
+	reply: &mut Reply,
+) -> Result<SessionChange, Failure> {
+	let header = view.header;
+	// The split above already sent bridge calls away. This is the road asking
+	// again rather than trusting that, so a change to the split cannot hand a
+	// native handler a pack that claims to be a bridge call.
+	if header.flags.is_bridged() {
+		return Err(Reject::code(RejectCode::Unsupported, "a bridge call reached the native handlers").into());
 	}
 
 	let Some(admission) = admission(header.kind, header.subtype) else {
@@ -737,13 +781,18 @@ impl Reject {
 		}
 	}
 
-	pub(crate) fn into_pack(self, id: u64, seq: u32) -> Vec<u8> {
+	pub(crate) fn into_pack(self, id: u64, seq: u32) -> Vec<u8> { self.into_reply_pack(id, seq, Flags::IS_RESPONSE) }
+
+	/// Args:
+	///     flags: the reply's flags — `IS_RESPONSE`, plus `IS_BRIDGED` when
+	///         the request was a bridge call (its reply says so too)
+	fn into_reply_pack(self, id: u64, seq: u32, flags: Flags) -> Vec<u8> {
 		let mut meta = json!({ "code_id": self.code.id(), "code": self.code.name(), "message": self.message });
 		if let (Value::Object(target), Value::Object(extra)) = (&mut meta, self.extra) {
 			target.extend(extra);
 		}
 
-		PackBuilder::new(Kind::Control, control::ERROR, Flags::IS_RESPONSE, id, seq)
+		PackBuilder::new(Kind::Control, control::ERROR, flags, id, seq)
 			.json_meta(&meta)
 			.map(PackBuilder::finish)
 			.unwrap_or_else(|_| error_pack(id, seq, RejectCode::Internal, "could not encode the error"))
@@ -777,17 +826,34 @@ impl From<UploadError> for Reject {
 }
 
 impl From<Error> for Reject {
-	fn from(error: Error) -> Self {
-		let code = match error.status_code() {
-			| StatusCode::NOT_FOUND | StatusCode::GONE => RejectCode::NotFound,
-			// A 400 from the Matrix layer is a request this server cannot
-			// accept as written, not a state conflict (wire-format 3.4).
-			| StatusCode::BAD_REQUEST => RejectCode::InvalidRequest,
-			| StatusCode::PAYLOAD_TOO_LARGE => RejectCode::TooLarge,
-			| _ => RejectCode::Internal,
-		};
+	fn from(error: Error) -> Self { Self::code(reject_code_for_status(error.status_code()), error.to_string()) }
+}
 
-		Self::code(code, error.to_string())
+/// The wire's code for a Matrix error's HTTP status: what a native handler's
+/// `Error` and a bridged endpoint's response are both reported as.
+///
+/// 🚨 Only statuses recognized here get a code of their own; anything else is
+/// `Internal`. It used to stop at 404/410/400/413, which turned a
+/// `M_FORBIDDEN` or an expired token into "the server's own fault" — the
+/// native handlers rarely met those, the bridge meets them all the time
+/// (`docs/design/wbf-api-bridge.md` §2.4).
+///
+/// Args:
+///     status: example: StatusCode::FORBIDDEN
+/// Return:
+///     RejectCode  example: RejectCode::Forbidden
+fn reject_code_for_status(status: StatusCode) -> RejectCode {
+	match status {
+		| StatusCode::NOT_FOUND | StatusCode::GONE => RejectCode::NotFound,
+		// A 400 from the Matrix layer is a request this server cannot
+		// accept as written, not a state conflict (wire-format 3.4).
+		| StatusCode::BAD_REQUEST => RejectCode::InvalidRequest,
+		| StatusCode::PAYLOAD_TOO_LARGE => RejectCode::TooLarge,
+		| StatusCode::UNAUTHORIZED => RejectCode::Unauthorized,
+		| StatusCode::FORBIDDEN => RejectCode::Forbidden,
+		| StatusCode::TOO_MANY_REQUESTS => RejectCode::RateLimited,
+		| StatusCode::CONFLICT => RejectCode::Conflict,
+		| _ => RejectCode::Internal,
 	}
 }
 
@@ -1055,7 +1121,38 @@ fn pack_response(status: StatusCode, pack: Vec<u8>) -> Response {
 mod tests {
 	use tuwunel_core::wbf::{IdType, Kind, RejectCode, decode};
 
-	use super::{Reject, admission, control, refuse_wrong_id_type};
+	use super::{Reject, admission, control, refuse_wrong_id_type, reject_code_for_status};
+
+	#[test]
+	fn matrix_statuses_map_to_the_code_that_names_them_and_nothing_else_is_guessed() {
+		use axum::http::StatusCode;
+
+		// These three used to come out as `Internal`, "the server's own fault".
+		assert_eq!(reject_code_for_status(StatusCode::UNAUTHORIZED), RejectCode::Unauthorized);
+		assert_eq!(reject_code_for_status(StatusCode::FORBIDDEN), RejectCode::Forbidden);
+		assert_eq!(reject_code_for_status(StatusCode::TOO_MANY_REQUESTS), RejectCode::RateLimited);
+
+		assert_eq!(reject_code_for_status(StatusCode::BAD_REQUEST), RejectCode::InvalidRequest);
+		assert_eq!(reject_code_for_status(StatusCode::NOT_FOUND), RejectCode::NotFound);
+		assert_eq!(reject_code_for_status(StatusCode::GONE), RejectCode::NotFound);
+		assert_eq!(reject_code_for_status(StatusCode::CONFLICT), RejectCode::Conflict);
+		assert_eq!(reject_code_for_status(StatusCode::PAYLOAD_TOO_LARGE), RejectCode::TooLarge);
+
+		// Not recognized: the safe answer, not a near miss.
+		assert_eq!(reject_code_for_status(StatusCode::IM_A_TEAPOT), RejectCode::Internal);
+		assert_eq!(reject_code_for_status(StatusCode::BAD_GATEWAY), RejectCode::Internal);
+	}
+
+	#[test]
+	fn a_refusal_carries_the_flags_it_is_given() {
+		use tuwunel_core::wbf::Flags;
+
+		let native = Reject::code(RejectCode::UnknownKind, "no").into_pack(0, 1);
+		assert_eq!(native[3], 0x04, "IS_RESPONSE only");
+
+		let bridged = Reject::code(RejectCode::UnknownKind, "no").into_reply_pack(0, 1, Flags::IS_RESPONSE.union(Flags::IS_BRIDGED));
+		assert_eq!(bridged[3], 0x14, "IS_RESPONSE and IS_BRIDGED");
+	}
 
 	#[test]
 	fn an_id_of_the_wrong_kind_is_refused_before_the_handler_sees_it() {

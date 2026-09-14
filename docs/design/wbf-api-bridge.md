@@ -87,7 +87,8 @@ pack（kind＝領域、subtype＝操作；meta＝變數；data＝body 的 bytes�
 | 要動的上游檔案 | `router/args.rs` | ✅ **零**（下面那個 seam 是 fork 自己的檔案） |
 | 每支端點的成本 | 分配表一列（型別 ＋ route 函式） | 分配表一列（只要型別） |
 
-📎 **層級沒有問題**：Matrix 的路由表是 **`api` crate 自己的** `tuwunel_api::router::build()` 組的（`router` crate 只是接上 fallback、掛 middleware、`with_state`）。所以橋可以在 `api` 裡組一份自己的 `Router<State>`，不必反過來依賴 `router` crate。**唯一的 seam**：`State` 裡那個 Services 指標是 `router` crate 建的，所以由它在啟動時呼叫一次 `wbf::install_bridge_router(state)`，把組好的 Router 交給橋。一行，方向還是 `api ← router`。
+📎 **層級沒有問題**：Matrix 的路由表是 **`api` crate 自己的** `tuwunel_api::router::build()` 組的（`router` crate 只是接上 fallback、掛 middleware、`with_state`）。所以橋可以在 `api` 裡組一份自己的 `Router<State>`，不必反過來依賴 `router` crate。**唯一的 seam**：`State` 裡那個 Services 指標是 `router` crate 建的，所以由它建橋的 Router（`tuwunel_api::router::build_bridge_router(state, server)`），**用 axum 的 `Extension` 掛在對外的 Router 上**；WebSocket 與 HTTP pack 兩個入口從請求裡取出來、放進 `PackContext`。方向還是 `api ← router`。
+🚨 **為什麼不是「啟動時存進一個全域變數」**（提案原本這樣寫，實作時改掉）：橋的 Router 持有 `State`，而 `State` 是指向 `Services` 的裸指標。tuwunel 支援在**同一個 process 裡重載模組**（`src/main/mods.rs`），`Services` 會被重建；全域那一份會繼續指著已經丟掉的 `Services`。掛在對外的 Router 上，它就跟那個 Router 同生同死，永遠不會活得比它指著的 `Services` 久。
 
 📎 **橋用的是自己組的那份 Router，不是對外服務的那份** —— 對外那份掛著 CORS、壓縮、逾時這些 HTTP 的 middleware，對一個內部呼叫沒有意義（壓縮還要再解一次）。
 
@@ -270,7 +271,7 @@ pack 可以從兩條路進來：WebSocket，或 `POST /_wbf/v1/pack`。**兩條�
 | 做什麼 | 落點 |
 |---|---|
 | 橋自己的 Router（`tuwunel_api::router::build` 組一份，不掛 middleware）、分配表、meta ↔ request／ response 轉換 | `src/api/client/wbf/bridge.rs`（新） |
-| 把組好的 Router 交給橋（啟動時一行，因為 `State` 是那邊建的） | `src/router/router.rs` 呼叫 `wbf::install_bridge_router(state)` |
+| 建橋的 Router 並用 `Extension` 掛在對外的 Router 上（`State` 是那邊建的） | `src/api/router.rs` 的 `BridgeRouter`、`build_bridge_router`；`src/router/router.rs` 掛上；`wbf/mod.rs` 與 `ws.rs` 取出來放進 `PackContext` |
 | 上游的 `router/args.rs`、`auth.rs` | **不動** |
 | 錯誤對應補齊、`errcode` | `src/api/client/wbf/mod.rs` 的 `Reject::from(Error)`；wire-format §3.4 |
 | 派發 | `wbf/mod.rs` 的 `dispatch`：`0x11`／`0x13`／`0x15` 與 `0x14`、`0x16` 裡新的 subtype 進橋 |

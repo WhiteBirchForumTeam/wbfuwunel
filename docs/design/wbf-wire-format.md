@@ -31,7 +31,8 @@ offset  size  欄位          說明
                             bit1 WANT_ACK：發送者要求對這個 pack 回 Ack
                             bit2 IS_RESPONSE：這是對 (id, seq) 那個請求的回應
                             bit3 IS_LAST：這個有序序列的最後一個（上傳的最後一塊、流的最後一片）
-                            其餘保留，必須為 0
+                            bit4 IS_BRIDGED：這是走橋的 Matrix 端點呼叫，回應也帶（wbf-api-bridge.md §2.3；號碼在 ../bridge-specs/index.md）
+                            其餘保留（bit5–bit7），必須為 0
 4       8     id            會話／物件識別：[id_type 1 byte] ‖ [值 7 byte]，型別表在 §2.2
                             0x00 = 無（整個 id 必須是 0）、0x01 client 的會話號、
                             0x02 事件位置 g_seq、0x03 上傳 id
@@ -268,8 +269,8 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 |---|---|---|---|---|---|
 | 1001 | `UnsupportedVersion` | pack 的版本位不是這個 server 支援的 | pack 解碼 | | 升級 client；重試沒有用（這個跟 `Corrupt` 一樣扣 §2.1 的計數器） |
 | 1002 | `Corrupt` | **這個 pack 解不開**：CRC 對不上、被截斷、保留旗標有值、送的是文字 frame | pack 解碼 | | 重連**一次**就好；再來一次就是編碼端的 bug（實務上多半是，見 §2 的 📎），往上報，🚫 不要一直重連 |
-| 1101 | `UnknownKind` | 這個 `(kind, subtype)` 沒有 handler | pack 解碼（kind 位未分配）或准入表（subtype 沒 handler） | | 這個 server 不會做這件事；別重試。📎 兩條路都**不**扣 §2.1 的計數器 —— 框是好的 |
-| 1102 | `Unsupported` | 有 handler，但**不走這個傳輸**（例：`Recent`／`Subscribe`／`Session` 只走 WS） | 准入表 | | 換傳輸（開 WS），不是重試 |
+| 1101 | `UnknownKind` | 這個 `(kind, subtype)` 沒有 handler | pack 解碼（kind 位未分配）、原生准入表、或**橋的分配表**（帶 bit4 時只查橋的表，不帶時只查原生的；wbf-api-bridge.md §2.3） | | 這個 server 不會做這件事；別重試。📎 兩條路都**不**扣 §2.1 的計數器 —— 框是好的 |
+| 1102 | `Unsupported` | 有 handler，但**不走這個傳輸**（例：`Recent`／`Subscribe`／`Session` 只走 WS）。📎 另外是橋與原生兩條路各自的防呆：bit4 跟走到的路不符（分流已經保證，實務上不會出現） | 准入表、兩條路的防呆 | | 換傳輸（開 WS），不是重試 |
 | 1103 | `TooLarge` | 超過 `wbf_meta_max_bytes`／`wbf_data_max_bytes`，或上傳宣告的大小上限 | 准入表、上傳 | | 切小再送 |
 | 1201 | `InvalidRequest` | pack 解得開，但 **meta／data 不是這個 subtype 要的**：JSON 壞、型別錯、缺欄位、值超出範圍、mxc 解不出來 | 各 handler | | client 的 bug；照 `message` 修，重送同樣的東西一定再錯 |
 | 1301 | `Unauthorized` | 沒登入，或身分**不再**有效（token 到期、被撤、帳號被鎖） | session 閘門 | `soft_logout`?（Refresh） | 重新登入；WS 通常隨即被關（Close 1008） |
@@ -282,6 +283,10 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 | 1504 | `Truncated` | 上傳觸到大小上限，被封成不完整（可以 Seal） | 上傳 | `received`、`total_len`、`finished`、`truncated` | 照那幾個數字決定 Seal 還是 Abort |
 | 1505 | `Superseded` | **這個訂閱被同一裝置後來的連線接手了**，它到此為止（`0x16 Device`，見 [wbf-to-device.md](wbf-to-device.md) §4） | 獨佔型訂閱的註冊表 | | 這條連線的那個訂閱已經沒了，別再等它的 `Push`；要收就重訂（但那會把現在那條踢掉）。⚠️ 連線本身沒關，它的其他訂閱照常 |
 | 1901 | `Internal` | server 自己的錯 | 任何地方 | | 可以退避重試；連續發生就是 server 的 bug |
+
+📌 **Matrix 的錯誤怎麼對到這張表**（`wbf/mod.rs` 的 `reject_code_for_status`，原生 handler 的 `Error` 與走橋的回應共用這一份）：400 → `InvalidRequest`、401 → `Unauthorized`、403 → `Forbidden`、404／410 → `NotFound`、409 → `Conflict`、413 → `TooLarge`、429 → `RateLimited`，**其餘一律 `Internal`**。
+⚠️ 橋之前這張對應只認 404／410、400、413，401／403／429 全被報成 `Internal`（「server 自己的錯」）—— 原生 handler 很少碰到，所以沒被發現；橋每天都會碰到（wbf-api-bridge.md §2.4）。這是**原生 kind 也看得見的改變**。
+📌 **走橋的 `Error` 多帶三樣**（../bridge-specs/index.md §1.2）：`status`（Matrix 的 HTTP 狀態碼）、`errcode`（Matrix 的，body 裡有才有，沒有就**不出現**，不填空字串）、限速時的 `retry_after_ms`；**data 是 Matrix 錯誤回應的 body 原樣**，UIAA 的 `flows`／`session` 也在裡面。
 
 **序號怎麼編**（新增的照這個範圍放，範圍本身就說了是哪一家）：
 

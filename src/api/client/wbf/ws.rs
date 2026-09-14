@@ -34,6 +34,7 @@
 use std::{net::IpAddr, time::Duration};
 
 use axum::{
+	Extension,
 	extract::{
 		State,
 		ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
@@ -54,7 +55,7 @@ use super::{
 	CloseReason, PackContext, Reply, Session, SessionChange, Transport, authenticate, error_pack, handle_pack,
 	header_id_seq, pack_response, reserve_connection_slot, revalidate,
 };
-use crate::ClientIp;
+use crate::{ClientIp, router::BridgeRouter};
 
 /// Bytes a pack carries besides its header, meta and data: `meta_len`,
 /// `meta_crc`, `data_len`, `data_crc` (4 each, 16 in all), doubled to leave
@@ -78,6 +79,7 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) async fn ws_route(
 	State(services): State<crate::State>,
 	ClientIp(client): ClientIp,
+	bridge: Option<Extension<BridgeRouter>>,
 	headers: HeaderMap,
 	upgrade: WebSocketUpgrade,
 ) -> Response {
@@ -131,7 +133,7 @@ pub(crate) async fn ws_route(
 			// its slot is dropped with it).
 			if !services
 				.connections
-				.spawn(serve(services, client, session, socket))
+				.spawn(serve(services, client, session, bridge.map(|Extension(bridge)| bridge), socket))
 			{
 				debug!("wbf WebSocket refused: server is shutting down");
 			}
@@ -151,7 +153,13 @@ pub(crate) async fn ws_route(
 /// no longer checks out, when the client logs out, when a `Login` is refused
 /// for the device's connection limit, when the peer stops taking replies, or
 /// when the server starts shutting down.
-async fn serve(services: crate::State, client: IpAddr, session: Option<Session>, socket: WebSocket) {
+async fn serve(
+	services: crate::State,
+	client: IpAddr,
+	session: Option<Session>,
+	bridge: Option<BridgeRouter>,
+	socket: WebSocket,
+) {
 	let idle_timeout = Duration::from_secs(services.config.wbf_ws_idle_timeout);
 	// Counted from the upgrade, not from the last message: a connection that
 	// pings but never logs in still goes at the deadline.
@@ -289,7 +297,13 @@ async fn serve(services: crate::State, client: IpAddr, session: Option<Session>,
 		};
 		health.record_decoded_pack();
 
-		let ctx = PackContext { session: session.as_ref(), client, transport: Transport::WebSocket, connection };
+		let ctx = PackContext {
+			session: session.as_ref(),
+			client,
+			transport: Transport::WebSocket,
+			connection,
+			bridge: bridge.as_ref(),
+		};
 		let change = match handle_pack(&services, &ctx, view, &mut reply).await {
 			| Ok(change) => change,
 			// The send task is gone: the peer closed while a reply was on

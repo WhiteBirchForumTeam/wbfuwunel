@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::{Router, response::IntoResponse, routing::get};
+use axum::{Extension, Router, response::IntoResponse, routing::get};
 use http::{StatusCode, Uri};
 use ruma::api::error::ErrorKind;
 use tuwunel_api::router::{state, state::Guard};
@@ -10,11 +10,13 @@ use tuwunel_service::Services;
 pub(crate) fn build(services: &Arc<Services>) -> (Router, Guard) {
 	let router = Router::<state::State>::new();
 	let (state, guard) = state::create(services.clone());
+	let bridge = tuwunel_api::router::build_bridge_router(state, &services.server);
 	let router = tuwunel_api::router::build(router, &services.server)
 		.route("/", get(it_works))
 		.fallback(not_found)
 		.method_not_allowed_fallback(method_not_allowed)
-		.with_state(state);
+		.with_state(state)
+		.layer(Extension(bridge));
 
 	(router, guard)
 }
