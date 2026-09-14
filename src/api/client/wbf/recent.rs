@@ -289,8 +289,11 @@ async fn resolve_rooms(
 
 /// The window's events, newest first: at most `limit` and at most
 /// `wbf_window_max_bytes` of them (bytes asked first), all newer than
-/// `cg_seq` and older than `before`, visible to `user`, and each small enough
-/// for a pack of its own.
+/// `cg_seq` and older than `before`, visible to `user`, each passed through
+/// the `bundle_aggregations` every Matrix read endpoint uses (so an erased
+/// sender's event is pruned for a late joiner), and each small enough for a
+/// pack of its own. 📎 Not MSC4115's `unsigned.membership`: `/messages` adds
+/// that in encrypted rooms and this window does not.
 ///
 /// 📎 One room is the cheap case, not a special case: the heap ranks one
 /// stream, so this becomes a single reverse scan of that room's prefix —
@@ -377,6 +380,21 @@ async fn collect_window(
 		let Some((_, pdu)) = visibility_filter(services, item, user).await else {
 			continue;
 		};
+		// 🚨 The last step every Matrix read endpoint takes before serving an
+		// event, and the one this window used to skip: MSC4025 erasure (an
+		// erased sender's event serves pruned to a reader who was not in the
+		// room when it was sent), thread markers, and the edit and reference
+		// folds when they are configured. Skipping it served a late joiner the
+		// original on the channel and an empty content on `/messages`.
+		//
+		// ⚠️ The same function, not a copy of its erasure check: this window
+		// once took two of `/messages`' filters and missed the third, and a
+		// rule added upstream later must not be missed the same way. And before
+		// the size checks below, so they measure what is actually sent.
+		let pdu = services
+			.pdu_metadata
+			.bundle_aggregations(user, pdu)
+			.await;
 
 		let event: Raw<AnyTimelineEvent> = pdu.to_format();
 		let json = event.json().get().as_bytes();

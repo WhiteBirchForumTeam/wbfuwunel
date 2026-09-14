@@ -424,6 +424,49 @@ Check '[4.5] first byte of a 320 window over 30 rooms is well under the client r
 $wsE.Dispose()
 Stop-Server $p
 
+# ================= Scenario 5: an erased sender's events serve pruned to whoever joined afterwards (MSC4025) =================
+# Every Matrix read endpoint passes an event through `bundle_aggregations` before serving it, and that is where
+# erasure is enforced. Event/Recent (and the Subscribe catch-up, which is the same window) served the stored event
+# as it is, so a user who joined after the sender erased their account read the original on the channel and an
+# empty content on /messages. Bob, who was in the room when alice wrote, still reads the original on both: the
+# control that tells "pruned for the right reader" apart from "pruned for everyone".
+Log '################ Scenario 5: erasure on the channel ################'
+$db5 = "$S\e2e8db-5"; Remove-Item -Recurse -Force $db5 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db5 | Out-Null
+$cfg5 = Write-Config $db5 86400
+$p = Start-Server $cfg5 's5'
+$regEA = Api Post '/_matrix/client/v3/register' '{"username":"alice","password":"pw-pw-pw-pw","auth":{"type":"m.login.dummy"}}' $null
+$regEB = Api Post '/_matrix/client/v3/register' '{"username":"bob","password":"pw-pw-pw-pw","auth":{"type":"m.login.dummy"}}' $null
+$regEC = Api Post '/_matrix/client/v3/register' '{"username":"carol","password":"pw-pw-pw-pw","auth":{"type":"m.login.dummy"}}' $null
+$rE = (Api Post '/_matrix/client/v3/createRoom' '{"preset":"public_chat","name":"erasure"}' $regEB.access_token).room_id
+$null = Api Post "/_matrix/client/v3/join/$([uri]::EscapeDataString($rE))" '{}' $regEA.access_token
+$erasedId = Send-Msg $rE 'alice wrote this before erasing her account' $regEA.access_token
+$null = Api Post '/_matrix/client/v3/account/deactivate' '{"erase":true,"auth":{"type":"m.login.password","identifier":{"type":"m.id.user","user":"alice"},"password":"pw-pw-pw-pw"}}' $regEA.access_token
+$null = Api Post "/_matrix/client/v3/join/$([uri]::EscapeDataString($rE))" '{}' $regEC.access_token
+function Find-Event($events, $id) { @($events | Where-Object { $_.event_id -eq $id }) | Select-Object -First 1 }
+function Is-EmptyContent($ev) { $null -ne $ev -and @($ev.content.PSObject.Properties).Count -eq 0 }
+
+$carolMsgs = Find-Event (Api Get "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($rE))/messages?dir=b&limit=100" $null $regEC.access_token).chunk $erasedId
+$wsEC = Ws-Open $regEC.access_token
+$carolWin = Recent-Ws $wsEC 1 100 $null $null 100
+$carolRecent = Find-Event $carolWin.events $erasedId
+Check '[5.1] a late joiner reads the erased sender''s event pruned on Event/Recent, as /messages serves it' ((Is-EmptyContent $carolMsgs) -and (Is-EmptyContent $carolRecent)) "messages=$($carolMsgs.content | ConvertTo-Json -Compress) recent=$($carolRecent.content | ConvertTo-Json -Compress)"
+
+Ws-Send $wsEC (Json-Pack 0x14 4 (Conv 92) 0 @{ cg_seq = 1 } $null)
+$caught = @()
+for ($i = 0; $i -lt 20 -and $null -eq (Find-Event $caught $erasedId); $i++) {
+  $pk = Ws-Recv-Bounded $wsEC 5000
+  if ($pk.kind -eq 0x14 -and $pk.subtype -eq 6) { $caught += @(Batch-Events ([byte[]]$pk.data)) }
+}
+$carolCaught = Find-Event $caught $erasedId
+Check '[5.2] and so does the Subscribe{cg_seq} catch-up, which is the same window' (Is-EmptyContent $carolCaught) "catch-up=$($carolCaught.content | ConvertTo-Json -Compress)"
+$wsEC.Dispose()
+
+$wsEB = Ws-Open $regEB.access_token
+$bobRecent = Find-Event (Recent-Ws $wsEB 1 100 $null $null 100).events $erasedId
+Check '[5.3] control: bob, in the room when alice wrote, still reads the original on Event/Recent' ($null -ne $bobRecent -and $bobRecent.content.body -eq 'alice wrote this before erasing her account') "recent=$($bobRecent.content | ConvertTo-Json -Compress)"
+$wsEB.Dispose()
+Stop-Server $p
+
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"
 
 # A pending ReceiveAsync or an undisposed socket can keep this process alive long after the
