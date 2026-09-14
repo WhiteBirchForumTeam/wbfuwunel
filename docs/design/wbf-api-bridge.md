@@ -149,13 +149,16 @@ data = {"topic":"大家好"} 的 bytes
 
 要補的：
 1. 狀態碼對應補齊：401 → `Unauthorized`、403 → `Forbidden`、429 → `RateLimited`（帶 `retry_after_ms`）。
-2. `Error` 的 meta **多帶 Matrix 的 `errcode`**（例如 `M_ROOM_IN_USE`、`M_USER_SUSPENDED`）。wire 的 `code` 是這條通道的詞表、分類得很粗；client 要顯示「房間別名已被使用」這種訊息，需要 Matrix 的那一個。📎 這是 wire-format §3.4 的增補，要寫進那張表。
+2. ✅ `Error` 的 meta **多帶 Matrix 的 `errcode`**（維護者 2026-09-14 同意，放在 meta；例如 `M_ROOM_IN_USE`、`M_USER_SUSPENDED`）。wire 的 `code` 是這條通道的詞表、分類得很粗；client 要顯示「房間別名已被使用」這種訊息，需要 Matrix 的那一個。📎 這是 wire-format §3.4 的增補，要寫進那張表。
 3. UIAA 的 401 帶 `flows`／`session`／`completed`：那是批 3 的事（§3）。
 
-### 2.5 HTTP 准不准
+### 2.5 走 WS 還是走 HTTP pack：橋不管（維護者 2026-09-14 定）
 
-pack 也能走 `POST /_wbf/v1/pack`。橋上的操作**准走 HTTP**：它們本來就是 HTTP 端點，擋掉沒有好處，而且 debug 時方便（pipeline §0-12：HTTP pack 是 debug／fallback）。
-**例外**：會改變「這條連線是誰」的操作（批 2 的 `Register`）跟 `Login` 一樣只走 WS —— HTTP 上沒有連線可以改。
+pack 可以從兩條路進來：WebSocket，或 `POST /_wbf/v1/pack`。**兩條路傳的都是 pack，而 pack 走不走橋只看 bit4**（§2.3）—— 橋本身不看傳輸層，也不為任何一邊開例外。
+
+📎 HTTP pack 包一個 Matrix 端點看起來多此一舉（直接打那個 HTTP 端點就好），實際上兩者差不多；它的價值是 debug 與 fallback（pipeline §0-12），不必為了它擋掉什麼。
+
+⚠️ 那「HTTP 不可」的規則還在不在：**在，但它屬於原生 handler，不屬於橋**。准入表（pipeline §3）本來就依 kind 決定哪些 HTTP 不准 —— `Recent` 串流、`Stream` 草稿、會改變連線身份的 `Login`／`Refresh`／`Logout`，以及之後手寫的 `Register`（批 2）。這些都不在分配表裡，所以 bit4 帶不進去，照舊由准入表擋。
 
 ## 3. 分批
 
@@ -165,17 +168,31 @@ pack 也能走 `POST /_wbf/v1/pack`。橋上的操作**准走 HTTP**：它們本
 
 不改變連線身份、不需要 UIAA、回應是普通 JSON。每支＝分配表一列 ＋ 向量 ＋ e2e。
 
-| kind | 端點 |
-|---|---|
-| `0x11 Account` | `whoami`；profile 取／設（displayname、avatar_url）；account data 取／設（global、room）；tags 取／設／刪 |
-| `0x13 Room` | `createRoom`；join（id 或 alias）；leave；forget；invite；kick；ban；unban；`joined_rooms`；members；別名取／設／刪 |
-| `0x14 Event` | 取單一事件；state 取／設；redact；context |
-| `0x15 Receipt` | typing；read markers；receipt |
-| `0x16 Device` | 列出裝置；取單一裝置；改裝置名稱 |
+| kind | 在 app 裡是什麼動作 | Matrix 端點 |
+|---|---|---|
+| `0x11 Account` | 查「我是誰」（登入後拿自己的 user id、device id） | `GET /account/whoami` |
+| | 看別人／自己的**暱稱、頭像**；改自己的 | `GET`／`PUT /profile/{userId}/displayname`、`…/avatar_url` |
+| | **app 自己的設定存在 server 上**（例如通知偏好、置頂清單；可以是整個帳號的，也可以是某個房間的） | `GET`／`PUT /user/{userId}/account_data/{type}`、`…/rooms/{roomId}/account_data/{type}` |
+| | 房間的**標籤**（我的最愛、低優先） | `GET`／`PUT`／`DELETE /user/{userId}/rooms/{roomId}/tags…` |
+| `0x13 Room` | **開房間** | `POST /createRoom` |
+| | **加入**房間（用 id 或 `#別名`）、**離開**、**把離開的房從清單移除** | `POST /join/{roomIdOrAlias}`、`…/leave`、`…/forget` |
+| | **邀請**、**踢人**、**封鎖**、**解除封鎖** | `POST /rooms/{roomId}/invite`、`kick`、`ban`、`unban` |
+| | 我**加入了哪些房間** | `GET /joined_rooms` |
+| | 房間**成員名單** | `GET /rooms/{roomId}/members` |
+| | 房間**別名**（`#name:server`）的查、設、刪 | `GET`／`PUT`／`DELETE /directory/room/{roomAlias}` |
+| `0x14 Event` | 用 event id **拿單一則訊息**（例如點開回覆引用的那則） | `GET /rooms/{roomId}/event/{eventId}` |
+| | 讀／改**房間設定**：名稱、topic、頭像、權限……（Matrix 叫 state） | `GET`／`PUT /rooms/{roomId}/state/{eventType}/{stateKey}` |
+| | **收回訊息**（redact） | `PUT /rooms/{roomId}/redact/{eventId}/{txnId}` |
+| | **跳到某則訊息**，連同它前後幾則（搜尋結果、通知點進去） | `GET /rooms/{roomId}/context/{eventId}` |
+| `0x15 Receipt` | 「**對方正在輸入…**」 | `PUT /rooms/{roomId}/typing/{userId}` |
+| | **已讀到哪裡**（未讀數、已讀標記） | `POST /rooms/{roomId}/read_markers`、`POST /rooms/{roomId}/receipt/…` |
+| `0x16 Device` | **登入過的裝置清單**、單一裝置的資訊、**改裝置名稱** | `GET /devices`、`GET`／`PUT /devices/{deviceId}` |
 
-約 35 支。估計：橋本身（`from_pack`、分配表、錯誤對應、回應轉換）加測試幾百行；之後每支幾行加一個向量、一個 e2e 檢查。
+📎 送訊息、翻歷史、收新訊息、to-device 這些**已經有原生的 pack**（`Event/Send`、`Event/Recent`、`Subscribe`、`Device/*`），不在這張表。
 
-⚠️ **批 1 的 e2e 規矩**：每支都要 **HTTP 打一次、WS 打一次、結果一致**（pipeline §7 第 6 步）。另外**關卡要有反向檢查**，不能只驗正常路徑：被暫停的帳號在 WS 上 `createRoom` 被拒、被鎖的帳號被拒 —— 這幾條就是這座橋存在的理由，沒有測到等於沒有。
+約 35 支。估計：橋本身（Router、分配表、錯誤對應、回應轉換）加測試幾百行；之後每支幾行加一個向量、一個 e2e 檢查。
+
+⚠️ **批 1 的 e2e 規矩**：每支都要**原本的 Matrix HTTP 端點打一次、橋打一次、結果一致**（pipeline §7 第 6 步）。另外**關卡要有反向檢查**，不能只驗正常路徑：被暫停的帳號在 WS 上 `createRoom` 被拒、被鎖的帳號被拒 —— 這幾條就是這座橋存在的理由，沒有測到等於沒有。
 
 ### 批 2：註冊（難度中）
 
@@ -207,10 +224,12 @@ pack 也能走 `POST /_wbf/v1/pack`。橋上的操作**准走 HTTP**：它們本
 
 1. ~~**橋，還是手搬？**~~ ✅ **定了**（維護者 2026-09-14）：用橋，而且是**把 pack 轉成內部的 HTTP request 丟進 Router**這一版（§2.1）。上游檔案一個都不用動。
 2. ~~**meta 三段分開還是攤平？**~~ ✅ **都不是**（維護者 2026-09-14）：body 根本不進 meta —— **data 就是 body**，meta 只放模板的變數（§2.2）。撞名問題因此消失；五條規則與「一個 subtype 對一個端點」也一併定了。
-3. **`Error` 多帶 Matrix `errcode`**（§2.4）。這是線上格式的增補，client 要跟。
-4. **橋上的操作准走 HTTP pack**（§2.5）？我建議准，`Register` 除外。
-5. **批 1 的清單**（§3）要增要減？
-6. **subtype 號什麼時候給？** 我照 Matrix 規格章節裡端點出現的順序排，寫進 wire-format §3.2；分配了就不改（§3.3 的規矩）。要不要先給號、還是批 1 寫程式時一起給？📌 粒度（一個 subtype 對一個端點）已定。
+3. ~~**`Error` 多帶 Matrix `errcode`？**~~ ✅ **要，放在 meta**（維護者 2026-09-14，§2.4）。線上格式的增補，client 要跟。
+4. ~~**橋上的操作准走 HTTP pack？**~~ ✅ **橋不看傳輸層**（維護者 2026-09-14，§2.5）：WS 與 HTTP 傳的都是 pack，走不走橋只看 bit4。「HTTP 不可」留在原生 handler 的准入表。
+5. **批 1 的清單**（§3，已改成白話的表）要增要減？
+6. ~~**subtype 號什麼時候給？**~~ ✅ **開始寫程式時才補進文件**（維護者 2026-09-14）。照 Matrix 規格章節裡端點出現的順序排，寫進 wire-format §3.2；分配了就不改（§3.3）。粒度（一個 subtype 對一個端點）已定。
+
+⚠️ **實作還沒有開始，也還沒有要開始**：維護者會給明確的開始訊號。這份文件在那之前只是定案的設計。
 
 ## 6. 同意之後的落點
 
