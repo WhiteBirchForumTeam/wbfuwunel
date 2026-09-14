@@ -120,6 +120,7 @@ registry（純記憶體，`Services.streams`）                          ← 所
 - **真相在哪**：誰能收的真相是 DB 的成員表；channel 是它的記憶體投影，靠接點 2 保持一致。漂移只可能來自漏接 hook 的新 join／leave 路徑，而那只有 `state_cache` 一組；重啟就清空，安全方向是「少推」，`Recent` 補得回來。
 - **接點 1 只有 `append_pdu` 提交後**：backfill 進來的舊事件不推（不是「新的」，`Recent` 拿得到）；redaction 是一則新事件，照推。
 - **可見性**：新事件對「現在是成員的人」永遠可見（`history_visibility` 管的是加入前的歷史），而能在 channel 裡的一定是成員，所以只做 ignore 過濾。
+  📎 **帳號抹除（MSC4025）同理不必在 live 路徑檢查**：它只對「事件發生時不在房間」的讀者剪，而收得到 live 推送的人當時就在。⚠️ **補窗路徑不一樣**：`Subscribe{cg_seq}` 推的是舊事件，讀的人可能是之後才加入的，所以補窗走 `collect_window`，那裡送出前經過 `bundle_aggregations`（PR #54；之前沒有，抹除之後才加入的人在補窗裡拿得到原文，見 [room-seq-and-recent.md](room-seq-and-recent.md) §2）。
 - **自己的事件也推**（含發送它的那條連線）：多裝置同步靠這個，發送者的其他裝置要收到；發送那條連線同時有 `Ack`（`event_id`）和 `Push`，client 用 `event_id` 去重。
   不做「排除發送連線」的特例：多一條規則，省一個幾百 byte 的包。
 

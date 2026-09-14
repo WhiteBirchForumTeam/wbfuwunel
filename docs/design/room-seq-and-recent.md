@@ -140,7 +140,7 @@ server **不記任何跨請求的狀態**，下一窗是 client 再叫一次 `Re
 rooms = state_cache.rooms_joined(user)
 每個 room 開 timeline.pdus_rev(Some(user), room, before)   ← 倒序、從 before 往舊（沒給就從最新）
 BinaryHeap 以 count 為鍵，每次彈最大的、再從那條串流補一個
-每彈一個：ignored_filter → visibility_filter（api/client/message.rs 既有的兩個，pub(crate)）
+每彈一個：ignored_filter → visibility_filter（api/client/message.rs 既有的兩個，pub(crate)）→ bundle_aggregations（PR #54 起）
 停：滿 limit（這一窗），或堆頂的 g_seq 已經 ≤ cg_seq，或全部串流耗盡
 收齊的窗 → tc = 條數 → 每 batch 條切一個 Batch（data 超過 wbf_data_max_bytes 就提早切），r = tc − 已送
 ```
@@ -148,7 +148,11 @@ BinaryHeap 以 count 為鍵，每次彈最大的、再從那條串流補一個
 - 為什麼不加 `count → pduid` 全域索引：那要一張新表、一次遷移、還要每個 append 多一筆寫；而且使用者只在少數 room 裡時，倒著掃全域
   索引大多在跳別人的房間。k 路合併只讀該使用者的 room，每個 room 一條既有串流，堆的大小 = room 數（幾十到幾百）。
 - Backfilled 的事件 count 為負，會排在所有 Normal 之後 —— 它們是「本站知道這個 room 之前」的歷史，排在最舊那邊是對的。
-- 可見性照 `/messages`：`history_visibility`、ignore、離開後看不到之後的，都在那兩個 filter 裡；`rooms_joined` 只給加入中的 room
+- 可見性照 `/messages`：`history_visibility`、ignore、離開後看不到之後的，都在那兩個 filter 裡。
+  🚨 **送出前還有第三道：`bundle_aggregations`**（PR #54 補上）。每個 Matrix client 讀取端點（`/messages`、`/sync`、`/context`、`/event`、`/search`……）送出事件前都經過它，**MSC4025 的帳號抹除**就在裡面：發送者帶 `erase` 停用了帳號、而讀的人在那則事件發生時不在房間 → 送剪過的版本（資料庫裡原文還在，是送出時才剪，所以可還原）。另外是 thread 標記，以及設定打開時的 edit／reference 聚合。
+  ⚠️ **這一道原本漏抄了**：這個窗當初只抄了前兩個 filter，所以抹除之後才加入的人，在 `/messages` 拿到 `content={}`、在 `Recent`（和 `Subscribe{cg_seq}` 補窗）拿到**原文**。修法是呼叫同一個函式，不是抄一份抹除檢查 —— 上游之後在裡面加的規則才會自動跟上。它放在算 bytes 之前，窗的預算量的是實際送出的大小。
+  📎 **還是跟 `/messages` 不同的一處**：加密房間裡 MSC4115 的 `unsigned.membership`（「你當時是不是成員」）`Recent` 沒有。它是少給資訊、不是多給不該給的，每則要多一次 state 查詢，等 client 要用再加。
+  `rooms_joined` 只給加入中的 room
   （issue 的「加入的所有 room」）。E2EE 密文原樣回。
 - 上限：`wbf_recent_max_limit`（預設 500）夾 `limit`、`wbf_recent_max_batch`（100）夾 `batch`，超過 clamp 不報錯。`wbf_data_max_bytes` 只切 Batch，不切窗；**切窗的是 `wbf_window_max_bytes`**（PR #53，先於 `limit`，窗的第一則一定收）。
   一窗的每一則都放得進一個 pack。唯一的例外：**一則事件自己就大於 `wbf_data_max_bytes`**，那它永遠送不出去，收窗時跨過它（否則 client 會卡在同一窗），
