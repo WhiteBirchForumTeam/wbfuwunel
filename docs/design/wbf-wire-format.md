@@ -289,7 +289,8 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 📌 **從 Matrix 錯誤來的 `Error` 都多帶 Matrix 的欄位**（`wbf/mod.rs` 的 `matrix_error_fields`，走橋的回覆、原生 handler 的 `Reject::from(Error)`、session 閘門的拒絕共用這一份規則）：`status`（Matrix 的 HTTP 狀態碼，一定有）、`errcode`、`retry_after_ms`、`soft_logout` —— 後三個 Matrix 的 body 裡有才有，沒有就**不出現**，不填空字串。原生的錯誤是把 `Error` 照 HTTP 會回的樣子轉成 body 再讀，所以同一個錯誤，走橋與不走橋的 `errcode` 一樣。
 - `message` 不變：原生的仍是 `"M_USER_LOCKED: This account has been locked."` 這種帶前綴的字串；走橋的是 body 的 `error`。
 - **走橋的另外把 data 放 Matrix 錯誤回應的 body 原樣**（../bridge-specs/index.md §1.2），UIAA 的 `flows`／`session` 也在裡面；原生的 data 是空的。
-- ⭐ **session 閘門的拒絕**（token 缺、錯、過期、被撤、帳號被鎖；HTTP pack 的認證、WS 升級時的認證、WS 每個 pack 之前的 `revalidate`）一律是 `Unauthorized`，不管 Matrix 的狀態碼是幾 —— 帶的 `errcode` 讓 client 分得出被鎖（`M_USER_LOCKED`，`soft_logout: true`）、過期（`M_UNKNOWN_TOKEN`，`soft_logout: true`）、被登出或撤銷（`M_UNKNOWN_TOKEN`，`soft_logout` 不是 `true`：要重新登入，不是 refresh）、沒帶 token（`M_MISSING_TOKEN`）。向量 `error_session_locked`。
+- ⭐ **session 閘門的拒絕**（token 缺、錯、過期、被撤、帳號被鎖；HTTP pack 的認證、WS 升級時的認證、WS 每個 pack 之前的 `revalidate`）一律是 `Unauthorized`，不管 Matrix 的狀態碼是幾 —— 帶的 `errcode` 讓 client 分得出被鎖（`M_USER_LOCKED`，`soft_logout: true`）、過期（`M_UNKNOWN_TOKEN`，`soft_logout: true`）、被登出或撤銷（`M_UNKNOWN_TOKEN`，**沒有** `soft_logout`：要重新登入，不是 refresh）、沒帶 token（`M_MISSING_TOKEN`）。向量 `error_session_locked`。
+- 📌 跟 Matrix 的 body 一樣，`soft_logout` 只會是 `true` 或不出現。之前 `Session` 的拒絕會寫 `"soft_logout": false`、限速不知道要等多久時寫 `"retry_after_ms": null`，現在兩者都是**不出現**（向量 `error_rate_limited` 也多了 `errcode`、`status`）。
 - 📎 這是原生 kind 也看得見的**加欄位**（維護者 2026-09-14 同意）；舊的 client 不認得就略過，不破壞。
 
 **序號怎麼編**（新增的照這個範圍放，範圍本身就說了是哪一家）：
@@ -460,8 +461,8 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 
 | subtype | meta（明文） | 成功的 Ack | 失敗 |
 |---|---|---|---|
-| `0x01 Login` | **Matrix `/login` 的請求體原樣**：`type`（`m.login.password` 或 `m.login.token`）、`identifier`、`password` 或 `token`、`device_id`?、`initial_device_display_name`?、`refresh_token`?: bool | `/login` 回應的欄位原樣：`user_id`、`device_id`、`access_token`、`refresh_token`?、`expires_in_ms`? | `Error(Forbidden)`（憑證錯、帳號停用；message 帶 Matrix errcode）、`Error(Unauthorized)`（帳號被鎖 `M_USER_LOCKED`）、`Error(RateLimited)` |
-| `0x02 Refresh` | `{ "refresh_token" }` | 同 Login | `Error(Unauthorized)`（到期、重放、帳號被鎖；帶 Matrix 的 `soft_logout` 旗標）、`Error(Forbidden)`（格式錯或不認得）、`Error(RateLimited)` |
+| `0x01 Login` | **Matrix `/login` 的請求體原樣**：`type`（`m.login.password` 或 `m.login.token`）、`identifier`、`password` 或 `token`、`device_id`?、`initial_device_display_name`?、`refresh_token`?: bool | `/login` 回應的欄位原樣：`user_id`、`device_id`、`access_token`、`refresh_token`?、`expires_in_ms`? | `Error(Forbidden)`（憑證錯、帳號停用）、`Error(Unauthorized)`（帳號被鎖 `M_USER_LOCKED`）、`Error(RateLimited)`；三者的 meta 都帶 Matrix 的 `errcode`、`status`（§3.4 表下） |
+| `0x02 Refresh` | `{ "refresh_token" }` | 同 Login | `Error(Unauthorized)`（到期、重放、帳號被鎖；`errcode` 分得出是哪一種，`soft_logout: true` 只在 Matrix 說是 soft logout 時出現，不是就不出現）、`Error(Forbidden)`（格式錯或不認得）、`Error(RateLimited)` |
 | `0x03 Logout` | `{ "all"?: bool }`（`all` = 撤這個 user 的全部 device，對應 `/logout/all`） | `{}`，緊接 Close `1000` 關線 | `Error(Unauthorized)`（這條連線本來就沒登入） |
 
 **不自己發明欄位**：meta 直接餵給既有的 login／refresh／logout 邏輯，client 不用學第二套；server 端要做的是把 `login_route` 的本體（驗證 → 發 token → 建或更新 device）

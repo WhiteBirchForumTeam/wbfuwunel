@@ -203,7 +203,7 @@ fn current() -> Value {
 			pack("refresh", Kind::Session, 0x02, Flags::default(), 0, 15, br#"{"refresh_token":"refresh_ExampleRefreshTokenExampleRefre"}"#, b""),
 			pack("logout", Kind::Session, 0x03, Flags::default(), 0, 16, br#"{}"#, b""),
 			pack("logout_all", Kind::Session, 0x03, Flags::default(), 0, 17, br#"{"all":true}"#, b""),
-			pack("error_rate_limited", Kind::Control, 0x03, Flags::IS_RESPONSE, 0, 14, br#"{"code":"RateLimited","code_id":1401,"message":"M_LIMIT_EXCEEDED: Too many login attempts from this address.","retry_after_ms":700}"#, b""),
+			pack("error_rate_limited", Kind::Control, 0x03, Flags::IS_RESPONSE, 0, 14, br#"{"code":"RateLimited","code_id":1401,"errcode":"M_LIMIT_EXCEEDED","message":"M_LIMIT_EXCEEDED: Too many login attempts from this address.","retry_after_ms":700,"status":429}"#, b""),
 			pack("error_out_of_order", Kind::Control, 0x03, Flags::IS_RESPONSE, upload(UPLOAD_VALUE), 2, br#"{"code":"OutOfOrder","code_id":1503,"expected_seq":1,"message":"expected chunk 1"}"#, b""),
 			pack("error_unsupported", Kind::Control, 0x03, Flags::IS_RESPONSE, conversation(10), 0, br#"{"code":"Unsupported","code_id":1102,"message":"this kind is only served over the WebSocket channel; POST /_wbf/v1/pack is for one-pack requests"}"#, b""),
 			pack("error_too_many_connections", Kind::Control, 0x03, Flags::IS_RESPONSE, 0, 14, br#"{"code":"TooManyConnections","code_id":1402,"max_connections":4,"message":"this device already holds 4 wbf connections; close one before opening another"}"#, b""),

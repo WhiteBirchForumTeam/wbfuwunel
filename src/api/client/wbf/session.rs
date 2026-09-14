@@ -21,7 +21,7 @@ use http::{StatusCode, header::CONTENT_TYPE};
 use ruma::api::{
 	IncomingRequest,
 	client::session::login::v3::{LoginInfo, Request as LoginRequest},
-	error::{ErrorKind, LimitExceededErrorData, RetryAfter},
+	error::{ErrorKind, LimitExceededErrorData},
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -269,28 +269,101 @@ fn insert_token_lifetime(meta: &mut Map<String, Value>, refresh_token: Option<St
 }
 
 /// Maps a login-path error to the wire's vocabulary: the throttle's 429 to
-/// `RateLimited` with how long to wait; an unknown, expired or replayed
-/// token (`M_UNKNOWN_TOKEN`, whatever its HTTP status) and a locked account
-/// to `Unauthorized`, carrying Matrix's `soft_logout` when the error has
-/// one so a client can tell "log in again" from "you are out"; everything
-/// else about the credentials to `Forbidden`.
+/// `RateLimited`; an unknown, expired or replayed token (`M_UNKNOWN_TOKEN`,
+/// whatever its HTTP status) and a locked account to `Unauthorized`;
+/// everything else about the credentials to `Forbidden`. The Matrix fields
+/// (`errcode`, `soft_logout`, `retry_after_ms`, `status`) come from the one
+/// rule every Matrix error uses (`Reject::from(Error)`); only the code is
+/// chosen here.
 fn refuse_login(error: Error) -> Failure {
-	if let ErrorKind::UnknownToken(data) = error.kind() {
-		return Reject::with_extra(RejectCode::Unauthorized, error.to_string(), json!({ "soft_logout": data.soft_logout })).into();
+	let code = match (error.kind(), error.status_code()) {
+		| (ErrorKind::UnknownToken(_), _) | (_, StatusCode::UNAUTHORIZED) => RejectCode::Unauthorized,
+		| (_, StatusCode::TOO_MANY_REQUESTS) => RejectCode::RateLimited,
+		| _ => RejectCode::Forbidden,
+	};
+
+	let mut refusal = Reject::from(error);
+	refusal.code = code;
+	refusal.into()
+}
+
+#[cfg(test)]
+mod tests {
+	use std::time::Duration;
+
+	use ruma::api::error::{ErrorKind, LimitExceededErrorData, RetryAfter};
+	use serde_json::Value;
+	use tuwunel_core::{Error, err, wbf::decode};
+
+	use super::{Failure, refuse_login};
+
+	fn meta_of(failure: Failure) -> Value {
+		let Failure::Reject(reject) = failure else { panic!("a login refusal is a Reject") };
+		let mut pack = reject.into_pack(0, 1);
+		decode(&mut pack).expect("decodes").meta_json().expect("json")
 	}
 
-	match error.status_code() {
-		| StatusCode::TOO_MANY_REQUESTS => {
-			let retry_after_ms = match error.kind() {
-				| ErrorKind::LimitExceeded(data) => match data.retry_after {
-					| Some(RetryAfter::Delay(delay)) => Some(u64::try_from(delay.as_millis()).unwrap_or(u64::MAX)),
-					| _ => None,
-				},
-				| _ => None,
-			};
-			Reject::with_extra(RejectCode::RateLimited, error.to_string(), json!({ "retry_after_ms": retry_after_ms })).into()
-		},
-		| StatusCode::UNAUTHORIZED => Reject::code(RejectCode::Unauthorized, error.to_string()).into(),
-		| _ => Reject::code(RejectCode::Forbidden, error.to_string()).into(),
+	#[test]
+	fn a_locked_account_logging_in_is_unauthorized_with_its_errcode() {
+		let meta = meta_of(refuse_login(err!(Request(UserLocked("This account has been locked.")))));
+
+		assert_eq!(meta["code"], "Unauthorized");
+		assert_eq!(meta["errcode"], "M_USER_LOCKED");
+		assert_eq!(meta["soft_logout"], true);
+	}
+
+	#[test]
+	fn a_throttled_login_says_how_long_to_wait_and_nothing_when_it_does_not_know() {
+		let throttled = Error::BadRequest(
+			ErrorKind::LimitExceeded(LimitExceededErrorData { retry_after: Some(RetryAfter::Delay(Duration::from_millis(700))) }),
+			"Too many login attempts from this address.",
+		);
+		let Failure::Reject(reject) = refuse_login(throttled) else { panic!("a login refusal is a Reject") };
+		let mut pack = reject.into_pack(0, 14);
+		let built: String = pack.iter().map(|byte| format!("{byte:02x}")).collect();
+		let vectors: Value = serde_json::from_str(include_str!("../../../../docs/design/wbf-vectors.json")).expect("JSON");
+		let vector = vectors["packs"]
+			.as_array()
+			.expect("a packs list")
+			.iter()
+			.find(|vector| vector["name"] == "error_rate_limited")
+			.expect("the error_rate_limited vector");
+		assert_eq!(built, vector["bytes_hex"].as_str().expect("hex"), "the vector is what the server sends");
+
+		let meta = decode(&mut pack).expect("decodes").meta_json().expect("json");
+		assert_eq!(meta["code"], "RateLimited");
+		assert_eq!(meta["errcode"], "M_LIMIT_EXCEEDED");
+		assert_eq!(meta["retry_after_ms"], 700);
+
+		let unknown_wait = Error::BadRequest(ErrorKind::LimitExceeded(LimitExceededErrorData { retry_after: None }), "connection limit");
+		assert_eq!(meta_of(refuse_login(unknown_wait)).get("retry_after_ms"), None, "absent, not null");
+	}
+
+	#[test]
+	fn wrong_credentials_are_forbidden_with_the_matrix_errcode() {
+		let meta = meta_of(refuse_login(err!(Request(Forbidden("Wrong username or password.")))));
+
+		assert_eq!(meta["code"], "Forbidden");
+		assert_eq!(meta["errcode"], "M_FORBIDDEN");
+		assert_eq!(meta["status"], 403);
+	}
+
+	#[test]
+	fn the_login_path_chooses_its_own_code_where_the_status_would_say_something_else() {
+		// A replayed login token may come back 403; it is still "your token is
+		// no good", not "you may not".
+		let replayed = Error::Request(
+			ErrorKind::UnknownToken(ruma::api::error::UnknownTokenErrorData { soft_logout: false }),
+			"Token was already used.".into(),
+			http::StatusCode::FORBIDDEN,
+		);
+		let meta = meta_of(refuse_login(replayed));
+		assert_eq!(meta["code"], "Unauthorized");
+		assert_eq!(meta["status"], 403);
+
+		// A 400 about the credentials is a refusal of them, not a malformed pack.
+		let meta = meta_of(refuse_login(err!(Request(InvalidParam("Unknown login type.")))));
+		assert_eq!(meta["code"], "Forbidden");
+		assert_eq!(meta["status"], 400);
 	}
 }

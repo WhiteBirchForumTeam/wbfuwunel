@@ -1362,6 +1362,10 @@ mod tests {
 		assert_eq!(expired["errcode"], "M_UNKNOWN_TOKEN");
 		assert_eq!(expired["soft_logout"], true);
 
+		let revoked = meta_of(refuse_session(unknown_token(false, "Unknown access token.")));
+		assert_eq!(revoked["errcode"], "M_UNKNOWN_TOKEN");
+		assert_eq!(revoked.get("soft_logout"), None, "Matrix writes soft_logout only when true; so do we");
+
 		let missing = meta_of(refuse_session(err!(Request(MissingToken("Missing access token.")))));
 		assert_eq!(missing["errcode"], "M_MISSING_TOKEN");
 		assert_eq!(missing.get("soft_logout"), None, "absent when the Matrix body has none");
