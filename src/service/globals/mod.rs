@@ -11,6 +11,9 @@ use tuwunel_core::{
 
 use crate::service;
 
+/// The localpart of the server's own account (`docs/design/server-user.md`).
+const SERVER_USER_LOCALPART: &str = "system";
+
 pub struct Service {
 	pub db: Data,
 	server: Arc<Server>,
@@ -26,10 +29,10 @@ impl crate::Service for Service {
 			db,
 			server: args.server.clone(),
 			server_user: UserId::parse_with_server_name(
-				String::from("conduit"),
+				String::from(SERVER_USER_LOCALPART),
 				&args.server.name,
 			)
-			.expect("@conduit:server_name is valid"),
+			.expect("@system:server_name is valid"),
 		}))
 	}
 
@@ -70,6 +73,14 @@ impl Service {
 	#[inline]
 	#[must_use]
 	pub fn server_name(&self) -> &ServerName { self.server.name.as_ref() }
+
+	/// The server user's profile displayname. Its join events take the name
+	/// from the profile like everyone else's (`profile::fill_profile_data`).
+	///
+	/// Return:
+	///     String  example: "[SYS] matrix.org"
+	#[must_use]
+	pub fn server_user_displayname(&self) -> String { format!("[SYS] {}", self.server_name()) }
 
 	/// checks if `user_id` is local to us via server_name comparison
 	#[inline]

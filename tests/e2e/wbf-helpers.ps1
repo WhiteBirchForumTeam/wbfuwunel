@@ -107,6 +107,19 @@ function Api($method, $path, $body, $tok) {
   if ($null -ne $body) { $args['Body'] = $body; $args['ContentType'] = 'application/json' }
   try { (Invoke-WebRequest @args).Content | ConvertFrom-Json } catch { Log "  !! FAILED $method $path : $($_.Exception.Message)"; $null }
 }
+# Like Api, but returns the status and body of every response instead of $null on a non-2xx --
+# for a check that expects a 404 or an errcode. Sends $body as JSON when it is not $null.
+function Http([string]$method, [string]$path, $body, $tok) {
+  $req = New-Object System.Net.Http.HttpRequestMessage ((New-Object System.Net.Http.HttpMethod $method), "$B$path")
+  if ($tok) { $req.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $tok) }
+  if ($null -ne $body) { $req.Content = New-Object System.Net.Http.StringContent ((ConvertTo-Json $body -Compress -Depth 20), [Text.Encoding]::UTF8, 'application/json') }
+  $resp = $script:PackHttpClient.SendAsync($req).Result
+  $text = $resp.Content.ReadAsStringAsync().Result
+  $json = $null; if ($text) { try { $json = $text | ConvertFrom-Json } catch {} }
+  @{ status = [int]$resp.StatusCode; text = $text; json = $json }
+}
+# Everything the server started as $tag wrote to stdout and stderr, colour codes stripped.
+function Read-ServerLog([string]$tag) { ((Get-Content "$OUT\$tag.out","$OUT\$tag.err" -Raw -ErrorAction SilentlyContinue) -join "`n") -replace "`e\[[0-9;]*m", '' }
 function Get-Bytes($mxc, $tok) {
   $id = $mxc -replace '^mxc://localhost/', ''
   $req = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::Get, "$B/_matrix/client/v1/media/download/localhost/$id")
@@ -149,7 +162,11 @@ function Start-Server([string]$cfg, [string]$tag) {
         throw "the server started for $tag is not the one answering"
       }
       return $p
-    } catch { $lastError = $_.Exception.Message; if ($lastError -like 'the server started for*') { throw } }
+    } catch {
+      $lastError = $_.Exception.Message; if ($lastError -like 'the server started for*') { throw }
+      # A process that already died will never answer: say so now instead of probing 40 times.
+      if ($p.HasExited) { throw "$tag exited (code $($p.ExitCode)) before answering" }
+    }
   }
   # Before giving up, tell the two failure modes apart: a server that is not there, or this process's HTTP stack
   # (connection pool, stale keep-alives) refusing to reach a server that is. A fresh HttpClient bypasses the pool.
