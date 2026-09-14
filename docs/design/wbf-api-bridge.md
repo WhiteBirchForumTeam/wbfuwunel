@@ -44,6 +44,22 @@ HTTP 請求進 route 之前，`router/auth.rs` 會依 **route 的型別**（`Typ
 
 ## 2. 橋怎麼接
 
+### 2.0 整條路（維護者 2026-09-14 重申）
+
+```
+傳輸層：WebSocket  或  POST /_wbf/v1/pack（request body 就是一個 pack，response body 回一個 pack）
+  → 解出 pack
+  → 看 flags bit4 分流
+       bit4 = 1（走橋）  → 查「橋的分配表」→ 轉成內部 HTTP request → Router → 轉回 pack（§2.1–§2.3）
+       bit4 = 0（原生）  → 查「原生的准入表」→ wbf 自己的 handler（`Recent`、`Send`、`Upload/*`…）
+       任一張表查不到   → Error pack（§2.3 的錯誤碼表）
+  → 原路返回：WebSocket 進來的從同一條 WebSocket 回；HTTP pack 進來的，回應 pack 放在同一個 HTTP response 的 body
+```
+
+- **兩張表，各自一份**：橋的分配表（kind／subtype → Matrix 端點）、原生的准入表（`wbf/mod.rs` 的 `admission`，已經存在）。📌 一個 (kind, subtype) 只會出現在其中一張（§2.3），這條要有一個單元測試守著：兩張表的鍵沒有交集。
+- **原路返回不用新寫**：現在的 `Reply` 本來就分兩種出口（WebSocket 的佇列、HTTP 的單一回應），handler 只管 `reply.send(pack)`，不知道自己在哪條路上（pipeline §4.2）。橋照這個契約寫就自動原路返回。
+- **HTTP pack 的認證在傳輸層**：`pack_route` 先用 HTTP 的 `Authorization: Bearer` 認出 session 才解 pack，所以 HTTP pack 上沒有匿名；WebSocket 則是連線的 session（可能還沒登入）。橋拿到的就是這一個 session 的 token，兩條路一樣。
+
 ### 2.1 一個 pack 的路：組成一個內部的 HTTP request，丟進 Router，不走網路
 
 維護者 2026-09-14 定的做法：**pack 轉成一個 `http::Request`，直接交給 axum 的 `Router` 跑一次**，不開 socket、不繞回自己的 port。
@@ -124,14 +140,18 @@ data = {"topic":"大家好"} 的 bytes
 
 旗標位組現在用到 bit3（`META_ENCRYPTED`、`WANT_ACK`、`IS_RESPONSE`、`IS_LAST`），**bit4 給橋**：設了就是「這個 pack 是一個轉成 HTTP 請求的 Matrix 端點呼叫」。
 
-🚨 **兩個方向都要「正面認得」，認不得就 `Unsupported`**（全域原則 A5：不是正面認得，就落到安全值）：
+🚨 **兩個方向都要「正面認得」，認不得就回錯誤，不猜**（全域原則 A5：不是正面認得，就落到安全值）：
 
-| 進來的 pack | 處理 |
+| 進來的 pack | 回應 |
 |---|---|
-| **bit4 = 1**，而 kind／subtype **在分配表裡** | 走橋（§2.1） |
-| **bit4 = 1**，而 kind／subtype **不在表裡** | `Error(Unsupported)` —— 🚫 不要回頭去試原生的 handler |
-| **bit4 = 0**，而 kind／subtype 只存在於分配表（沒有原生 handler） | `Error(Unsupported)` —— 🚫 不要「幫它補上」當成橋請求 |
-| bit4 = 0，kind／subtype 有原生 handler | 照舊（`Recent`、`Send`、`Upload/*` ……） |
+| **bit4 = 1**，在**橋的分配表**裡 | 走橋（§2.1） |
+| **bit4 = 1**，不在橋的表、但**原生准入表有** | `Error(Unsupported)`（1102）—— 有這個操作，但不是走橋的；🚫 不要回頭去試原生 handler |
+| **bit4 = 0**，不在原生准入表、但**橋的表有** | `Error(Unsupported)`（1102）—— 有這個操作，但要帶 bit4；🚫 不要「幫它補上」當成橋請求 |
+| **兩張表都沒有**（不論 bit4） | `Error(UnknownKind)`（1101）—— 這台 server 沒有這個操作 |
+| bit4 = 0，原生准入表有 | 照舊（`Recent`、`Send`、`Upload/*` ……；「HTTP 不可」等規則照准入表） |
+| 走橋，但**轉換不了**：變數缺、多、不是字串（§2.2 規則 3、4） | `Error(InvalidRequest)` —— 操作存在、路也對，是請求本身寫錯 |
+
+📎 **跟維護者原話的差別，待確認**：維護者說「不在清單＝不支援，回 Unsupported」。這張表把「查不到」細分成兩種，因為 wire-format §3.4 的兩個碼**叫 client 做不同的事**：`Unsupported`（1102）是「**有**這個操作，你走錯路了 —— 換一種送法」，`UnknownKind`（1101）是「**沒有**這個操作 —— 別重試」。全部回 `Unsupported` 的話，client 對一個根本不存在的操作會照 1102 的指示去換路重試。「轉換失敗」同理：變數寫錯是 `InvalidRequest`（格式錯的請求，§3.4 既有的歸位），不是路走錯。
 
 📌 **號碼空間只有一個**：一個 (kind, subtype) **不是分給原生 handler，就是分給橋，不會兩個都有**。bit4 是 client 的**聲明**，要跟分配對得上；它不是第二個號碼空間（不會出現「`0x14/0x05` 在 bit4=0 時是 A、bit4=1 時是 B」）。一個號碼一個意思，向量與 client 的程式碼才不會有歧義。
 
@@ -226,7 +246,7 @@ pack 可以從兩條路進來：WebSocket，或 `POST /_wbf/v1/pack`。**兩條�
 2. ~~**meta 三段分開還是攤平？**~~ ✅ **都不是**（維護者 2026-09-14）：body 根本不進 meta —— **data 就是 body**，meta 只放模板的變數（§2.2）。撞名問題因此消失；五條規則與「一個 subtype 對一個端點」也一併定了。
 3. ~~**`Error` 多帶 Matrix `errcode`？**~~ ✅ **要，放在 meta**（維護者 2026-09-14，§2.4）。線上格式的增補，client 要跟。
 4. ~~**橋上的操作准走 HTTP pack？**~~ ✅ **橋不看傳輸層**（維護者 2026-09-14，§2.5）：WS 與 HTTP 傳的都是 pack，走不走橋只看 bit4。「HTTP 不可」留在原生 handler 的准入表。
-5. **批 1 的清單**（§3，已改成白話的表）要增要減？
+5. ~~**批 1 的清單要增要減？**~~ ✅ **這批就夠**（維護者 2026-09-14）。方向是**之後幾乎全部搬過去**，不必一個 commit 全上，一批一批來、常用的先上。
 6. ~~**subtype 號什麼時候給？**~~ ✅ **開始寫程式時才補進文件**（維護者 2026-09-14）。照 Matrix 規格章節裡端點出現的順序排，寫進 wire-format §3.2；分配了就不改（§3.3）。粒度（一個 subtype 對一個端點）已定。
 
 ⚠️ **實作還沒有開始，也還沒有要開始**：維護者會給明確的開始訊號。這份文件在那之前只是定案的設計。
