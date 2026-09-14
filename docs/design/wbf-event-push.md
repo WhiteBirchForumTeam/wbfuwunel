@@ -47,9 +47,10 @@ kind `0x14 Event`（§3.3 的 Event 章），三個新 subtype：
 - **只走 WS**（准入表 `logged_in_websocket_only`）；HTTP 回 `Unsupported`。
 - **一條連線一個訂閱者身分**（一個 `id`、一條 `seq`），它可以在多個 channel 裡；再送 `Subscribe` 是加進更多 channel（去重），不是換掉。`Logout`／關線全退。
 - **`Subscribe` 帶 `cg_seq` 的意思**：「我快取到這裡了，比它新的請一起給」——server 回 Ack 之後**先推一輪 `cg_seq` 之後的事件**（走 `Recent` 同一個 `collect_window`，
-  用 `Push` 包，最多 `wbf_recent_max_limit` 則），再開始推新的。這樣 client 連上後不用先 `Recent` 再 `Subscribe` 還要擔心中間那條縫。
+  用 `Push` 包，最多 `wbf_recent_max_limit` 則、`wbf_window_max_bytes` bytes），再開始推新的。這樣 client 連上後不用先 `Recent` 再 `Subscribe` 還要擔心中間那條縫。
+  🚨 **補窗被這兩個上限截斷時，它的第一個 `Push` 帶 `gap: true`**（PR #53）：截斷的補窗是「漏掉的那段裡**最新的一部分**」，而 client 每收到一個 `Push` 就推進水位（§2.1），不說的話它會直接跨過剩下的。PR #53 之前被 `wbf_recent_max_limit` 截斷也一樣不說 —— 這條漏洞比 bytes 上限早，是加 bytes 上限時一起看到的。
   不帶 `cg_seq` = 只要新的。
-- **`gap: true`**：這條連線在上一個 `Push` 之後**有事件沒推到**（§4）。client 看到就用 `Recent(cg_seq)` 補一窗；補完之後的推送接得上。
+- **`gap: true`**：這條連線在上一個 `Push` 之後**有事件沒推到**（§4），或這是一個被截斷的補窗的第一個 `Push`。client 看到就用 `Recent(cg_seq)` 補一窗；補完之後的推送接得上。
 - `Push` 是**事件驅動類**（wire-format §4）：不 Ack、不重送、client 不守順序。`fs`／`ls` 是這一包的最新／最舊 g_seq，只給 client 推水位用。
 - **`seq` 只是這條連線的推送序號，不是計數保證**：丟掉的包（佇列滿、編碼失敗）也佔掉一個號，所以 client 🚫 不要拿 `seq` 的跳號算「少了幾則」。**水位只認 `fs`／`ls`**，少了什麼由 `gap` ＋ `Recent` 補；`seq` 留給除錯與排序。
 - **`Unsubscribe` 退的是當下的 channel，不是黑名單**：帳號層訂閱者點名退掉某房之後再加入那個房，`follow` 會把它加回來（wire-format §3.2 同一句）。要真的不收，就別用帳號層訂閱。

@@ -1,7 +1,7 @@
 # PR #24 合併後的再審，與外部審查（2026-09-05 兩輪）的逐條驗證
 
 > **這份文件回答：main `389152df6`（PR #24 合併後）還有哪些已確認的缺陷、各自的證據在哪一行、建議怎麼修、怎麼驗。**
-> 狀態：維護者 2026-09-06 同意三支都修（§4）。✅ `media/managed-origin`（§2.1、§2.6、§2.7、§2.9）PR #26 已合併；✅ `wbf/auth-and-ws-lifetime`（§2.3、§2.4）PR #28 已合併；`media/upload-lifecycle`（§2.2、§2.5、§2.8）排最後（維護者有自己的 checklist，逐條確認設計漏洞後再開）；在它之前先寫 WS `Login`／`Refresh`／`Logout` 的提案（wbf-wire-format.md §6.3）。
+> 狀態：維護者 2026-09-06 同意三支都修（§4）。✅ `media/managed-origin`（§2.1、§2.6、§2.7、§2.9）PR #26 已合併；✅ `wbf/auth-and-ws-lifetime`（§2.3、§2.4）PR #28 已合併；✅ `media/upload-lifecycle`（§2.2、§2.5）PR #48 已合併（分支實際叫 `wbf/upload-lifecycle`），🚫 §2.8 不做（維護者 2026-09-13：這個 fork 從未上線）。📎 當時的排序是「它排最後、之前先寫 WS `Login`／`Refresh`／`Logout` 的提案」，兩者都已完成；各節的狀態標在節內（PR #52）。
 > 來源兩個：(1) 持有者集合是實作到一半重做的（[media-holders.md](media-holders.md)），合併後對 main 重看一次；
 > (2) `../external-review/wbfuwunel-2026-09-05.md` 與 `-v2.md`，一位外部審查者對 `0c964d522`／`3091c7ce3` 做的靜態審查，共 9＋5 條。
 > 外部審查的每一條都**對現在的程式碼重新讀過**再下結論，不沿用它的判定；它看的版本沒有 #22 與 #24。

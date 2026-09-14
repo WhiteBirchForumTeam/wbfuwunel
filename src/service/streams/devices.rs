@@ -171,6 +171,37 @@ impl Streams {
 		}
 	}
 
+	/// Pushes the catch-up a `Device/Subscribe` with `cd_seq` asked for.
+	///
+	/// 🚨 Like the rooms' `push_window`: a window cut short by its count or its
+	/// bytes is only the oldest part of what is waiting, so its first pack
+	/// carries `gap: true` and the client `Fetch`es the rest — rather than
+	/// taking the last `nt` it was pushed for the end of its queue.
+	///
+	/// Args:
+	///     items: oldest first, example: the first 1000 after `cd_seq`
+	///     is_cut_short: the window stopped at a cap
+	pub fn push_device_window(
+		&self,
+		user: &UserId,
+		device: &DeviceId,
+		items: &[PushedItem<'_>],
+		is_cut_short: bool,
+		per_pack: usize,
+		data_max: usize,
+	) {
+		if is_cut_short {
+			let holder: Vec<ConnectionId> = self
+				.devices
+				.listeners(&DeviceTopic::new(user, device))
+				.into_iter()
+				.map(|(connection, _)| connection)
+				.collect();
+			self.devices.mark_gap(&holder);
+		}
+		self.push_to_device(user, device, items, per_pack, data_max);
+	}
+
 	fn push_items(&self, topic: &DeviceTopic, holder: &[ConnectionId], items: &[PushedItem<'_>]) {
 		if items.is_empty() {
 			return;
@@ -340,6 +371,30 @@ mod tests {
 			split_length_prefixed(view.data).expect("items"),
 			vec![b"{\"a\":1}".as_slice(), b"{\"b\":2}".as_slice()]
 		);
+	}
+
+	#[test]
+	fn a_device_catch_up_cut_short_says_gap_on_its_first_pack() {
+		let streams = Streams::new();
+		let alice = user_id!("@alice:localhost");
+		let phone = device_id!("PHONE");
+		let (tx, mut rx) = queue(4);
+		streams.subscribe_device(1, alice, phone, tx, 42);
+		let items: Vec<PushedItem<'_>> = (0..3).map(|n| PushedItem { count: 500 + n, json: b"{}" }).collect();
+
+		streams.push_device_window(alice, phone, &items, true, 2, 1024);
+
+		let gaps: Vec<bool> = (0..2)
+			.map(|_| {
+				let mut pack = match rx.try_recv().expect("a pack was queued").outgoing {
+					| Outgoing::Pack(pack) => pack,
+					| Outgoing::Close { .. } => panic!("expected a pack, got a close"),
+				};
+				let view = decode(&mut pack).expect("decodes");
+				view.meta_json().expect("meta")["gap"].as_bool().expect("gap")
+			})
+			.collect();
+		assert_eq!(gaps, vec![true, false], "said once, on the first pack");
 	}
 
 	#[test]

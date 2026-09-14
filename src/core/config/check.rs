@@ -77,6 +77,7 @@ pub fn check(config: &Config) -> Result {
 	check_observability(config)?;
 	check_wbf_device_window(config)?;
 	check_wbf_send_queue_bytes(config)?;
+	check_wbf_window_max_bytes(config)?;
 	check_s3_part_size(config)?;
 	check_network(config)?;
 	check_storage(config)?;
@@ -175,6 +176,26 @@ fn check_wbf_send_queue_bytes(config: &Config) -> Result {
 			config.wbf_meta_max_bytes,
 			config.wbf_data_max_bytes,
 			PACK_OVERHEAD,
+		));
+	}
+
+	Ok(())
+}
+
+/// A window must hold the largest event a pack can carry.
+///
+/// ⚠️ Nothing hangs below that — the first event of a window always joins,
+/// whatever its size (`WindowBudget`) — but then "a window holds at most
+/// `wbf_window_max_bytes`" stops being true, and a bound that is only true
+/// for the defaults is the kind nobody finds out about until it matters.
+fn check_wbf_window_max_bytes(config: &Config) -> Result {
+	if config.wbf_window_max_bytes < config.wbf_data_max_bytes {
+		return Err!(Config(
+			"wbf_window_max_bytes",
+			"a window may hold {} bytes of events, but one event can be as wide as a pack's data \
+			 (wbf_data_max_bytes {}): raise wbf_window_max_bytes, or lower wbf_data_max_bytes",
+			config.wbf_window_max_bytes,
+			config.wbf_data_max_bytes,
 		));
 	}
 

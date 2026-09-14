@@ -2,7 +2,8 @@
 
 > **這份文件回答：client 的聊天模型要 server 配合的兩件事，server 端怎麼做、為什麼這樣做。**
 > 需求出處：issue #20（wbf-matrix-client `docs/design/chat-model.md` §4.3、§7）。
-> 狀態：🔧 維護者 2026-09-05 同意（PR #21），實作分支 `event/room-seq-recent`。
+> 狀態：✅ 已實作（提案 PR #21 維護者 2026-09-05 同意，實作分支 `event/room-seq-recent` PR #22 合併；2026-09-14 補標，原本停在 🔧）。
+> `Event/Recent` 之後的變化：Batch 串流（PR #33）、`rooms` 點名（PR #51）、窗的 bytes 上限與 `more`（PR #53）—— 線上欄位的權威在 [wbf-pack-pipeline.md](wbf-pack-pipeline.md) §6。
 > 相關：[wbf-wire-format.md](wbf-wire-format.md)（pack 與 kind 分配）、[roadmap.md](roadmap.md)。
 
 ## 0. 一句話
@@ -98,16 +99,17 @@ kind `0x14 Event`（wire-format §3.3 已分配給 send／messages／context 這
   📎 **只有加入中的房**：離開過的房間的歷史是 HTTP `/messages` 的工作（它有 `history_visibility` 那一整套語意），`Recent` 從來就只看 `rooms_joined`。
 - `cg_seq`（cached g_seq）：client 裝置上存的最新 `g_seq`。server 從最新往舊拿，**碰到它就停**；省略或 0 = 沒有快取，直接拿最新的 `limit` 則。
 - `limit`：**這一窗**最多幾則。預設 `wbf_recent_default_limit`（320），上限 `wbf_recent_max_limit`（500，維護者 2026-09-07 從 10000 壓下來：一窗多大是 client 決定的，不夠就再要一段）。
+  ⚠️ 窗還有 bytes 的上限 `wbf_window_max_bytes`（8 MiB，PR #53），**先於 `limit` 生效**：收滿 bytes 的窗則數會少於 `limit`。
 - `before`：只要比它舊的；下一窗帶上一窗最後一個 Batch 的 `ls`。
 - `batch`：每個 Batch 幾則。預設 `wbf_recent_default_batch`（10），上限 `wbf_recent_max_batch`（100）。
 
-一次 `Recent` 是**一窗**：server 只在 `(cg_seq, before)` 之間從最新數 `limit` 則，全部收齊（幾百則，記憶體可忽略）再切成 Batch 送；
+一次 `Recent` 是**一窗**：server 只在 `(cg_seq, before)` 之間從最新收，收到 `wbf_window_max_bytes` 或 `limit` 則為止（哪個先到），全部收齊再切成 Batch、送一個造一個；
 server **不記任何跨請求的狀態**，下一窗是 client 再叫一次 `Recent` 帶 `before`。兩窗之間連線是空的，`Ping` 或別的請求可以插進去。
 差 4000 則就是 13 窗；一萬則由 client 自己累計。維護者 2026-09-05 定：always 拿一萬本身有問題，client 要帶自己的水位、只取差異。
 
 回應 **`0x03 Batch`**（`IS_RESPONSE`，`id` 抄請求，`seq` 從 0 嚴格 +1）：
 
-- meta：`{ "tc": 320, "bc": 10, "fs": 20000, "ls": 19991, "r": 310 }`
+- meta：`{ "tc": 320, "bc": 10, "fs": 20000, "ls": 19991, "r": 310, "more": true }`
   - `tc`（total count）：這一窗總共會送幾則（≤ `limit`），同一窗每個 Batch 都一樣。
   - `bc`（batch count）：這個 Batch 幾則。
   - `fs`／`ls`（first／last g_seq）：這批最新與最舊那則的 `g_seq`；最後一個 Batch 的 `ls` 就是下一窗的 `before`。
@@ -117,13 +119,15 @@ server **不記任何跨請求的狀態**，下一窗是 client 再叫一次 `Re
     HTTP `/messages` 往回翻到邊界時會去聯邦抓（`backfill_if_required`），`Recent` **不會**。
     📎 今天 `allow_federation = false`，每個房的第一則必然是本站寫的 `m.room.create`，所以兩者沒有差別；
     等哪天開了聯邦，client 🚫 不要把「窗到底了」讀成「這個房間沒有更早的歷史」—— 那時最後一個 Batch 會多一個明確的邊界旗標（相容的增補），要更早的歷史走 `/messages`。
+  - `more`：這一窗停在**上限**（`limit` 或 `wbf_window_max_bytes`），更舊的可能還有；`false` = 停在沒有事件了。同一窗每個 Batch 都一樣（PR #53，欄位語意的權威在 [wbf-pack-pipeline.md](wbf-pack-pipeline.md) §6.2）。
   - 不變量：`tc = 已送 + bc + r`。空窗（`tc = 0`）送一個 `bc = 0, r = 0, fs = ls = 0` 的 Batch。
 - data：`bc` 則事件，每則 **u32 大端長度 ＋ 事件 JSON bytes**（不是 JSON 陣列：client 切事件只看四個 byte，不掃逗號、不先 parse 整段），
   新到舊排。事件是完整的 `Pdu` 格式，含 `room_id`；`unsigned` 帶 `r_seq`、`g_seq`。一個 Batch 的 data 另受 `wbf_data_max_bytes` 限，
   放不下就提早結束這個 Batch（`bc < batch`）。
 
-**client 的水位**（server 欄位語意決定的）：一窗走完且 `tc < limit` → 已回到 `cg_seq`，同步結束，`cg_seq` 存成**第一窗第一個 Batch 的 `fs`**；
-`tc == limit` → 可能還有更舊的，帶 `before = 最後的 ls` 再叫一窗，水位不動（剛好沒有更舊的會拿到一個空 Batch，一個來回的代價）；
+**client 的水位**（server 欄位語意決定的）：一窗走完且 `more = false` → 已回到 `cg_seq`，同步結束，`cg_seq` 存成**第一窗第一個 Batch 的 `fs`**；
+`more = true`（或沒有這個欄位）→ 可能還有更舊的，帶 `before = 最後的 ls` 再叫一窗，水位不動（剛好沒有更舊的會拿到一個空 Batch，一個來回的代價）；
+🚨 PR #53 之前這裡寫的是 `tc < limit`／`tc == limit` —— 窗有了 bytes 上限之後，被截斷的窗 `tc < limit` 而且還有更舊的，照舊規則會漏掉那段；
 中途斷線或收到 `Error` → 已收到的 Batch 有效，從最後的 `ls` 續問，**不要**在中途推水位（回應是新到舊，第一批之後還有比舊水位新的）。
 
 不另外包 `{room_id, g_seq, event}` —— 事件本身已經帶這些欄位，包一層是重複。所有位置都是整數，跟 `unsigned` 裡的一致；client 不解讀、原樣帶回。
@@ -146,7 +150,7 @@ BinaryHeap 以 count 為鍵，每次彈最大的、再從那條串流補一個
 - Backfilled 的事件 count 為負，會排在所有 Normal 之後 —— 它們是「本站知道這個 room 之前」的歷史，排在最舊那邊是對的。
 - 可見性照 `/messages`：`history_visibility`、ignore、離開後看不到之後的，都在那兩個 filter 裡；`rooms_joined` 只給加入中的 room
   （issue 的「加入的所有 room」）。E2EE 密文原樣回。
-- 上限：`wbf_recent_max_limit`（預設 500）夾 `limit`、`wbf_recent_max_batch`（100）夾 `batch`，超過 clamp 不報錯。data 的 byte 上限只切 Batch，不切窗：
+- 上限：`wbf_recent_max_limit`（預設 500）夾 `limit`、`wbf_recent_max_batch`（100）夾 `batch`，超過 clamp 不報錯。`wbf_data_max_bytes` 只切 Batch，不切窗；**切窗的是 `wbf_window_max_bytes`**（PR #53，先於 `limit`，窗的第一則一定收）。
   一窗的每一則都放得進一個 pack。唯一的例外：**一則事件自己就大於 `wbf_data_max_bytes`**，那它永遠送不出去，收窗時跨過它（否則 client 會卡在同一窗），
   server 用 `debug_warn` 記下 event_id；它不算進 `tc`。被 ignore／不可見而跳過的事件也推進游標、不算進 `tc`。
 - 程式碼：`src/api/client/wbf/recent.rs`（`handle_event_recent` → `collect_window` → `build_batches`，後者是純函數有單元測試）；`mod.rs` 的准入表與 `event::RECENT` 派發；
@@ -174,6 +178,7 @@ BinaryHeap 以 count 為鍵，每次彈最大的、再從那條串流補一個
 - 單元：計數器同一交易；redact 前後 `r_seq` 不變；`into_outgoing_federation` 剝掉 `r_seq`；k 路合併順序（三個 room 交錯的 count）
   與 byte 上限截斷後 `next` 正確。
 - e2e（真伺服器，Windows release build，腳本 `tests/e2e/e2e8.ps1`，2026-09-06 **37 個檢查點全綠**）：
+  📎 下面是**當時的**驗收紀錄，裡面的 `tc < limit`／`tc == limit` 是 PR #53 之前判斷「翻不翻下一窗」的規則；現在看 `more`（§2 的 client 水位）。
   - `r_seq`：兩個 room 各 1..n 連續、`m.room.create` 是 1、同一事件在 `/event`／`/messages`／`/context`／`/sync` 同號、redact 後不變且
     redaction 事件拿下一號。
   - `Event/Recent`（WS，2026-09-07 起是 Batch 串流）：`limit=3, batch=1` → 三個 Batch、`tc=3`、`r` 2,1,0、`seq` 0,1,2、每個 `fs=ls=` 該則的 `g_seq`；

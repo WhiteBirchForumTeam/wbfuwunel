@@ -6,7 +6,7 @@
 > 狀態標記：✅ 已合併 · 🔧 進行中 · 📄 有提案待同意 · 🔲 下一步 · 💭 候選（還沒決定要不要做）· 🚫 明確不做。
 > 每一項改狀態時順手改這裡；這裡的狀態如果跟 [`CHANGELOG-fork.md`](../../CHANGELOG-fork.md) 對不上，以 CHANGELOG 為準。
 >
-> 最後更新：2026-09-12（PR #38、#42、#43 合併後）。下一步：§2.9 的工作 3 Draft Message（⚙️ 文件還在等維護者同意）；§2.6 的 `media/upload-lifecycle` 仍等維護者的 checklist。
+> 最後更新：2026-09-14（PR #53）。⚙️ 等維護者決定的：§2.9 末尾兩件（連線死掉後名額 ~5 秒才回來、`Hello` 的 `features`）；§3 的候選。
 
 ## 0. 目標，一句話
 
@@ -56,11 +56,13 @@ pack 格式與 kind 分配在 [wbf-wire-format.md](wbf-wire-format.md)，**未�
 
 分塊做完，串流播放就是客戶端「用明文位置要對的塊」；server 端已經沒有要補的了，B 支的 WebSocket 只是把同一套 pack 換條線。
 不另開項目，併在 2.1 的驗收裡：**一個大於 1 GB 的檔案，中途 seek 不必下載前面的部分。**
+⚠️ 狀態留在 🔲 是因為**這個驗收沒跑過**（2026-09-14 對過）：用明文位置讀塊的功能在，e2e6 只對小檔驗過，沒有大於 1 GB 的檔案中途 seek。
 
-### 2.3 📄 流式訊息（文字 token 串流）
+### 2.3 ✅ 流式訊息（文字 token 串流）→ Draft Message（PR #45）
 
-提案已在 [streaming-messages.md](streaming-messages.md)，核心設計 §5.3。走短暫訊息旁路，講完才寫一個正式事件，歷史零污染。
-程式碼落點對照 `rooms/typing/` 與 sync 喚醒，提案 §3 已寫。等維護者同意就能開分支；它與媒體層互不依賴，可以並行。
+核心設計 §5.3 的這一項已經以 **Draft Message** 的形狀實作並合併（[streaming-messages.md](streaming-messages.md) 第四版，進度記在 §2.9 的工作 3）：
+一則真的佔位事件當錨、草稿用它的 `g_seq` 命名、內容變化只廣播不進庫。
+⚠️ 這一節原本寫的是「走短暫訊息旁路、對照 `rooms/typing/` 與 sync 喚醒、等維護者同意」—— 那是**已作廢的第二／三版**草案。它在 #45 合併後沒有被改，#52 的文件同步也漏了（那輪掃的是 #50／#51 改了哪些事實，沒有把狀態標記本身當成要掃的事實）。
 
 ### 2.4 ✅ 每房 `r_seq`、全域 `g_seq` 與 `Event/Recent`（issue #20，PR #22 已合併 2026-09-06）
 
@@ -75,7 +77,7 @@ client（wbf-matrix-client）的聊天模型要 server 配合的兩件事。設�
 （[media-attachments.md](media-attachments.md)），**形狀**換成外鍵集合（[media-holders.md](media-holders.md)），
 `migrate-references` 拔掉，既存媒體永不自動刪。**client 端必須同步**（spec §12），否則 E2EE 房間的附件 7 天後被掃掉。
 
-### 2.6 🔧 合併後再審與外部審查的修補（[review-followups-2026-09-06.md](review-followups-2026-09-06.md)），三支，維護者 2026-09-06 同意
+### 2.6 ✅ 合併後再審與外部審查的修補（[review-followups-2026-09-06.md](review-followups-2026-09-06.md)），三支，維護者 2026-09-06 同意
 
 PR #24 合併後對 main 重看一次，加上 `../external-review` 兩輪（2026-09-05）逐條對現在的程式碼驗證；外部審查 14 條裡 4 條已由 #24 修掉、8 條仍在、1 條降級、1 條文件講反話，另抓到 1 條新的 P1。
 
@@ -83,7 +85,7 @@ PR #24 合併後對 main 重看一次，加上 `../external-review` 兩輪（202
 |---|---|---|
 | `media/managed-origin` | 既存媒體被縮圖拉進 `mxc_managed` 後 7 天被掃（P1，只有 `create`／Seal 確立受管）；`(mxc, Interfix)` 前綴；頭像幽靈持有者；墓碑 TTL 文件 | ✅ PR #26 |
 | `wbf/auth-and-ws-lifetime` | `/_wbf/*` 與 WebSocket 不查帳號鎖定（P1）；WebSocket 在登出／到期後仍有權限、關機時 `State` 懸空（P1） | ✅ PR #28 |
-| `media/upload-lifecycle` | Seal 在本地儲存收整檔進記憶體、S3 的 1 MiB parts（P1）；`Status` 冷載入不持鎖、sweeper 鎖下不重讀進度（P2）；升級前舊上傳卡配額（P2） | 🔲 |
+| `media/upload-lifecycle` | Seal 在本地儲存收整檔進記憶體、S3 的 1 MiB parts（P1）；`Status` 冷載入不持鎖、sweeper 鎖下不重讀進度（P2）；升級前舊上傳卡配額（P2） | ✅ PR #48（分支名是 `wbf/upload-lifecycle`）。🚫 最後一項（review-followups §2.8）**不做**：這個 fork 從未上線，不可能有那種列。⚠️ S3 那半沒有對真的 S3／MinIO 跑過 |
 
 ### 2.7 ✅ WS 的 `Login`／`Refresh`／`Logout`（提案 #29，實作 PR #30，2026-09-07 合併）
 
@@ -121,7 +123,8 @@ client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
 
 **工作 3 Draft Message ✅ PR #45（2026-09-13 合併）**：照 [streaming-messages.md](streaming-messages.md) §3–§8（`Stream` kind、server 零狀態、每片從佔位事件點讀驗作者、`wbf_draft_max_room_members`）。審查期間維護者加了片的 `prev` 指標（每片指向它接在哪一片之後），外部審查另外抓到七條「開著的草稿是一張不會過期的許可證」型的漏洞，全部修掉。
 ✅ **發送佇列的記憶體界已修（PR #50）**（起於維護者 2026-09-13 問「4 個 client 的記憶體高峰」）：原本 `wbf_ws_send_queue_len` 數的是**包數**（32），而一個 pack 最大 16.07 MiB → **每條連線 514 MiB**、4 裝置 × 4 條 ≈ 9 GiB。現在多一個 **`wbf_ws_send_queue_bytes`（預設 16 MiB）**，額度跟著 pack 排隊、寫完才還；同時把 `wbf_data_max_bytes` 從 16 MiB 降到 **2 MiB**（維護者定），所以一個滿包（meta 64 KiB ＋ data ＋ 32 byte 外框 ＝ 2,166,816 bytes）在預算裡放得下 **7** 個。每條連線的最壞值 ≈ **20 MiB**，4 裝置 × 4 條 ≈ 0.3 GiB。
-📍 **同家族還沒做的**：`Event/Recent` 的窗（最多 500 **筆**，每筆只要求小於一個 pack）與 `Device/Fetch`（一整窗先收齊、再一次造完所有 pack，等於整窗兩份）—— 兩者都還是**數筆數、不數 bytes**。另外維護者提過**大塊懶加載**（佇列裡只放指標，寫的時候才讀檔），那個要先寫提案：它會改 `Outgoing` 的語意、要給送出任務發 `Error` 的能力（檔案可能在排隊期間消失）。📎 實測的另一端：空資料庫、沒人連線時閒置 **42 MiB**（6 核）。
+✅ **同家族的窗已修（PR #53）**：`Event/Recent` 的窗（最多 500 **筆**，每筆只要求小於一個 pack，理論上 ~1 GiB）與 `Device/Fetch`（一整窗先收齊、再一次造完所有 pack，等於整窗兩份）原本都**數筆數、不數 bytes**。現在多一個 **`wbf_window_max_bytes`（預設 8 MiB），先於則數生效**（維護者 2026-09-14 指定），pack 送一個造一個；被截斷的窗在 `Batch` 帶 `more: true`、被截斷的訂閱補窗第一個 `Push` 帶 `gap: true`（[wbf-pack-pipeline.md](wbf-pack-pipeline.md) §6.3）。⚠️ client 要跟：判斷「還有沒有更舊的」改看 `more`，不看 `tc < limit`。
+📍 另外維護者提過**大塊懶加載**（佇列裡只放指標，寫的時候才讀檔），那個要先寫提案：它會改 `Outgoing` 的語意、要給送出任務發 `Error` 的能力（檔案可能在排隊期間消失）。📎 實測的另一端：空資料庫、沒人連線時閒置 **42 MiB**（6 核）。
 🔲 **兩件 PR #51 的 e2e 量到、還沒處理的**（等維護者決定要不要做）：
 - **連線死掉之後名額要 ~5 秒才回來**：有推播還排著的連線結束時會先把佇列排空（`DRAIN_TIMEOUT` 5 秒）才還 `wbf_ws_max_connections_per_device` 的名額，實測兩次都是 **5.1 秒**。
   ⚠️ 影響是實際的：手機切網路時舊連線來不及正常關，若它們還有推播沒送出，**新連線可能在這幾秒內被 `TooManyConnections` 拒絕**。可能的方向是「對端已經不在時就不必排空」，要先確認送出任務能不能分辨這件事。
@@ -150,7 +153,7 @@ client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
 
 1. **不聯邦的話，事件層還需不需要 DAG？** 沒有遠端分叉，房間可以退化成單調遞增的日誌，刪除與容量都簡單得多；代價是放棄可驗證歷史與未來接聯邦。
    **媒體層不等它**；同步語意（核心設計 Phase 1）等它。
-2. **塊大小**：1 MiB 或 4 MiB，拿實際網路與記憶體去量。擋 2.1。
+2. ~~**塊大小**：1 MiB 或 4 MiB，拿實際網路與記憶體去量。擋 2.1。~~ ✅ **已定**：一個 pack 的 data 上限 2 MiB（`wbf_data_max_bytes` = 2 MiB + 4096、`media_chunk_size_max` = 2 MiB），維護者 2026-09-13 在 PR #50 定的；理由是記憶體界（發送佇列以 bytes 計），不是網路量測。
 3. **串流文字在 E2EE 下的金鑰安排**。擋 2.3 在加密房間的部分，不擋明文房間。
 4. **客戶端策略**：自己從 SDK 寫小的，還是站在現成的上。核心設計 Phase 2，最後才做。
 

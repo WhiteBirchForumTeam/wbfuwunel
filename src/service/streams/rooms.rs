@@ -215,14 +215,33 @@ impl Streams {
 	/// Pushes a window of events to one connection for a `Subscribe` that
 	/// asked to be caught up from `cg_seq`. Same drop rule as `push`.
 	///
+	/// 🚨 A window cut short (by its count or its bytes) is the newest part of
+	/// what the client is missing, not all of it — and a client moves its
+	/// watermark on every `Push` (wbf-event-push §2.1), so without a word it
+	/// would step over the rest for good. The first pack of such a window
+	/// therefore carries `gap: true`, which is the one signal a subscriber
+	/// already acts on by asking `Recent`.
+	///
 	/// Args:
 	///     connection: the subscriber being caught up
 	///     events: newest first, example: the 25 events after `cg_seq`
+	///     is_cut_short: the window stopped at a cap, so older events after
+	///         `cg_seq` may be missing from it
 	///     per_pack: `wbf_push_max_events_per_pack`, example: 10
 	///     data_max: `wbf_data_max_bytes`; a pack is cut here too, so a
 	///         window of large events cannot exceed the connection's
 	///         message size
-	pub fn push_window(&self, connection: ConnectionId, events: &[PushedEvent<'_>], per_pack: usize, data_max: usize) {
+	pub fn push_window(
+		&self,
+		connection: ConnectionId,
+		events: &[PushedEvent<'_>],
+		is_cut_short: bool,
+		per_pack: usize,
+		data_max: usize,
+	) {
+		if is_cut_short {
+			self.rooms.mark_gap(&[connection]);
+		}
 		for range in list_pack_ranges(events.iter().map(|event| event.json.len()), per_pack, data_max) {
 			self.push(&[connection], &events[range]);
 		}
@@ -362,16 +381,40 @@ mod tests {
 		streams.subscribe(1, alice, tx, 1, &[room], false);
 		let events: Vec<PushedEvent<'_>> = (0..5).map(|n| PushedEvent { g_seq: 100 - n, json: b"{}" }).collect();
 
-		streams.push_window(1, &events, 2, 1024);
+		streams.push_window(1, &events, false, 2, 1024);
 		let sizes: Vec<usize> = (0..3)
 			.map(|_| {
 				let mut pack = take_pack(&mut rx);
 				let view = decode(&mut pack).expect("decodes");
+				assert_eq!(view.meta_json().expect("meta")["gap"], false, "a whole window hides nothing");
 				split_length_prefixed(view.data).expect("events").len()
 			})
 			.collect();
 		assert_eq!(sizes, vec![2, 2, 1]);
 		assert!(rx.try_recv().is_err(), "nothing more");
+	}
+
+	#[test]
+	fn a_catch_up_cut_short_says_gap_on_its_first_pack() {
+		// 🚨 The client moves its watermark on every Push; a catch-up that
+		// stopped at a cap would otherwise let it step over what is left.
+		let streams = Streams::new();
+		let alice = user_id!("@alice:localhost");
+		let room = room_id!("!r:localhost").to_owned();
+		let (tx, mut rx) = queue(8);
+		streams.subscribe(1, alice, tx, 1, &[room], false);
+		let events: Vec<PushedEvent<'_>> = (0..3).map(|n| PushedEvent { g_seq: 100 - n, json: b"{}" }).collect();
+
+		streams.push_window(1, &events, true, 2, 1024);
+
+		let gaps: Vec<bool> = (0..2)
+			.map(|_| {
+				let mut pack = take_pack(&mut rx);
+				let view = decode(&mut pack).expect("decodes");
+				view.meta_json().expect("meta")["gap"].as_bool().expect("gap")
+			})
+			.collect();
+		assert_eq!(gaps, vec![true, false], "said once, on the first pack");
 	}
 
 	#[test]
@@ -479,7 +522,7 @@ mod tests {
 		// Room for two events per pack by bytes, while the count cap (10) is
 		// nowhere near: four events must still leave as two packs.
 		let data_max = 2 * framed_len(body.len());
-		streams.push_window(1, &events, 10, data_max);
+		streams.push_window(1, &events, false, 10, data_max);
 
 		for expected_seq in 0..2 {
 			let mut pack = take_pack(&mut rx);

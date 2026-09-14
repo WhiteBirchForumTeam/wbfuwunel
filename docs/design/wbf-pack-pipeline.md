@@ -1,6 +1,6 @@
 # wbf pack 處理管線：連線就是佇列、handler 的契約、以及 HTTP 一章章搬過來的模子
 
-**狀態**：§1–§6 ✅ 已實作（PR #33，2026-09-08 合併）；§8 第二部分 🔲 未開。維護者定的決定列在 §0；其餘是照那些決定推出來的做法。
+**狀態**：§1–§6 ✅ 已實作（PR #33，2026-09-08 合併；之後發送佇列的 bytes 預算 PR #50、窗的 bytes 上限 PR #53）；§8 第二部分 ✅ PR #48（原本停在「🔲 未開」，2026-09-14 補標）。維護者定的決定列在 §0；其餘是照那些決定推出來的做法。
 實作跟提案不同的地方標 📎，理由就地寫。client 端要跟的東西開在 wbf-matrix-client #15。
 
 [wbf-wire-format.md](wbf-wire-format.md) 講的是**封包的版面與協議**（header、kind、順序類別、兩種送法）；
@@ -21,7 +21,7 @@
 | 3 | 一條連線就是一個 queue：收到的 pack **依序**處理；Ack 是**真的落地**（DB 交易執行完）才回。 |
 | 4 | `Event/Recent` **不能一包回一萬條**：first byte 會很久，client 會卡在 DB 同步。WS 上要拆成**很多小 pack** 串流回去，新的 pack 格式 `Event/Batch`（§6）。 |
 | 5 | `Recent` 走 HTTP 回 `Error(Unsupported)`。 |
-| 6 | `Batch` 的 meta 是 `{ tc, bc, fs, ls, r }`；**`r = 0` 就是這一窗結束**，不用 `IS_LAST`、不另做結束用的 pack（先想過一個「蓋子」subtype，後定省掉：`tc` 一開始就給了，尾巴不需要第二個信號）。 |
+| 6 | `Batch` 的 meta 是 `{ tc, bc, fs, ls, r }`；**`r = 0` 就是這一窗結束**，不用 `IS_LAST`、不另做結束用的 pack（先想過一個「蓋子」subtype，後定省掉：`tc` 一開始就給了，尾巴不需要第二個信號）。📎 PR #53 加了 `more`：它不是第二個「這窗完了」，是「**這窗後面還有沒有**」—— 它原本靠 `tc < limit` 推得出來，窗有了 bytes 上限之後推不出來了（§6.3）。 |
 | 7 | client 在同步中**不能中止**串流，也收不到新訊息（那條連線被佇列佔著）；要就再開一條。這是 client 的事，server 不做取消指令。 |
 | 8 | 這條 checklist 的範圍是**整條 pack 處理流程**，不只上傳下載：登入登出、以及未來每個 HTTP→WS 的新功能都走它。 |
 | 9 | **同步是 client 拉的視窗**（維護者 2026-09-07 晚）：一次 `Recent` 只拿 `limit` 條（例 320 = 32 個 pack × 10 條），server 只數這一窗、`tc` 是這一窗的條數；client 收完一窗再帶 `before` 叫下一窗，一萬條由 client 自己累計。server **不記串流狀態**、不另起 `Continue` subtype：`before` 游標本來就是 continue。節流完全在 client。 |
@@ -210,12 +210,12 @@ client 送 `Recent { rooms?, limit, cg_seq, before?, batch? }`：
 | 欄 | 意思 | 預設／上限 |
 |---|---|---|
 | `rooms` | 只讀這幾個房間（PR #51）。⭐ **一個房 ＋ `before` 就是那個房的歷史** | 沒帶 = 每個加入的房；`[]` = 空窗；**點名了不在的房 → 整個請求 `Forbidden`**；同一個房點兩次是一個房 |
-| `limit` | **這一窗**最多幾條 | 沒帶 `wbf_recent_default_limit`（320）；上限 `wbf_recent_max_limit`（**預設改 500**，原 10000） |
+| `limit` | **這一窗**最多幾條 | 沒帶 `wbf_recent_default_limit`（320）；上限 `wbf_recent_max_limit`（**預設改 500**，原 10000）。⚠️ **窗還有一個 bytes 的上限 `wbf_window_max_bytes`（8 MiB），先於它生效**（PR #53，§6.3） |
 | `cg_seq` | client 已有的最新 `g_seq`，這窗不會回到它或比它舊 | 沒帶或 0 = 沒有快取 |
 | `before` | 只要比這個舊的（上一窗最後一條的 `ls`） | 沒帶 = 從最新開始 |
 | `batch` | 每個 Batch 幾條 | 預設 `wbf_recent_default_batch`（10）；上限 `wbf_recent_max_batch`（100），超過夾 |
 
-server 在 `(cg_seq, before)` 之間從最新往舊，**只數這一窗**的 `limit` 條（§6.3），然後每 `batch` 條送一個 `Batch`。
+server 在 `(cg_seq, before)` 之間從最新往舊，**只收這一窗**：收到 `wbf_window_max_bytes` 或 `limit` 條，**哪個先到停在哪**（bytes 先問，§6.3），然後每 `batch` 條送一個 `Batch`。
 📎 點名一個房間是**最便宜**的情況：`collect_window` 對每個房開一條倒序串流、用 heap 合併，所以一個房是 k 路合併退化成單路掃描（跟 `/messages` 同一個迭代器）。
 ⚠️ **一窗結束講的是「本站這份副本沒有更舊的了」，不是「這個房間沒有更舊的了」** —— `Recent` 不會像 `/messages` 那樣去聯邦 backfill（[room-seq-and-recent.md](room-seq-and-recent.md) §2.1）。
 下一窗由 client 帶 `before = 這窗最後一個 Batch 的 ls` 再叫一次 `Recent`；server 不記任何跨請求的狀態，`id` 由 client 決定要不要沿用。
@@ -228,7 +228,7 @@ server 在 `(cg_seq, before)` 之間從最新往舊，**只數這一窗**的 `li
 | 欄位 | 內容 |
 |---|---|
 | header | `IS_RESPONSE = 1`；`id` 抄請求；`seq` 從 0 起嚴格 +1；沒有 `IS_LAST` |
-| meta | `{ "tc": 320, "bc": 10, "fs": 20000, "ls": 19991, "r": 310 }` |
+| meta | `{ "tc": 320, "bc": 10, "fs": 20000, "ls": 19991, "r": 310, "more": true }` |
 | data | `bc` 則事件，每則 **u32 大端長度 ＋ 事件 JSON bytes**，新到舊排（`fs ≥ ls`） |
 
 | meta 欄 | 意思 |
@@ -238,6 +238,7 @@ server 在 `(cg_seq, before)` 之間從最新往舊，**只數這一窗**的 `li
 | `fs` | first g_seq：這批第一條（最新那條）的 `g_seq` |
 | `ls` | last g_seq：這批最後一條（最舊那條）的 `g_seq`；最後一個 Batch 的 `ls` 就是下一窗的 `before` |
 | `r` | remain：這批之後這一窗還剩幾條。**`r = 0` 就是這一窗結束** |
+| `more` | **這一窗是被上限截斷的**（收滿 `limit` 條，或收滿 `wbf_window_max_bytes`），所以更舊的可能還有。`false` = 這窗是因為**沒有事件了**才停的（到了 `cg_seq` 或本站副本的最舊）。同一窗每個 Batch 都一樣。⚠️ client **沒看到這個欄位要當 `true`**（多問一次是一個來回，少問一次是漏事件）。📎 **`limit: 0` 是 `false`**：什麼都沒要，就沒有被截斷（PR #53 審查，rumia；原本回 `true`，會把 client 叫回來再要一次「什麼都不要」） |
 
 不變量：每個 Batch `tc = 已送 + bc + r`；最後一個 `r = 0`；**空窗**（`tc = 0`）送一個 `bc = 0, r = 0, fs = ls = 0` 的 Batch。
 事件 JSON 跟現在一樣（含 `room_id`，`unsigned` 帶 `org.wbftw.wbfuwunel.r_seq`／`g_seq`），見 room-seq-and-recent.md §2。
@@ -251,12 +252,24 @@ server 在 `(cg_seq, before)` 之間從最新往舊，**只數這一窗**的 `li
 ### 6.3 先收齊一窗，再切 Batch
 
 `g_seq` 是全站計數器，跨這個人沒加入的房間，`before − cg_seq` 是上界不是條數，準確的 `tc` 得把跨房合併＋可見性過濾走一遍。
-📎 提案寫「兩趟：先數再送」；實作改成**一趟收進記憶體再切**：一窗最多 500 則（§0-11），幾百則事件在 RAM 裡是幾百 KB 到幾 MB，
-可忽略；而兩趟要保證「數的規則與送的規則是同一段程式」，多一個會漂移的接縫。收齊之後 `tc` 就是 `window.len()`，第二趟那些「數到的比 `tc` 少怎麼辦」的規則全部消失。
+📎 提案寫「兩趟：先數再送」；實作改成**一趟收進記憶體再切**：兩趟要保證「數的規則與送的規則是同一段程式」，多一個會漂移的接縫。收齊之後 `tc` 就是 `window.len()`，第二趟那些「數到的比 `tc` 少怎麼辦」的規則全部消失。
+
+⚠️ **收進記憶體的那一窗有多大，原本只數則數**：一窗最多 500 則（§0-11），當時的理由是「幾百則事件在 RAM 裡是幾百 KB 到幾 MB，可忽略」。
+那句話只對**一般大小**的事件成立 —— 每則只要求放得進一個 pack（`wbf_data_max_bytes`，2 MiB），所以理論上一窗是 500 × 2 MiB ≈ **1 GiB**；
+而且原本的 `build_batches` 先把**所有** pack 造好再送，等於整窗在記憶體裡**兩份**。跟 PR #50 修掉的發送佇列是同一種病：界是用「幾個」寫的，沒有人把它乘出來。
+✅ **PR #53（維護者 2026-09-14 指定「加上 filesize 限制，優先於 limit」）**：
+
+- 一窗另有 **`wbf_window_max_bytes`（預設 8 MiB）**，數的是 data 裡的 bytes（每則 JSON ＋ 4 byte 長度前綴）。**先問 bytes、再問則數**；兩個上限共用一條規則 `core::wbf::events::WindowBudget`，`Event/Recent`、`Device/Fetch`、兩種 `Subscribe` 的補窗都用它。
+- **窗的第一則一定收**，不管多大：拒收第一則的窗會對之後每一次請求回同一個空窗，client 永遠翻不過去。啟動檢查要求 `wbf_window_max_bytes ≥ wbf_data_max_bytes`（`check_wbf_window_max_bytes`），所以第一則也在界內，「一窗最多這麼多 bytes」就是真的。
+- **一旦拒收，之後全拒**（`WindowBudget` 自己記著）：被拒的那則是下一窗的第一則，讓後面一則比較小的插隊，這窗就會有一個游標已經走過去的洞。
+- 被 bytes 截斷的窗 `tc < limit` —— 那原本是「沒有更舊的了」的長相，所以 Batch 多了 **`more`**（§6.2、§6.4）。
+- pack 改成**送一個造一個**：記憶體是「一窗 ＋ 一個 pack」，不再是兩份。
+- 預設 8 MiB 的算法：一般事件幾 KB，500 則 × 4 KiB ≈ 2 MiB，**正常的窗碰不到它**（`the_default_window_budget_holds_a_default_window_of_ordinary_events` 釘著）；它只擋病態的窗。一窗 8 MiB 在發送佇列（16 MiB）裡放得下，送完一窗不必等 client 讀。
 
 ```
-collect_window：堆合併 → ignored／visibility 過濾 → 停在 cg_seq 或 limit；一則自己就比 pack 大 → 跳過（debug_warn），不算進 tc
-build_batches：每 batch 則切一個 Batch；下一則放不進 wbf_data_max_bytes 也切；r = tc − 已送；空窗一個空 Batch   ← 純函數，單元測試
+collect_window：堆合併 → ignored／visibility 過濾 → 一則自己就比 pack 大 → 跳過（debug_warn），不算進 tc
+               → WindowBudget：先 bytes 後則數，放不下就停；停在 cg_seq 或沒有事件了 → more = false，停在上限 → more = true
+build_batches：每 batch 則切一個 Batch；下一則放不進 wbf_data_max_bytes 也切；r = tc − 已送；空窗一個空 Batch；送一個造一個   ← 單元測試
 ```
 
 **門檻**（§0-10）：client 等不到回應會斷線重連再問，server 又數一次，形成迴圈。所以「一窗 320 條的第一趟」必須遠低於 client 的等待時間；
@@ -275,8 +288,9 @@ first byte 是 30 房間的堆合併＋可見性過濾＋收齊 320 則的時間
 
 ### 6.4 client 的水位（server 欄位語意決定的，寫在這裡）
 
-- 一窗收完（`r = 0`）且 `tc < limit`：這窗已經回到 `cg_seq`，同步結束；把 `cg_seq` 存成**第一窗第一個 Batch 的 `fs`**（這輪最新的一條；比它新的下輪會來）。
-- `tc == limit`：可能還有更舊的，帶 `before = 最後的 ls` 再叫一窗；**水位不動**。剛好沒有更舊的會拿到一個空 Batch，一個來回的代價。
+- 一窗收完（`r = 0`）且 `more = false`：這窗已經回到 `cg_seq`，同步結束；把 `cg_seq` 存成**第一窗第一個 Batch 的 `fs`**（這輪最新的一條；比它新的下輪會來）。
+- `more = true`（或沒有這個欄位）：可能還有更舊的，帶 `before = 最後的 ls` 再叫一窗；**水位不動**。剛好沒有更舊的會拿到一個空 Batch，一個來回的代價。
+- 🚨 **不要再用 `tc < limit` 判斷同步結束**（PR #53 之前的規則）。窗被 bytes 截斷時 `tc < limit` 而且**還有更舊的**，照舊規則會把水位推過去、那段就再也補不回來。`more` 是唯一分得開這兩種情況的東西。
 - 中途斷線或收到 `Error`：已收到的 Batch 有效；從最後一個 `ls` 續問。**不要**在中途推水位：回應是新到舊，第一批之後還有比舊 `cg_seq` 新的。
 - 總數（一萬）是 client 自己累計的；server 每窗只知道自己的 `tc`。
 
@@ -311,6 +325,9 @@ wire-format §3.3 已經把 kind 按 Matrix 章節占好號。搬一個端點 = 
 | 2 | §2.2 | Seal 永遠串流 `put_multi`，塊大小用 provider 的 `multipart_part_size`（本地夾 8 MiB） | Seal 是慢 handler 的代表，§4.3-5 說的「佔住連線」就是它；驗收要在 WS 上量 |
 | 3 | §2.8 | sweeper 多掃「宣告在、進度不在、超過 TTL」的舊上傳 | 無。維護者已答（§0-13）：從未上線，這條是純防禦，做最小的那版、排最後 |
 
+✅ **結果（PR #48，2026-09-13 合併）**：1、2 照做；📎 2 的實作跟這張表不同 —— 不是「本地夾 8 MiB」一條規則，而是 provider 回 `Option`（S3 給自己的 part 大小、至少 5 MiB；本地沒有意見、由上傳那側用 8 MiB），另加啟動檢查 `check_s3_part_size`。
+🚫 3 **不做**：維護者 2026-09-13 確認這個 fork 從未上線，§0-13 那個「純防禦」要防的資料狀態不存在（review-followups §2.8）。
+
 ## 9. 版本與相容
 
 `protocol` 號不動（舊 client 不送 `batch`，`Batch` 是它沒收過的 subtype；而且現在沒有舊 client 在跑）。**但下面三條是行為改變，CHANGELOG 要點名**：
@@ -325,6 +342,7 @@ wire-format §3.3 已經把 kind 按 Matrix 章節占好號。搬一個端點 = 
 新 config 五個：`wbf_ws_max_connections_per_device`（4）、`wbf_ws_send_queue_len`（32）、`wbf_recent_default_limit`（320）、`wbf_recent_default_batch`（10）、`wbf_recent_max_batch`（100）。
 📎 之後加的：`wbf_ws_send_queue_bytes`（16 MiB，PR #50）；同一支把 `wbf_data_max_bytes` 從 16 MiB 降到 **2 MiB + 4096**、`media_chunk_size_max` 從 16 MiB 降到 **2 MiB**。
 既有 config 改預設一個：`wbf_recent_max_limit` 10000 → **500**（§0-11）。
+📎 PR #53：`wbf_window_max_bytes`（8 MiB，≥ `wbf_data_max_bytes`）；`Event/Batch` 與 `Device/Batch` 的 meta 多 `more`。⚠️ **這是 client 要跟的行為改變**：靠 `tc < limit` 判斷同步結束的 client，在窗被 bytes 截斷時會漏掉更舊的那段（§6.4）。
 
 ## 10. 驗收（e2e7 加情境 5、e2e9 改）
 

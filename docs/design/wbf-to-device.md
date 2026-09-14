@@ -57,11 +57,11 @@ client 得讓兩個資料庫原子性地一起 commit —— 兩個 db、兩套�
 | subtype | 方向 | meta | data | 順序類別 |
 |---|---|---|---|---|
 | `0x01 Fetch` | client → server | `{ "limit": 1000?, "cd_seq": <count>? }`；`id` 由 client 選 | 無 | 無序 |
-| `0x02 Batch` | **server → client** | `{ "tc", "bc", "ot", "nt", "counts": [...], "r" }`；`id` 抄 `Fetch`，`seq` 從 0 嚴格 +1 | `bc` 則事件，u32 大端長度 ＋ JSON | 有序 |
+| `0x02 Batch` | **server → client** | `{ "tc", "bc", "ot", "nt", "counts": [...], "r", "more" }`；`id` 抄 `Fetch`，`seq` 從 0 嚴格 +1；`more` = 這窗停在上限（`limit` 或 `wbf_window_max_bytes`）、後面可能還有（PR #53） | `bc` 則事件，u32 大端長度 ＋ JSON | 有序 |
 | `0x03 ItemsDestroy` | client → server | `{ "tc": <筆數> }`；`id` 由 client 選 | **`tc` × 8 byte**，每個是一個 u64 大端的 count（§5.1） | 無序 |
 | `0x04 Subscribe` | client → server | `{ "device_id": "…", "cd_seq": <count>? }`；`id` 由 client 選 | 無 | 無序 |
 | `0x05 Unsubscribe` | client → server | `{}` | 無 | 無序 |
-| `0x06 Push` | **server → client** | `{ "bc", "ot", "nt", "counts": [...], "gap": bool }`；`id` 抄 `Subscribe`，`seq` 每推一次 +1 | 同 `Batch` 的切法 | 事件驅動 |
+| `0x06 Push` | **server → client** | `{ "bc", "ot", "nt", "counts": [...], "gap": bool }`；`id` 抄 `Subscribe`，`seq` 每推一次 +1；`Subscribe{cd_seq}` 的補窗被上限截斷時，它的第一個 `Push` 帶 `gap: true`（PR #53） | 同 `Batch` 的切法 | 事件驅動 |
 | `0x07 ItemsDestroyed` | **server → client** | `{ "tc", "bc" }`；`id` 抄 `ItemsDestroy` | **`bc` × 8 byte**，銷毀掉的 count（§5.2） | 無序（一個命令一則） |
 
 ### 3.1 跟 `Event` 那一套刻意不同的三處
@@ -245,6 +245,7 @@ to-device 一則約 1 KB 又不需要逐則渲染，包大一點反而省來回�
 | `wbf_device_fetch_default_limit` | **1000** | **一次 `Fetch` 回幾則**（client 沒帶 `limit` 時）。積得比這多就多叫幾次，帶上一窗的 `nt` 當 `cd_seq` |
 | `wbf_device_fetch_max_limit` | **1000** | client 帶的 `limit` 夾到這裡。🔲 維護者 2026-09-11 只定了「一次一千則」這個數，所以兩者同值；要讓 client 能要更多再分開 |
 | `wbf_device_default_batch` | **100** | **一包幾則**（`Fetch` 的回應 `Batch`）。⚠️ **client 不能指定** —— `Fetch` 沒有 `batch` 參數（`Recent` 有），一包裝多少是 server 的事 |
+| `wbf_window_max_bytes` | 8 MiB（**與 `Event` 共用**，PR #53） | **一窗最多幾 bytes**，`Fetch` 與 `Subscribe{cd_seq}` 的補窗都受它；**先於 `limit`**。收滿 bytes 的窗則數少於 `limit` 而且 `more: true` |
 | `wbf_push_max_events_per_pack` | 10（**與 `Event` 共用**） | **server 主動推的一包最多幾則**（維護者 2026-09-11）。推送要的是快，一包小一點先出去；補窗要的是吞吐，才用上面那個 100 |
 | ~~包數~~ | *（算出來的，10）* | `ceil(limit ÷ 一包則數)`。🚫 **不給旋鈕**：三個數字只有兩個自由度，三個都能調就會有「互相矛盾時誰贏」的問題。✅ 啟動時斷言它 ≤ `wbf_ws_send_queue_len`（`config/check.rs` 的 `check_wbf_device_window`），不成立就是設定錯，fail closed |
 
@@ -253,7 +254,7 @@ to-device 一則約 1 KB 又不需要逐則渲染，包大一點反而省來回�
 放不下時發生的是**那個 handler 卡在半窗**等 client 讀，同時佔著它的名額。那不是資料損失，但是個沒人看得見的
 停頓，而且它的成因純粹是設定值互相矛盾 —— 這種東西應該在啟動時就講出來。
 
-📎 **`limit: 0` 就是「不要」**：回一則空的 `Batch`（`r=0`），跟 `Event/Recent` 一致。
+📎 **`limit: 0` 就是「不要」**：回一則空的 `Batch`（`r=0`、`more: false`），跟 `Event/Recent` 一致。⚠️ `more` 在這裡是 `false` 不是 `true`（PR #53 審查，rumia）：沒要東西就沒有被截斷，回 `true` 會叫 client 再來要一次「什麼都不要」；把補窗設成 0（`wbf_device_fetch_default_limit = 0`）也因此不會留下一個讓下一個 live `Push` 帶著的 `gap`。
 🚫 不夾成 1 —— 那會回一則沒人要的，還順手把 client 那個「欄位沒初始化」的 bug 藏起來。
 
 ⭐ **兩條路兩個數，是刻意的**：`Fetch`→`Batch` 是補洞（**大包少包**，100 × 10）、`Push` 是即時（**一包最多 10**，
@@ -278,6 +279,7 @@ to-device 一則約 1 KB 又不需要逐則渲染，包大一點反而省來回�
 | `wbf_ws_send_queue_len` | **32** | **一條連線的出站佇列裝幾個 pack**（數的是 pack，不是則） | `serve` |
 | `wbf_ws_send_queue_bytes` | **16 MiB** | **同一個佇列裝幾 bytes**（PR #50）：決定記憶體的是這個；兩個界誰先用完誰擋 | `PackQueue` |
 | `wbf_data_max_bytes` | **2 MiB + 4096** | 一個 pack 的 data 上限；所有切包都同時受它 | `list_pack_ranges` |
+| `wbf_window_max_bytes` | **8 MiB** | **一窗最多幾 bytes**（PR #53）：`Recent`、`Fetch`、兩種 `Subscribe` 的補窗共用；**先於則數上限**，收滿就停、`more: true` | `WindowBudget` |
 
 📎 **包數從來不是旋鈕**：它是 `ceil(limit ÷ 每包則數)` 算出來的（預設 320 ÷ 10 = 32 = 佇列剛好滿）。
 維護者 2026-09-11 問過要不要加一個「一次最多幾包」的上限（例如 50）——**不加**，理由兩條：
@@ -312,6 +314,7 @@ olm 封裝再 base64 之後**一則大約 1 KB**；SAS 驗證與 `m.secret.send`
 byte 上限仍然要接（規則只有一份，[wbf-wire-format.md](wbf-wire-format.md) §2.1 那條教訓），只是幾乎不會觸發。
 理論上界是每條連線 **`wbf_ws_send_queue_bytes`**（預設 16 MiB）加上正在寫出與正在收的那兩個 pack，跟其他 kind 同一條，不是這裡新增的風險（[wbf-pack-pipeline.md](wbf-pack-pipeline.md) §5）。
 ⚠️ 這裡原本寫的是 `wbf_ws_send_queue_len` × `wbf_data_max_bytes` —— 那是 PR #50 之前**數包數**的界（32 × 16 MiB ＝ 512 MiB），而佇列現在數的是 bytes；包數仍在，但它已經不是決定記憶體的那個（審查者 rumia，PR #50）。
+✅ **一窗在收的時候佔多少記憶體**，原本只有則數的界（1000 則 × 每則只要求放得進一個 pack），而且整窗的 pack 是先造好再送、等於兩份。PR #53 起是 `wbf_window_max_bytes`（8 MiB），而且 pack 送一個造一個（[wbf-pack-pipeline.md](wbf-pack-pipeline.md) §6.3）。估算的一窗 ~1 MB 遠在它之內。
 🔲 這幾個數字**先這樣定**（維護者 2026-09-11），量過再調。
 
 ## 8. client 端會怎麼用（給讀 server 的人理解脈絡）
@@ -323,7 +326,7 @@ daemon 啟動、Login → Subscribe{device_id, cd_seq: 上次存的}   ← 先�
                   → 逐則匯進 crypto store（OlmMachine::receive_sync_changes）
                   → ItemsDestroy{ 這一包裡成功的那些 count }   ← 一包一個呼叫，不等整窗
                   → 收到 ItemsDestroyed：在清單裡的，本地是唯一真相
-一窗收完（r = 0）還有更舊的 → 帶上一窗的 nt 當 cd_seq 再叫一次
+一窗收完（r = 0）且 more = true → 帶上一窗的 nt 當 cd_seq 再叫一次（不要用「則數 < limit」判斷：窗被 bytes 截斷時則數少、後面還有）
 之後靠 Push；收到 gap 就再 Fetch 一次
 ```
 
