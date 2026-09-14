@@ -43,14 +43,14 @@
 #database_path = "/var/lib/tuwunel"
 
 # Text which will be added to the end of the user's displayname upon
-# registration with a space before the text. In Conduit, this was the
-# lightning bolt emoji.
+# registration with a space before the text. This fork's is the leaf
+# (upstream tuwunel's was a heart, Conduit's a lightning bolt).
 #
 # To disable, set this to "" (an empty string).
 #
 # reloadable: yes
 #
-#new_user_displayname_suffix = "💕"
+#new_user_displayname_suffix = "🍃"
 
 # The default address (IPv4 or IPv6) tuwunel will listen on.
 #
