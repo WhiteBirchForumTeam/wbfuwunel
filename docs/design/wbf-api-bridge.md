@@ -6,7 +6,7 @@
 
 ## 0. 一句話
 
-**不一支一支手寫 handler。** 做一座通用的橋：把 pack 轉成一個**內部的 `http::Request`（不走網路）**，直接丟進 axum 的 `Router` 跑一次 —— 認證、關卡、ruma 解析、route 函式全部是 HTTP 進來時的同一條路，回應的 JSON 原樣放進 `Ack`。之後搬一個端點＝**分配表加一列**（一個 subtype 號對一個 ruma 的 Request 型別），外加向量與 e2e。
+**不一支一支手寫 handler。** 做一座通用的橋：把 pack 轉成一個**內部的 `http::Request`（不走網路）** —— **kind ＋ subtype 查出 method 與模板、meta 是模板的變數、data 就是 body** —— 直接丟進 axum 的 `Router` 跑一次 —— 認證、關卡、ruma 解析、route 函式全部是 HTTP 進來時的同一條路，回應的 JSON 原樣放進 `Ack`。之後搬一個端點＝**分配表加一列**（一個 subtype 號對一個 ruma 的 Request 型別），外加向量與 e2e。
 📌 這個形狀是維護者 2026-09-14 定的（「內部做一個 ws pack 轉換成內部 http request 的方法，直接塞進去 route，不走網路丟一次」）；比提案原本寫的「自己呼叫 route 函式」少動一個上游檔案，理由在 §2.1。
 
 ## 1. 為什麼不照 `Login` 那樣手搬
@@ -49,15 +49,16 @@ HTTP 請求進 route 之前，`router/auth.rs` 會依 **route 的型別**（`Typ
 維護者 2026-09-14 定的做法：**pack 轉成一個 `http::Request`，直接交給 axum 的 `Router` 跑一次**，不開 socket、不繞回自己的 port。
 
 ```
-pack（kind＝領域、subtype＝操作，meta＝{ path?, query?, body? }）
-  → 分配表：subtype → ruma 的 Request 型別（只用它的 METADATA 拿 method 與 path 模板）
-  → 組 http::Request：path 模板填上 meta.path、query 串上 meta.query、body ＝ meta.body
-                      Authorization: Bearer <這條連線 session 的 access token>
-                      extensions: ConnectInfo(<這條連線的對端位址>)   ← 限速與 client IP 照常
+pack（kind＝領域、subtype＝操作；meta＝變數；data＝body 的 bytes）
+  → 分配表：subtype → ruma 的 Request 型別 → method（`Req::METHOD`）、URL 模板（`Req::PATH_BUILDER`）、header 模板
+  → 組 http::Request：URL 模板的空格用 meta 的變數填（path 與 query），header 模板同理
+                      body ＝ pack 的 data，**原樣的 bytes**
+                      Authorization: Bearer <這條連線 session 的 access token>   ← server 填，client 蓋不掉
+                      extensions: ConnectInfo(<這條連線的對端位址>)              ← 限速與 client IP 照常
   → Router::call(request)                      ← 就是 HTTP 進來時走的那一條，一條都不少
        axum 比對路徑 → 填 path 參數 → Args::from_request（token、鎖定、暫停、UIAA、ruma 解析）
        → route 函式（原封不動）
-  → http::Response：2xx → body 的 JSON 原樣當 Ack 的 meta
+  → http::Response：2xx → 狀態碼與 header 進 Ack 的 meta、body 的 bytes 進 Ack 的 data
                     其他 → Error，照狀態碼與 Matrix 的 errcode 對應（§2.3）
 ```
 
@@ -78,16 +79,46 @@ pack（kind＝領域、subtype＝操作，meta＝{ path?, query?, body? }）
 
 ⚠️ **代價：路徑對不對從編譯期變成執行期**。所以分配表存的是 **ruma 的 Request 型別**，method 與 path 模板從它的 `METADATA` 取 —— 上游改路徑或改型別名字，**建置就會壞**，不是上線才壞。另外加一條啟動檢查／測試：分配表每一列都對橋的 Router 打一次不帶 token 的請求，**回 401 才算這條路存在**（回 404 就是表寫錯了）。
 
-### 2.2 meta 的形狀
+### 2.2 pack 的三段對到 HTTP 的哪三段（維護者 2026-09-14 定）
 
-```json
-{ "path": { "roomId": "!abc:example.org" }, "query": { "limit": 10 }, "body": { "reason": "spam" } }
+[wbf-wire-format.md](wbf-wire-format.md) §2 已經定死一個 pack 長什麼樣：header、meta、data。橋要定的只是**這三段對到 HTTP 的哪裡**：
+
+| pack | HTTP | 誰決定 |
+|---|---|---|
+| kind ＋ subtype | method ＋ URL 模板 ＋ header 模板 | **server 的分配表**（client 只送號碼） |
+| meta | 模板裡的**變數**（填進 path、query、header） | client |
+| data | **body，原樣的 bytes** | client |
+
+```
+kind=Room, subtype=SetTopic
+  → (PUT, /_matrix/client/v3/rooms/{room}/state/m.room.topic/, { "Content-Type": "{format}" })
+meta = { "room": "!abc:localhost", "format": "application/json" }
+data = {"topic":"大家好"} 的 bytes
 ```
 
-- **三段分開**，不攤平：有些端點的 body 是**任意 JSON**（account data 的 body 就是使用者自己的內容，鍵叫什麼都可以，包括 `roomId`）。攤平就要一條「撞名時誰贏」的規則，而那條規則會在某個使用者剛好用了那個鍵的時候，悄悄把使用者自己的資料當成 path 參數吃掉。
-- 三段都可省略；沒有 path 參數的端點就不帶 `path`。
-- `path` 的鍵用 **Matrix 規格上的名字**（`roomId`、`userId`、`eventType`、`stateKey`），client 對著規格寫就對，不必知道 server 內部。
-- 回應 meta ＝ **Matrix 回應的 JSON 原樣**。不另造欄位（pipeline §7 第 2 步）。
+⭐ **為什麼 data 當 body，而不是把 body 塞進 meta**：
+
+1. **E2EE 的密文原樣過去。** data 是 bytes，server 不解析、不重新編碼 —— 密文送進來什麼樣、進 route 就什麼樣。塞進 meta 的 JSON 會多一次 parse 與 re-serialize，而那是會改變 bytes 的（鍵的順序、數字的寫法）。
+2. **本來就是這樣做的。** `Event/Send` 的 meta 是 `{room_id, type, txn_id, attachments}`、data 是事件內容的 JSON；`Upload/Chunk` 的 data 是塊的 bytes。這個對應不是新規則，是把既有的做法變成通則。
+3. **撞名問題直接消失。** 提案原本要在 meta 裡分 `path`／`query`／`body` 三段，就是因為有些端點的 body 是**使用者的任意 JSON**（account data 的內容鍵叫什麼都可以，包括 `roomId`），攤平會跟變數撞名。body 不進 meta，就沒有命名空間要共用，也不需要「撞名時誰贏」那條會被寫錯的規則。
+4. **回應對稱**：狀態碼與 header 進 `Ack` 的 meta、body 的 bytes 進 `Ack` 的 data。以後要搬**回二進位**的端點（舊的媒體下載、縮圖）不用再發明一套。
+   ⚠️ 出去的 header 也照同一條規矩**由表決定**（例如只轉 `Content-Type`），🚫 不要把 response 的 header 整包倒給 client —— 那會把 server 自己的東西（中介層加的、將來某天加的）一起送出去。
+
+#### 五條規則（維護者 2026-09-14 同意）
+
+1. 🚨 **header 模板由 server 的表決定，client 不能自己塞 header。** meta 的變數只能填**表上宣告過的空格**。否則 client 塞一個 `X-Forwarded-For` 就能假裝自己是別的來源位址（繞過限速），或塞這個 fork 自己的 `X-Wbf-Attachments`。**`Authorization` 與來源位址一律由 server 填，client 給的永遠蓋不掉。**
+2. **query 是 URL 的一部分**，一起寫在模板裡（`?limit={limit}&dir={dir}`）。⚠️ **變數沒給就整個省掉那個 query 參數**，🚫 不要填空字串 —— `""` 跟「沒有」是兩件事（全域原則 A6）。
+3. **path 的變數要 percent-encode**：房間是 `!abc:localhost`、使用者是 `@alice:localhost`、別名有 `#`，不編碼就把路徑切壞了。**變數缺了、或不是字串 → 拒絕**，不要用空值硬拼。
+4. **meta 出現表上沒有的變數 → 拒絕**，🚫 不要默默忽略。忽略的話，client 打錯欄位名會表現成「server 安靜地用了預設值」，那種 bug 最難找。
+5. **`Content-Type` 預設寫死在表裡**（Matrix 這些端點就是 JSON）。像上面例子那樣讓它當變數，**只在表明確宣告的端點開放** —— 之後搬媒體上傳會需要，一般端點不需要。
+
+#### 一個 subtype 對一個端點（維護者 2026-09-14 定）
+
+上面的例子把 `m.room.topic` 寫死在路徑裡，等於一個 subtype 比一個端點更窄。**定案是 1:1**：`eventType`、`stateKey` 都是變數，一個 subtype 就是一個 Matrix 端點。
+
+- 表比較短，而且 method 與 URL 模板**直接取自 ruma 的型別**（`Req::METHOD`、`Req::PATH_BUILDER`）—— 上游改路徑或改名字，建置就會壞。
+- 更窄的別名（「設 topic」這種）以後真的常用再加，不要一開始就讓同一個端點有兩個入口。
+- 📎 **變數的名字就用 ruma 模板裡的名字**（`room_id`、`event_type`、`state_key`），不另取一套 —— 另取一套就是第二份會漂移的對照表。每一列的變數名寫進 wire-format §3.2。
 
 ### 2.3 錯誤：現在的對應表會把大部分 Matrix 錯誤變成 `Internal`
 
@@ -152,11 +183,11 @@ pack 也能走 `POST /_wbf/v1/pack`。橋上的操作**准走 HTTP**：它們本
 ## 5. 要維護者決定的
 
 1. ~~**橋，還是手搬？**~~ ✅ **定了**（維護者 2026-09-14）：用橋，而且是**把 pack 轉成內部的 HTTP request 丟進 Router**這一版（§2.1）。上游檔案一個都不用動。
-2. **meta 三段分開**（§2.2）還是攤平？我建議分開。
+2. ~~**meta 三段分開還是攤平？**~~ ✅ **都不是**（維護者 2026-09-14）：body 根本不進 meta —— **data 就是 body**，meta 只放模板的變數（§2.2）。撞名問題因此消失；五條規則與「一個 subtype 對一個端點」也一併定了。
 3. **`Error` 多帶 Matrix `errcode`**（§2.3）。這是線上格式的增補，client 要跟。
 4. **橋上的操作准走 HTTP pack**（§2.4）？我建議准，`Register` 除外。
 5. **批 1 的清單**（§3）要增要減？
-6. **subtype 號**：我照 Matrix 規格章節裡端點出現的順序排，寫進 wire-format §3.2；分配了就不改（§3.3 的規矩）。要不要先給號、還是批 1 寫程式時一起給？
+6. **subtype 號什麼時候給？** 我照 Matrix 規格章節裡端點出現的順序排，寫進 wire-format §3.2；分配了就不改（§3.3 的規矩）。要不要先給號、還是批 1 寫程式時一起給？📌 粒度（一個 subtype 對一個端點）已定。
 
 ## 6. 同意之後的落點
 
