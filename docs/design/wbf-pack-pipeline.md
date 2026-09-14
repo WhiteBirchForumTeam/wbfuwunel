@@ -301,6 +301,7 @@ e2e 腳本要看 `Recent` 的結果就開 WS 收 Batch（e2e9 現在用 HTTP 打
 
 ## 7. HTTP → WS 的模子：搬一個端點的步驟
 
+> ⭐ **一般的 Matrix 端點不照這張表手搬了**：走橋（[wbf-api-bridge.md](wbf-api-bridge.md)），搬一個端點＝[bridge-specs/index.md](../bridge-specs/index.md) 加一列、`bridge.rs` 的表加一列、`KIND.md` 補範例、e2e 跟 HTTP 比一次；關卡（第 7 步）是 HTTP 那一道本身，不用另外寫。下面這張表留給**橋做不到的**：原生的 pack（串流、訂閱、推送、上傳）與改變連線身份的（`Login` 那一類）。
 wire-format §3.3 已經把 kind 按 Matrix 章節占好號。搬一個端點 = 填一次這張清單，**順序不變**：
 
 | 步 | 做什麼 | 落點 |

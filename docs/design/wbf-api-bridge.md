@@ -1,7 +1,7 @@
 # 常用 Matrix API 走通道：一座通用的橋，而不是一支一支手搬
 
 > **這份文件回答：怎麼把大部分常用的 Matrix client API 改成 WebSocket pack，搬的順序是什麼，每一支要花多少。**
-> 狀態：📄 提案，等維護者同意。維護者 2026-09-14：「把大部分常用的 api 接口改成 web socket pack 的模式 —— account 註冊、登入、登出、session 相關、room 相關、device，看能做多少、多快；行數少就多做一點，難度高就少做一點，慢慢移植。」
+> 狀態：✅ 維護者同意（PR #55）；橋的層與批 1 的 37 支在 PR #56 實作。維護者 2026-09-14：「把大部分常用的 api 接口改成 web socket pack 的模式 —— account 註冊、登入、登出、session 相關、room 相關、device，看能做多少、多快；行數少就多做一點，難度高就少做一點，慢慢移植。」
 > 上位文件：[wbf-pack-pipeline.md](wbf-pack-pipeline.md) §7（搬一個端點的七步）、[wbf-wire-format.md](wbf-wire-format.md) §3.3（kind 分配表）。
 
 ## 0. 一句話
@@ -274,6 +274,6 @@ pack 可以從兩條路進來：WebSocket，或 `POST /_wbf/v1/pack`。**兩條�
 | 建橋的 Router 並用 `Extension` 掛在對外的 Router 上（`State` 是那邊建的） | `src/api/router.rs` 的 `BridgeRouter`、`build_bridge_router`；`src/router/router.rs` 掛上；`wbf/mod.rs` 與 `ws.rs` 取出來放進 `PackContext` |
 | 上游的 `router/args.rs`、`auth.rs` | **不動** |
 | 錯誤對應補齊、`errcode` | `src/api/client/wbf/mod.rs` 的 `Reject::from(Error)`；wire-format §3.4 |
-| 派發 | `wbf/mod.rs` 的 `dispatch`：`0x11`／`0x13`／`0x15` 與 `0x14`、`0x16` 裡新的 subtype 進橋 |
-| 契約 | wire-format §3.2 每支一列；pipeline §7 改寫成「搬一個端點＝分配表一列」 |
+| 派發 | `wbf/mod.rs` 的 `dispatch`：看 bit4 分兩條路（§2.3），不看 kind |
+| 契約 | [bridge-specs/index.md](../bridge-specs/index.md) 每支一列（wire-format §3.2 只列原生的），每個 kind 一份 `KIND.md` 寫範例；pipeline §7 標明一般端點走橋 |
 | 向量、e2e | `core/wbf/vectors.rs`；新腳本 `tests/e2e/e2e13.ps1` |

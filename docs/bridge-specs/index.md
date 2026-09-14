@@ -3,8 +3,8 @@
 > **這份文件回答：哪些 Matrix 端點已經（或這一批要）走橋、每個的 kind／subtype 是幾號、送出去的 pack 前幾個 byte 長什麼樣、對到哪個端點、要帶哪些變數。**
 > 設計與規則在 [../design/wbf-api-bridge.md](../design/wbf-api-bridge.md)（下稱「橋的設計」），這裡只放**分配結果**。
 > ⭐ **這張表是走橋的 subtype 號的唯一權威**：[wbf-wire-format.md](../design/wbf-wire-format.md) §3.2 只列原生的 subtype，走橋的一律指到這裡 —— 兩份表遲早漂移。
-> 每個 kind 的完整範例（請求與回應的 meta、data、錯誤）在同一個目錄的 `KIND.md`（例如 `0x13-room.md`），隨搬的那一批一起寫。
-> 狀態：第一批（批 1）**分配好號碼，還沒實作**。
+> 每個 kind 的完整範例（請求與回應的 meta、data、錯誤）在同一個目錄的 `KIND.md`，隨搬的那一批一起寫：[0x11-account.md](0x11-account.md)、[0x13-room.md](0x13-room.md)、[0x14-event.md](0x14-event.md)、[0x15-receipt.md](0x15-receipt.md)、[0x16-device.md](0x16-device.md)。
+> 狀態：第一批（批 1）37 支**已實作**：server 的表（`src/api/client/wbf/bridge.rs` 的 `BRIDGED_ENDPOINTS`）逐列跟這份總表比對（單元測試 `the_specs_index_and_this_table_list_the_same_endpoints`，對不上就紅）；每支都在 e2e13 情境 1 跟原本的 HTTP 端點比對過結果。
 
 ## 1. 一個走橋的 pack 怎麼讀
 
@@ -32,6 +32,8 @@ offset  bytes              意思
 | 失敗 | `01 01 03 14`（`Control/Error`，同樣帶 `IS_BRIDGED`） | `{"code_id", "code", "message", "errcode", "status"}`，限速時多 `retry_after_ms`（橋的設計 §2.4） | Matrix 錯誤回應的 body，原樣 bytes（見 §4 待確認 1） |
 
 `id`、`seq` 抄請求。
+
+⚠️ **有一種拒絕比橋還早**：WebSocket 在**每個 pack 解碼之前**先問 session 還算不算數（登出、裝置被撤、token 過期、帳號被鎖，`ws.rs` 的 `revalidate`）。不算數就回通道自己的 `Error`（`01 01 03 04`：**沒有** `IS_BRIDGED`，因為那時 pack 還沒解）、`code` 是 `Unauthorized`、Matrix 的 errcode 只在 `message` 裡（例 `"M_USER_LOCKED: This account has been locked."`）、**沒有** `errcode` 與 `status` 欄位，然後**關連線**。這條不分走不走橋，e2e13 [1.27] 驗過。
 
 ### 1.3 meta 的變數
 
