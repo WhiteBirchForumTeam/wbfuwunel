@@ -413,6 +413,67 @@ pub async fn get_joined_count(&self, room_id: &RoomId, user_id: &UserId) -> Resu
 		.deserialized()
 }
 
+/// The room's current members whose join landed after `since`: the "who
+/// joined" half of the device-list catch-up (docs/design/wbf-e2ee.md §3.4.1).
+///
+/// Args:
+///     room_id: example: "!lobby:localhost"
+///     since: a position in the global count, example: 4711
+/// Return:
+///     Stream<&UserId>  members joined after `since`, and members whose row
+///     has no readable count — an unknown position is taken as recent,
+///     because a change left out is the unsafe side.
+#[implement(Service)]
+pub fn room_members_joined_after<'a>(
+	&'a self,
+	room_id: &'a RoomId,
+	since: u64,
+) -> impl Stream<Item = &'a UserId> + Send + 'a {
+	let prefix = (room_id, Interfix);
+	self.db
+		.roomuserid_joinedcount
+		.stream_prefix(&prefix)
+		.ignore_err()
+		.ready_filter_map(move |((_, user_id), count): ((Ignore, &UserId), &[u8])| {
+			is_count_after(count, since).then_some(user_id)
+		})
+}
+
+/// Users whose leave from the room landed after `since`: the "who left" half
+/// of the catch-up. ⚠️ A leave that was forgotten since has no row and is not
+/// listed; that can only leave a `left` out, never a `changed`.
+///
+/// Args:
+///     room_id: example: "!lobby:localhost"
+///     since: example: 4711
+/// Return:
+///     Stream<&UserId>  as `room_members_joined_after`, over the left rows
+#[implement(Service)]
+pub fn room_members_left_after<'a>(
+	&'a self,
+	room_id: &'a RoomId,
+	since: u64,
+) -> impl Stream<Item = &'a UserId> + Send + 'a {
+	let prefix = (room_id, Interfix);
+	self.db
+		.roomuserid_leftcount
+		.stream_prefix(&prefix)
+		.ignore_err()
+		.ready_filter_map(move |((_, user_id), count): ((Ignore, &UserId), &[u8])| {
+			is_count_after(count, since).then_some(user_id)
+		})
+}
+
+/// Args:
+///     count: a stored membership count, example: 4712 as 8 big-endian bytes
+///     since: example: 4711
+/// Return:
+///     bool  true when the count is after `since`, and when the bytes are not
+///     a count at all (an unknown position counts as recent)
+fn is_count_after(count: &[u8], since: u64) -> bool {
+	<[u8; 8]>::try_from(count).map_or(true, |bytes| u64::from_be_bytes(bytes) > since)
+}
+
 /// Returns an iterator over all memberships for a user.
 #[implement(Service)]
 #[inline]

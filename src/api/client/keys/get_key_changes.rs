@@ -1,17 +1,17 @@
 use axum::extract::State;
-use futures::{StreamExt, stream};
-use itertools::Itertools;
-use ruma::{OwnedRoomId, api::client::keys::get_key_changes};
-use tuwunel_core::{Result, at, err, utils::stream::BroadbandExt};
+use ruma::api::client::keys::get_key_changes;
+use tuwunel_core::{Result, err};
 
 use crate::Ruma;
 
 /// # `GET /_matrix/client/r0/keys/changes`
 ///
 /// Gets a list of users who have updated their device identity keys since the
-/// previous sync token.
+/// previous sync token, and the users who no longer share an encrypted room.
 ///
-/// - TODO: left users
+/// - Same answer as the device-list catch-up of the wbf channel
+///   (`docs/design/wbf-e2ee.md` §3.4.1, decision 5): memberships are read as
+///   they are now, key changes between `from` and `to`.
 pub(crate) async fn get_key_changes_route(
 	State(services): State<crate::State>,
 	body: Ruma<get_key_changes::v3::Request>,
@@ -28,37 +28,13 @@ pub(crate) async fn get_key_changes_route(
 		.parse()
 		.map_err(|_| err!(Request(InvalidParam("Invalid `to`."))))?;
 
-	let user_changes = services
+	let changes = services
 		.users
-		.keys_changed(sender_user, from, Some(to))
-		.map(ToOwned::to_owned);
-
-	let room_changes = services
-		.state_cache
-		.rooms_joined(sender_user)
-		.map(ToOwned::to_owned)
-		.broad_then(async |room_id: OwnedRoomId| {
-			services
-				.users
-				.room_keys_changed(&room_id, from, Some(to))
-				.map(at!(0))
-				.map(ToOwned::to_owned)
-				.collect::<Vec<_>>()
-				.await
-		})
-		.flat_map(stream::iter);
-
-	let changed = user_changes
-		.chain(room_changes)
-		.collect::<Vec<_>>()
-		.await
-		.into_iter()
-		.sorted_unstable()
-		.dedup()
-		.collect();
+		.list_device_list_changes(sender_user, from, Some(to))
+		.await;
 
 	Ok(get_key_changes::v3::Response {
-		left: Vec::new(), // TODO
-		changed,
+		changed: changes.changed.into_iter().collect(),
+		left: changes.left.into_iter().collect(),
 	})
 }

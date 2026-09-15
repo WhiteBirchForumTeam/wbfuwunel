@@ -96,6 +96,9 @@ pub async fn add_one_time_keys(
 	txn.execute();
 	drop(oldest_count);
 
+	self.push_crypto_state(user_id, device_id, &[], &[])
+		.await;
+
 	Ok(())
 }
 
@@ -194,6 +197,9 @@ where
 	txn.execute();
 	drop(oldest_count);
 
+	self.push_crypto_state(user_id, device_id, &[], &[])
+		.await;
+
 	Ok(())
 }
 
@@ -263,6 +269,10 @@ pub async fn take_fallback_key(
 		.userdeviceidalgorithm_fallback
 		.put(key, Json(&updated));
 
+	// The device learns its fallback key is used and should be replaced.
+	self.push_crypto_state(user_id, device_id, &[], &[])
+		.await;
+
 	Ok((updated.key_id, updated.key))
 }
 
@@ -323,8 +333,15 @@ pub async fn take_one_time_key(
 		.ok_or_else(|| err!(Request(NotFound("No one-time-key found"))))?;
 
 	otk.del((user_id, device_id, count, id));
+	let claimed: (OwnedKeyId<OneTimeKeyAlgorithm, OneTimeKeyName>, Raw<OneTimeKey>) =
+		(id.into(), serde_json::from_slice(val)?);
 
-	Ok((id.into(), serde_json::from_slice(val)?))
+	// Local and federated claims both pass here: the device learns it has one
+	// key fewer, without waiting for a sync it may never run.
+	self.push_crypto_state(user_id, device_id, &[], &[])
+		.await;
+
+	Ok(claimed)
 }
 
 #[implement(super::Service)]
@@ -925,17 +942,35 @@ pub async fn mark_device_key_update(&self, user_id: &UserId) {
 		.keychangeid_userid
 		.put_raw(user_key, user_id);
 
-	self.services
+	let rooms: Vec<OwnedRoomId> = self
+		.services
 		.state_cache
 		.rooms_joined(user_id)
 		.filter(|room_id| all_or_is_encrypted(*room_id))
-		.ready_for_each(|room_id| {
-			let room_key = (room_id, *count);
-			self.db
-				.keychangeid_userid
-				.put_raw(room_key, user_id);
-		})
+		.map(ToOwned::to_owned)
+		.collect()
 		.await;
+	for room_id in &rooms {
+		let room_key = (room_id, *count);
+		self.db
+			.keychangeid_userid
+			.put_raw(room_key, user_id);
+	}
+
+	// The connected devices of everyone who sees this change learn of it now
+	// (wbf-e2ee.md §3.4). Written above first, so a device that subscribes
+	// meanwhile reads it in its catch-up instead; off the caller's path,
+	// because the recipients are every member of every one of those rooms.
+	if self.services.streams.is_any_device_held() {
+		let services = self.services.clone();
+		let changed_user = user_id.to_owned();
+		self.services.server.runtime().spawn(async move {
+			services
+				.users
+				.push_key_change(&changed_user, &rooms)
+				.await;
+		});
+	}
 
 	self.services
 		.sending

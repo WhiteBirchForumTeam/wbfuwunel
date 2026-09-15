@@ -13,7 +13,7 @@
 //! second connection deleting items the first is still importing would lose
 //! them for good.
 
-use ruma::{DeviceId, OwnedDeviceId, UserId};
+use ruma::{DeviceId, OwnedDeviceId, OwnedUserId, UserId};
 use serde::Deserialize;
 use serde_json::json;
 use tuwunel_core::{
@@ -26,6 +26,7 @@ use tuwunel_core::{
 use tuwunel_service::{
 	Services,
 	streams::PushedItem,
+	users::DeviceListChanges,
 };
 
 use super::{Failure, PackContext, Reject, Reply, ack, parse_meta};
@@ -46,6 +47,10 @@ struct SubscribeMeta {
 	device_id: Option<OwnedDeviceId>,
 	#[serde(default)]
 	cd_seq: Option<u64>,
+	/// Where the client's device lists were last caught up to: the `dl_seq`
+	/// of the `CryptoState` it last stored (docs/design/wbf-e2ee.md §3.4).
+	#[serde(default)]
+	dl_seq: Option<u64>,
 }
 
 #[derive(Default, Deserialize)]
@@ -82,9 +87,12 @@ struct ItemWindow {
 ///     ctx: the connection and its session — the session's device is the
 ///         only identity; the meta's `device_id` is the client saying which
 ///         one it thinks it is
-///     view: meta example: `{"device_id":"PHONE","cd_seq":4711}`
+///     view: meta example: `{"device_id":"PHONE","cd_seq":4711,"dl_seq":4700}`
 /// Return:
-///     Result<(), Failure>  Ack meta `{latest_cd_seq}`; `Forbidden` when the
+///     Result<(), Failure>  Ack meta `{latest_cd_seq}`, then the to-device
+///     catch-up as `Push` packs (with `cd_seq`), then a `CryptoState` with
+///     the key counts and the device-list changes since `dl_seq` (empty
+///     lists without it); `Forbidden` when the
 ///     named device is not this session's. Another connection already
 ///     holding the queue is not a refusal: this one takes it over, and that
 ///     one is sent `Superseded` (1505).
@@ -130,6 +138,13 @@ pub(super) async fn handle_device_subscribe(
 	// Read before the window, like `Recent`: a client that stores it never
 	// misses an item added while the window was being read.
 	let latest_cd_seq = services.globals.current_count();
+	// The same number is this subscription's `dl_seq`, and it is set before
+	// the device-list catch-up reads: a change pushed from here on reaches
+	// this connection, one written before is in the catch-up
+	// (`set_device_list_position` says why it stays one number).
+	services
+		.streams
+		.set_device_list_position(ctx.connection, latest_cd_seq);
 
 	reply
 		.send(ack(
@@ -159,6 +174,20 @@ pub(super) async fn handle_device_subscribe(
 			services.config.wbf_data_max_bytes,
 		);
 	}
+
+	let changes = match meta.dl_seq {
+		| Some(dl_seq) => services
+			.users
+			.list_device_list_changes(&session.user, dl_seq, None)
+			.await,
+		| None => DeviceListChanges::default(),
+	};
+	let changed: Vec<OwnedUserId> = changes.changed.into_iter().collect();
+	let left: Vec<OwnedUserId> = changes.left.into_iter().collect();
+	services
+		.users
+		.push_crypto_state(&session.user, &device, &changed, &left)
+		.await;
 
 	Ok(())
 }

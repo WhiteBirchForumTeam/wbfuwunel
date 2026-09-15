@@ -22,6 +22,8 @@ use tuwunel_core::{
 };
 use tuwunel_database::{Json, serialize_key, serialize_val};
 
+use crate::users::MembershipChange;
+
 /// Optional stripped room state attached to invite and knock transitions.
 pub type StrippedRoomState = Option<Vec<Raw<AnyStrippedStateEvent>>>;
 
@@ -402,8 +404,30 @@ async fn handle_join(&self, room_id: &RoomId, user_id: &UserId, count: PduCount)
 	// The join hook of the wbf channels (docs/design/wbf-event-push.md 3):
 	// the user's account-wide subscribers start listening to this room.
 	self.services.streams.follow(user_id, room_id);
+	self.spawn_device_list_push(room_id, user_id, MembershipChange::Join);
 
 	Ok(())
+}
+
+/// The device-list hook of the channel (docs/design/wbf-e2ee.md §3.4):
+/// connected devices whose sharing of an encrypted room with `user_id` this
+/// join or leave changed are sent a `CryptoState`. Spawned, because it looks
+/// at every member of the room and this runs on the path that stores the
+/// membership event.
+#[implement(super::Service)]
+fn spawn_device_list_push(&self, room_id: &RoomId, user_id: &UserId, change: MembershipChange) {
+	if !self.services.streams.is_any_device_held() {
+		return;
+	}
+	let services = self.services.clone();
+	let room_id = room_id.to_owned();
+	let user_id = user_id.to_owned();
+	self.services.server.runtime().spawn(async move {
+		services
+			.users
+			.push_membership_change(&room_id, &user_id, change)
+			.await;
+	});
 }
 
 #[implement(super::Service)]
@@ -504,6 +528,7 @@ async fn handle_leave(&self, room_id: &RoomId, user_id: &UserId, count: PduCount
 	// The leave hook of the wbf channels: whether the user left, was kicked
 	// or banned, every one of their connections stops listening to the room.
 	self.services.streams.evict(user_id, room_id);
+	self.spawn_device_list_push(room_id, user_id, MembershipChange::Leave);
 
 	if self.services.globals.user_is_local(user_id)
 		&& (self.services.config.forget_forced_upon_leave

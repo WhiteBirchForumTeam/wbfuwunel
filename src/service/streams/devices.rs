@@ -15,8 +15,10 @@
 //! whenever its last connection died without saying so — and the registry
 //! only learns that at the idle timeout, if ever.
 
+use std::collections::HashSet;
+
 use ruma::{DeviceId, OwnedDeviceId, OwnedUserId, UserId};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use tuwunel_core::{
 	debug,
@@ -30,6 +32,21 @@ use super::{ConnectionId, Outgoing, PackQueue, Streams};
 
 /// `Device/Push`, server to client only.
 pub const DEVICE_PUSH_SUBTYPE: u8 = 0x06;
+
+/// `Device/CryptoState`, server to client only (docs/design/wbf-e2ee.md §3).
+pub const DEVICE_CRYPTO_STATE_SUBTYPE: u8 = 0x08;
+
+/// What one `CryptoState` reports for a device, before it is cut to fit packs.
+pub struct CryptoState<'a> {
+	/// example: `{"signed_curve25519": 42}`
+	pub otk_counts: &'a Value,
+	/// Always sent, empty or not: `[]` means "all used", absent would mean
+	/// "not supported". example: `["signed_curve25519"]`
+	pub unused_fallback_key_types: &'a [String],
+	/// example: `["@bob:example.org"]`
+	pub changed: &'a [OwnedUserId],
+	pub left: &'a [OwnedUserId],
+}
 
 /// One to-device item on the wire: its count (the position the client acks
 /// and later destroys by) and its JSON as stored.
@@ -123,6 +140,93 @@ impl Streams {
 	/// other connection can ever subscribe to it.
 	pub fn unsubscribe_device(&self, connection: ConnectionId) {
 		self.devices.remove_connection(connection);
+		self.device_list_positions
+			.write()
+			.expect("device list positions lock poisoned")
+			.remove(&connection);
+	}
+
+	/// Records where this connection's device-list catch-up starts from, so
+	/// every `CryptoState` of its subscription carries it as `dl_seq`.
+	///
+	/// 🚨 It is one number for the whole subscription, not the count of each
+	/// change pushed. A change is written before it is pushed, and pushes are
+	/// not ordered by count: stamping each push with its own count lets a
+	/// client store 101 while the push for 100 is still in flight, and a
+	/// reconnect from 101 never hears of 100. Taken after the connection holds
+	/// the queue and before the catch-up reads, every change is either read
+	/// by the catch-up or pushed to a connection already listening; a
+	/// reconnect from here repeats some of them, which costs a key query.
+	///
+	/// Args:
+	///     connection: the connection that holds the device's queue, example: 7
+	///     dl_seq: `globals.current_count()` read after `subscribe_device`
+	pub fn set_device_list_position(&self, connection: ConnectionId, dl_seq: u64) {
+		self.device_list_positions
+			.write()
+			.expect("device list positions lock poisoned")
+			.insert(connection, dl_seq);
+	}
+
+	/// Which of these users' devices a connection holds right now.
+	///
+	/// Return:
+	///     Vec<(OwnedUserId, OwnedDeviceId)>  empty when none of them is
+	///     connected, which is the case to make cheap.
+	#[must_use]
+	pub fn list_held_devices(&self, users: &HashSet<OwnedUserId>) -> Vec<(OwnedUserId, OwnedDeviceId)> {
+		if users.is_empty() {
+			return Vec::new();
+		}
+		self.devices
+			.list_topics_where(|topic| users.contains(&topic.user))
+			.into_iter()
+			.map(|topic| (topic.user, topic.device))
+			.collect()
+	}
+
+	/// Whether any connection holds any device's queue; lets a hook skip its
+	/// work entirely on a server nobody is subscribed to.
+	#[must_use]
+	pub fn is_any_device_held(&self) -> bool { self.devices.is_any_topic_listened() }
+
+	/// Pushes a `CryptoState` to whoever holds this device's queue, cut into
+	/// as many packs as the user lists need to fit `meta_max`. Every pack
+	/// carries the counts, so any one of them is a complete report of those.
+	///
+	/// Args:
+	///     state: what to report
+	///     meta_max: `wbf_meta_max_bytes`
+	pub fn push_crypto_state(&self, user: &UserId, device: &DeviceId, state: &CryptoState<'_>, meta_max: usize) {
+		let topic = DeviceTopic::new(user, device);
+		let holder: Vec<ConnectionId> = self
+			.devices
+			.listeners(&topic)
+			.into_iter()
+			.map(|(connection, _)| connection)
+			.collect();
+
+		for connection in holder {
+			// Not caught up yet: the catch-up it is about to run reads this
+			// change, because the change was written before this push.
+			let Some(dl_seq) = self.find_device_list_position(connection) else {
+				continue;
+			};
+			let budget = meta_max.saturating_sub(crypto_state_meta_overhead(state));
+			for (changed, left) in split_user_lists(state.changed, state.left, budget) {
+				self.devices.push_with(Some(&topic), &[connection], |id, seq, gap| {
+					crypto_state_pack(id, seq, &crypto_state_meta(state, changed, left, dl_seq, gap))
+				});
+			}
+		}
+	}
+
+	fn find_device_list_position(&self, connection: ConnectionId) -> Option<u64> {
+		self.device_list_positions
+			.read()
+			.expect("device list positions lock poisoned")
+			.get(&connection)
+			.copied()
 	}
 
 	/// Whether this device's queue is held by a connection, and by which.
@@ -249,6 +353,76 @@ fn superseded_pack(id: u64, seq: u32) -> Result<Vec<u8>, PackError> {
 	)
 }
 
+/// Args:
+///     state: the counts, and the full lists (only their shape matters here)
+///     changed: this pack's part of `state.changed`
+///     left: this pack's part of `state.left`
+/// Return:
+///     Value  the `CryptoState` meta, every field present
+fn crypto_state_meta(state: &CryptoState<'_>, changed: &[OwnedUserId], left: &[OwnedUserId], dl_seq: u64, gap: bool) -> Value {
+	json!({
+		"otk_counts": state.otk_counts,
+		"unused_fallback_key_types": state.unused_fallback_key_types,
+		"device_lists": { "changed": changed, "left": left },
+		"dl_seq": dl_seq,
+		"gap": gap,
+	})
+}
+
+fn crypto_state_pack(id: u64, seq: u32, meta: &Value) -> Result<Vec<u8>, PackError> {
+	Ok(PackBuilder::new(Kind::Device, DEVICE_CRYPTO_STATE_SUBTYPE, Flags::IS_RESPONSE, id, seq)
+		.json_meta(meta)?
+		.finish())
+}
+
+/// Bytes of a `CryptoState` meta with both lists empty and the widest
+/// `dl_seq` and `gap`: what every pack spends before its user ids.
+fn crypto_state_meta_overhead(state: &CryptoState<'_>) -> usize {
+	serde_json::to_vec(&crypto_state_meta(state, &[], &[], u64::MAX, false)).map_or(usize::MAX, |meta| meta.len())
+}
+
+/// Cuts the two lists into consecutive parts whose user ids fit `budget`
+/// bytes each, `changed` first.
+///
+/// Args:
+///     budget: bytes of meta left for user ids in one pack, example: 65000
+/// Return:
+///     Vec<(&[OwnedUserId], &[OwnedUserId])>  at least one part, even when
+///     both lists are empty (the counts are still reported); a user id
+///     larger than `budget` gets a part of its own, and the pack it makes
+///     fails to encode and marks the subscription's gap.
+fn split_user_lists<'a>(
+	changed: &'a [OwnedUserId],
+	left: &'a [OwnedUserId],
+	budget: usize,
+) -> Vec<(&'a [OwnedUserId], &'a [OwnedUserId])> {
+	// A quoted id and its comma; ids need no escaping.
+	let cost = |user: &OwnedUserId| user.as_str().len().saturating_add(3);
+
+	let mut parts = Vec::new();
+	let (mut changed_at, mut left_at) = (0, 0);
+	loop {
+		let (changed_from, left_from) = (changed_at, left_at);
+		let mut used = 0_usize;
+		while changed_at < changed.len() && (changed_at == changed_from || used.saturating_add(cost(&changed[changed_at])) <= budget) {
+			used = used.saturating_add(cost(&changed[changed_at]));
+			changed_at += 1;
+		}
+		let is_part_empty = changed_at == changed_from;
+		while changed_at == changed.len()
+			&& left_at < left.len()
+			&& ((is_part_empty && left_at == left_from) || used.saturating_add(cost(&left[left_at])) <= budget)
+		{
+			used = used.saturating_add(cost(&left[left_at]));
+			left_at += 1;
+		}
+		parts.push((&changed[changed_from..changed_at], &left[left_from..left_at]));
+		if changed_at == changed.len() && left_at == left.len() {
+			return parts;
+		}
+	}
+}
+
 fn device_push_pack(
 	id: u64,
 	seq: u32,
@@ -267,11 +441,11 @@ fn device_push_pack(
 
 #[cfg(test)]
 mod tests {
-	use ruma::{device_id, user_id};
+	use ruma::{OwnedUserId, device_id, user_id};
 	use tokio::sync::mpsc;
 	use tuwunel_core::wbf::{CONTROL_ERROR_SUBTYPE, Kind, decode, events::split_length_prefixed};
 
-	use super::{DEVICE_PUSH_SUBTYPE, PushedItem};
+	use super::{CryptoState, DEVICE_CRYPTO_STATE_SUBTYPE, DEVICE_PUSH_SUBTYPE, PushedItem, split_user_lists};
 	use crate::streams::{Outgoing, PackQueue, Queued, Streams};
 
 	/// A test queue: the count is what these tests exercise, so the byte
@@ -395,6 +569,142 @@ mod tests {
 			})
 			.collect();
 		assert_eq!(gaps, vec![true, false], "said once, on the first pack");
+	}
+
+	fn crypto_meta(rx: &mut mpsc::Receiver<Queued>) -> (u8, u64, u32, serde_json::Value) {
+		let mut pack = next_pack(rx);
+		let view = decode(&mut pack).expect("decodes");
+		(view.header.subtype, view.header.id, view.header.seq, view.meta_json().expect("meta"))
+	}
+
+	#[test]
+	fn a_crypto_state_carries_every_field_even_when_empty() {
+		let streams = Streams::new();
+		let alice = user_id!("@alice:localhost");
+		let phone = device_id!("PHONE");
+		let (tx, mut rx) = queue(4);
+		streams.subscribe_device(1, alice, phone, tx, 42);
+		streams.set_device_list_position(1, 900);
+
+		let counts = serde_json::json!({});
+		streams.push_crypto_state(
+			alice,
+			phone,
+			&CryptoState { otk_counts: &counts, unused_fallback_key_types: &[], changed: &[], left: &[] },
+			64 * 1024,
+		);
+
+		let (subtype, id, _, meta) = crypto_meta(&mut rx);
+		assert_eq!(subtype, DEVICE_CRYPTO_STATE_SUBTYPE);
+		assert_eq!(id, 42, "the Subscribe's id, like Push");
+		assert_eq!(
+			meta,
+			serde_json::json!({
+				"otk_counts": {},
+				// ⚠️ `[]` is "all used"; leaving the field out would read as
+				// "this server does not support fallback keys".
+				"unused_fallback_key_types": [],
+				"device_lists": { "changed": [], "left": [] },
+				"dl_seq": 900,
+				"gap": false,
+			})
+		);
+	}
+
+	#[test]
+	fn a_connection_not_yet_caught_up_is_not_pushed_a_crypto_state() {
+		let streams = Streams::new();
+		let alice = user_id!("@alice:localhost");
+		let phone = device_id!("PHONE");
+		let (tx, mut rx) = queue(4);
+		streams.subscribe_device(1, alice, phone, tx, 42);
+
+		let counts = serde_json::json!({});
+		let state = CryptoState { otk_counts: &counts, unused_fallback_key_types: &[], changed: &[], left: &[] };
+		streams.push_crypto_state(alice, phone, &state, 64 * 1024);
+		assert!(rx.try_recv().is_err(), "no dl_seq to stamp: its catch-up reads the change instead");
+
+		streams.set_device_list_position(1, 7);
+		streams.unsubscribe_device(1);
+		let (again, mut again_rx) = queue(4);
+		streams.subscribe_device(1, alice, phone, again, 43);
+		streams.push_crypto_state(alice, phone, &state, 64 * 1024);
+		assert!(again_rx.try_recv().is_err(), "an unsubscribe forgets the position; a new subscription starts over");
+	}
+
+	#[test]
+	fn push_and_crypto_state_share_one_seq() {
+		let streams = Streams::new();
+		let alice = user_id!("@alice:localhost");
+		let phone = device_id!("PHONE");
+		let (tx, mut rx) = queue(8);
+		streams.subscribe_device(1, alice, phone, tx, 42);
+		streams.set_device_list_position(1, 1);
+
+		let counts = serde_json::json!({"signed_curve25519": 3});
+		let state = CryptoState { otk_counts: &counts, unused_fallback_key_types: &[], changed: &[], left: &[] };
+		streams.push_to_device(alice, phone, &[PushedItem { count: 5, json: b"{}" }], 10, 1024);
+		streams.push_crypto_state(alice, phone, &state, 64 * 1024);
+		streams.push_to_device(alice, phone, &[PushedItem { count: 6, json: b"{}" }], 10, 1024);
+
+		let seqs: Vec<(u8, u32)> = (0..3)
+			.map(|_| {
+				let mut pack = next_pack(&mut rx);
+				let view = decode(&mut pack).expect("decodes");
+				(view.header.subtype, view.header.seq)
+			})
+			.collect();
+		assert_eq!(
+			seqs,
+			vec![(DEVICE_PUSH_SUBTYPE, 0), (DEVICE_CRYPTO_STATE_SUBTYPE, 1), (DEVICE_PUSH_SUBTYPE, 2)],
+			"one subscription, one seq across both kinds"
+		);
+	}
+
+	#[test]
+	fn a_long_user_list_is_cut_into_packs_that_each_fit_and_lose_nobody() {
+		let streams = Streams::new();
+		let alice = user_id!("@alice:localhost");
+		let phone = device_id!("PHONE");
+		let (tx, mut rx) = queue(64);
+		streams.subscribe_device(1, alice, phone, tx, 42);
+		streams.set_device_list_position(1, 1);
+
+		let changed: Vec<OwnedUserId> = (0..40).map(|n| format!("@changed{n:03}:localhost").try_into().expect("id")).collect();
+		let left: Vec<OwnedUserId> = (0..25).map(|n| format!("@left{n:03}:localhost").try_into().expect("id")).collect();
+		let counts = serde_json::json!({"signed_curve25519": 3});
+		let meta_max = 400;
+		streams.push_crypto_state(
+			alice,
+			phone,
+			&CryptoState { otk_counts: &counts, unused_fallback_key_types: &[], changed: &changed, left: &left },
+			meta_max,
+		);
+
+		let (mut seen_changed, mut seen_left) = (Vec::new(), Vec::new());
+		while let Ok(queued) = rx.try_recv() {
+			let Outgoing::Pack(mut pack) = queued.outgoing else { panic!("a pack") };
+			let view = decode(&mut pack).expect("decodes");
+			assert!(view.meta.len() <= meta_max, "a part of {} bytes", view.meta.len());
+			let meta = view.meta_json().expect("meta");
+			assert_eq!(meta["otk_counts"]["signed_curve25519"], 3, "every part carries the counts");
+			for user in meta["device_lists"]["changed"].as_array().expect("changed") {
+				seen_changed.push(user.as_str().expect("id").to_owned());
+			}
+			for user in meta["device_lists"]["left"].as_array().expect("left") {
+				seen_left.push(user.as_str().expect("id").to_owned());
+			}
+		}
+		assert_eq!(seen_changed, changed.iter().map(ToString::to_string).collect::<Vec<_>>());
+		assert_eq!(seen_left, left.iter().map(ToString::to_string).collect::<Vec<_>>());
+	}
+
+	#[test]
+	fn splitting_always_makes_progress_and_at_least_one_part() {
+		let one: Vec<OwnedUserId> = vec!["@a:localhost".try_into().expect("id")];
+		assert_eq!(split_user_lists(&[], &[], 100).len(), 1, "empty lists still report the counts once");
+		assert_eq!(split_user_lists(&one, &one, 0).len(), 2, "a budget too small for any id: one id per part, no endless loop");
+		assert_eq!(split_user_lists(&one, &one, 1000), vec![(one.as_slice(), one.as_slice())]);
 	}
 
 	#[test]

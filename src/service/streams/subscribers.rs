@@ -269,6 +269,29 @@ where
 			.collect()
 	}
 
+	pub(super) fn is_any_topic_listened(&self) -> bool {
+		self.registry
+			.read()
+			.expect("stream lock poisoned")
+			.topics
+			.values()
+			.any(|listeners| !listeners.is_empty())
+	}
+
+	/// The topics somebody is listening to that `is_wanted` accepts, in one
+	/// pass under one read lock — for hooks that start from many users at
+	/// once (a key change reaches everyone sharing a room with its owner).
+	pub(super) fn list_topics_where(&self, is_wanted: impl Fn(&Topic) -> bool) -> Vec<Topic> {
+		self.registry
+			.read()
+			.expect("stream lock poisoned")
+			.topics
+			.iter()
+			.filter(|(topic, listeners)| !listeners.is_empty() && is_wanted(topic))
+			.map(|(topic, _)| topic.clone())
+			.collect()
+	}
+
 	pub(super) fn listener_count(&self, topic: &Topic) -> usize {
 		self.registry
 			.read()
