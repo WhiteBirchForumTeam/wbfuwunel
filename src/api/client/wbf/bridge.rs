@@ -462,8 +462,9 @@ fn build_reply_pack(
 }
 
 /// The most of a Matrix error's text an `Error` pack's `message` carries. The
-/// whole body is still in data; this keeps the meta inside its limit however
-/// long the text, so the reply never falls back to `Internal` for its size.
+/// whole body is still in data. Building the pack would not stop a longer
+/// meta; a client holding replies to the same `wbf_meta_max_bytes` it must send
+/// within would refuse it, and lose the status and errcode with it.
 const MAX_MESSAGE_BYTES: usize = 1024;
 
 /// Args:
@@ -660,14 +661,14 @@ mod tests {
 	#[test]
 	fn a_long_matrix_error_is_cut_in_the_message_and_whole_in_the_data() {
 		// Three bytes a character, so a cut at a byte count lands mid-character
-		// unless it looks for the boundary; longer than the whole meta limit.
+		// unless it looks for the boundary; longer than the 64 KiB meta limit.
 		let text = "界".repeat(30_000);
 		let body = serde_json::to_vec(&serde_json::json!({ "errcode": "M_FORBIDDEN", "error": text })).expect("json");
 		let mut pack = build_reply_pack(0, 9, StatusCode::FORBIDDEN, None, &body).expect("builds");
 
 		let view = decode(&mut pack).expect("decodes");
 		let meta = view.meta_json().expect("meta");
-		assert_eq!(meta["code"], "Forbidden", "not the Internal fallback for an oversized meta");
+		assert_eq!(meta["code"], "Forbidden");
 		assert_eq!(meta["errcode"], "M_FORBIDDEN");
 		let message = meta["message"].as_str().expect("a message");
 		assert!(message.len() <= MAX_MESSAGE_BYTES, "message is {} bytes", message.len());
