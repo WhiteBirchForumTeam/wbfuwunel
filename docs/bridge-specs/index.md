@@ -3,8 +3,8 @@
 > **這份文件回答：哪些 Matrix 端點已經（或這一批要）走橋、每個的 kind／subtype 是幾號、送出去的 pack 前幾個 byte 長什麼樣、對到哪個端點、要帶哪些變數。**
 > 設計與規則在 [../design/wbf-api-bridge.md](../design/wbf-api-bridge.md)（下稱「橋的設計」），這裡只放**分配結果**。
 > ⭐ **這張表是走橋的 subtype 號的唯一權威**：[wbf-wire-format.md](../design/wbf-wire-format.md) §3.2 只列原生的 subtype，走橋的一律指到這裡 —— 兩份表遲早漂移。
-> 每個 kind 的完整範例（請求與回應的 meta、data、錯誤）在同一個目錄的 `KIND.md`，隨搬的那一批一起寫：[0x11-account.md](0x11-account.md)、[0x13-room.md](0x13-room.md)、[0x14-event.md](0x14-event.md)、[0x15-receipt.md](0x15-receipt.md)、[0x16-device.md](0x16-device.md)。
-> 狀態：第一批（批 1）37 支**已實作**：server 的表（`src/api/client/wbf/bridge.rs` 的 `BRIDGED_ENDPOINTS`）逐列跟這份總表比對（單元測試 `the_specs_index_and_this_table_list_the_same_endpoints`，對不上就紅）；每支都在 e2e13 情境 1 跟原本的 HTTP 端點比對過結果。
+> 每個 kind 的完整範例（請求與回應的 meta、data、錯誤）在同一個目錄的 `KIND.md`，隨搬的那一批一起寫：[0x10-session.md](0x10-session.md)、[0x11-account.md](0x11-account.md)、[0x13-room.md](0x13-room.md)、[0x14-event.md](0x14-event.md)、[0x15-receipt.md](0x15-receipt.md)、[0x16-device.md](0x16-device.md)。
+> 狀態：批 1 的 37 支與批 2 的 8 支（註冊、UIAA）**已實作**：server 的表（`src/api/client/wbf/bridge.rs` 的 `BRIDGED_ENDPOINTS`）逐列跟這份總表比對（單元測試 `the_specs_index_and_this_table_list_the_same_endpoints`，對不上就紅）；每支都在 e2e13（批 1 情境 1、批 2 情境 2）跟原本的 HTTP 端點比對過結果。
 
 ## 1. 一個走橋的 pack 怎麼讀
 
@@ -50,6 +50,19 @@ offset  bytes              意思
   📎 這個區間只是**分配慣例**，讓人一眼看出號碼是誰的；server 判斷走不走橋仍然只看 bit4 與各自的表，不看號碼大小。實作時會有一個單元測試守兩件事：橋的表每一列都落在 `0x20`–`0x9F`、兩張表的鍵沒有交集。
 - 同一個 kind 裡照 Matrix 規格章節裡端點出現的順序排。**分配了就不改**（wire-format §3.3 的規矩）；端點下線就讓那個號碼空著。
 - 一個 subtype 對一個 Matrix 端點（橋的設計 §2.2）。
+
+### 1.5 要 UIAA 的端點（批 2）
+
+註冊、改密碼、停用帳號、刪裝置要 Matrix 的互動式認證（UIAA）。走橋時**沒有新格式**，就是 Matrix 的兩輪，錯誤回覆的 data 本來就是 Matrix body：
+
+1. **第一輪**不帶 `auth`。回 `Error`（`01 01 03 14`），meta `status` 是 401、**沒有 `errcode`**；data 是 `{"flows":[{"stages":[…]}],"session":"…","params":{…}}`。
+2. **第二輪**送**同一個 subtype、同樣的變數與 body**，body 多一個 `auth`：`{"type":"m.login.password","session":"<第一輪的>","identifier":{"type":"m.id.user","user":"alice"},"password":"…"}`（註冊用 `m.login.dummy` 或 `m.login.registration_token`，看 `flows`）。
+3. 認證失敗（例：密碼錯）**還是 401**，meta 多了 `errcode`（例 `M_FORBIDDEN`），data 仍帶 `flows` 與**同一個** `session`，可以再試。
+4. 成功 → `Ack`，data 是端點的回應。
+
+- **怎麼認出「要 UIAA」**：走橋的回覆（bit4）、`status` 401、data 有 `flows`。沒登入的 401 帶 `errcode` `M_MISSING_TOKEN`／`M_UNKNOWN_TOKEN`、沒有 `flows`。（維護者 2026-09-15 定：不另加 meta 欄位）
+- `session` 存在 server。註冊的 `session` 跟連線無關，**沒登入的連線只活 `wbf_ws_unauthenticated_timeout`（預設 30 秒）**，來不及就重連一條、帶同一個 `session` 接著送。
+- **做完之後這條連線還算不算數**：刪掉自己這個裝置、停用帳號之後，回覆照樣先到，**下一個 pack** 在橋之前被拒（§1.2 那一道：`Unauthorized`、沒有 bit4、關連線）。改密碼的 `logout_devices` 保留發請求的裝置，這條連線不受影響。
 
 ## 2. 總表（批 1、批 2）
 
@@ -144,7 +157,6 @@ offset  bytes              意思
 
 | 什麼 | 在哪 |
 |---|---|
-| 註冊、停用帳號、改密碼、刪裝置（要 UIAA） | 批 2（📄 提案：全部走橋，註冊帶 `inhibit_login` 再送既有的 `Session/Login`；見橋的設計 §3 批 2） |
 | 送訊息、翻歷史、訂閱推送、to-device | 已經是原生 pack |
 | `/sync`、SSO 等瀏覽器登入、舊的整檔媒體 | 不搬（橋的設計 §3） |
 
