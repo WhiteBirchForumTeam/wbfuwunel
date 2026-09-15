@@ -280,8 +280,8 @@ $suspend = Http PUT "/_matrix/client/v1/admin/suspend/$(Enc $bob)" @{ suspended 
 $suspendedCreate = Bridge $wsB 0x13 0x20 $null @{ name = 'should not exist' }
 $hsuspendedCreate = Http POST '/_matrix/client/v3/createRoom' @{ name = 'should not exist either' } $tokB
 $null = Http PUT "/_matrix/client/v1/admin/suspend/$(Enc $bob)" @{ suspended = $false } $tok
-Check '[1.26] a suspended account cannot CreateRoom through the bridge, exactly as over HTTP: the gate is the HTTP gate' `
-  ($suspend.status -eq 200 -and $suspendedCreate.subtype -eq 3 -and $suspendedCreate.meta.errcode -eq 'M_USER_SUSPENDED' -and $suspendedCreate.status -eq $hsuspendedCreate.status -and $hsuspendedCreate.json.errcode -eq 'M_USER_SUSPENDED') `
+Check '[1.26] a suspended account cannot CreateRoom through the bridge, exactly as over HTTP: the gate is the HTTP gate, and it is 403 Forbidden (MSC3823)' `
+  ($suspend.status -eq 200 -and $suspendedCreate.subtype -eq 3 -and $suspendedCreate.meta.errcode -eq 'M_USER_SUSPENDED' -and $suspendedCreate.status -eq $hsuspendedCreate.status -and $hsuspendedCreate.json.errcode -eq 'M_USER_SUSPENDED' -and $hsuspendedCreate.status -eq 403 -and $suspendedCreate.meta.code -eq 'Forbidden') `
   "suspend=$($suspend.status) bridge=$($suspendedCreate.metaText) http=$($hsuspendedCreate.status) $($hsuspendedCreate.text)"
 
 $lock = Http PUT "/_matrix/client/v1/admin/lock/$(Enc $bob)" @{ locked = $true } $tok

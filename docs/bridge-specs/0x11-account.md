@@ -52,7 +52,7 @@
 | 請求 data | `{"displayname":"Alice"}` —— 鍵名跟 `field` 一樣 |
 | 回覆 data | `{}` |
 
-**會怎麼被拒**：改別人的 → `Forbidden`（403，`M_FORBIDDEN`）；**帳號被暫停** → `InvalidRequest`（400，`M_USER_SUSPENDED`）。📎 Matrix 規格與 MSC3823 寫的是 403，這個 server 現在回 400（HTTP 也是，橋照實轉）。
+**會怎麼被拒**：改別人的 → `Forbidden`（403，`M_FORBIDDEN`）；**帳號被暫停** → `Forbidden`（403，`M_USER_SUSPENDED`）。
 
 ## `0x24` DeleteProfileField —— 刪自己 profile 的一個欄位
 

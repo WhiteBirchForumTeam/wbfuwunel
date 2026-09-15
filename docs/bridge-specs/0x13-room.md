@@ -14,7 +14,7 @@
 | 請求 data | `{"name":"週末聚餐","preset":"private_chat","invite":["@bob:localhost"]}`；其他欄位照 Matrix 規格（`room_alias_name`、`topic`、`initial_state`、`is_direct`…）。加密房間放在 `initial_state` 裡的 `m.room.encryption` |
 | 回覆 data | `{"room_id":"!AbCdEf:localhost"}` |
 
-**會怎麼被拒**：**帳號被暫停** → `InvalidRequest`（400，`M_USER_SUSPENDED`）；別名已被使用 → `InvalidRequest`（400，`M_ROOM_IN_USE`）。
+**會怎麼被拒**：**帳號被暫停** → `Forbidden`（403，`M_USER_SUSPENDED`）；別名已被使用 → `InvalidRequest`（400，`M_ROOM_IN_USE`）。
 
 ## `0x21` Join —— 用房間 id 或 `#別名` 加入
 
@@ -28,7 +28,7 @@
 | 回覆 data | `{"room_id":"!AbCdEf:localhost"}` |
 
 📎 `#` 在 meta 裡照原樣寫，橋會 percent-encode 成 `%23`；client 🚫 不要自己先編碼（會變成 `%2523`）。
-**會怎麼被拒**：沒被邀請的私人房 → `Forbidden`（403）；被封鎖 → `Forbidden`（403）；帳號被暫停 → `InvalidRequest`（400，`M_USER_SUSPENDED`）；別名不存在 → `NotFound`（404）。
+**會怎麼被拒**：沒被邀請的私人房 → `Forbidden`（403）；被封鎖 → `Forbidden`（403）；帳號被暫停 → `Forbidden`（403，`M_USER_SUSPENDED`）；別名不存在 → `NotFound`（404）。
 
 ## `0x22` Leave —— 離開房間
 
@@ -63,7 +63,7 @@
 | 回覆 data | `{}` |
 
 📎 被邀請的人放在 **data** 的 `user_id`，不是 meta —— 它是 body 的欄位，不是路徑變數。放進 meta 會被當成**表上沒有的變數**拒絕。
-**會怎麼被拒**：沒有邀請的權限 → `Forbidden`（403，`M_FORBIDDEN`）；帳號被暫停 → `InvalidRequest`（400，`M_USER_SUSPENDED`）。
+**會怎麼被拒**：沒有邀請的權限 → `Forbidden`（403，`M_FORBIDDEN`）；帳號被暫停 → `Forbidden`（403，`M_USER_SUSPENDED`）。
 
 ## `0x25` Kick / `0x26` Ban / `0x27` Unban —— 踢人、封鎖、解除封鎖
 
@@ -80,7 +80,7 @@
 meta  {"code":"Forbidden","code_id":1302,"errcode":"M_FORBIDDEN","message":"Auth check failed: sender does not have enough power to kick target user","status":403}
 data  {"errcode":"M_FORBIDDEN","error":"Auth check failed: sender does not have enough power to kick target user"}
 ```
-帳號被暫停 → `InvalidRequest`（400，`M_USER_SUSPENDED`）。
+帳號被暫停 → `Forbidden`（403，`M_USER_SUSPENDED`）。
 
 ## `0x28` JoinedRooms —— 我加入了哪些房間
 
@@ -147,4 +147,4 @@ data  {"errcode":"M_FORBIDDEN","error":"Auth check failed: sender does not have 
 |---|---|---|
 | meta 少了路徑變數、多了表上沒有的變數（例：把 Invite 的 `user_id` 放進 meta）、變數型別不對 | `InvalidRequest`（1201） | 橋（不會呼叫端點） |
 | 沒登入 | `Unauthorized`（1301，`M_MISSING_TOKEN`） | 端點 |
-| 帳號被暫停（MSC3823）：CreateRoom、Join、Invite、Kick、Ban、Unban | `InvalidRequest`（1201，`M_USER_SUSPENDED`，status 400）。📎 Matrix 規格與 MSC3823 寫的是 403，這個 server 現在回 400（HTTP 也是；e2e13 [1.26] 實跑） | 端點前的 HTTP 關卡 —— 橋走的就是那一道 |
+| 帳號被暫停（MSC3823）：CreateRoom、Join、Invite、Kick、Ban、Unban | `Forbidden`（1302，`M_USER_SUSPENDED`，status 403，MSC3823）。📎 批 2 之前這個 server 回的是 400（狀態碼對應表漏列），批 2 修正 | 端點前的 HTTP 關卡 —— 橋走的就是那一道 |
