@@ -65,7 +65,8 @@ issue 提的是在 `Batch`／`Push` 的 meta 多帶 `otk_counts` 等欄位。我
   "otk_counts": { "signed_curve25519": 42 },
   "unused_fallback_key_types": ["signed_curve25519"],
   "device_lists": { "changed": ["@bob:example.org"], "left": ["@carol:example.org"] },
-  "dl_seq": 81234
+  "dl_seq": 81234,
+  "gap": false
 }
 ```
 
@@ -75,7 +76,7 @@ issue 提的是在 `Batch`／`Push` 的 meta 多帶 `otk_counts` 等欄位。我
 | `unused_fallback_key_types` | **一定有**，可以是 `[]` | 還沒被用掉的 fallback key 演算法。⚠️ **`[]` 與不出現意思不同**：`OlmMachine` 把「沒給」當成 server 不支援、把 `[]` 當成「都用掉了，該換」。所以這一欄**不套**「沒有就不出現」的慣例 |
 | `device_lists` | **一定有**，兩個陣列可以是空的 | 從上一個 `dl_seq` 到這一個之間的變動，語意照 `/sync`（§3.3） |
 | `dl_seq` | **一定有** | 這份 `device_lists` 算到哪個 count。client 存下來，重新訂閱時帶回來（§3.4） |
-| `gap` | **一定有**，bool | `true`：之前有 `CryptoState` 因為發送佇列滿被丟掉，`device_lists` 可能漏了，client 帶目前的 `dl_seq` 重新訂閱補齊（跟 `Push` 的 `gap` 同一套，wbf-event-push §4） |
+| `gap` | **一定有**，bool | `true`：**這個訂閱**上一個推送之後有 pack 因為發送佇列滿被丟掉。⚠️ `Push` 與 `CryptoState` 共用一個訂閱（§3.2），所以也共用一個 `gap` 旗標：被丟的可能是其中任一種，而旗標由**下一個送得出去的**帶走（不論哪種）。client 在**任一種** pack 看到 `gap: true`，都帶 `cd_seq` 與 `dl_seq` 兩個水位重新 `Subscribe`，兩邊一起補（wbf-event-push §4 的同一套） |
 
 欄位名照 `/sync` 的語意取短名 → **決定 2**。
 
@@ -102,6 +103,23 @@ issue 提的是在 `Batch`／`Push` 的 meta 多帶 `otk_counts` 等欄位。我
 - **即時推送的 `dl_seq`**：就是觸發它的那個寫入的 count（`mark_device_key_update` 的 count、成員事件的 count）。client 收到就更新水位；推送因為佇列滿被丟掉時，下一個 `CryptoState` 帶 `gap: true`，client 用重新訂閱補（跟 `Push` 的 `gap` 同一套，wbf-event-push §4）。
 - ⚠️ **只推給「持有這個裝置佇列」的那條連線**：`OlmMachine` 是每個裝置一台，佇列的持有者（wbf-to-device §4，後來的接手）就是在跑它的那條。同一裝置的其他連線不收。
 
+### 3.4.1 補窗怎麼算：共用哪一層、輸入從哪來（實作前查到的，2026-09-16）
+
+決定 3 選了 (a)「把 `/sync` 那份搬到 service 層共用」。動手前讀完 `src/api/client/sync/v3.rs`，那份程式**不是搬過去就能給補窗用**—— 它分成三層，只有兩層跟「怎麼算」有關，第三層是 `/sync` 順手拿的材料：
+
+| 層 | `/sync` 現在 | 補窗（`CryptoState`、`/keys/changes`）能不能直接用 |
+|---|---|---|
+| ① **金鑰變動** | `keys_changed(我)` 加上每個我在的房間的 `room_keys_changed`（`keychangeid_userid` 索引，區間 `(since, next_batch]`） | ✅ 只吃 `(使用者, 區間)`，原樣共用 |
+| ② **判斷** | 有人**加入** → 除了這個房間以外跟我沒有共同的加密房就放進 `changed`；有人**離開** → 離開後跟我沒有任何共同的加密房就放進 `left`（`share_encrypted_room`） | ✅ 只吃 `(我, 這個人, 哪個房間, 加入或離開)`，原樣共用 |
+| ③ **「誰加入、誰離開」這份材料** | 從 `/sync` 為了回房間狀態而**已經算好**的逐房狀態差異與 timeline 裡挑成員事件 | ❌ 補窗沒有這份材料。為了它去跑一次 `/sync` 的逐房計算不合理 |
+
+**補窗的 ③ 改從現成的成員索引拿**：`state_cache` 對每個（房間, 成員）記著加入時的 count（`roomuserid_joinedcount`）與離開時的 count（`roomuserid_leftcount`），跟 `dl_seq` 同一個號碼空間。對我在的（與我在區間內離開的）每個房間，挑 count 落在 `(dl_seq, 現在]` 的成員，交給 ②。
+
+- **我自己在區間內加入的房間**：裡面每一個成員都當作「加入」交給 ②（原本不同房的人變成同房）。
+- **我自己在區間內離開的房間**：裡面每一個成員都當作「離開」交給 ②。⚠️ **`/sync` 現在不做這件事**：它的 `left` 只從「我還在的房間」裡的離開事件算（`collect_joined_rooms` 才收 `left_encrypted_users`，`collect_left_rooms` 不收）。→ **決定 7**。
+- ⚠️ **被 forget 的離開查不到**：`forget`（含 `forget_forced_upon_leave` 與被封鎖的房間）會刪掉那一列 `roomuserid_leftcount`。漏的只會是 `left`，不會是 `changed`（加入的 count 不被 forget 刪）。漏 `left` 的後果是 client 繼續追蹤一個已經不同房的人（多查幾次 `/keys/query`），房間金鑰該發給誰是看房間成員、不看這份清單，所以**不會把金鑰發給不該拿的人**。這是「寧可多報」（§3.3）那一側的誤差。
+- **成本**：補窗按我在的房間掃成員索引，是「我所有房間的成員數加總」的量級。`CryptoState` 每次 `Subscribe` 才做一次；`/keys/changes` 是 client 要才做。→ **決定 6**：`/sync` 要不要也改吃這份。
+
 ### 3.5 規模
 
 - `mark_device_key_update` 的推送要列出「跟 Bob 同房的本地使用者的持有連線」。Bob 在大房間時這是房間成員數量級；但金鑰變動很少（新裝置、刪裝置、交叉簽章），而 `mark_device_key_update` 本來就逐房寫索引、還要算聯邦目的地，推送不會是這條路上最貴的一步。
@@ -115,7 +133,7 @@ issue 提的是在 `Batch`／`Push` 的 meta 多帶 `otk_counts` 等欄位。我
 ## 5. 不做的
 
 - **原生的「發 to-device」subtype**：§2，走橋就夠。
-- **在 `Batch`／`Push` 加欄位**：§3.1（決定 1 若選這條，§3 的時機表照樣適用，只是換成推空的 `Push`）。
+- **在 `Batch`／`Push` 加欄位**：§3.1（決定 1 定了獨立的 `CryptoState`）。
 - **拿 `/keys/changes` 當裝置清單的來源**：§2，`left` 是 TODO，而且漏了「新同房」。
 - **批 3 的候選端點**（推播規則、目錄、房間升級與敲門、搜尋…）：維護者 2026-09-15 defer，[wbf-api-bridge.md](wbf-api-bridge.md) §3 的清單保留。
 
@@ -132,6 +150,15 @@ issue 提的是在 `Batch`／`Push` 的 meta 多帶 `otk_counts` 等欄位。我
    ✅ 維護者 2026-09-16：同意。
 5. **`/keys/changes`**：(a) 照樣上橋、文件註明 `left` 是空的；(b) 上橋並順便補 `left`（用決定 3 那份共用的算法）；(c) 不上橋。建議 **(b)**，而且放在 (B) 那支 PR —— 共用算法做好之後補 `left` 是幾行的事，也修掉上游的 TODO。
    ✅ 維護者 2026-09-16：(b)。
+6. **補窗的「誰加入、誰離開」從哪來**（§3.4.1，實作 (B) 前查到、決定 3 沒有問到的一層）：
+   - (i) **三層全共用**：`/sync` 也改成掃成員索引。真正只有一份；代價是**每次 `/sync`** 都要掃一次我所有房間的成員索引，在大房間多的帳號上會明顯變慢，而 `/sync` 手上其實已經有這份材料。
+   - (ii) **共用 ① 金鑰變動與 ② 判斷**，搬到 service；③ 兩條路各自來：`/sync` 用它已經算好的，補窗與 `/keys/changes` 掃成員索引。e2e 拿同一個 `since` 比 `/sync` 與 `CryptoState` 的補窗，守住漂移。
+   建議 **(ii)**：會漂移的是「怎麼算」，那兩層只有一份；材料的來源不同是因為成本不同，由 e2e 比對兩邊的結果守。
+7. **我自己離開房間時，那個房間裡「從此不同房」的人要不要進 `left`**（§3.4.1）？`/sync` 現在不報。
+   - (a) `CryptoState` 與 `/keys/changes` 報，`/sync` 也順便補上。Matrix 規格的 `left` 就是「不再共有任何加密房」，不分誰走的；兩邊一致，e2e 比對不必排除這個情況。代價是動到 `/sync` 的行為（多報，不是少報）。
+   - (b) 只有通道這邊報，`/sync` 不動；e2e 比對排除這個情況。
+   - (c) 都不報，跟 `/sync` 一樣。
+   建議 **(a)**。
 
 ## 7. 落點
 
@@ -140,6 +167,7 @@ issue 提的是在 `Batch`／`Push` 的 meta 多帶 `otk_counts` 等欄位。我
 | (A) 表的 7 列、範例 | `src/api/client/wbf/bridge.rs`；`docs/bridge-specs/index.md`、新 `0x17-keys.md`、`0x16-device.md`；e2e |
 | (B) `0x08 CryptoState` 的形狀 | `docs/design/wbf-to-device.md` §3（第八個 subtype）、`wbf-wire-format.md`；向量（欄位出現與空陣列各一） |
 | (B) 推送 | `src/service/streams/devices.rs`（推給持有連線）；掛鉤：`users/keys.rs` 的 `take_one_time_key`、`add_one_time_keys`、`mark_device_key_update`，`state_cache` 的成員寫入點 |
-| (B) 補窗與 `/sync` 共用的算法 | 從 `src/api/client/sync/v3.rs` 搬到 `src/service/`；`Device/Subscribe` 的 handler 呼叫 |
+| (B) 補窗與 `/sync` 共用的算法 | 從 `src/api/client/sync/v3.rs` 搬到 `src/service/`；`Device/Subscribe` 的 handler 呼叫（共用哪幾層見 §3.4.1、決定 6） |
+| (B) `/keys/changes` 補 `left`（決定 5） | `src/api/client/keys/get_key_changes.rs` 呼叫同一份補窗 |
 | (C) 備份 14 列 | `bridge.rs`、`0x17-keys.md` |
 | client 同步 | 合併後開 client repo 的 issue（跟 #65 對應） |
