@@ -310,6 +310,8 @@ client                                          server
 
 ### 批 3 之後：候選清單（等維護者挑）
 
+> ⏸ **維護者 2026-09-15：先 defer，先處理金鑰**（issue #65，client 要讓 E2EE 全走通道）。金鑰那部分另有設計：[wbf-e2ee.md](wbf-e2ee.md)。下面這張清單保留，E2EE 那一列由 wbf-e2ee.md 取代。
+
 批 2 做完，`account 註冊、登入、登出、session、room、device` 這幾類（維護者 2026-09-14 點名的）就都在通道上了。剩下常用、橋可以直接跑的：
 
 | 類 | 端點 | 備註 |
