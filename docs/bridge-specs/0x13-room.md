@@ -147,4 +147,4 @@ data  {"errcode":"M_FORBIDDEN","error":"Auth check failed: sender does not have 
 |---|---|---|
 | meta 少了路徑變數、多了表上沒有的變數（例：把 Invite 的 `user_id` 放進 meta）、變數型別不對 | `InvalidRequest`（1201） | 橋（不會呼叫端點） |
 | 沒登入 | `Unauthorized`（1301，`M_MISSING_TOKEN`） | 端點 |
-| 帳號被暫停（MSC3823）：CreateRoom、Join、Invite、Kick、Ban、Unban | `Forbidden`（1302，`M_USER_SUSPENDED`） | 端點前的 HTTP 關卡 —— 橋走的就是那一道 |
+| 帳號被暫停（MSC3823）：CreateRoom、Join、Invite、Kick、Ban、Unban | `Forbidden`（1302，`M_USER_SUSPENDED`，status 403，MSC3823）。📎 批 2 之前這個 server 回的是 400（狀態碼對應表漏列），批 2 修正 | 端點前的 HTTP 關卡 —— 橋走的就是那一道 |

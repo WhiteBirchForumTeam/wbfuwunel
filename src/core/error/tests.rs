@@ -40,6 +40,21 @@ fn our_own_unknown_token_still_reaches_the_client() {
 }
 
 #[test]
+fn a_suspended_account_error_carries_a_403() {
+	let ours = [
+		Error::BadRequest(ErrorKind::UserSuspended, "Account is suspended."),
+		Error::Request(ErrorKind::UserSuspended, Cow::Borrowed("Account is suspended."), StatusCode::BAD_REQUEST),
+	];
+
+	for error in ours {
+		let (status, kind) = client_response(error);
+
+		assert_eq!(status, StatusCode::FORBIDDEN, "MSC3823 requires 403 for a suspended account");
+		assert_eq!(kind, ErrorKind::UserSuspended);
+	}
+}
+
+#[test]
 fn a_locked_account_error_carries_a_401() {
 	let ours = [
 		Error::BadRequest(ErrorKind::UserLocked, "This account has been locked."),

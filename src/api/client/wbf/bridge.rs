@@ -20,8 +20,8 @@ use http::{HeaderValue, Method, Request, StatusCode, header};
 use ruma::api::{
 	IncomingRequest,
 	client::{
-		account, alias, config, context, device, membership, profile, read_marker, receipt, redact, room, state,
-		tag, typing,
+		account, alias, config, context, device, membership, profile, read_marker, receipt, redact, room, session,
+		state, tag, typing,
 	},
 	path_builder::PathBuilder,
 };
@@ -35,9 +35,12 @@ use super::{
 	Failure, PackContext, Reject, Reply, control, matrix_error_fields, refuse_wrong_id_type, reject_code_for_status,
 };
 
-/// The path every bridged endpoint is reached by. ruma lists each endpoint's
-/// paths across versions; the bridge always uses the stable v3 one.
+/// ruma lists each endpoint's paths across versions. The bridge uses the v3
+/// one; an endpoint that entered the spec later has only a newer stable
+/// version (`/v1/register/m.login.registration_token/validity`), and then the
+/// newest of those. `r0` and `unstable` paths are never used.
 const V3_PREFIX: &str = "/_matrix/client/v3/";
+const STABLE_VERSION_PREFIX: &str = "/_matrix/client/v";
 
 /// One Matrix endpoint reachable through the bridge: one row of
 /// `docs/bridge-specs/index.md`.
@@ -47,7 +50,7 @@ pub(super) struct BridgedEndpoint {
 	pub(super) subtype: u8,
 	/// The name the specs index gives it, for errors and logs.
 	pub(super) name: &'static str,
-	/// Method and v3 path template, read from the ruma request type so that
+	/// Method and path template, read from the ruma request type so that
 	/// an upstream rename breaks the build instead of the endpoint.
 	pub(super) shape: fn() -> Option<EndpointShape>,
 	/// The query variables it takes, by ruma's names. Path variables come
@@ -66,6 +69,11 @@ pub(super) struct EndpointShape {
 /// ⚠️ That table is the authority for the numbers; this one must agree with
 /// it row for row. Numbers are never reused.
 static BRIDGED_ENDPOINTS: &[BridgedEndpoint] = &[
+	// 0x10 Session (batch 2)
+	row(Kind::Session, 0x20, "Register", shape_of::<account::register::v3::Request>, &["kind"]),
+	row(Kind::Session, 0x21, "UsernameAvailable", shape_of::<account::get_username_availability::v3::Request>, &["username"]),
+	row(Kind::Session, 0x22, "RegistrationTokenValidity", shape_of::<account::check_registration_token_validity::v1::Request>, &["token"]),
+	row(Kind::Session, 0x23, "LoginTypes", shape_of::<session::get_login_types::v3::Request>, NO_QUERY),
 	// 0x11 Account
 	row(Kind::Account, 0x20, "WhoAmI", shape_of::<account::whoami::v3::Request>, NO_QUERY),
 	row(Kind::Account, 0x21, "GetProfile", shape_of::<profile::get_profile::v3::Request>, NO_QUERY),
@@ -79,6 +87,8 @@ static BRIDGED_ENDPOINTS: &[BridgedEndpoint] = &[
 	row(Kind::Account, 0x29, "GetTags", shape_of::<tag::get_tags::v3::Request>, NO_QUERY),
 	row(Kind::Account, 0x2A, "SetTag", shape_of::<tag::create_tag::v3::Request>, NO_QUERY),
 	row(Kind::Account, 0x2B, "DeleteTag", shape_of::<tag::delete_tag::v3::Request>, NO_QUERY),
+	row(Kind::Account, 0x2C, "ChangePassword", shape_of::<account::change_password::v3::Request>, NO_QUERY),
+	row(Kind::Account, 0x2D, "Deactivate", shape_of::<account::deactivate::v3::Request>, NO_QUERY),
 	// 0x13 Room
 	row(Kind::Room, 0x20, "CreateRoom", shape_of::<room::create_room::v3::Request>, NO_QUERY),
 	row(Kind::Room, 0x21, "Join", shape_of::<membership::join_room_by_id_or_alias::v3::Request>, &["via", "server_name"]),
@@ -108,6 +118,8 @@ static BRIDGED_ENDPOINTS: &[BridgedEndpoint] = &[
 	row(Kind::Device, 0x20, "ListDevices", shape_of::<device::get_devices::v3::Request>, NO_QUERY),
 	row(Kind::Device, 0x21, "GetDevice", shape_of::<device::get_device::v3::Request>, NO_QUERY),
 	row(Kind::Device, 0x22, "UpdateDevice", shape_of::<device::update_device::v3::Request>, NO_QUERY),
+	row(Kind::Device, 0x23, "DeleteDevice", shape_of::<device::delete_device::v3::Request>, NO_QUERY),
+	row(Kind::Device, 0x24, "DeleteDevices", shape_of::<device::delete_devices::v3::Request>, NO_QUERY),
 ];
 
 const NO_QUERY: &[&str] = &[];
@@ -125,11 +137,18 @@ const fn row(
 /// Args:
 ///     Request: the ruma request type of the endpoint, example: `leave_room::v3::Request`
 /// Return:
-///     Option<EndpointShape>  None when the type has no v3 path.
+///     Option<EndpointShape>  the v3 path; without one, the newest stable
+///     `/_matrix/client/vN` path; None when the type has neither.
 fn shape_of<Request: IncomingRequest>() -> Option<EndpointShape> {
 	let path_template = Request::PATH_BUILDER
 		.all_paths()
-		.find(|path| path.starts_with(V3_PREFIX))?;
+		.find(|path| path.starts_with(V3_PREFIX))
+		.or_else(|| {
+			Request::PATH_BUILDER
+				.all_paths()
+				.filter(|path| path.starts_with(STABLE_VERSION_PREFIX))
+				.last()
+		})?;
 
 	Some(EndpointShape { method: Request::METHOD, path_template })
 }
@@ -185,7 +204,7 @@ pub(super) async fn handle(
 		.bridge
 		.ok_or_else(|| Reject::code(RejectCode::Internal, "this server was built without the bridge"))?;
 	let shape = (endpoint.shape)().ok_or_else(|| {
-		Reject::code(RejectCode::Internal, format!("{} has no v3 path to bridge to", endpoint.name))
+		Reject::code(RejectCode::Internal, format!("{} has no path to bridge to", endpoint.name))
 	})?;
 
 	let token = ctx.session.map(|session| session.token.as_str());
@@ -490,15 +509,20 @@ fn to_bounded_message(text: &str) -> String {
 mod tests {
 	use std::net::{IpAddr, Ipv4Addr};
 
-	use axum::extract::ConnectInfo;
+	use axum::extract::{ConnectInfo, FromRequestParts};
 	use http::{HeaderValue, Method, StatusCode, header};
-	use ruma::api::client::{membership::leave_room, state::send_state_event};
+	use ruma::api::client::{
+		account::{check_registration_token_validity, register},
+		membership::leave_room,
+		state::send_state_event,
+	};
 	use tuwunel_core::wbf::{RejectCode, decode};
 
 	use super::{
 		BRIDGED_ENDPOINTS, EndpointShape, MAX_MESSAGE_BYTES, build_reply_pack, build_request, list_path_variables,
 		shape_of, to_bounded_message,
 	};
+	use crate::{ClientIp, router::ConfiguredIpSource};
 
 	const PEER: IpAddr = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
 
@@ -617,6 +641,33 @@ mod tests {
 		let anonymous = build_request(&shape, &[], variables, b"", None, PEER).expect("builds");
 		assert!(anonymous.headers().get(header::AUTHORIZATION).is_none(), "no session, no token");
 		assert!(anonymous.headers().get(header::CONTENT_TYPE).is_none(), "no body, no content type");
+	}
+
+	/// `ip_source` reaches a request as an extension the outer router's layers
+	/// add; the bridge's requests never pass those layers. So an endpoint
+	/// behind the bridge reads the address the transport already resolved
+	/// under `ip_source` — whatever the operator configured, and whatever the
+	/// client put in its own headers, which the bridge never forwards.
+	#[tokio::test]
+	async fn an_endpoint_behind_the_bridge_sees_the_address_the_transport_resolved() {
+		let variables = br#"{"room_id":"!abc:localhost","event_type":"m.room.topic","state_key":""}"#;
+		let request = build_request(&state_shape(), &[], variables, b"", Some("TOKEN"), PEER).expect("builds");
+		let (mut parts, _body) = request.into_parts();
+
+		assert!(parts.extensions.get::<ConfiguredIpSource>().is_none(), "no ip_source marker on a bridged request");
+		assert!(parts.headers.get("x-forwarded-for").is_none() && parts.headers.get("forwarded").is_none());
+		let ClientIp(seen) = ClientIp::from_request_parts(&mut parts, &()).await.expect("an address");
+		assert_eq!(seen, PEER);
+	}
+
+	#[test]
+	fn an_endpoint_with_only_a_newer_stable_version_is_reached_by_that_path() {
+		let shape = shape_of::<check_registration_token_validity::v1::Request>().expect("a stable path");
+		assert_eq!(shape.path_template, "/_matrix/client/v1/register/m.login.registration_token/validity");
+
+		// Listed under r0 and v3: v3, never r0.
+		let register = shape_of::<register::v3::Request>().expect("a path");
+		assert_eq!(register.path_template, "/_matrix/client/v3/register");
 	}
 
 	#[test]
@@ -748,7 +799,7 @@ mod tests {
 			assert_eq!(*first_bytes, format!("01 {:02X} {:02X} 10", *kind, *subtype), "{} prints the wrong first bytes", endpoint.name);
 			assert_eq!(endpoint.name, name, "the index names 0x{kind:02X}/0x{subtype:02X} differently");
 
-			let shape = (endpoint.shape)().expect("a v3 path");
+			let shape = (endpoint.shape)().expect("a path");
 			let expected = format!("`{} {}`", shape.method, shape.path_template.trim_start_matches("/_matrix/client/v3"));
 			assert_eq!(*endpoint_cell, expected, "the index gives {} the wrong endpoint", endpoint.name);
 		}
@@ -767,7 +818,7 @@ mod tests {
 			assert!(!seen.contains(&(endpoint.kind as u8, endpoint.subtype)), "{} is listed twice", endpoint.name);
 			seen.push((endpoint.kind as u8, endpoint.subtype));
 
-			let shape = (endpoint.shape)().unwrap_or_else(|| panic!("{} has no v3 path", endpoint.name));
+			let shape = (endpoint.shape)().unwrap_or_else(|| panic!("{} has no path to bridge to", endpoint.name));
 			let path_names = list_path_variables(shape.path_template);
 			for query_name in endpoint.query {
 				assert!(!path_names.contains(query_name), "{}: `{query_name}` is both a path and a query variable", endpoint.name);

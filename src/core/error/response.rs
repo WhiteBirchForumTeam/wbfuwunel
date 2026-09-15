@@ -118,6 +118,9 @@ pub(super) fn bad_request_code(kind: &ErrorKind) -> StatusCode {
 		| GuestAccessForbidden
 		| ThreepidAuthFailed
 		| UserDeactivated
+		// MSC3823. Missing here, it fell through to 400 while the gate that
+		// raises it (`api::router::auth`) documented 403.
+		| UserSuspended
 		| ThreepidDenied
 		| InviteBlocked
 		| WrongRoomKeysVersion { .. }

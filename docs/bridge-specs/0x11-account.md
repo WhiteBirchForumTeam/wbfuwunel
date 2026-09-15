@@ -144,6 +144,34 @@ app 自己存在 server 上的東西（通知偏好、置頂清單…），`even
 | 請求 data | 空 |
 | 回覆 data | `{}` |
 
+## `0x2C` ChangePassword —— 改密碼（批 2，要 UIAA）
+
+`POST /_matrix/client/v3/account/password`
+
+| | |
+|---|---|
+| 請求 meta | 空 |
+| 請求 data | 第一輪 `{"new_password":"…","logout_devices":true}`；第二輪加 `"auth":{"type":"m.login.password","session":"…","identifier":{"type":"m.id.user","user":"erin"},"password":"<舊密碼>"}` |
+| 第一輪回覆 | `Error`，`status` 401；data `{"flows":[{"stages":["m.login.password"]}],"params":{},"session":"…"}`（index §1.5） |
+| 成功回覆 data | `{}` |
+
+- `logout_devices: true`：**其他**裝置被登出，發請求的這個裝置保留 —— 所以這條連線照常可用（e2e13 [2.12]）。
+
+**會怎麼被拒**：舊密碼錯 → `{"code":"Unauthorized","code_id":1301,"errcode":"M_FORBIDDEN","message":"Invalid username or password.","status":401}`，data 仍帶同一個 `session`，可以再試。
+
+## `0x2D` Deactivate —— 停用帳號（批 2，要 UIAA）
+
+`POST /_matrix/client/v3/account/deactivate`
+
+| | |
+|---|---|
+| 請求 meta | 空 |
+| 請求 data | 第一輪 `{}`（要抹除加 `"erase":true`）；第二輪加 `auth`，同上 |
+| 第一輪回覆 | `Error`，`status` 401；data `{"flows":[{"stages":["m.login.password"]}],"params":{},"session":"…"}` |
+| 成功回覆 data | `{"id_server_unbind_result":"no-support"}` |
+
+⚠️ **停用之後這條連線就不算數了**：回覆照樣先到，**下一個 pack** 在橋之前被拒 —— `{"code":"Unauthorized","code_id":1301,"errcode":"M_UNKNOWN_TOKEN",…}`、沒有 bit4、關連線（index §1.2；e2e13 [2.14]）。
+
 ## 這個 kind 共通的拒絕
 
 | 情況 | `code` | 來自 |

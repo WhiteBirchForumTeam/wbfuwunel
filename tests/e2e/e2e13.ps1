@@ -280,8 +280,8 @@ $suspend = Http PUT "/_matrix/client/v1/admin/suspend/$(Enc $bob)" @{ suspended 
 $suspendedCreate = Bridge $wsB 0x13 0x20 $null @{ name = 'should not exist' }
 $hsuspendedCreate = Http POST '/_matrix/client/v3/createRoom' @{ name = 'should not exist either' } $tokB
 $null = Http PUT "/_matrix/client/v1/admin/suspend/$(Enc $bob)" @{ suspended = $false } $tok
-Check '[1.26] a suspended account cannot CreateRoom through the bridge, exactly as over HTTP: the gate is the HTTP gate' `
-  ($suspend.status -eq 200 -and $suspendedCreate.subtype -eq 3 -and $suspendedCreate.meta.errcode -eq 'M_USER_SUSPENDED' -and $suspendedCreate.status -eq $hsuspendedCreate.status -and $hsuspendedCreate.json.errcode -eq 'M_USER_SUSPENDED') `
+Check '[1.26] a suspended account cannot CreateRoom through the bridge, exactly as over HTTP: the gate is the HTTP gate, and it is 403 Forbidden (MSC3823)' `
+  ($suspend.status -eq 200 -and $suspendedCreate.subtype -eq 3 -and $suspendedCreate.meta.errcode -eq 'M_USER_SUSPENDED' -and $suspendedCreate.status -eq $hsuspendedCreate.status -and $hsuspendedCreate.json.errcode -eq 'M_USER_SUSPENDED' -and $hsuspendedCreate.status -eq 403 -and $suspendedCreate.meta.code -eq 'Forbidden') `
   "suspend=$($suspend.status) bridge=$($suspendedCreate.metaText) http=$($hsuspendedCreate.status) $($hsuspendedCreate.text)"
 
 $lock = Http PUT "/_matrix/client/v1/admin/lock/$(Enc $bob)" @{ locked = $true } $tok
@@ -296,6 +296,162 @@ Check '[1.27] a locked account is refused on a bridged pack before the bridge ru
   "lock=$($lock.status) bridge=$($lockedWhoAmI.metaText) http=$($hlockedWhoAmI.status) $($hlockedWhoAmI.text)"
 
 $wsA.Dispose(); $wsB.Dispose(); $wsC.Dispose()
+Stop-Server $server
+
+Log '################ Scenario 2: batch 2, registration and the UIAA endpoints through the bridge ################'
+# docs/design/wbf-api-bridge.md §3 batch 2. Registration: an anonymous connection registers with inhibit_login and
+# then sends the native Session/Login. UIAA: the 401's flows and session arrive in data, the second round carries
+# auth. Every gate is the HTTP one, so each refusal is compared with what HTTP answers.
+function Same-Refusal($bridged, $http) { $bridged.subtype -eq 3 -and (Is-BridgedReply $bridged) -and $bridged.status -eq $http.status -and "$($bridged.meta.errcode)" -eq "$($http.json.errcode)" -and $http.status -ge 400 }
+function Is-Uiaa-Challenge($p) { $p.subtype -eq 3 -and (Is-BridgedReply $p) -and $p.status -eq 401 -and $null -ne $p.body.flows -and "$($p.body.session)" -ne '' }
+function Password-Auth($user, $password, $session) { @{ type = 'm.login.password'; session = $session; identifier = @{ type = 'm.id.user'; user = $user }; password = $password } }
+function Login-Http-Device($user, $password) { Http POST '/_matrix/client/v3/login' @{ type = 'm.login.password'; identifier = @{ type = 'm.id.user'; user = $user }; password = $password } $null }
+
+$db2 = "$S\e2e13db2"; Remove-Item -Recurse -Force $db2 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db2 | Out-Null
+$cfg2 = Write-Config $db2 86400
+$server = Start-Server $cfg2 's2'
+$admin2 = Api Post '/_matrix/client/v3/register' '{"username":"root","password":"pw-pw-pw-pw","auth":{"type":"m.login.dummy"}}' $null
+
+# ---- 0x10 Session: the read-only queries, anonymous ----
+$anon = Ws-Open $null
+$avail = Bridge $anon 0x10 0x21 @{ username = 'dave' } $null
+$havail = Http GET '/_matrix/client/v3/register/available?username=dave' $null $null
+$taken = Bridge $anon 0x10 0x21 @{ username = 'system' } $null
+$htaken = Http GET '/_matrix/client/v3/register/available?username=system' $null $null
+Check '[2.1] UsernameAvailable: a free name and the server user''s name, anonymously, as over HTTP' `
+  ((Same-As-Http $avail $havail) -and $avail.body.available -eq $true -and (Same-Refusal $taken $htaken) -and $taken.meta.errcode -eq 'M_USER_IN_USE') `
+  "free=$($avail.text) system=$($taken.metaText) http=$($htaken.status) $($htaken.text)"
+
+$types = Bridge $anon 0x10 0x23 $null $null
+$htypes = Http GET '/_matrix/client/v3/login' $null $null
+Check '[2.2] LoginTypes anonymously, as over HTTP' ((Same-As-Http $types $htypes) -and @($types.body.flows).Count -gt 0) "bridge=$($types.text)"
+
+$validity = Bridge $anon 0x10 0x22 @{ token = 'nothing-configured' } $null
+$hvalidity = Http GET '/_matrix/client/v1/register/m.login.registration_token/validity?token=nothing-configured' $null $null
+Check '[2.3] RegistrationTokenValidity is reached by its v1 path and answers as over HTTP' `
+  ((Same-As-Http $validity $hvalidity) -or (Same-Refusal $validity $hvalidity)) "bridge=$($validity.status) $($validity.metaText) $($validity.text) http=$($hvalidity.status) $($hvalidity.text)"
+
+# ---- Registration: UIAA, then the native Login ----
+$round1 = Bridge $anon 0x10 0x20 $null @{ username = 'dave'; password = 'pw-dave-1'; inhibit_login = $true }
+$hround1 = Http POST '/_matrix/client/v3/register' @{ username = 'dave-http'; password = 'pw-dave-1'; inhibit_login = $true } $null
+Check '[2.4] Register without auth: the UIAA challenge (flows, session) arrives in data, the same flows HTTP offers' `
+  ((Is-Uiaa-Challenge $round1) -and $hround1.status -eq 401 -and (Canon $round1.body.flows) -eq (Canon $hround1.json.flows)) `
+  "bridge=$($round1.metaText) $($round1.text) http=$($hround1.status) $($hround1.text)"
+
+$round2 = Bridge $anon 0x10 0x20 $null @{ username = 'dave'; password = 'pw-dave-1'; inhibit_login = $true; auth = @{ type = 'm.login.dummy'; session = $round1.body.session } }
+Check '[2.5] Register with auth and inhibit_login: the account exists, no token was minted' `
+  ((Is-Ack $round2) -and $round2.body.user_id -eq '@dave:localhost' -and $null -eq $round2.body.access_token) "bridge=$($round2.text)"
+
+$login = Call $anon (Json-Pack 16 1 0 900 @{ type = 'm.login.password'; identifier = @{ type = 'm.id.user'; user = 'dave' }; password = 'pw-dave-1' } @())
+$whoDave = Bridge $anon 0x11 0x20 $null $null
+Check '[2.6] the native Login on the same connection makes it the new account' `
+  ($login.subtype -eq 2 -and $login.meta.user_id -eq '@dave:localhost' -and (Is-Ack $whoDave) -and $whoDave.body.user_id -eq '@dave:localhost') `
+  "login=$($login.metaText) whoami=$($whoDave.text)"
+
+$daveDevice = $login.meta.device_id; $daveToken = $login.meta.access_token
+$held = @(Ws-Open $daveToken; Ws-Open $daveToken; Ws-Open $daveToken)
+$anon2 = Ws-Open $null
+$over = Call $anon2 (Json-Pack 16 1 0 901 @{ type = 'm.login.password'; identifier = @{ type = 'm.id.user'; user = 'dave' }; password = 'pw-dave-1'; device_id = $daveDevice } @())
+Check '[2.7] after registering, a Login past the device''s connection limit is still TooManyConnections' `
+  ($over.subtype -eq 3 -and $over.meta.code_id -eq 1402) "reply=$($over.metaText)"
+$held | ForEach-Object { $_.Dispose() }; $anon2.Dispose(); $anon.Dispose()
+
+$anon3 = Ws-Open $null
+$systemReg = Bridge $anon3 0x10 0x20 $null @{ username = 'system'; password = 'pw-pw-pw-pw'; inhibit_login = $true }
+$hsystemReg = Http POST '/_matrix/client/v3/register' @{ username = 'system'; password = 'pw-pw-pw-pw'; inhibit_login = $true } $null
+Check '[2.8] nobody registers "system" through the bridge either' ((Same-Refusal $systemReg $hsystemReg) -and $systemReg.meta.errcode -eq 'M_USER_IN_USE') `
+  "bridge=$($systemReg.metaText) http=$($hsystemReg.status) $($hsystemReg.text)"
+$anon3.Dispose()
+
+# ---- UIAA: devices, password ----
+$regE = Api Post '/_matrix/client/v3/register' '{"username":"erin","password":"pw-erin-1","auth":{"type":"m.login.dummy"}}' $null
+$wsE = Ws-Open $regE.access_token
+$e2 = Login-Http-Device 'erin' 'pw-erin-1'; $e3 = Login-Http-Device 'erin' 'pw-erin-1'; $e4 = Login-Http-Device 'erin' 'pw-erin-1'
+
+$del1 = Bridge $wsE 0x16 0x23 @{ device_id = $e2.json.device_id } @{}
+$hdel1 = Http DELETE "/_matrix/client/v3/devices/$(Enc $e3.json.device_id)" @{} $regE.access_token
+$delWrong = Bridge $wsE 0x16 0x23 @{ device_id = $e2.json.device_id } @{ auth = (Password-Auth 'erin' 'not-the-password' $del1.body.session) }
+Check '[2.9] DeleteDevice: the challenge offers what HTTP offers; a wrong password is M_FORBIDDEN and keeps the session' `
+  ((Is-Uiaa-Challenge $del1) -and $hdel1.status -eq 401 -and (Canon $del1.body.flows) -eq (Canon $hdel1.json.flows) -and $delWrong.status -eq 401 -and $delWrong.meta.errcode -eq 'M_FORBIDDEN' -and $delWrong.body.session -eq $del1.body.session) `
+  "challenge=$($del1.text) wrong=$($delWrong.metaText) $($delWrong.text)"
+
+$delOk = Bridge $wsE 0x16 0x23 @{ device_id = $e2.json.device_id } @{ auth = (Password-Auth 'erin' 'pw-erin-1' $del1.body.session) }
+$afterDel = Bridge $wsE 0x16 0x20 $null $null
+Check '[2.10] DeleteDevice with the password: gone from ListDevices' `
+  ((Is-Ack $delOk) -and (Is-Ack $afterDel) -and -not (@($afterDel.body.devices | ForEach-Object { $_.device_id }) -contains $e2.json.device_id)) `
+  "delete=$($delOk.status) devices=$(@($afterDel.body.devices | ForEach-Object { $_.device_id }) -join ',')"
+
+$dels1 = Bridge $wsE 0x16 0x24 $null @{ devices = @($e3.json.device_id) }
+$delsOk = Bridge $wsE 0x16 0x24 $null @{ devices = @($e3.json.device_id); auth = (Password-Auth 'erin' 'pw-erin-1' $dels1.body.session) }
+$e3Who = Http GET '/_matrix/client/v3/account/whoami' $null $e3.json.access_token
+Check '[2.11] DeleteDevices: challenge, then the device and its token are gone' `
+  ((Is-Uiaa-Challenge $dels1) -and (Is-Ack $delsOk) -and $e3Who.status -eq 401) "delete=$($delsOk.status) $($delsOk.text) e3=$($e3Who.status)"
+
+$pw1 = Bridge $wsE 0x11 0x2C $null @{ new_password = 'pw-erin-2'; logout_devices = $true }
+$pwOk = Bridge $wsE 0x11 0x2C $null @{ new_password = 'pw-erin-2'; logout_devices = $true; auth = (Password-Auth 'erin' 'pw-erin-1' $pw1.body.session) }
+$e4Who = Http GET '/_matrix/client/v3/account/whoami' $null $e4.json.access_token
+$stillMe = Bridge $wsE 0x11 0x20 $null $null
+$newLogin = Login-Http-Device 'erin' 'pw-erin-2'
+Check '[2.12] ChangePassword with logout_devices: other devices logged out, this connection kept, the new password works' `
+  ((Is-Uiaa-Challenge $pw1) -and (Is-Ack $pwOk) -and $e4Who.status -eq 401 -and (Is-Ack $stillMe) -and $newLogin.status -eq 200) `
+  "change=$($pwOk.status) e4=$($e4Who.status) whoami=$($stillMe.status) login=$($newLogin.status)"
+
+$own1 = Bridge $wsE 0x16 0x23 @{ device_id = $regE.device_id } @{}
+$ownOk = Bridge $wsE 0x16 0x23 @{ device_id = $regE.device_id } @{ auth = (Password-Auth 'erin' 'pw-erin-2' $own1.body.session) }
+$afterOwn = Bridge $wsE 0x11 0x20 $null $null
+Check '[2.13] deleting this connection''s own device: the reply arrives, the next pack is refused before the bridge' `
+  ((Is-Ack $ownOk) -and $afterOwn.subtype -eq 3 -and ($afterOwn.flags -band $IS_BRIDGED) -eq 0 -and $afterOwn.meta.errcode -eq 'M_UNKNOWN_TOKEN') `
+  "delete=$($ownOk.status) next=$($afterOwn.metaText)"
+$wsE.Dispose()
+
+$regF = Api Post '/_matrix/client/v3/register' '{"username":"frank","password":"pw-frank-1","auth":{"type":"m.login.dummy"}}' $null
+$wsF = Ws-Open $regF.access_token
+$de1 = Bridge $wsF 0x11 0x2D $null @{}
+$hde1 = Http POST '/_matrix/client/v3/account/deactivate' @{} $regF.access_token
+$deOk = Bridge $wsF 0x11 0x2D $null @{ auth = (Password-Auth 'frank' 'pw-frank-1' $de1.body.session) }
+$afterDe = Bridge $wsF 0x11 0x20 $null $null
+$frankLogin = Login-Http-Device 'frank' 'pw-frank-1'
+Check '[2.14] Deactivate: the same challenge as HTTP, then the account is gone: the next pack refused, no login' `
+  ((Is-Uiaa-Challenge $de1) -and (Canon $de1.body.flows) -eq (Canon $hde1.json.flows) -and (Is-Ack $deOk) -and $afterDe.subtype -eq 3 -and ($afterDe.flags -band $IS_BRIDGED) -eq 0 -and $frankLogin.status -ne 200) `
+  "deactivate=$($deOk.status) $($deOk.text) next=$($afterDe.metaText) login=$($frankLogin.status) $($frankLogin.text)"
+$wsF.Dispose()
+Stop-Server $server
+
+# ---- The registration gates: a token, a forbidden name, registration closed ----
+$db3 = "$S\e2e13db3"; Remove-Item -Recurse -Force $db3 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db3 | Out-Null
+$cfg3 = Write-Config $db3 86400 0 0 0 @('registration_token = "sekrit-e2e13"', 'forbidden_usernames = ["^bad"]')
+$server = Start-Server $cfg3 's2-token'
+$anon4 = Ws-Open $null
+$valid = Bridge $anon4 0x10 0x22 @{ token = 'sekrit-e2e13' } $null
+$hvalid = Http GET '/_matrix/client/v1/register/m.login.registration_token/validity?token=sekrit-e2e13' $null $null
+$invalid = Bridge $anon4 0x10 0x22 @{ token = 'wrong' } $null
+Check '[2.15] RegistrationTokenValidity: the configured token is valid, another is not, as over HTTP' `
+  ((Same-As-Http $valid $hvalid) -and $valid.body.valid -eq $true -and (Is-Ack $invalid) -and $invalid.body.valid -eq $false) "valid=$($valid.text) invalid=$($invalid.text)"
+
+$t1 = Bridge $anon4 0x10 0x20 $null @{ username = 'gina'; password = 'pw-gina-1'; inhibit_login = $true }
+$ht1 = Http POST '/_matrix/client/v3/register' @{ username = 'gina-http'; password = 'pw-gina-1'; inhibit_login = $true } $null
+$tWrong = Bridge $anon4 0x10 0x20 $null @{ username = 'gina'; password = 'pw-gina-1'; inhibit_login = $true; auth = @{ type = 'm.login.registration_token'; token = 'wrong'; session = $t1.body.session } }
+$htWrong = Http POST '/_matrix/client/v3/register' @{ username = 'gina-http'; password = 'pw-gina-1'; inhibit_login = $true; auth = @{ type = 'm.login.registration_token'; token = 'wrong'; session = $ht1.json.session } } $null
+$tOk = Bridge $anon4 0x10 0x20 $null @{ username = 'gina'; password = 'pw-gina-1'; inhibit_login = $true; auth = @{ type = 'm.login.registration_token'; token = 'sekrit-e2e13'; session = $t1.body.session } }
+Check '[2.16] with a registration token required: the same flows as HTTP, a wrong token refused as HTTP refuses it, the right one registers' `
+  ((Is-Uiaa-Challenge $t1) -and (Canon $t1.body.flows) -eq (Canon $ht1.json.flows) -and $tWrong.subtype -eq 3 -and $tWrong.status -eq $htWrong.status -and "$($tWrong.meta.errcode)" -eq "$($htWrong.json.errcode)" -and (Is-Ack $tOk) -and $tOk.body.user_id -eq '@gina:localhost') `
+  "flows=$($t1.text) wrong=$($tWrong.status) $($tWrong.metaText) http=$($htWrong.status) $($htWrong.text) ok=$($tOk.text)"
+
+$bad = Bridge $anon4 0x10 0x20 $null @{ username = 'badguy'; password = 'pw-pw-pw-pw'; inhibit_login = $true }
+$hbad = Http POST '/_matrix/client/v3/register' @{ username = 'badguy'; password = 'pw-pw-pw-pw'; inhibit_login = $true } $null
+Check '[2.17] a forbidden username is refused through the bridge as over HTTP' (Same-Refusal $bad $hbad) "bridge=$($bad.metaText) http=$($hbad.status) $($hbad.text)"
+$anon4.Dispose()
+Stop-Server $server
+
+$db4 = "$S\e2e13db4"; Remove-Item -Recurse -Force $db4 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db4 | Out-Null
+$cfg4 = Write-Config $db4 86400
+(Get-Content $cfg4 -Raw).Replace('allow_registration = true', 'allow_registration = false') | Set-Content -Path $cfg4 -Encoding ascii
+$server = Start-Server $cfg4 's2-closed'
+$anon5 = Ws-Open $null
+$closed = Bridge $anon5 0x10 0x20 $null @{ username = 'henry'; password = 'pw-pw-pw-pw'; inhibit_login = $true }
+$hclosed = Http POST '/_matrix/client/v3/register' @{ username = 'henry'; password = 'pw-pw-pw-pw'; inhibit_login = $true } $null
+Check '[2.18] with registration closed, the bridge refuses it exactly as HTTP does' (Same-Refusal $closed $hclosed) "bridge=$($closed.metaText) http=$($hclosed.status) $($hclosed.text)"
+$anon5.Dispose()
 Stop-Server $server
 
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"
