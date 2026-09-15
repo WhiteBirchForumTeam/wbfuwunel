@@ -1,7 +1,7 @@
 # 常用 Matrix API 走通道：一座通用的橋，而不是一支一支手搬
 
 > **這份文件回答：怎麼把大部分常用的 Matrix client API 改成 WebSocket pack，搬的順序是什麼，每一支要花多少。**
-> 狀態：✅ 維護者同意（PR #55）；橋的層與批 1 的 37 支在 PR #56 實作。維護者 2026-09-14：「把大部分常用的 api 接口改成 web socket pack 的模式 —— account 註冊、登入、登出、session 相關、room 相關、device，看能做多少、多快；行數少就多做一點，難度高就少做一點，慢慢移植。」
+> 狀態：✅ 維護者同意（PR #55）；橋的層與批 1 的 37 支在 PR #56 實作。📄 批 2（註冊＋UIAA，8 支）提案中，見 §3 與 §5「批 2 要維護者決定的」。維護者 2026-09-14：「把大部分常用的 api 接口改成 web socket pack 的模式 —— account 註冊、登入、登出、session 相關、room 相關、device，看能做多少、多快；行數少就多做一點，難度高就少做一點，慢慢移植。」
 > 上位文件：[wbf-pack-pipeline.md](wbf-pack-pipeline.md) §7（搬一個端點的七步）、[wbf-wire-format.md](wbf-wire-format.md) §3.3（kind 分配表）。
 
 ## 0. 一句話
@@ -228,18 +228,98 @@ pack 可以從兩條路進來：WebSocket，或 `POST /_wbf/v1/pack`。**兩條�
 
 ⚠️ **批 1 的 e2e 規矩**：每支都要**原本的 Matrix HTTP 端點打一次、橋打一次、結果一致**（pipeline §7 第 6 步）。另外**關卡要有反向檢查**，不能只驗正常路徑：被暫停的帳號在 WS 上 `createRoom` 被拒、被鎖的帳號被拒 —— 這幾條就是這座橋存在的理由，沒有測到等於沒有。
 
-### 批 2：註冊（難度中）
+### 批 2：註冊 ＋ 要 UIAA 的（📄 提案，2026-09-15，等維護者同意）
 
-`POST /register` 的 route 有 493 行，而且有三件橋沒有的事：
-- **匿名**：沒有 session 就能發。
-- **會改變連線身份**：註冊成功就發 token，這條連線要變成那個帳號 —— 跟 `Login` 一樣要過 `wbf_ws_max_connections_per_device` 的名額閘門（pipeline §2.1）。
-- **註冊的 UIAA**：registration token、`m.login.dummy`。
+> 原本的規劃是「批 2 註冊手寫 `Session/Register`、批 3 UIAA 另外定格式」。批 1 做完再看，**兩件都不需要新的東西**，所以併成一批、全部走橋。下面是理由與要維護者決定的地方。
 
-所以它是一支手寫的 `Session/Register`（`0x10` 已經有 Login／Refresh／Logout），比照 `Login` 把「發 session」那段抽出來共用。`register/available`、`token_validity` 這兩支是匿名的唯讀查詢，走橋就好。
+#### 2-A. 註冊不必手寫：`inhibit_login` ＋ 既有的 `Session/Login`
 
-### 批 3：要 UIAA 的（難度中高）
+原本擔心的三件事（§3 舊版）：
 
-停用帳號、改密碼、刪裝置（單一與批次）。橋能跑它們，但 UIAA 是多來回的：第一次回 401 帶 `flows` 與 `session`，client 帶 `auth` 再送一次。要定的是 WS 上那個 401 長什麼樣（`Error` 帶哪些欄位），以及 client 怎麼接回同一個 `session`。這批等批 1 的錯誤格式定下來再做。
+| 擔心的 | 現在 |
+|---|---|
+| **匿名**：沒有 session 就能發 | 橋本來就不要求 session：沒登入的 WS 連線送橋的 pack，就是不帶 `Authorization` 的 HTTP 請求（批 1 e2e13 已驗：匿名的 `WhoAmI` 到得了端點、拿到端點自己的 401） |
+| **會改變連線身份** | Matrix 的 `/register` 有 **`inhibit_login: true`**：只建帳號，不建裝置、不發 token。建完再送一個既有的 **`Session/Login`**，連線身份的變更、`wbf_ws_max_connections_per_device` 名額閘門、登入限速，全部走已經有的那條路 |
+| **註冊的 UIAA**（registration token、`m.login.dummy`、同意條款、email） | 跟 2-B 同一條規則：第一次回 401 帶 `flows`，client 帶 `auth` 再送 |
+
+所以流程是：
+
+```
+client                                          server
+  │ Session 0x21 UsernameAvailable {username}  →   （可選）
+  │ Session 0x20 Register  data {username, password, inhibit_login: true}
+  │                                           ←   Error 401, data {flows, session}      ← UIAA 第一輪
+  │ Session 0x20 Register  data {…, auth: {type, session, …}}
+  │                                           ←   Ack, data {user_id}                    ← 帳號建好，沒有 token
+  │ Session 0x01 Login     meta {password 登入}  →   （原生，不帶 bit4）
+  │                                           ←   Ack {user_id, device_id, access_token} ← 這條連線變成那個帳號
+```
+
+- ⭐ **關卡一條不少**：`allow_registration`、registration token、appservice 命名空間、`forbidden_usernames`、`@system` 被佔住（#57），全是 HTTP 那一道本身。**省掉的是 493 行 route 的抽取**，而原本要抽的正是這些關卡最容易漏抄的地方。
+- 代價：多一個來回；密碼在同一條連線上送兩次。
+- ⚠️ **沒帶 `inhibit_login`** 的註冊：端點照 HTTP 的行為建裝置、發 token，token 在回覆的 data 裡，但**這條連線不會變成那個帳號**（橋不改連線身份、也不看 body）。不危險（跟 HTTP 呼叫一模一樣），只是白發一個 token。→ **決定 1**。
+- 訪客註冊（`kind=guest`）不能 `inhibit_login`，同上：拿得到 token，連線不變。→ 併入決定 1。
+- 📎 HTTP pack 在傳輸層就要 token，所以匿名註冊**只能走 WS**。
+- ⚠️ **沒登入的 WS 連線只活 `wbf_ws_unauthenticated_timeout`（預設 30 秒，從升級算起，ping 不延長）**。要 email 驗證、或使用者看到 `flows` 才去找註冊碼的註冊，一定超過。註冊的 UIAA `session` 存在 server（鍵是伺服器帳號，跟連線無關），所以 client **重連一條匿名連線、帶同一個 `session` 接著送**就行。→ **決定 4**。
+
+#### 2-B. UIAA 不必另定格式：批 1 已經把整個 Matrix 錯誤 body 放進 data
+
+批 1 定的「失敗回覆的 data ＝ Matrix 錯誤 body 原樣」（bridge-specs §4 第 1 點），就是為了這一批。UIAA 在 WS 上長這樣，**沒有新欄位**：
+
+```
+第一輪  → Account 0x2D Deactivate   data {}
+       ← Error  01 01 03 14
+           meta {"code":"Unauthorized","code_id":1301,"message":"…","status":401}
+           data {"flows":[{"stages":["m.login.password"]}],"session":"xYz","params":{}}
+第二輪  → Account 0x2D Deactivate   data {"auth":{"type":"m.login.password","session":"xYz","identifier":{…},"password":"…"}}
+       ← Ack    data {"id_server_unbind_result":"no-support"}
+密碼錯  ← Error  meta {…,"errcode":"M_FORBIDDEN","status":401}   data {"flows":…,"session":"xYz","completed":[],"errcode":"M_FORBIDDEN",…}
+```
+
+- client 怎麼分辨「要 UIAA」和「沒登入」：**走橋的回覆（bit4）、status 401、data 有 `flows`** ＝ UIAA 挑戰；沒登入的 401 有 `errcode` `M_MISSING_TOKEN`／`M_UNKNOWN_TOKEN`、沒有 `flows`。→ **決定 2**（要不要在 meta 另加一個旗標，省得 client 解 data）。
+- `session` 由 server 存。已登入的這幾支以「這個帳號、這個裝置」為鍵，所以同一個裝置的另一條連線也接得上（實作時 e2e 驗）。
+- **對連線的影響**：
+  - 停用帳號、刪掉**自己這個**裝置之後，這條連線的 token 就失效。回覆照樣先送到，**下一個 pack** 被 `revalidate` 擋下並關連線（批 1 §1.2 那一道）。
+  - 改密碼的 `logout_devices` 保留發請求的那個裝置（HTTP 本來的行為），所以這條連線不受影響。
+- 密碼猜測的限速：跟 HTTP 的 UIAA 一樣（同一個 `auth_uiaa`），橋不另加也不減。
+
+#### 2-C. 這一批的端點
+
+| kind | subtype | 名稱 | 端點 | 變數 | data |
+|---|---|---|---|---|---|
+| `0x10 Session` | `0x20` | Register | `POST /register` | query `kind` | JSON：`/register` 的 body（建議 `inhibit_login: true`） |
+| | `0x21` | UsernameAvailable | `GET /register/available` | query `username` | — |
+| | `0x22` | RegistrationTokenValidity | `GET /_matrix/client/v1/register/m.login.registration_token/validity` | query `token` | — |
+| | `0x23` | LoginTypes | `GET /login` | — | — |
+| `0x11 Account` | `0x2C` | ChangePassword | `POST /account/password` | — | JSON：`new_password`、`logout_devices`、`auth` |
+| | `0x2D` | Deactivate | `POST /account/deactivate` | — | JSON：`erase`、`auth` |
+| `0x16 Device` | `0x23` | DeleteDevice | `DELETE /devices/{device_id}` | `device_id` | JSON：`auth` |
+| | `0x24` | DeleteDevices | `POST /delete_devices` | — | JSON：`devices`、`auth` |
+
+共 8 支。`0x10` 的 `0x01`–`0x03`（Login／Refresh／Logout）是原生的，橋的號碼照慣例從 `0x20` 起。`LoginTypes` 不是註冊，但 client 在登入畫面前要知道 server 支援哪些登入方式，順手放進來。
+
+- 🔧 **橋要改的一處**：`RegistrationTokenValidity` 只有 v1 路徑（MSC3231 進規格時就是 v1），而 `shape_of` 現在只收 v3。改成「**有 v3 取 v3，沒有就取 ruma 列的最新穩定路徑**」，批 1 的 37 支全是 v3，不受影響；總表的端點欄照寫完整路徑。→ **決定 3**。
+- 🔧 **補一條測試**（批 1 留下的待查，已查清楚）：`ip_source` 與信任網段是外層 Router 用 layer 放進請求的 extension（`router/layers.rs`），橋的 Router 沒有這些 layer、橋組的請求也只帶 `ConnectInfo`。所以走橋的呼叫在端點一定走「沒設 `ip_source`」的路：掃轉發 header（橋一個都不帶）→ `ConnectInfo`，而那個位址是**傳輸層已經照 `ip_source` 解析好的 client IP**。行為正確、client 偽造不了；測試把它釘住。
+
+#### 2-D. e2e（沿用批 1 的規矩）
+
+每支橋打一次、HTTP 打一次、結果一致；另外：
+- 註冊的反向檢查：`allow_registration = false` 被拒、registration token 錯被拒、`system` 註冊不到（`M_USER_IN_USE`）、`forbidden_usernames` 被拒 —— 跟 HTTP 一模一樣。
+- 完整流程：匿名 WS 連線 → `Register`（UIAA 兩輪）→ `Login` → `WhoAmI` 是新帳號；超過裝置名額的 `Login` 照樣 `TooManyConnections`。
+- UIAA：第一輪拿到 `flows`＋`session`、密碼錯拿到 `M_FORBIDDEN` 且 `session` 不變、第二輪成功；刪掉自己的裝置後下一個 pack 被拒並關連線。
+
+### 批 3 之後：候選清單（等維護者挑）
+
+批 2 做完，`account 註冊、登入、登出、session、room、device` 這幾類（維護者 2026-09-14 點名的）就都在通道上了。剩下常用、橋可以直接跑的：
+
+| 類 | 端點 | 備註 |
+|---|---|---|
+| 推播規則、pusher、通知列表 | `/pushrules/…`、`/pushers`、`/notifications` | `0x18` |
+| 使用者目錄、公開房間目錄 | `/user_directory/search`、`/publicRooms` | |
+| 房間：升級、敲門、回報 | `/rooms/{id}/upgrade`、`/knock/{id}`、`/rooms/{id}/report/{eventId}` | 升級與敲門有暫停帳號的關卡 |
+| 關聯、討論串、搜尋 | `/rooms/{id}/relations/…`、`/rooms/{id}/threads`、`/search` | |
+| 在線狀態、filter、capabilities | `/presence/…`、`/user/{id}/filter`、`/capabilities` | |
+| E2EE 金鑰、備份、cross-signing | `/keys/…`、`/room_keys/…` | `0x17`；量大，client 用的 matrix-sdk 走 HTTP，要先問 client 那邊要不要 |
 
 ### 不搬（至少這一輪）
 
@@ -265,6 +345,25 @@ pack 可以從兩條路進來：WebSocket，或 `POST /_wbf/v1/pack`。**兩條�
    📌 維護者 2026-09-14 開工時指定落點：**號碼寫在 [../bridge-specs/index.md](../bridge-specs/index.md) 的總表**（不是 wire-format §3.2），每一批的詳細範例寫在同目錄的 kind 檔。wire-format §3.3 指過去。
 
 ✅ **維護者 2026-09-14 給了開工訊號**：分支 `wbf/api-bridge`。順序是先寫 [../bridge-specs/index.md](../bridge-specs/index.md) 的總表 → 寫橋的那一層 → 才真的搬。
+
+### 批 2 要維護者決定的（2026-09-15 提案）
+
+我的建議寫在每條後面。
+
+1. **沒帶 `inhibit_login` 的註冊怎麼辦？**（§3 批 2-A）
+   - (a) 照 HTTP 放行：帳號建好、token 在 data，連線不變。橋照舊不看 body。
+   - (b) 橋對 `Register` 這一列特別檢查 body，沒帶 `inhibit_login: true` 就 `InvalidRequest`。
+   - 建議 **(a)**：跟 HTTP 行為一致、不危險；橋一旦開始為某一列看 body，就是第二套規則。範例檔寫清楚「要帶 `inhibit_login: true`，再送 `Login`」。
+2. **UIAA 挑戰要不要在 meta 另加旗標？**（§3 批 2-B）
+   - (a) 不加：client 看「bit4 ＋ status 401 ＋ data 有 `flows`」。
+   - (b) meta 多一個 `uiaa: true`。
+   - 建議 **(a)**：失敗回覆的 data 本來就是 Matrix body，client 要拿 `session` 一定得解；多一個欄位是同一件事的第二份。
+3. **只有 v1 路徑的端點**：`shape_of` 改成「有 v3 取 v3，沒有取最新穩定路徑」（§3 批 2-C）。建議照做。
+4. **註冊超過 30 秒的匿名時限**（§3 批 2-A）：
+   - (a) 不改時限，client 重連、帶同一個 UIAA `session` 接著送。
+   - (b) 沒登入的連線每送一個走橋的 pack 就延長時限。
+   - 建議 **(a)**：時限存在是為了不讓匿名連線佔著資源；讓匿名連線自己延長，就等於沒有時限。
+5. **批 2 的號碼與清單**（§3 批 2-C 那 8 支）要增要減？
 
 ## 6. 同意之後的落點
 
