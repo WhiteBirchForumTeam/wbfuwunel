@@ -1,7 +1,7 @@
 # 常用 Matrix API 走通道：一座通用的橋，而不是一支一支手搬
 
 > **這份文件回答：怎麼把大部分常用的 Matrix client API 改成 WebSocket pack，搬的順序是什麼，每一支要花多少。**
-> 狀態：📄 提案，等維護者同意。維護者 2026-09-14：「把大部分常用的 api 接口改成 web socket pack 的模式 —— account 註冊、登入、登出、session 相關、room 相關、device，看能做多少、多快；行數少就多做一點，難度高就少做一點，慢慢移植。」
+> 狀態：✅ 維護者同意（PR #55）；橋的層與批 1 的 37 支在 PR #56 實作。維護者 2026-09-14：「把大部分常用的 api 接口改成 web socket pack 的模式 —— account 註冊、登入、登出、session 相關、room 相關、device，看能做多少、多快；行數少就多做一點，難度高就少做一點，慢慢移植。」
 > 上位文件：[wbf-pack-pipeline.md](wbf-pack-pipeline.md) §7（搬一個端點的七步）、[wbf-wire-format.md](wbf-wire-format.md) §3.3（kind 分配表）。
 
 ## 0. 一句話
@@ -87,7 +87,8 @@ pack（kind＝領域、subtype＝操作；meta＝變數；data＝body 的 bytes�
 | 要動的上游檔案 | `router/args.rs` | ✅ **零**（下面那個 seam 是 fork 自己的檔案） |
 | 每支端點的成本 | 分配表一列（型別 ＋ route 函式） | 分配表一列（只要型別） |
 
-📎 **層級沒有問題**：Matrix 的路由表是 **`api` crate 自己的** `tuwunel_api::router::build()` 組的（`router` crate 只是接上 fallback、掛 middleware、`with_state`）。所以橋可以在 `api` 裡組一份自己的 `Router<State>`，不必反過來依賴 `router` crate。**唯一的 seam**：`State` 裡那個 Services 指標是 `router` crate 建的，所以由它在啟動時呼叫一次 `wbf::install_bridge_router(state)`，把組好的 Router 交給橋。一行，方向還是 `api ← router`。
+📎 **層級沒有問題**：Matrix 的路由表是 **`api` crate 自己的** `tuwunel_api::router::build()` 組的（`router` crate 只是接上 fallback、掛 middleware、`with_state`）。所以橋可以在 `api` 裡組一份自己的 `Router<State>`，不必反過來依賴 `router` crate。**唯一的 seam**：`State` 裡那個 Services 指標是 `router` crate 建的，所以由它建橋的 Router（`tuwunel_api::router::build_bridge_router(state, server)`），**用 axum 的 `Extension` 掛在對外的 Router 上**；WebSocket 與 HTTP pack 兩個入口從請求裡取出來、放進 `PackContext`。方向還是 `api ← router`。
+🚨 **為什麼不是「啟動時存進一個全域變數」**（提案原本這樣寫，實作時改掉）：橋的 Router 持有 `State`，而 `State` 是指向 `Services` 的裸指標。tuwunel 支援在**同一個 process 裡重載模組**（`src/main/mods.rs`），`Services` 會被重建；全域那一份會繼續指著已經丟掉的 `Services`。掛在對外的 Router 上，它就跟那個 Router 同生同死，永遠不會活得比它指著的 `Services` 久。
 
 📎 **橋用的是自己組的那份 Router，不是對外服務的那份** —— 對外那份掛著 CORS、壓縮、逾時這些 HTTP 的 middleware，對一個內部呼叫沒有意義（壓縮還要再解一次）。
 
@@ -260,18 +261,19 @@ pack 可以從兩條路進來：WebSocket，或 `POST /_wbf/v1/pack`。**兩條�
 3. ~~**`Error` 多帶 Matrix `errcode`？**~~ ✅ **要，放在 meta**（維護者 2026-09-14，§2.4）。線上格式的增補，client 要跟。
 4. ~~**橋上的操作准走 HTTP pack？**~~ ✅ **橋不看傳輸層**（維護者 2026-09-14，§2.5）：WS 與 HTTP 傳的都是 pack，走不走橋只看 bit4。「HTTP 不可」留在原生 handler 的准入表。
 5. ~~**批 1 的清單要增要減？**~~ ✅ **這批就夠**（維護者 2026-09-14）。方向是**之後幾乎全部搬過去**，不必一個 commit 全上，一批一批來、常用的先上。
-6. ~~**subtype 號什麼時候給？**~~ ✅ **開始寫程式時才補進文件**（維護者 2026-09-14）。照 Matrix 規格章節裡端點出現的順序排，寫進 wire-format §3.2；分配了就不改（§3.3）。粒度（一個 subtype 對一個端點）已定。
+6. ~~**subtype 號什麼時候給？**~~ ✅ **開始寫程式時才補進文件**（維護者 2026-09-14）。照 Matrix 規格章節裡端點出現的順序排；分配了就不改（§3.3）。粒度（一個 subtype 對一個端點）已定。
+   📌 維護者 2026-09-14 開工時指定落點：**號碼寫在 [../bridge-specs/index.md](../bridge-specs/index.md) 的總表**（不是 wire-format §3.2），每一批的詳細範例寫在同目錄的 kind 檔。wire-format §3.3 指過去。
 
-⚠️ **實作還沒有開始，也還沒有要開始**：維護者會給明確的開始訊號。這份文件在那之前只是定案的設計。
+✅ **維護者 2026-09-14 給了開工訊號**：分支 `wbf/api-bridge`。順序是先寫 [../bridge-specs/index.md](../bridge-specs/index.md) 的總表 → 寫橋的那一層 → 才真的搬。
 
 ## 6. 同意之後的落點
 
 | 做什麼 | 落點 |
 |---|---|
 | 橋自己的 Router（`tuwunel_api::router::build` 組一份，不掛 middleware）、分配表、meta ↔ request／ response 轉換 | `src/api/client/wbf/bridge.rs`（新） |
-| 把組好的 Router 交給橋（啟動時一行，因為 `State` 是那邊建的） | `src/router/router.rs` 呼叫 `wbf::install_bridge_router(state)` |
+| 建橋的 Router 並用 `Extension` 掛在對外的 Router 上（`State` 是那邊建的） | `src/api/router.rs` 的 `BridgeRouter`、`build_bridge_router`；`src/router/router.rs` 掛上；`wbf/mod.rs` 與 `ws.rs` 取出來放進 `PackContext` |
 | 上游的 `router/args.rs`、`auth.rs` | **不動** |
 | 錯誤對應補齊、`errcode` | `src/api/client/wbf/mod.rs` 的 `Reject::from(Error)`；wire-format §3.4 |
-| 派發 | `wbf/mod.rs` 的 `dispatch`：`0x11`／`0x13`／`0x15` 與 `0x14`、`0x16` 裡新的 subtype 進橋 |
-| 契約 | wire-format §3.2 每支一列；pipeline §7 改寫成「搬一個端點＝分配表一列」 |
+| 派發 | `wbf/mod.rs` 的 `dispatch`：看 bit4 分兩條路（§2.3），不看 kind |
+| 契約 | [bridge-specs/index.md](../bridge-specs/index.md) 每支一列（wire-format §3.2 只列原生的），每個 kind 一份 `KIND.md` 寫範例；pipeline §7 標明一般端點走橋 |
 | 向量、e2e | `core/wbf/vectors.rs`；新腳本 `tests/e2e/e2e13.ps1` |

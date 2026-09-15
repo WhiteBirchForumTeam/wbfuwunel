@@ -15,6 +15,7 @@
 use std::net::IpAddr;
 
 use axum::{
+	Extension,
 	body::Bytes,
 	extract::State,
 	http::{HeaderMap, StatusCode, header},
@@ -22,9 +23,13 @@ use axum::{
 };
 use ruma::{
 	DeviceId, Mxc, OwnedDeviceId, OwnedUserId, UserId,
-	api::error::{ErrorKind, UnknownTokenErrorData},
+	api::{
+		OutgoingResponse,
+		client::uiaa::UiaaResponse,
+		error::{ErrorKind, UnknownTokenErrorData},
+	},
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tuwunel_core::{
 	Error, Result, debug, err, error,
 	wbf::{
@@ -39,6 +44,7 @@ use tuwunel_service::{
 	media::{UploadError, UploadRequest},
 };
 
+mod bridge;
 mod device;
 mod draft;
 mod recent;
@@ -49,7 +55,7 @@ mod ws;
 
 pub(crate) use self::ws::ws_route;
 use self::draft::stream;
-use crate::ClientIp;
+use crate::{ClientIp, router::BridgeRouter};
 
 /// `Control` subtypes.
 mod control {
@@ -96,13 +102,14 @@ mod event {
 pub(crate) async fn pack_route(
 	State(services): State<crate::State>,
 	ClientIp(client): ClientIp,
+	bridge: Option<Extension<BridgeRouter>>,
 	headers: HeaderMap,
 	body: Bytes,
 ) -> Result<Response> {
 	let session = match authenticate(&services, &headers).await {
 		| Ok(session) => session,
 		| Err(error) => {
-			let reply = error_pack(0, 0, RejectCode::Unauthorized, &error.to_string());
+			let reply = refuse_session(error).into_pack(0, 0);
 			return Ok(pack_response(StatusCode::UNAUTHORIZED, reply));
 		},
 	};
@@ -111,7 +118,13 @@ pub(crate) async fn pack_route(
 	let reply = match decode(&mut body) {
 		| Ok(view) => {
 			let (id, seq) = (view.header.id, view.header.seq);
-			let ctx = PackContext { session: Some(&session), client, transport: Transport::Http, connection: 0 };
+			let ctx = PackContext {
+				session: Some(&session),
+				client,
+				transport: Transport::Http,
+				connection: 0,
+				bridge: bridge.as_ref().map(|Extension(bridge)| bridge),
+			};
 			let mut reply = Reply::for_http();
 			// The session change is dropped: no kind admitted on HTTP makes one.
 			match handle_pack(&services, &ctx, view, &mut reply).await {
@@ -294,6 +307,9 @@ pub(crate) struct PackContext<'a> {
 	/// The WebSocket connection's number (`Channels::next_connection_id`);
 	/// 0 on HTTP, which has no connection to subscribe.
 	pub(crate) connection: ConnectionId,
+	/// Where bridge calls go (`bridge.rs`). `None` only when the served router
+	/// was built without one, and then every bridge call is refused.
+	pub(crate) bridge: Option<&'a BridgeRouter>,
 }
 
 impl PackContext<'_> {
@@ -594,28 +610,60 @@ pub(crate) async fn handle_pack(
 	reply: &mut Reply,
 ) -> Result<SessionChange, ReplyError> {
 	let (id, seq) = (view.header.id, view.header.seq);
+	// A bridge call's refusal says it answers a bridge call, the way its
+	// success does (`docs/design/wbf-api-bridge.md` §2.3).
+	let reply_flags = if view.header.flags.is_bridged() {
+		Flags::IS_RESPONSE.union(Flags::IS_BRIDGED)
+	} else {
+		Flags::IS_RESPONSE
+	};
 	match dispatch(services, ctx, &view, reply).await {
 		| Ok(change) => Ok(change),
 		| Err(Failure::Reply(error)) => Err(error),
 		| Err(Failure::Reject(reject)) => {
 			let closes_connection = reject.closes_connection;
-			reply.send(reject.into_pack(id, seq)).await?;
+			reply.send(reject.into_reply_pack(id, seq, reply_flags)).await?;
 			Ok(if closes_connection { SessionChange::Close(CloseReason::Refused) } else { SessionChange::Keep })
 		},
 	}
 }
 
+/// Splits the two roads a pack can take, on `IS_BRIDGED` and nothing else:
+/// a bridge call goes to `bridge::handle` and its table, everything else to
+/// the native handlers and theirs. Neither road looks at the other's table
+/// (`docs/design/wbf-api-bridge.md` §2.3).
 async fn dispatch(
 	services: &Services,
 	ctx: &PackContext<'_>,
 	view: &PackView<'_>,
 	reply: &mut Reply,
 ) -> Result<SessionChange, Failure> {
-	let header = view.header;
 	let limits_ok = view.meta.len() <= services.config.wbf_meta_max_bytes
 		&& view.data.len() <= services.config.wbf_data_max_bytes;
 	if !limits_ok {
 		return Err(Reject::code(RejectCode::TooLarge, "meta or data exceeds the configured limit").into());
+	}
+
+	if view.header.flags.is_bridged() {
+		bridge::handle(services, ctx, view, reply).await?;
+		return Ok(SessionChange::Keep);
+	}
+
+	dispatch_native(services, ctx, view, reply).await
+}
+
+async fn dispatch_native(
+	services: &Services,
+	ctx: &PackContext<'_>,
+	view: &PackView<'_>,
+	reply: &mut Reply,
+) -> Result<SessionChange, Failure> {
+	let header = view.header;
+	// The split above already sent bridge calls away. This is the road asking
+	// again rather than trusting that, so a change to the split cannot hand a
+	// native handler a pack that claims to be a bridge call.
+	if header.flags.is_bridged() {
+		return Err(Reject::code(RejectCode::Unsupported, "a bridge call reached the native handlers").into());
 	}
 
 	let Some(admission) = admission(header.kind, header.subtype) else {
@@ -737,13 +785,18 @@ impl Reject {
 		}
 	}
 
-	pub(crate) fn into_pack(self, id: u64, seq: u32) -> Vec<u8> {
+	pub(crate) fn into_pack(self, id: u64, seq: u32) -> Vec<u8> { self.into_reply_pack(id, seq, Flags::IS_RESPONSE) }
+
+	/// Args:
+	///     flags: the reply's flags — `IS_RESPONSE`, plus `IS_BRIDGED` when
+	///         the request was a bridge call (its reply says so too)
+	fn into_reply_pack(self, id: u64, seq: u32, flags: Flags) -> Vec<u8> {
 		let mut meta = json!({ "code_id": self.code.id(), "code": self.code.name(), "message": self.message });
 		if let (Value::Object(target), Value::Object(extra)) = (&mut meta, self.extra) {
 			target.extend(extra);
 		}
 
-		PackBuilder::new(Kind::Control, control::ERROR, Flags::IS_RESPONSE, id, seq)
+		PackBuilder::new(Kind::Control, control::ERROR, flags, id, seq)
 			.json_meta(&meta)
 			.map(PackBuilder::finish)
 			.unwrap_or_else(|_| error_pack(id, seq, RejectCode::Internal, "could not encode the error"))
@@ -777,17 +830,91 @@ impl From<UploadError> for Reject {
 }
 
 impl From<Error> for Reject {
+	/// The Matrix error is rendered the way HTTP would answer it and read back
+	/// with the rule the bridge uses (`matrix_error_fields`), so a native
+	/// refusal and a bridged one name the same `errcode` for the same error.
 	fn from(error: Error) -> Self {
-		let code = match error.status_code() {
-			| StatusCode::NOT_FOUND | StatusCode::GONE => RejectCode::NotFound,
-			// A 400 from the Matrix layer is a request this server cannot
-			// accept as written, not a state conflict (wire-format 3.4).
-			| StatusCode::BAD_REQUEST => RejectCode::InvalidRequest,
-			| StatusCode::PAYLOAD_TOO_LARGE => RejectCode::TooLarge,
-			| _ => RejectCode::Internal,
-		};
+		let message = error.to_string();
+		let (status, body) = render_matrix_error(error);
 
-		Self::code(code, error.to_string())
+		Self::with_extra(reject_code_for_status(status), message, Value::Object(matrix_error_fields(status, &body)))
+	}
+}
+
+/// The refusal for a session that is not (or no longer) good: always
+/// `Unauthorized`, whatever status the Matrix error carries, with that error's
+/// `errcode` and `soft_logout` so a client can tell a lock from a logout.
+fn refuse_session(error: Error) -> Reject {
+	let mut refusal = Reject::from(error);
+	refusal.code = RejectCode::Unauthorized;
+	refusal
+}
+
+/// Return:
+///     (StatusCode, Vec<u8>)  the status and JSON body a Matrix HTTP endpoint
+///     answers this error with; (500, empty) if ruma cannot render it
+fn render_matrix_error(error: Error) -> (StatusCode, Vec<u8>) {
+	let response: UiaaResponse = error.into();
+
+	match response.try_into_http_response::<Vec<u8>>() {
+		| Ok(http) => (http.status(), http.into_body()),
+		| Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Vec::new()),
+	}
+}
+
+/// The Matrix facts an `Error` pack's meta carries besides `code_id`, `code`
+/// and `message`: the one rule for a native refusal and a bridged reply.
+///
+/// Args:
+///     status: example: StatusCode::UNAUTHORIZED
+///     body: example: `{"errcode":"M_USER_LOCKED","error":"…","soft_logout":true}`
+/// Return:
+///     Map  always `status`; `errcode`, `retry_after_ms` and `soft_logout`
+///     only when the body has them with the right type (absent, never "")
+fn matrix_error_fields(status: StatusCode, body: &[u8]) -> Map<String, Value> {
+	let matrix_error = serde_json::from_slice::<Value>(body).ok();
+	let matrix_field = |name: &str| matrix_error.as_ref().and_then(|error| error.get(name));
+
+	let mut fields = Map::new();
+	fields.insert("status".into(), json!(status.as_u16()));
+	if let Some(errcode) = matrix_field("errcode").and_then(Value::as_str) {
+		fields.insert("errcode".into(), json!(errcode));
+	}
+	if let Some(retry_after_ms) = matrix_field("retry_after_ms").and_then(Value::as_u64) {
+		fields.insert("retry_after_ms".into(), json!(retry_after_ms));
+	}
+	if let Some(soft_logout) = matrix_field("soft_logout").and_then(Value::as_bool) {
+		fields.insert("soft_logout".into(), json!(soft_logout));
+	}
+
+	fields
+}
+
+/// The wire's code for a Matrix error's HTTP status: what a native handler's
+/// `Error` and a bridged endpoint's response are both reported as.
+///
+/// 🚨 Only statuses recognized here get a code of their own; anything else is
+/// `Internal`. It used to stop at 404/410/400/413, which turned a
+/// `M_FORBIDDEN` or an expired token into "the server's own fault" — the
+/// native handlers rarely met those, the bridge meets them all the time
+/// (`docs/design/wbf-api-bridge.md` §2.4).
+///
+/// Args:
+///     status: example: StatusCode::FORBIDDEN
+/// Return:
+///     RejectCode  example: RejectCode::Forbidden
+fn reject_code_for_status(status: StatusCode) -> RejectCode {
+	match status {
+		| StatusCode::NOT_FOUND | StatusCode::GONE => RejectCode::NotFound,
+		// A 400 from the Matrix layer is a request this server cannot
+		// accept as written, not a state conflict (wire-format 3.4).
+		| StatusCode::BAD_REQUEST => RejectCode::InvalidRequest,
+		| StatusCode::PAYLOAD_TOO_LARGE => RejectCode::TooLarge,
+		| StatusCode::UNAUTHORIZED => RejectCode::Unauthorized,
+		| StatusCode::FORBIDDEN => RejectCode::Forbidden,
+		| StatusCode::TOO_MANY_REQUESTS => RejectCode::RateLimited,
+		| StatusCode::CONFLICT => RejectCode::Conflict,
+		| _ => RejectCode::Internal,
 	}
 }
 
@@ -1055,7 +1182,45 @@ fn pack_response(status: StatusCode, pack: Vec<u8>) -> Response {
 mod tests {
 	use tuwunel_core::wbf::{IdType, Kind, RejectCode, decode};
 
-	use super::{Reject, admission, control, refuse_wrong_id_type};
+	use axum::http::StatusCode;
+	use serde_json::{Value, json};
+	use tuwunel_core::err;
+
+	use super::{
+		Reject, admission, control, matrix_error_fields, refuse_session, refuse_wrong_id_type, reject_code_for_status,
+		unknown_token,
+	};
+
+	#[test]
+	fn matrix_statuses_map_to_the_code_that_names_them_and_nothing_else_is_guessed() {
+		use axum::http::StatusCode;
+
+		// These three used to come out as `Internal`, "the server's own fault".
+		assert_eq!(reject_code_for_status(StatusCode::UNAUTHORIZED), RejectCode::Unauthorized);
+		assert_eq!(reject_code_for_status(StatusCode::FORBIDDEN), RejectCode::Forbidden);
+		assert_eq!(reject_code_for_status(StatusCode::TOO_MANY_REQUESTS), RejectCode::RateLimited);
+
+		assert_eq!(reject_code_for_status(StatusCode::BAD_REQUEST), RejectCode::InvalidRequest);
+		assert_eq!(reject_code_for_status(StatusCode::NOT_FOUND), RejectCode::NotFound);
+		assert_eq!(reject_code_for_status(StatusCode::GONE), RejectCode::NotFound);
+		assert_eq!(reject_code_for_status(StatusCode::CONFLICT), RejectCode::Conflict);
+		assert_eq!(reject_code_for_status(StatusCode::PAYLOAD_TOO_LARGE), RejectCode::TooLarge);
+
+		// Not recognized: the safe answer, not a near miss.
+		assert_eq!(reject_code_for_status(StatusCode::IM_A_TEAPOT), RejectCode::Internal);
+		assert_eq!(reject_code_for_status(StatusCode::BAD_GATEWAY), RejectCode::Internal);
+	}
+
+	#[test]
+	fn a_refusal_carries_the_flags_it_is_given() {
+		use tuwunel_core::wbf::Flags;
+
+		let native = Reject::code(RejectCode::UnknownKind, "no").into_pack(0, 1);
+		assert_eq!(native[3], 0x04, "IS_RESPONSE only");
+
+		let bridged = Reject::code(RejectCode::UnknownKind, "no").into_reply_pack(0, 1, Flags::IS_RESPONSE.union(Flags::IS_BRIDGED));
+		assert_eq!(bridged[3], 0x14, "IS_RESPONSE and IS_BRIDGED");
+	}
 
 	#[test]
 	fn an_id_of_the_wrong_kind_is_refused_before_the_handler_sees_it() {
@@ -1154,5 +1319,80 @@ mod tests {
 		let view = decode(&mut pack).expect("decodes");
 
 		assert_eq!(view.meta_json().expect("json")["expected_seq"], 12);
+	}
+
+	fn meta_of(reject: Reject) -> Value {
+		let mut pack = reject.into_pack(0, 1);
+		decode(&mut pack).expect("decodes").meta_json().expect("json")
+	}
+
+	#[test]
+	fn a_locked_session_is_refused_with_the_errcode_and_soft_logout_http_gives() {
+		let meta = meta_of(refuse_session(err!(Request(UserLocked("This account has been locked.")))));
+
+		assert_eq!(meta["code"], "Unauthorized");
+		assert_eq!(meta["errcode"], "M_USER_LOCKED");
+		assert_eq!(meta["soft_logout"], true);
+		assert_eq!(meta["status"], 401);
+		// The message is what it was before the fields were added.
+		assert_eq!(meta["message"], "M_USER_LOCKED: This account has been locked.");
+
+		const VECTORS: &str = include_str!("../../../../docs/design/wbf-vectors.json");
+		let vectors: Value = serde_json::from_str(VECTORS).expect("the vectors file is JSON");
+		let hex = vectors["packs"]
+			.as_array()
+			.expect("a packs list")
+			.iter()
+			.find(|vector| vector["name"] == "error_session_locked")
+			.expect("the error_session_locked vector")["bytes_hex"]
+			.as_str()
+			.expect("hex")
+			.to_owned();
+		let built: String = refuse_session(err!(Request(UserLocked("This account has been locked."))))
+			.into_pack(0, 60)
+			.iter()
+			.map(|byte| format!("{byte:02x}"))
+			.collect();
+		assert_eq!(built, hex, "the vector is what the server sends");
+	}
+
+	#[test]
+	fn an_expired_token_and_a_missing_one_are_told_apart_by_errcode_and_soft_logout() {
+		let expired = meta_of(refuse_session(unknown_token(true, "Access token expired.")));
+		assert_eq!(expired["errcode"], "M_UNKNOWN_TOKEN");
+		assert_eq!(expired["soft_logout"], true);
+
+		let revoked = meta_of(refuse_session(unknown_token(false, "Unknown access token.")));
+		assert_eq!(revoked["errcode"], "M_UNKNOWN_TOKEN");
+		assert_eq!(revoked.get("soft_logout"), None, "Matrix writes soft_logout only when true; so do we");
+
+		let missing = meta_of(refuse_session(err!(Request(MissingToken("Missing access token.")))));
+		assert_eq!(missing["errcode"], "M_MISSING_TOKEN");
+		assert_eq!(missing.get("soft_logout"), None, "absent when the Matrix body has none");
+	}
+
+	#[test]
+	fn a_session_refusal_is_unauthorized_even_when_the_matrix_status_is_not_401() {
+		let meta = meta_of(refuse_session(err!(Request(Forbidden("not yours")))));
+
+		assert_eq!(meta["code"], "Unauthorized", "fail closed: a session failure never reads as anything milder");
+		assert_eq!(meta["errcode"], "M_FORBIDDEN");
+		assert_eq!(meta["status"], 403);
+	}
+
+	#[test]
+	fn a_native_handlers_matrix_error_carries_its_errcode_like_a_bridged_one() {
+		let meta = meta_of(Reject::from(err!(Request(NotFound("Profile was not found.")))));
+
+		assert_eq!(meta["code"], "NotFound");
+		assert_eq!(meta["errcode"], "M_NOT_FOUND");
+		assert_eq!(meta["status"], 404);
+	}
+
+	#[test]
+	fn a_body_without_matrix_fields_adds_only_the_status() {
+		let fields = matrix_error_fields(StatusCode::BAD_GATEWAY, b"<html>bad gateway</html>");
+
+		assert_eq!(Value::Object(fields), json!({ "status": 502 }));
 	}
 }

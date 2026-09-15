@@ -129,7 +129,14 @@ impl Flags {
 	/// The last pack of its ordered sequence: the final chunk of an upload,
 	/// the final fragment of a stream.
 	pub const IS_LAST: Self = Self(0b0000_1000);
-	const KNOWN: u8 = 0b0000_1111;
+	/// This pack is a Matrix endpoint call through the bridge
+	/// (`docs/design/wbf-api-bridge.md` §2.3); its reply carries it too.
+	///
+	/// ⭐ It was a reserved bit until the bridge, so a server older than the
+	/// bridge refuses such a pack as `Corrupt` instead of reading it as
+	/// something else.
+	pub const IS_BRIDGED: Self = Self(0b0001_0000);
+	const KNOWN: u8 = 0b0001_1111;
 
 	/// Whether every bit of `other` is set.
 	#[must_use]
@@ -154,6 +161,10 @@ impl Flags {
 	/// Whether `IS_LAST` is set.
 	#[must_use]
 	pub const fn is_last(self) -> bool { self.contains(Self::IS_LAST) }
+
+	/// Whether `IS_BRIDGED` is set.
+	#[must_use]
+	pub const fn is_bridged(self) -> bool { self.contains(Self::IS_BRIDGED) }
 
 	const fn has_reserved_bits(self) -> bool { self.0 & !Self::KNOWN != 0 }
 }
@@ -559,6 +570,21 @@ mod tests {
 		let mut flags = sample();
 		flags[3] = 0b1000_0000;
 		assert_eq!(decode(&mut flags).err(), Some(PackError::ReservedFlags(0b1000_0000)));
+
+		// The bit above the bridge is still reserved.
+		let mut above_bridge = sample();
+		above_bridge[3] = 0b0010_0000;
+		assert_eq!(decode(&mut above_bridge).err(), Some(PackError::ReservedFlags(0b0010_0000)));
+	}
+
+	#[test]
+	fn the_bridge_bit_decodes_and_is_read_back() {
+		let mut bytes = PackBuilder::new(Kind::Account, 0x20, Flags::IS_BRIDGED, 0, 1).finish();
+		assert_eq!(bytes[..4], [0x01, 0x11, 0x20, 0x10], "the first four bytes the bridge specs index shows");
+
+		let view = decode(&mut bytes).expect("bit4 is a known flag now");
+		assert!(view.header.flags.is_bridged());
+		assert!(!Flags::IS_RESPONSE.is_bridged());
 	}
 
 	#[test]

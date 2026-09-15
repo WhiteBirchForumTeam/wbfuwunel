@@ -53,6 +53,26 @@ pub fn build(router: Router<State>, server: &Server) -> Router<State> {
 	register_legacy_media_routes(router, config.allow_legacy_media)
 }
 
+/// The routing table the wbf bridge hands its internal requests to
+/// (`docs/design/wbf-api-bridge.md` §2.1): the same `build` as the served
+/// router, without the HTTP middleware an internal call has no use for.
+///
+/// ⚠️ It travels as an extension of the served router rather than a global:
+/// it holds the same `State`, a pointer to `Services`, and a module reload
+/// rebuilds `Services` in the same process. Riding on the served router, it
+/// is dropped with it and can never outlive the `Services` it points at.
+#[derive(Clone)]
+pub struct BridgeRouter(pub(crate) Router);
+
+/// Args:
+///     state: the `State` the served router was built with
+///     server: for the configuration `build` reads
+/// Return:
+///     BridgeRouter  to install with `Extension` on the served router
+pub fn build_bridge_router(state: State, server: &Server) -> BridgeRouter {
+	BridgeRouter(build(Router::new(), server).with_state(state))
+}
+
 fn register_client_auth_routes(router: Router<State>) -> Router<State> {
 	router
 		.ruma_route(&client::get_supported_versions_route)
