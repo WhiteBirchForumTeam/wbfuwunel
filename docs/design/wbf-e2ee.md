@@ -1,7 +1,7 @@
 # E2EE 全走通道：金鑰端點上橋、發 to-device、OTK 數量與裝置清單變動
 
 > **這份文件回答：client 要讓 E2EE 完全不靠 `/sync`，server 要補哪幾件事、各自長什麼樣、分幾步做。**
-> 狀態：📄 提案（2026-09-15），等維護者決定是否照做。起因是 issue #65（client 的需求）。
+> 狀態：✅ 維護者 2026-09-16 同意（§6 五條的決定記在各條後面；第 3 條的「算法共用」仍待確認）。起因是 issue #65（client 的需求）。
 > 維護者 2026-09-15：「原本第三批次要加入的 api，可以先 defer，先處理金鑰的部分。」
 > 上位文件：[wbf-api-bridge.md](wbf-api-bridge.md)（橋）、[wbf-to-device.md](wbf-to-device.md)（`0x16 Device`）、[../bridge-specs/index.md](../bridge-specs/index.md)（號碼總表）。
 
@@ -56,7 +56,9 @@ issue 提的是在 `Batch`／`Push` 的 meta 多帶 `otk_counts` 等欄位。我
 
 ### 3.2 形狀
 
-`0x16` 的 `0x08`，server → client，**不帶 bit4**（原生），`id` 抄 `Subscribe`，跟 `Push` 共用那個訂閱與 `seq` 序列。
+`0x16` 的 `0x08`，server → client，**不帶 bit4**（原生）。
+
+⭐ **共用 to-device 的訂閱，沒有新的訂閱**（維護者 2026-09-16 同意）：client 照舊送 `Device/Subscribe{device_id, cd_seq?}`（多一個可選的 `dl_seq`，§3.4），server 對這個訂閱送兩種 pack：佇列裡的事件是 `Push`，狀態變了是 `CryptoState`。兩者的 `id` 都抄 `Subscribe`、**共用同一個 `seq` 序列**（每推一個不論哪種都 +1），收的也是同一條連線：這個裝置佇列的持有者（wbf-to-device §4，後來的接手）。`Unsubscribe` 或被接手（`Superseded`）時，兩種一起停。
 
 ```json
 {
@@ -73,6 +75,7 @@ issue 提的是在 `Batch`／`Push` 的 meta 多帶 `otk_counts` 等欄位。我
 | `unused_fallback_key_types` | **一定有**，可以是 `[]` | 還沒被用掉的 fallback key 演算法。⚠️ **`[]` 與不出現意思不同**：`OlmMachine` 把「沒給」當成 server 不支援、把 `[]` 當成「都用掉了，該換」。所以這一欄**不套**「沒有就不出現」的慣例 |
 | `device_lists` | **一定有**，兩個陣列可以是空的 | 從上一個 `dl_seq` 到這一個之間的變動，語意照 `/sync`（§3.3） |
 | `dl_seq` | **一定有** | 這份 `device_lists` 算到哪個 count。client 存下來，重新訂閱時帶回來（§3.4） |
+| `gap` | **一定有**，bool | `true`：之前有 `CryptoState` 因為發送佇列滿被丟掉，`device_lists` 可能漏了，client 帶目前的 `dl_seq` 重新訂閱補齊（跟 `Push` 的 `gap` 同一套，wbf-event-push §4） |
 
 欄位名照 `/sync` 的語意取短名 → **決定 2**。
 
@@ -119,10 +122,16 @@ issue 提的是在 `Batch`／`Push` 的 meta 多帶 `otk_counts` 等欄位。我
 ## 6. 要維護者決定的
 
 1. **OTK 數量與裝置清單用獨立的 `0x08 CryptoState`，還是併進 `Batch`／`Push`？** 建議 **獨立**（§3.1）。
+   ✅ 維護者 2026-09-16：獨立。
 2. **欄位名**：`otk_counts`、`unused_fallback_key_types`、`device_lists{changed,left}`、`dl_seq`？建議照這組（取 `/sync` 的語意、去掉 `device_` 前綴，因為整個 kind 就是 Device）。
+   ✅ 維護者 2026-09-16：取 `/sync` 的語意，這組名字。
 3. **補窗的算法搬到 service 層，`/sync` 與 `CryptoState` 共用**？建議照做（§3.4）。代價是動到 `/sync` 的程式（行為不變，由 e2e 比對兩邊守住）。
+   ✅ 維護者 2026-09-16 同意「`CryptoState` **共用 to-device 的訂閱**」（§3.2 寫明）。
+   ⏳ **這條原本問的是另一件事，待確認**：server **內部的程式**怎麼算「從 `dl_seq` 到現在，誰的清單變了、誰不再同房」。`/sync` 現在已經有一份（`src/api/client/sync/v3.rs` 的 `gather_device_list_updates`、`collect_device_list_left`），兩個選擇：(a) 把那份搬到 `src/service/`，`/sync`、`CryptoState` 的補窗、`/keys/changes` 三處呼叫同一份；(b) 替通道另寫一份。建議 **(a)**：兩份實作遲早對不上，對不上的那天就是金鑰送不到；代價是會動到 `/sync` 的程式（只搬位置、行為不變）。這是 server 內部的決定，wire 上看不到差別。
 4. **分三個 PR**：(A) 走橋 7 列 → (B) `CryptoState` → (C) 備份 14 列？建議照這個順序；(A) 很小、client 馬上能用，(B) 是這份提案真正的工作量。
+   ✅ 維護者 2026-09-16：同意。
 5. **`/keys/changes`**：(a) 照樣上橋、文件註明 `left` 是空的；(b) 上橋並順便補 `left`（用決定 3 那份共用的算法）；(c) 不上橋。建議 **(b)**，而且放在 (B) 那支 PR —— 共用算法做好之後補 `left` 是幾行的事，也修掉上游的 TODO。
+   ✅ 維護者 2026-09-16：(b)。
 
 ## 7. 落點
 
