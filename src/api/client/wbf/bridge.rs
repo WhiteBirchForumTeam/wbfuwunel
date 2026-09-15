@@ -176,7 +176,7 @@ pub(super) async fn handle(
 	if header.flags.is_meta_encrypted() {
 		return Err(Reject::code(
 			RejectCode::InvalidRequest,
-			"a bridge call's meta is the endpoint's variables; it cannot be ciphertext",
+			"a bridge call's meta is the endpoint's variables in plain JSON; META_ENCRYPTED (flags bit0) must be unset",
 		)
 		.into());
 	}
@@ -447,7 +447,7 @@ fn build_reply_pack(
 	let code = reject_code_for_status(status);
 	let message = serde_json::from_slice::<Value>(body)
 		.ok()
-		.and_then(|error| error.get("error").and_then(Value::as_str).map(ToOwned::to_owned))
+		.and_then(|error| error.get("error").and_then(Value::as_str).map(to_bounded_message))
 		.unwrap_or_else(|| format!("the endpoint answered {status}"));
 	let mut meta = Map::new();
 	meta.insert("code_id".into(), json!(code.id()));
@@ -461,6 +461,30 @@ fn build_reply_pack(
 		.finish())
 }
 
+/// The most of a Matrix error's text an `Error` pack's `message` carries. The
+/// whole body is still in data; this keeps the meta inside its limit however
+/// long the text, so the reply never falls back to `Internal` for its size.
+const MAX_MESSAGE_BYTES: usize = 1024;
+
+/// Args:
+///     text: example: "You don't have permission to post that to the room."
+/// Return:
+///     String  the text unchanged when it fits in `MAX_MESSAGE_BYTES`;
+///     otherwise cut at the last character boundary that fits, with "…"
+fn to_bounded_message(text: &str) -> String {
+	if text.len() <= MAX_MESSAGE_BYTES {
+		return text.to_owned();
+	}
+
+	let ellipsis = "…";
+	let mut end = MAX_MESSAGE_BYTES - ellipsis.len();
+	while !text.is_char_boundary(end) {
+		end -= 1;
+	}
+
+	format!("{}{ellipsis}", &text[..end])
+}
+
 #[cfg(test)]
 mod tests {
 	use std::net::{IpAddr, Ipv4Addr};
@@ -471,7 +495,8 @@ mod tests {
 	use tuwunel_core::wbf::{RejectCode, decode};
 
 	use super::{
-		BRIDGED_ENDPOINTS, EndpointShape, build_reply_pack, build_request, list_path_variables, shape_of,
+		BRIDGED_ENDPOINTS, EndpointShape, MAX_MESSAGE_BYTES, build_reply_pack, build_request, list_path_variables,
+		shape_of, to_bounded_message,
 	};
 
 	const PEER: IpAddr = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
@@ -630,6 +655,26 @@ mod tests {
 		let meta = view.meta_json().expect("meta");
 		assert_eq!(meta["code"], "Internal");
 		assert_eq!(meta.get("errcode"), None, "absent, not an empty string");
+	}
+
+	#[test]
+	fn a_long_matrix_error_is_cut_in_the_message_and_whole_in_the_data() {
+		// Three bytes a character, so a cut at a byte count lands mid-character
+		// unless it looks for the boundary; longer than the whole meta limit.
+		let text = "界".repeat(30_000);
+		let body = serde_json::to_vec(&serde_json::json!({ "errcode": "M_FORBIDDEN", "error": text })).expect("json");
+		let mut pack = build_reply_pack(0, 9, StatusCode::FORBIDDEN, None, &body).expect("builds");
+
+		let view = decode(&mut pack).expect("decodes");
+		let meta = view.meta_json().expect("meta");
+		assert_eq!(meta["code"], "Forbidden", "not the Internal fallback for an oversized meta");
+		assert_eq!(meta["errcode"], "M_FORBIDDEN");
+		let message = meta["message"].as_str().expect("a message");
+		assert!(message.len() <= MAX_MESSAGE_BYTES, "message is {} bytes", message.len());
+		assert!(message.starts_with("界界界") && message.ends_with('…'), "cut on a character, marked as cut");
+		assert_eq!(view.data, body.as_slice(), "the data still carries the whole Matrix error");
+
+		assert_eq!(to_bounded_message("short"), "short", "text that fits is untouched");
 	}
 
 	/// The golden vectors are what clients test their decoders against, so

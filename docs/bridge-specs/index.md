@@ -29,7 +29,7 @@ offset  bytes              意思
 | 結果 | 前 4 byte | meta | data |
 |---|---|---|---|
 | 成功（HTTP 2xx） | `01 01 02 14`（`Control/Ack`，flags ＝ `IS_RESPONSE` ＋ `IS_BRIDGED`） | `{"status": 200, "headers": {"content-type": "application/json"}}` —— 只有表上宣告要轉的 header（橋的設計 §2.2） | Matrix 回應的 body，原樣 bytes |
-| 失敗 | `01 01 03 14`（`Control/Error`，同樣帶 `IS_BRIDGED`） | `{"code_id", "code", "message", "status"}`，Matrix body 裡有的話再帶 `errcode`、`retry_after_ms`、`soft_logout`（橋的設計 §2.4；規則跟原生的錯誤共用，wire-format §3.4） | Matrix 錯誤回應的 body，原樣 bytes（見 §4 待確認 1） |
+| 失敗 | `01 01 03 14`（`Control/Error`，同樣帶 `IS_BRIDGED`） | `{"code_id", "code", "message", "status"}`，Matrix body 裡有的話再帶 `errcode`、`retry_after_ms`、`soft_logout`（橋的設計 §2.4；規則跟原生的錯誤共用，wire-format §3.4）。`message` 是 body 的 `error`，最多 1024 bytes，超過就在字元邊界截斷並以 `…` 結尾 —— 完整的文字在 data | Matrix 錯誤回應的 body，原樣 bytes（見 §4 待確認 1） |
 
 `id`、`seq` 抄請求。
 
