@@ -454,5 +454,116 @@ Check '[2.18] with registration closed, the bridge refuses it exactly as HTTP do
 $anon5.Dispose()
 Stop-Server $server
 
+Log '################ Scenario 3: E2EE (A), the key endpoints and sending to-device through the bridge ################'
+# docs/design/wbf-e2ee.md §2. Each endpoint is the HTTP one, so each is checked against HTTP: what the bridge uploads HTTP
+# reads back, a key the bridge claims HTTP no longer counts, and a to-device sent through the bridge arrives as the
+# native Device/Push on the receiver's holding connection.
+$db5 = "$S\e2e13db5"; Remove-Item -Recurse -Force $db5 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db5 | Out-Null
+$cfg5 = Write-Config $db5 86400
+$server = Start-Server $cfg5 's3'
+$regK = Api Post '/_matrix/client/v3/register' '{"username":"kate","password":"pw-kate-1","auth":{"type":"m.login.dummy"}}' $null
+$regL = Api Post '/_matrix/client/v3/register' '{"username":"leo","password":"pw-leo-1","auth":{"type":"m.login.dummy"}}' $null
+$kate = $regK.user_id; $kateDevice = $regK.device_id; $tokK = $regK.access_token
+$leo = $regL.user_id; $leoDevice = $regL.device_id; $tokL = $regL.access_token
+$wsK = Ws-Open $tokK; $wsL = Ws-Open $tokL
+
+# Shaped like what OlmMachine uploads; the server stores keys and signatures without verifying them.
+function Device-Keys($user, $device) {
+  @{ user_id = $user; device_id = $device; algorithms = @('m.olm.v1.curve25519-aes-sha2', 'm.megolm.v1.aes-sha2')
+     keys = @{ "curve25519:$device" = 'Y3VydmUyNTUxOWtleWZvcmUyZTEzYnJpZGdldGVzdA'; "ed25519:$device" = 'ZWQyNTUxOWtleWZvcmUyZTEzYnJpZGdldGVzdHh4eA' }
+     signatures = @{ $user = @{ "ed25519:$device" = 'c2lnbmF0dXJlZm9yZTJlMTNicmlkZ2V0ZXN0' } } }
+}
+function One-Time-Keys([string]$prefix, [int]$count) {
+  $keys = @{}; for ($n = 1; $n -le $count; $n++) { $keys["signed_curve25519:$prefix$n"] = @{ key = "b3RrJHByZWZpeCRuZm9yZTJlMTM$prefix$n"; signatures = @{} } }; $keys
+}
+function Master-Key($user, [string]$publicKey) { @{ user_id = $user; usage = @('master'); keys = @{ "ed25519:$publicKey" = $publicKey } } }
+function Otk-Count($tok) { (Http POST '/_matrix/client/v3/keys/upload' @{} $tok).json.one_time_key_counts.signed_curve25519 }
+# The to-device items in a Device/Push's data (u32 length prefix each).
+function Push-Items([byte[]]$data) {
+  $items = @(); $at = 0
+  while ($at + 4 -le $data.Length) { $len = [int](RdBE32 $data $at); $at += 4; $items += ,([Text.Encoding]::UTF8.GetString($data, $at, $len) | ConvertFrom-Json); $at += $len }
+  @($items)
+}
+function Next-Push($ws, [int]$ms) {
+  $deadline = [DateTime]::UtcNow.AddMilliseconds($ms)
+  while ([DateTime]::UtcNow -lt $deadline) {
+    $p = Recv-Or-Null $ws ([int][Math]::Max(1, ($deadline - [DateTime]::UtcNow).TotalMilliseconds))
+    if ($null -eq $p) { return $null }
+    if ($p.kind -eq 0x16 -and $p.subtype -eq 6) { return $p }
+  }
+  $null
+}
+
+# ---- 0x17 Keys ----
+$upload = Bridge $wsK 0x17 0x20 $null @{ device_keys = (Device-Keys $kate $kateDevice); one_time_keys = (One-Time-Keys 'AAAB' 3); fallback_keys = @{ 'signed_curve25519:FALLBACK1' = @{ key = 'ZmFsbGJhY2trZXlmb3JlMmUxMw'; fallback = $true; signatures = @{} } } }
+$hupload = Http POST '/_matrix/client/v3/keys/upload' @{} $tokK
+Check '[3.1] KeysUpload through the bridge: the counts it answers are the ones HTTP reads back' `
+  ((Is-Ack $upload) -and $upload.body.one_time_key_counts.signed_curve25519 -eq 3 -and (Same-As-Http $upload $hupload)) "bridge=$($upload.text) http=$($hupload.text)"
+
+$query = Bridge $wsL 0x17 0x21 $null @{ device_keys = @{ $kate = @() } }
+$hquery = Http POST '/_matrix/client/v3/keys/query' @{ device_keys = @{ $kate = @() } } $tokL
+Check '[3.2] KeysQuery: the other user sees the device keys the bridge uploaded, the same answer as HTTP' `
+  ((Same-As-Http $query $hquery) -and $query.body.device_keys.$kate.$kateDevice.keys."ed25519:$kateDevice" -eq 'ZWQyNTUxOWtleWZvcmUyZTEzYnJpZGdldGVzdHh4eA') "bridge=$($query.text)"
+
+$claim = Bridge $wsL 0x17 0x22 $null @{ one_time_keys = @{ $kate = @{ $kateDevice = 'signed_curve25519' } } }
+$afterBridgeClaim = Otk-Count $tokK
+$hclaim = Http POST '/_matrix/client/v3/keys/claim' @{ one_time_keys = @{ $kate = @{ $kateDevice = 'signed_curve25519' } } } $tokL
+$afterHttpClaim = Otk-Count $tokK
+$claimedIds = @($claim.body.one_time_keys.$kate.$kateDevice.PSObject.Properties.Name)
+$hclaimedIds = @($hclaim.json.one_time_keys.$kate.$kateDevice.PSObject.Properties.Name)
+Check '[3.3] KeysClaim: the bridge takes one key and HTTP counts one fewer; HTTP then takes a different one' `
+  ((Is-Ack $claim) -and $claimedIds.Count -eq 1 -and $afterBridgeClaim -eq 2 -and $hclaim.status -eq 200 -and $hclaimedIds.Count -eq 1 -and $hclaimedIds[0] -ne $claimedIds[0] -and $afterHttpClaim -eq 1) `
+  "bridge=$($claimedIds -join ',') count=$afterBridgeClaim http=$($hclaimedIds -join ',') count=$afterHttpClaim"
+
+$changes = Bridge $wsK 0x17 0x23 @{ from = '0'; to = '999999999999' } $null
+$hchanges = Http GET '/_matrix/client/v3/keys/changes?from=0&to=999999999999' $null $tokK
+$badFrom = Bridge $wsK 0x17 0x23 @{ from = 'not-a-position'; to = '1' } $null
+$hbadFrom = Http GET '/_matrix/client/v3/keys/changes?from=not-a-position&to=1' $null $tokK
+Check '[3.4] KeyChanges: from and to go as query variables, the answer and a bad position''s refusal are HTTP''s' `
+  ((Same-As-Http $changes $hchanges) -and @($changes.body.changed) -contains $kate -and (Same-Refusal $badFrom $hbadFrom)) `
+  "bridge=$($changes.text) bad=$($badFrom.metaText) http=$($hbadFrom.status) $($hbadFrom.text)"
+
+$firstMaster = Bridge $wsK 0x17 0x24 $null @{ master_key = (Master-Key $kate 'bWFzdGVya2V5b25lZm9yZTJlMTNicmlkZ2V0ZXN0eHg') }
+$replace1 = Bridge $wsK 0x17 0x24 $null @{ master_key = (Master-Key $kate 'bWFzdGVya2V5dHdvZm9yZTJlMTNicmlkZ2V0ZXN0eHg') }
+$hreplace1 = Http POST '/_matrix/client/v3/keys/device_signing/upload' @{ master_key = (Master-Key $kate 'bWFzdGVya2V5dGhyZWVmb3JlMmUxM2JyaWRnZXRlc3Q') } $tokK
+$replaceOk = Bridge $wsK 0x17 0x24 $null @{ master_key = (Master-Key $kate 'bWFzdGVya2V5dHdvZm9yZTJlMTNicmlkZ2V0ZXN0eHg'); auth = (Password-Auth 'kate' 'pw-kate-1' $replace1.body.session) }
+$masterNow = (Http POST '/_matrix/client/v3/keys/query' @{ device_keys = @{ $kate = @() } } $tokL).json.master_keys.$kate.keys
+Check '[3.5] SigningKeysUpload: the first master key needs no UIAA; replacing it is the same challenge as HTTP, and the password completes it' `
+  ((Is-Ack $firstMaster) -and (Is-Uiaa-Challenge $replace1) -and $hreplace1.status -eq 401 -and (Canon $replace1.body.flows) -eq (Canon $hreplace1.json.flows) -and (Is-Ack $replaceOk) -and "$($masterNow.PSObject.Properties.Name)" -eq 'ed25519:bWFzdGVya2V5dHdvZm9yZTJlMTNicmlkZ2V0ZXN0eHg') `
+  "first=$($firstMaster.status) challenge=$($replace1.text) http=$($hreplace1.status) ok=$($replaceOk.status) master=$($masterNow.PSObject.Properties.Name)"
+
+$signed = @{ $kate = @{ $kateDevice = (Device-Keys $kate $kateDevice) } }
+$signatures = Bridge $wsK 0x17 0x25 $null $signed
+$hsignatures = Http POST '/_matrix/client/v3/keys/signatures/upload' $signed $tokK
+Check '[3.6] SignaturesUpload: the same answer as HTTP for the same body' ((Same-As-Http $signatures $hsignatures)) "bridge=$($signatures.text) http=$($hsignatures.text)"
+
+# ---- 0x16 Device: SendToDevice ----
+$wsHold = Ws-Open $tokL
+$hold = Call $wsHold (Json-Pack 0x16 4 (Conv 10) 0 @{ device_id = $leoDevice } $null)
+$sent = Bridge $wsK 0x16 0x25 @{ event_type = 'm.room_key.e2e13'; txn_id = 'bridge-txn-1' } @{ messages = @{ $leo = @{ $leoDevice = @{ algorithm = 'm.megolm.v1.aes-sha2'; body = 'via bridge' } } } }
+$push = Next-Push $wsHold 5000
+$pushed = @(if ($null -ne $push) { Push-Items $push.data })
+Check '[3.7] SendToDevice through the bridge: Ack {}, and the receiver''s holding connection gets it as the native Push' `
+  ($hold.subtype -eq 2 -and (Is-Ack $sent) -and $sent.text -eq '{}' -and $pushed.Count -eq 1 -and $pushed[0].type -eq 'm.room_key.e2e13' -and $pushed[0].sender -eq $kate -and $pushed[0].content.body -eq 'via bridge') `
+  "hold=$($hold.metaText) sent=$($sent.status) $($sent.text) push=$(if ($push) { $push.metaText } else { 'none' }) items=$($pushed | ConvertTo-Json -Compress -Depth 6)"
+
+$again = Bridge $wsK 0x16 0x25 @{ event_type = 'm.room_key.e2e13'; txn_id = 'bridge-txn-1' } @{ messages = @{ $leo = @{ $leoDevice = @{ algorithm = 'm.megolm.v1.aes-sha2'; body = 'via bridge' } } } }
+$noSecond = Next-Push $wsHold 2000
+$hsent = Http PUT '/_matrix/client/v3/sendToDevice/m.room_key.e2e13/http-txn-1' @{ messages = @{ $leo = @{ $leoDevice = @{ algorithm = 'm.megolm.v1.aes-sha2'; body = 'via http' } } } } $tokK
+$httpPush = Next-Push $wsHold 5000
+$httpPushed = @(if ($null -ne $httpPush) { Push-Items $httpPush.data })
+Check '[3.8] the same txn_id again is an Ack and delivers nothing; HTTP''s send reaches the same queue' `
+  ((Is-Ack $again) -and $null -eq $noSecond -and $hsent.status -eq 200 -and $httpPushed.Count -eq 1 -and $httpPushed[0].content.body -eq 'via http') `
+  "again=$($again.status) second=$(if ($noSecond) { $noSecond.metaText } else { 'none' }) http=$($hsent.status) push=$($httpPushed | ConvertTo-Json -Compress -Depth 6)"
+
+$anon6 = Ws-Open $null
+$anonQuery = Bridge $anon6 0x17 0x21 $null @{ device_keys = @{ $kate = @() } }
+$hanonQuery = Http POST '/_matrix/client/v3/keys/query' @{ device_keys = @{ $kate = @() } } $null
+$anonSend = Bridge $anon6 0x16 0x25 @{ event_type = 'm.room_key.e2e13'; txn_id = 'anon-txn-1' } @{ messages = @{} }
+Check '[3.9] without logging in, the key endpoints and SendToDevice are refused as HTTP refuses them' `
+  ((Same-Refusal $anonQuery $hanonQuery) -and $anonQuery.meta.errcode -eq 'M_MISSING_TOKEN' -and $anonSend.subtype -eq 3 -and $anonSend.meta.errcode -eq 'M_MISSING_TOKEN') `
+  "query=$($anonQuery.metaText) http=$($hanonQuery.status) $($hanonQuery.text) send=$($anonSend.metaText)"
+$anon6.Dispose(); $wsHold.Dispose(); $wsK.Dispose(); $wsL.Dispose()
+Stop-Server $server
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"
 exit $(if ($script:Fail -gt 0) { 1 } else { 0 })

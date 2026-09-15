@@ -20,8 +20,8 @@ use http::{HeaderValue, Method, Request, StatusCode, header};
 use ruma::api::{
 	IncomingRequest,
 	client::{
-		account, alias, config, context, device, membership, profile, read_marker, receipt, redact, room, session,
-		state, tag, typing,
+		account, alias, config, context, device, keys, membership, profile, read_marker, receipt, redact, room,
+		session, state, tag, to_device, typing,
 	},
 	path_builder::PathBuilder,
 };
@@ -120,6 +120,15 @@ static BRIDGED_ENDPOINTS: &[BridgedEndpoint] = &[
 	row(Kind::Device, 0x22, "UpdateDevice", shape_of::<device::update_device::v3::Request>, NO_QUERY),
 	row(Kind::Device, 0x23, "DeleteDevice", shape_of::<device::delete_device::v3::Request>, NO_QUERY),
 	row(Kind::Device, 0x24, "DeleteDevices", shape_of::<device::delete_devices::v3::Request>, NO_QUERY),
+	// docs/design/wbf-e2ee.md (A): sending to-device; receiving is the native `Push`.
+	row(Kind::Device, 0x25, "SendToDevice", shape_of::<to_device::send_event_to_device::v3::Request>, NO_QUERY),
+
+	row(Kind::Keys, 0x20, "KeysUpload", shape_of::<keys::upload_keys::v3::Request>, NO_QUERY),
+	row(Kind::Keys, 0x21, "KeysQuery", shape_of::<keys::get_keys::v3::Request>, NO_QUERY),
+	row(Kind::Keys, 0x22, "KeysClaim", shape_of::<keys::claim_keys::v3::Request>, NO_QUERY),
+	row(Kind::Keys, 0x23, "KeyChanges", shape_of::<keys::get_key_changes::v3::Request>, &["from", "to"]),
+	row(Kind::Keys, 0x24, "SigningKeysUpload", shape_of::<keys::upload_signing_keys::v3::Request>, NO_QUERY),
+	row(Kind::Keys, 0x25, "SignaturesUpload", shape_of::<keys::upload_signatures::v3::Request>, NO_QUERY),
 ];
 
 const NO_QUERY: &[&str] = &[];
