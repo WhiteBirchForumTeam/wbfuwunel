@@ -717,7 +717,7 @@ async fn register_user(
 		.as_deref()
 		.unwrap_or(provider.brand.as_str());
 
-	// log in conduit admin channel if a non-guest user registered
+	// tell the admin room a non-guest user registered
 	let notice =
 		format!("New user \"{user_id}\" registered on this server via {idp_name} ({idp_id})");
 

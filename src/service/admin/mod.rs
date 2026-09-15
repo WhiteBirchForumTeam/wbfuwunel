@@ -18,7 +18,7 @@ use std::{
 
 use async_trait::async_trait;
 pub use context::Context;
-pub use create::create_admin_room;
+pub use create::{create_admin_room, ensure_server_user};
 use futures::TryFutureExt;
 use ruma::{OwnedEventId, OwnedRoomAliasId, OwnedRoomId, RoomId, RoomOrAliasId, UserId};
 use tokio::sync::mpsc;

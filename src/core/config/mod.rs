@@ -123,13 +123,13 @@ pub struct Config {
 	pub database_path: PathBuf,
 
 	/// Text which will be added to the end of the user's displayname upon
-	/// registration with a space before the text. In Conduit, this was the
-	/// lightning bolt emoji.
+	/// registration with a space before the text. This fork's is the leaf
+	/// (upstream tuwunel's was a heart, Conduit's a lightning bolt).
 	///
 	/// To disable, set this to "" (an empty string).
 	///
 	/// reloadable: yes
-	/// default: "💕"
+	/// default: "🍃"
 	#[serde(default = "default_new_user_displayname_suffix")]
 	pub new_user_displayname_suffix: String,
 
@@ -2454,7 +2454,7 @@ pub struct Config {
 	pub rocksdb_allow_fallocate: bool,
 
 	/// This is a password that can be configured that will let you login to the
-	/// server bot account (currently `@conduit`) for emergency troubleshooting
+	/// server bot account (`@system`) for emergency troubleshooting
 	/// purposes such as recovering/recreating your admin room, or inviting
 	/// yourself back.
 	///
@@ -5986,7 +5986,7 @@ fn default_url_preview_max_media_size() -> usize {
 
 fn default_url_preview_cache_ttl() -> u64 { 60 * 60 * 24 }
 
-fn default_new_user_displayname_suffix() -> String { "💕".to_owned() }
+fn default_new_user_displayname_suffix() -> String { "🍃".to_owned() }
 
 fn default_sentry_endpoint() -> Option<Url> {
 	let url = "https://8994b1762a6a95af9502a7900edabc4c@o4509498990067712.ingest.us.sentry.io/4509498993213440"

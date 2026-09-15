@@ -137,7 +137,7 @@ accounts were created.
 ## Emergency password
 
 The emergency password lets you log in to the server bot account
-(`@conduit:<server_name>`) when normal access is unavailable — for example,
+(`@system:<server_name>`, shown as `[SYS] <server_name>`) when normal access is unavailable — for example,
 if you have lost access to your admin room.
 
 ```toml

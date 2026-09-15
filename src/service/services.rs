@@ -237,6 +237,10 @@ pub async fn start(self: &Arc<Self>) -> Result<Arc<Self>> {
 
 	super::migrations::migrations(self).await?;
 
+	// Not a migration: it runs with migrations disabled too, and before any
+	// worker can act as the server user (docs/design/server-user.md §4).
+	admin::ensure_server_user(self).await?;
+
 	self.manager
 		.lock()
 		.await

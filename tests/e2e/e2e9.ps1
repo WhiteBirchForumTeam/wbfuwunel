@@ -128,7 +128,7 @@ $undeclared1 = Send-Raw $rE 'm.room.encrypted' (Encrypted-Body 'E1') $tokB $null
 Start-Sleep -Seconds 2
 $syncB = Api Get '/_matrix/client/v3/sync?timeout=0' $null $tokB
 $fromServer = @()
-if ($syncB.rooms.invite) { foreach ($prop in $syncB.rooms.invite.PSObject.Properties) { $ev = @($prop.Value.invite_state.events | Where-Object { $_.type -eq 'm.room.member' -and $_.sender -eq '@conduit:localhost' -and $_.state_key -eq $regB.user_id }); if ($ev.Count -gt 0) { $fromServer += $prop.Name } } }
+if ($syncB.rooms.invite) { foreach ($prop in $syncB.rooms.invite.PSObject.Properties) { $ev = @($prop.Value.invite_state.events | Where-Object { $_.type -eq 'm.room.member' -and $_.sender -eq '@system:localhost' -and $_.state_key -eq $regB.user_id }); if ($ev.Count -gt 0) { $fromServer += $prop.Name } } }
 Check '[1.6] undeclared encrypted send after a legacy upload -> one DM invite from the server user' ($undeclared1.status -eq 200 -and $fromServer.Count -eq 1) "invites_from_server=$($fromServer.Count)"
 $inviteRoom = $fromServer[0]
 $null = Api Post "/_matrix/client/v3/join/$([uri]::EscapeDataString($inviteRoom))" '{}' $tokB
