@@ -151,6 +151,7 @@ client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
 | 💭 遠端媒體快取 TTL | 別台伺服器的媒體被抓來快取後沒有過期時間，收集器也不碰它 | **只有打開聯邦才會發生**（`allow_federation = false` 時連出去的請求在 `federation/execute.rs` 就被擋）。開聯邦之前必做 |
 | 💭 RocksDB 空間回收 | 刪除只寫 tombstone 記錄，空間靠 compaction；大量清理後可能要手動 compaction 或調 periodic compaction | 第一次大量刪房或 purge 之後量一次（`migrate-references` 已拔掉） |
 | 💭 Services 級的測試夾具 | 「可刪」決策（本地 ∧ 有 `mxc_managed` ∧ 無持有者）、purge 與備份到期的冪等，目前只有 e2e 涵蓋（雙扣本身已被集合語意消掉） | 需要能在測試裡建起 Services 的夾具；有了夾具很多「靠讀碼確認」的東西都能變測試 |
+| 💭 加密訊息送出時把關 | 現在「新裝置解不解得開」靠一條推播鏈，掉一環就靜默送出解不開的訊息；目標是 server 收訊息時檢查裝置清單版本、過期就拒。問題書與達標條件在 [e2ee-send-guard-problem.md](e2ee-send-guard-problem.md) | 維護者 2026-09-16 要的題目；E2EE (B) 照 Matrix 做完之後再寫提案 |
 | ✅ admin 指令顯示「誰持有」 | `!admin media refcount <mxc>` 從 #24 起印持有者清單與是否受管 | 持有者集合天然有這個答案，不用另做 |
 
 ## 4. 大的未定（核心設計 §7）

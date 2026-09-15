@@ -75,6 +75,8 @@ fork 專屬的文件都在 [`docs/design/`](docs/design/)。它們刻意不進�
 | 每房連續序號 `r_seq`、全域序號 `g_seq`，與跨房間的 `Event/Recent`（client 帶快取水位、只拿差異） | [docs/design/room-seq-and-recent.md](docs/design/room-seq-and-recent.md) |
 | 🔧 **常用 Matrix API 走通道**（設計已同意 PR #55，實作中）：一座通用的橋 —— pack 轉成內部 HTTP request 丟進 Router，flags bit4 分流，關卡只有一份；分三批（一般已登入端點、註冊、要 UIAA 的） | [docs/design/wbf-api-bridge.md](docs/design/wbf-api-bridge.md) |
 | **橋的規格總表**：走橋的每個 kind／subtype 是幾號、請求前 4 個 byte、對到哪個 Matrix 端點、帶哪些變數；每個 kind 的詳細範例在同目錄 | [docs/bridge-specs/index.md](docs/bridge-specs/index.md) |
+| 🔧 **E2EE 全走通道**（設計已同意 PR #66）：金鑰端點與發 to-device 走橋、`0x16 CryptoState` 推 OTK 數量與裝置清單變動、金鑰備份走橋 | [docs/design/wbf-e2ee.md](docs/design/wbf-e2ee.md) |
+| 💭 **問題書：加密訊息送出時把關**（還沒有提案）：現在新裝置解不解得開靠推播鏈、掉一環就靜默失敗；核心目的、目標、候選格式、怎麼追蹤、達標條件 | [docs/design/e2ee-send-guard-problem.md](docs/design/e2ee-send-guard-problem.md) |
 
 上游的使用文件（[`docs/`](docs/) 其餘部分：設定、部署、維護）大體仍適用，因為程式碼的骨架還是
 上游的。但凡 `CHANGELOG-fork.md` 寫了行為有變的地方，以它為準。
