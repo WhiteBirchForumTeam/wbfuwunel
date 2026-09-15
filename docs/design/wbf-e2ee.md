@@ -113,6 +113,8 @@ issue 提的是在 `Batch`／`Push` 的 meta 多帶 `otk_counts` 等欄位。我
 | ② **判斷** | 有人**加入** → 除了這個房間以外跟我沒有共同的加密房就放進 `changed`；有人**離開** → 離開後跟我沒有任何共同的加密房就放進 `left`（`share_encrypted_room`） | ✅ 只吃 `(我, 這個人, 哪個房間, 加入或離開)`，原樣共用 |
 | ③ **「誰加入、誰離開」這份材料** | 從 `/sync` 為了回房間狀態而**已經算好**的逐房狀態差異與 timeline 裡挑成員事件 | ❌ 補窗沒有這份材料。為了它去跑一次 `/sync` 的逐房計算不合理 |
 
+📎 **① 是什麼，舉個例子**：Bob 在新手機登入、上傳了新裝置的金鑰，server 的 `mark_device_key_update(bob)` 當下拿一個 count（例 500），在 `keychangeid_userid` 寫幾列：`(@bob, 500) → @bob`，以及 Bob 在的每個房間各一列 `(!room1, 500) → @bob`、`(!room2, 500) → @bob`。之後 Alice 問「從 400 到現在，誰的金鑰變了」，就是查「前綴是 @alice 自己、或是 Alice 在的任一個房間，count 落在 400 之後」的列 → 拿到 @bob。這一步只需要「Alice、從哪個位置開始」兩個輸入，跟有沒有人加入或離開房間無關，所以 `/sync`、`CryptoState` 的補窗、`/keys/changes` 三處呼叫**同一個函式**就好。它答的是 `changed` 裡「金鑰變了」那一半；另一半「新同房」與 `left` 是 ② 拿 ③ 的材料算出來的。
+
 **補窗的 ③ 改從現成的成員索引拿**：`state_cache` 對每個（房間, 成員）記著加入時的 count（`roomuserid_joinedcount`）與離開時的 count（`roomuserid_leftcount`），跟 `dl_seq` 同一個號碼空間。對我在的（與我在區間內離開的）每個房間，挑 count 落在 `(dl_seq, 現在]` 的成員，交給 ②。
 
 - **我自己在區間內加入的房間**：裡面每一個成員都當作「加入」交給 ②（原本不同房的人變成同房）。
@@ -159,6 +161,7 @@ issue 提的是在 `Batch`／`Push` 的 meta 多帶 `otk_counts` 等欄位。我
    - (b) 只有通道這邊報，`/sync` 不動；e2e 比對排除這個情況。
    - (c) 都不報，跟 `/sync` 一樣。
    建議 **(a)**。
+   ✅ 維護者 2026-09-16：應該報。→ 照 (a)：`CryptoState`、`/keys/changes`、`/sync` 三處都報。
 
 ## 7. 落點
 
