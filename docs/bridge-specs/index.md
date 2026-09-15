@@ -51,9 +51,20 @@ offset  bytes              意思
 - 同一個 kind 裡照 Matrix 規格章節裡端點出現的順序排。**分配了就不改**（wire-format §3.3 的規矩）；端點下線就讓那個號碼空著。
 - 一個 subtype 對一個 Matrix 端點（橋的設計 §2.2）。
 
-## 2. 總表（批 1）
+## 2. 總表（批 1、批 2）
 
-「前 4 bytes」是請求的 `version kind subtype flags`。method 與路徑省略 `/_matrix/client/v3` 前綴。
+「前 4 bytes」是請求的 `version kind subtype flags`。method 與路徑省略 `/_matrix/client/v3` 前綴；不是 v3 的（只有較新的穩定版本的端點）寫完整路徑。批 2 的列在「做什麼」欄標 **（批 2）**。
+
+### `0x10 Session`（註冊與登入前）
+
+📎 `0x01`–`0x03` 是原生的 `Login`、`Refresh`、`Logout`（wire-format §6.3）。註冊要帶 `inhibit_login: true`，建好帳號再送 `Login`，這條連線才會變成那個帳號（橋的設計 §3 批 2-A）。
+
+| subtype | 前 4 bytes | 名稱 | 做什麼 | 端點 | 變數（path ／ query） | data |
+|---|---|---|---|---|---|---|
+| `0x20` | `01 10 20 10` | Register | **（批 2）** 註冊帳號（要 UIAA） | `POST /register` | query `kind`（`user`／`guest`，省略是 `user`） | JSON：`/register` 的 body，要帶 `inhibit_login: true` |
+| `0x21` | `01 10 21 10` | UsernameAvailable | **（批 2）** 帳號名還能不能用 | `GET /register/available` | query `username` | — |
+| `0x22` | `01 10 22 10` | RegistrationTokenValidity | **（批 2）** 註冊碼有沒有效 | `GET /_matrix/client/v1/register/m.login.registration_token/validity` | query `token` | — |
+| `0x23` | `01 10 23 10` | LoginTypes | **（批 2）** server 支援哪些登入方式 | `GET /login` | — | — |
 
 ### `0x11 Account`（帳號）
 
@@ -71,6 +82,8 @@ offset  bytes              意思
 | `0x29` | `01 11 29 10` | GetTags | 某個房間的標籤（我的最愛、低優先…） | `GET /user/{user_id}/rooms/{room_id}/tags` | `user_id`、`room_id` | — |
 | `0x2A` | `01 11 2A 10` | SetTag | 加或改一個標籤 | `PUT /user/{user_id}/rooms/{room_id}/tags/{tag}` | `user_id`、`room_id`、`tag` | JSON，例 `{"order":0.5}` |
 | `0x2B` | `01 11 2B 10` | DeleteTag | 拿掉一個標籤 | `DELETE /user/{user_id}/rooms/{room_id}/tags/{tag}` | `user_id`、`room_id`、`tag` | — |
+| `0x2C` | `01 11 2C 10` | ChangePassword | **（批 2）** 改密碼（要 UIAA） | `POST /account/password` | — | JSON：`new_password`、`logout_devices`、`auth` |
+| `0x2D` | `01 11 2D 10` | Deactivate | **（批 2）** 停用帳號（要 UIAA） | `POST /account/deactivate` | — | JSON：`erase`、`auth` |
 
 ### `0x13 Room`（房間）
 
@@ -122,8 +135,10 @@ offset  bytes              意思
 | `0x20` | `01 16 20 10` | ListDevices | 登入過的裝置清單 | `GET /devices` | — | — |
 | `0x21` | `01 16 21 10` | GetDevice | 單一裝置的資訊 | `GET /devices/{device_id}` | `device_id` | — |
 | `0x22` | `01 16 22 10` | UpdateDevice | 改裝置名稱 | `PUT /devices/{device_id}` | `device_id` | JSON：`display_name` |
+| `0x23` | `01 16 23 10` | DeleteDevice | **（批 2）** 刪一個裝置（要 UIAA） | `DELETE /devices/{device_id}` | `device_id` | JSON：`auth` |
+| `0x24` | `01 16 24 10` | DeleteDevices | **（批 2）** 一次刪好幾個裝置（要 UIAA） | `POST /delete_devices` | — | JSON：`devices`、`auth` |
 
-**批 1 共 37 支**：Account 12、Room 13、Event 6、Receipt 3、Device 3。
+**批 1 共 37 支**：Account 12、Room 13、Event 6、Receipt 3、Device 3。**批 2 共 8 支**：Session 4、Account 2、Device 2。合計 45 支。
 
 ## 3. 不在這批
 
