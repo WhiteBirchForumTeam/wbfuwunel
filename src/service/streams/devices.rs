@@ -445,7 +445,10 @@ mod tests {
 	use tokio::sync::mpsc;
 	use tuwunel_core::wbf::{CONTROL_ERROR_SUBTYPE, Kind, decode, events::split_length_prefixed};
 
-	use super::{CryptoState, DEVICE_CRYPTO_STATE_SUBTYPE, DEVICE_PUSH_SUBTYPE, PushedItem, split_user_lists};
+	use super::{
+		CryptoState, DEVICE_CRYPTO_STATE_SUBTYPE, DEVICE_PUSH_SUBTYPE, PushedItem, crypto_state_meta, crypto_state_pack,
+		split_user_lists,
+	};
 	use crate::streams::{Outgoing, PackQueue, Queued, Streams};
 
 	/// A test queue: the count is what these tests exercise, so the byte
@@ -697,6 +700,46 @@ mod tests {
 		}
 		assert_eq!(seen_changed, changed.iter().map(ToString::to_string).collect::<Vec<_>>());
 		assert_eq!(seen_left, left.iter().map(ToString::to_string).collect::<Vec<_>>());
+	}
+
+	/// The golden vectors are what clients test their decoders against, so the
+	/// two `CryptoState` vectors must be the bytes this server builds — not a
+	/// hand-written example that happens to decode.
+	#[test]
+	fn the_crypto_state_vectors_are_what_the_server_builds() {
+		const VECTORS: &str = include_str!("../../../docs/design/wbf-vectors.json");
+		let vectors: serde_json::Value = serde_json::from_str(VECTORS).expect("the vectors file is JSON");
+		let bytes_of = |name: &str| -> Vec<u8> {
+			let hex = vectors["packs"]
+				.as_array()
+				.expect("a packs list")
+				.iter()
+				.find(|vector| vector["name"] == name)
+				.unwrap_or_else(|| panic!("no vector named {name}"))["bytes_hex"]
+				.as_str()
+				.expect("hex")
+				.to_owned();
+			(0..hex.len())
+				.step_by(2)
+				.map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("hex digit"))
+				.collect()
+		};
+		let conversation_30 = tuwunel_core::wbf::IdType::ClientConversation
+			.compose(30)
+			.expect("fits");
+
+		let counts = serde_json::json!({"signed_curve25519": 42});
+		let fallback = ["signed_curve25519".to_owned()];
+		let changed: Vec<OwnedUserId> = vec!["@bob:example.org".try_into().expect("id")];
+		let left: Vec<OwnedUserId> = vec!["@carol:example.org".try_into().expect("id")];
+		let state = CryptoState { otk_counts: &counts, unused_fallback_key_types: &fallback, changed: &changed, left: &left };
+		let built = crypto_state_pack(conversation_30, 1, &crypto_state_meta(&state, &changed, &left, 4730, false)).expect("builds");
+		assert_eq!(built, bytes_of("device_crypto_state"));
+
+		let empty_counts = serde_json::json!({});
+		let empty = CryptoState { otk_counts: &empty_counts, unused_fallback_key_types: &[], changed: &[], left: &[] };
+		let built = crypto_state_pack(conversation_30, 2, &crypto_state_meta(&empty, &[], &[], 4730, false)).expect("builds");
+		assert_eq!(built, bytes_of("device_crypto_state_empty"));
 	}
 
 	#[test]

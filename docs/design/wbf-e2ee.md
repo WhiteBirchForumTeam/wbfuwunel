@@ -74,8 +74,8 @@ issue 提的是在 `Batch`／`Push` 的 meta 多帶 `otk_counts` 等欄位。我
 |---|---|---|
 | `otk_counts` | **一定有** | 這個裝置目前每種演算法剩幾把 OTK，跟 `/sync` 的 `device_one_time_keys_count` 同一個數字（`users::count_one_time_keys`） |
 | `unused_fallback_key_types` | **一定有**，可以是 `[]` | 還沒被用掉的 fallback key 演算法。⚠️ **`[]` 與不出現意思不同**：`OlmMachine` 把「沒給」當成 server 不支援、把 `[]` 當成「都用掉了，該換」。所以這一欄**不套**「沒有就不出現」的慣例 |
-| `device_lists` | **一定有**，兩個陣列可以是空的 | 從上一個 `dl_seq` 到這一個之間的變動，語意照 `/sync`（§3.3） |
-| `dl_seq` | **一定有** | 這份 `device_lists` 算到哪個 count。client 存下來，重新訂閱時帶回來（§3.4） |
+| `device_lists` | **一定有**，兩個陣列可以是空的 | 補窗：從 client 帶來的 `dl_seq` 到現在的變動；即時推送：觸發這次推送的那一個變動。語意照 `/sync`（§3.3）。清單超過一個 pack 的 meta 上限（`wbf_meta_max_bytes`）時**拆成好幾個 `CryptoState`**，每個都帶完整的數量欄位；client 把它們的清單依序餵進去就好 |
+| `dl_seq` | **一定有** | **這個訂閱**的補窗從哪裡算起—— 整個訂閱期間是同一個數字，跟 `Subscribe` 回的 `latest_cd_seq` 相同。client 存下來，重新訂閱時帶回來（§3.4） |
 | `gap` | **一定有**，bool | `true`：**這個訂閱**上一個推送之後有 pack 因為發送佇列滿被丟掉。⚠️ `Push` 與 `CryptoState` 共用一個訂閱（§3.2），所以也共用一個 `gap` 旗標：被丟的可能是其中任一種，而旗標由**下一個送得出去的**帶走（不論哪種）。client 在**任一種** pack 看到 `gap: true`，都帶 `cd_seq` 與 `dl_seq` 兩個水位重新 `Subscribe`，兩邊一起補（wbf-event-push §4 的同一套） |
 
 欄位名照 `/sync` 的語意取短名 → **決定 2**。
@@ -92,7 +92,7 @@ issue 提的是在 `Batch`／`Push` 的 meta 多帶 `otk_counts` 等欄位。我
 
 | 時機 | 推給誰 | `device_lists` |
 |---|---|---|
-| `Device/Subscribe` 成功之後（跟補窗的 `Push` 同一個時段） | 這條連線 | 帶 `dl_seq` 訂閱：**從那裡補到現在**；沒帶：兩個陣列都空，`dl_seq` 是現在（第一次，client 本來就要自己追蹤房間成員） |
+| `Device/Subscribe` 成功之後（`Ack` 與補窗的 `Push` 之後），**一定送一個** | 這條連線 | 帶 `dl_seq` 訂閱：**從那裡補到現在**；沒帶：兩個陣列都空（第一次，client 本來就要自己追蹤房間成員）。📎 `dl_seq: 0` 跟初始 `/sync` 一樣，只報金鑰變動、不報成員變動 |
 | `take_one_time_key`（別人 claim、聯邦 claim 都經過它） | 被 claim 的那個裝置的持有連線 | 空 |
 | `add_one_time_keys`、上傳 fallback key | 那個裝置的持有連線 | 空 |
 | `mark_device_key_update(bob)` | 跟 Bob 同房的**每個本地使用者**的每個有持有連線的裝置 | `changed: [bob]` |
@@ -100,7 +100,8 @@ issue 提的是在 `Batch`／`Push` 的 meta 多帶 `otk_counts` 等欄位。我
 
 - **補法（`dl_seq` → 現在）**：把 `/sync` 算這兩個陣列的程式（`gather_device_list_updates`、`collect_device_list_left`）**搬到 service 層共用**，`/sync` 與 `CryptoState` 呼叫同一份 —— 兩份實作遲早漂移，而漂移的那天是金鑰送不到。e2e 直接拿同一個 `since` 比 `/sync` 的 `device_lists` 與 `CryptoState` 的補窗。→ **決定 3**。
 - `dl_seq` 跟 `cd_seq`、`g_seq` **同一個號碼空間**（都是 `globals.next_count()`），但是**不同的水位**：`cd_seq` 是「to-device 處理完到哪」（會被銷毀），`dl_seq` 是「裝置清單算到哪」（隨時可以重算）。client 分開存，跟 wbf-to-device §2 的理由一樣。
-- **即時推送的 `dl_seq`**：就是觸發它的那個寫入的 count（`mark_device_key_update` 的 count、成員事件的 count）。client 收到就更新水位；推送因為佇列滿被丟掉時，下一個 `CryptoState` 帶 `gap: true`，client 用重新訂閱補（跟 `Push` 的 `gap` 同一套，wbf-event-push §4）。
+- **即時推送的 `dl_seq`**：跟補窗那個一樣，**整個訂閱是同一個數字**。📎 **實作時改的**（原本寫「就是觸發它的那個寫入的 count」）：變動是**先寫入、再推**，而推送不照 count 的順序送達 —— 100 還在路上、101 先到，client 存下 101 後斷線，重連從 101 補就永遠沒有 100。改成：`Subscribe` 把這條連線登記成持有者之後讀 `globals.current_count()`（之前的寫入都已提交）當 `dl_seq`，補窗從 client 的 `dl_seq` 讀到**索引的尾巴**（不是到 `dl_seq` 為止）。一個變動要嗎寫在補窗讀之前（補窗讀得到），要嗎寫在之後（它的推送一定在登記之後，送得到）。代價是重連會重報這個訂閱期間的變動，多查幾次 `/keys/query`（安全側）。還沒補過窗的連線不推：它的補窗會讀到這個變動。推送因為佇列滿被丟掉時，下一個送得出去的 pack 帶 `gap: true`，client 用重新訂閱補（wbf-event-push §4）。
+- 📎 **OTK 數量是「推的當下讀到的」**：兩次上傳或 claim 幾乎同時發生時，兩個 `CryptoState` 到達的順序不保證跟讀的順序一樣，client 可能短暫拿到舊數字。下一次變動或重新訂閱就會更正；`OlmMachine` 多補幾把或晚一點補都不會讓金鑰送不到。
 - ⚠️ **只推給「持有這個裝置佇列」的那條連線**：`OlmMachine` 是每個裝置一台，佇列的持有者（wbf-to-device §4，後來的接手）就是在跑它的那條。同一裝置的其他連線不收。
 
 ### 3.4.1 補窗怎麼算：共用哪一層、輸入從哪來（實作前查到的，2026-09-16）
@@ -120,6 +121,7 @@ issue 提的是在 `Batch`／`Push` 的 meta 多帶 `otk_counts` 等欄位。我
 - **我自己在區間內加入的房間**：裡面每一個成員都當作「加入」交給 ②（原本不同房的人變成同房）。
 - **我自己在區間內離開的房間**：裡面每一個成員都當作「離開」交給 ②。⚠️ **`/sync` 現在不做這件事**：它的 `left` 只從「我還在的房間」裡的離開事件算（`collect_joined_rooms` 才收 `left_encrypted_users`，`collect_left_rooms` 不收）。→ **決定 7**。
 - ⚠️ **被 forget 的離開查不到**：`forget`（含 `forget_forced_upon_leave` 與被封鎖的房間）會刪掉那一列 `roomuserid_leftcount`。漏的只會是 `left`，不會是 `changed`（加入的 count 不被 forget 刪）。漏 `left` 的後果是 client 繼續追蹤一個已經不同房的人（多查幾次 `/keys/query`），房間金鑰該發給誰是看房間成員、不看這份清單，所以**不會把金鑰發給不該拿的人**。這是「寧可多報」（§3.3）那一側的誤差。
+- 📎 **區間內加入又離開的人**：成員索引只記最後的狀態（離開時加入那一列就刪了），所以補窗只把他放進 `left`；`/sync` 從 timeline 看得到加入與離開兩個事件，可能 `changed`、`left` 都放。兩者都表示「現在不同房」，e2e 比對時 `changed` 先扣掉 `left` 裡的人再比（e2e15 [1.8]）。
 - **成本**：補窗按我在的房間掃成員索引，是「我所有房間的成員數加總」的量級。`CryptoState` 每次 `Subscribe` 才做一次；`/keys/changes` 是 client 要才做。→ **決定 6**：`/sync` 要不要也改吃這份。
 
 ### 3.5 規模
