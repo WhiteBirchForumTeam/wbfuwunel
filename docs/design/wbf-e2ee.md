@@ -1,7 +1,7 @@
 # E2EE 全走通道：金鑰端點上橋、發 to-device、OTK 數量與裝置清單變動
 
 > **這份文件回答：client 要讓 E2EE 完全不靠 `/sync`，server 要補哪幾件事、各自長什麼樣、分幾步做。**
-> 狀態：✅ 維護者 2026-09-16 同意（§6 五條的決定記在各條後面；第 3 條的「算法共用」仍待確認）。起因是 issue #65（client 的需求）。
+> 狀態：✅ 維護者 2026-09-16 同意（§6 五條的決定記在各條後面）。起因是 issue #65（client 的需求）。
 > 維護者 2026-09-15：「原本第三批次要加入的 api，可以先 defer，先處理金鑰的部分。」
 > 上位文件：[wbf-api-bridge.md](wbf-api-bridge.md)（橋）、[wbf-to-device.md](wbf-to-device.md)（`0x16 Device`）、[../bridge-specs/index.md](../bridge-specs/index.md)（號碼總表）。
 
@@ -127,7 +127,7 @@ issue 提的是在 `Batch`／`Push` 的 meta 多帶 `otk_counts` 等欄位。我
    ✅ 維護者 2026-09-16：取 `/sync` 的語意，這組名字。
 3. **補窗的算法搬到 service 層，`/sync` 與 `CryptoState` 共用**？建議照做（§3.4）。代價是動到 `/sync` 的程式（行為不變，由 e2e 比對兩邊守住）。
    ✅ 維護者 2026-09-16 同意「`CryptoState` **共用 to-device 的訂閱**」（§3.2 寫明）。
-   ⏳ **這條原本問的是另一件事，待確認**：server **內部的程式**怎麼算「從 `dl_seq` 到現在，誰的清單變了、誰不再同房」。`/sync` 現在已經有一份（`src/api/client/sync/v3.rs` 的 `gather_device_list_updates`、`collect_device_list_left`），兩個選擇：(a) 把那份搬到 `src/service/`，`/sync`、`CryptoState` 的補窗、`/keys/changes` 三處呼叫同一份；(b) 替通道另寫一份。建議 **(a)**：兩份實作遲早對不上，對不上的那天就是金鑰送不到；代價是會動到 `/sync` 的程式（只搬位置、行為不變）。這是 server 內部的決定，wire 上看不到差別。
+   ✅ **這條原本問的是另一件事，維護者 2026-09-16 選 (a)**：server **內部的程式**怎麼算「從 `dl_seq` 到現在，誰的清單變了、誰不再同房」。`/sync` 現在已經有一份（`src/api/client/sync/v3.rs` 的 `gather_device_list_updates`、`collect_device_list_left`），兩個選擇：(a) 把那份搬到 `src/service/`，`/sync`、`CryptoState` 的補窗、`/keys/changes` 三處呼叫同一份；(b) 替通道另寫一份。建議 **(a)**：兩份實作遲早對不上，對不上的那天就是金鑰送不到；代價是會動到 `/sync` 的程式（只搬位置、行為不變）。這是 server 內部的決定，wire 上看不到差別。
 4. **分三個 PR**：(A) 走橋 7 列 → (B) `CryptoState` → (C) 備份 14 列？建議照這個順序；(A) 很小、client 馬上能用，(B) 是這份提案真正的工作量。
    ✅ 維護者 2026-09-16：同意。
 5. **`/keys/changes`**：(a) 照樣上橋、文件註明 `left` 是空的；(b) 上橋並順便補 `left`（用決定 3 那份共用的算法）；(c) 不上橋。建議 **(b)**，而且放在 (B) 那支 PR —— 共用算法做好之後補 `left` 是幾行的事，也修掉上游的 TODO。
