@@ -137,20 +137,43 @@ const fn row(
 /// Args:
 ///     Request: the ruma request type of the endpoint, example: `leave_room::v3::Request`
 /// Return:
-///     Option<EndpointShape>  the v3 path; without one, the newest stable
-///     `/_matrix/client/vN` path; None when the type has neither.
+///     Option<EndpointShape>  None when the type has no path the bridge uses
+///     (`pick_path`).
 fn shape_of<Request: IncomingRequest>() -> Option<EndpointShape> {
-	let path_template = Request::PATH_BUILDER
-		.all_paths()
-		.find(|path| path.starts_with(V3_PREFIX))
-		.or_else(|| {
-			Request::PATH_BUILDER
-				.all_paths()
-				.filter(|path| path.starts_with(STABLE_VERSION_PREFIX))
-				.last()
-		})?;
+	let paths: Vec<&'static str> = Request::PATH_BUILDER.all_paths().collect();
+	let path_template = pick_path(&paths)?;
 
 	Some(EndpointShape { method: Request::METHOD, path_template })
+}
+
+/// Args:
+///     paths: every path ruma lists for one endpoint, in any order, example:
+///         ["/_matrix/client/unstable/…", "/_matrix/client/v1/…"]
+/// Return:
+///     Option<&str>  the v3 path; without one, the stable `/_matrix/client/vN/`
+///     path with the largest N, by the number in the path rather than by where
+///     ruma lists it; None when there is neither (only r0 or unstable).
+fn pick_path(paths: &[&'static str]) -> Option<&'static str> {
+	if let Some(v3) = paths.iter().find(|path| path.starts_with(V3_PREFIX)) {
+		return Some(v3);
+	}
+
+	paths
+		.iter()
+		.filter_map(|path| Some((stable_version_of(path)?, *path)))
+		.max_by_key(|(version, _)| *version)
+		.map(|(_, path)| path)
+}
+
+/// Return:
+///     Option<u32>  N for a `/_matrix/client/vN/…` path, example: Some(1);
+///     None for r0, unstable, or anything that is not a number after the `v`.
+fn stable_version_of(path: &str) -> Option<u32> {
+	path.strip_prefix(STABLE_VERSION_PREFIX)?
+		.split('/')
+		.next()?
+		.parse()
+		.ok()
 }
 
 /// Args:
@@ -520,7 +543,7 @@ mod tests {
 
 	use super::{
 		BRIDGED_ENDPOINTS, EndpointShape, MAX_MESSAGE_BYTES, build_reply_pack, build_request, list_path_variables,
-		shape_of, to_bounded_message,
+		pick_path, shape_of, to_bounded_message,
 	};
 	use crate::{ClientIp, router::ConfiguredIpSource};
 
@@ -668,6 +691,23 @@ mod tests {
 		// Listed under r0 and v3: v3, never r0.
 		let register = shape_of::<register::v3::Request>().expect("a path");
 		assert_eq!(register.path_template, "/_matrix/client/v3/register");
+	}
+
+	/// The newest version is the largest number in the path, not the last path
+	/// ruma happens to list (PR #63 review: rumia, salvia, cirno).
+	#[test]
+	fn the_newest_stable_version_is_picked_by_its_number_not_by_its_place() {
+		let reversed = ["/_matrix/client/unstable/org.example/x", "/_matrix/client/v2/x", "/_matrix/client/v1/x"];
+		assert_eq!(pick_path(&reversed), Some("/_matrix/client/v2/x"));
+
+		let v10_before_v9 = ["/_matrix/client/v10/x", "/_matrix/client/v9/x"];
+		assert_eq!(pick_path(&v10_before_v9), Some("/_matrix/client/v10/x"), "10 is larger than 9 as a number, not as text");
+
+		let v3_and_newer = ["/_matrix/client/v4/x", "/_matrix/client/v3/x"];
+		assert_eq!(pick_path(&v3_and_newer), Some("/_matrix/client/v3/x"), "v3 is still the bridge's first choice");
+
+		let neither = ["/_matrix/client/r0/x", "/_matrix/client/unstable/org.example/x"];
+		assert_eq!(pick_path(&neither), None, "r0 and unstable are never used");
 	}
 
 	#[test]
