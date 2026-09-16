@@ -1,7 +1,7 @@
 # E2EE 全走通道：金鑰端點上橋、發 to-device、OTK 數量與裝置清單變動
 
 > **這份文件回答：client 要讓 E2EE 完全不靠 `/sync`，server 要補哪幾件事、各自長什麼樣、分幾步做。**
-> 狀態：✅ 維護者 2026-09-16 同意（§6 五條的決定記在各條後面）。起因是 issue #65（client 的需求）。
+> 狀態：✅ 維護者 2026-09-16 同意（§6 五條的決定記在各條後面）。(A) 已實作（分支 `wbf/e2ee-bridge-keys`；每支的範例在 [0x17-keys.md](../bridge-specs/0x17-keys.md)、[0x16-device.md](../bridge-specs/0x16-device.md)）。起因是 issue #65（client 的需求）。
 > 維護者 2026-09-15：「原本第三批次要加入的 api，可以先 defer，先處理金鑰的部分。」
 > 上位文件：[wbf-api-bridge.md](wbf-api-bridge.md)（橋）、[wbf-to-device.md](wbf-to-device.md)（`0x16 Device`）、[../bridge-specs/index.md](../bridge-specs/index.md)（號碼總表）。
 
@@ -31,7 +31,7 @@ client 用 `matrix-sdk-crypto` 的 `OlmMachine`（沒有網路 IO 的狀態機�
 | | `0x21` | KeysQuery | `POST /keys/query` | — | JSON：`device_keys` | |
 | | `0x22` | KeysClaim | `POST /keys/claim` | — | JSON：`one_time_keys` | |
 | | `0x23` | KeyChanges | `GET /keys/changes` | query `from`、`to` | — | ⚠️ 見下 |
-| | `0x24` | SigningKeysUpload | `POST /keys/device_signing/upload` | — | JSON：`master_key` 等、`auth` | **要 UIAA**，照批 2 的規則（bridge-specs §1.5） |
+| | `0x24` | SigningKeysUpload | `POST /keys/device_signing/upload` | — | JSON：`master_key` 等、`auth` | **換掉既有的金鑰要 UIAA**，照批 2 的規則（bridge-specs §1.5）。📎 實作時查到：**第一次上傳不要**（MSC3967），這格原本寫「要 UIAA」 |
 | | `0x25` | SignaturesUpload | `POST /keys/signatures/upload` | — | JSON：簽章 | |
 
 - ⭐ **為什麼「發」走橋、不做原生 subtype**：`/sendToDevice` 是一問一答、帶 `txn_id` 冪等、關卡（限速、暫停、ignore）都在 HTTP 那一道。收的那一側已經有原生的佇列與推送，server 的 `add_to_device_event` 寫進佇列時就會推給對方的持有連線（wbf-to-device §4），**發的那一側不需要任何新東西**。
