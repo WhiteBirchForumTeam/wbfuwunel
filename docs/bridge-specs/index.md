@@ -4,7 +4,7 @@
 > 設計與規則在 [../design/wbf-api-bridge.md](../design/wbf-api-bridge.md)（下稱「橋的設計」），這裡只放**分配結果**。
 > ⭐ **這張表是走橋的 subtype 號的唯一權威**：[wbf-wire-format.md](../design/wbf-wire-format.md) §3.2 只列原生的 subtype，走橋的一律指到這裡 —— 兩份表遲早漂移。
 > 每個 kind 的完整範例（請求與回應的 meta、data、錯誤）在同一個目錄的 `KIND.md`，隨搬的那一批一起寫：[0x10-session.md](0x10-session.md)、[0x11-account.md](0x11-account.md)、[0x13-room.md](0x13-room.md)、[0x14-event.md](0x14-event.md)、[0x15-receipt.md](0x15-receipt.md)、[0x16-device.md](0x16-device.md)、[0x17-keys.md](0x17-keys.md)。
-> 狀態：批 1 的 37 支、批 2 的 8 支（註冊、UIAA）與 E2EE (A) 的 7 支（金鑰、發 to-device，[wbf-e2ee.md](../design/wbf-e2ee.md) §2）**已實作**：server 的表（`src/api/client/wbf/bridge.rs` 的 `BRIDGED_ENDPOINTS`）逐列跟這份總表比對（單元測試 `the_specs_index_and_this_table_list_the_same_endpoints`，對不上就紅）；每支都在 e2e13（批 1 情境 1、批 2 情境 2、E2EE (A) 情境 3）跟原本的 HTTP 端點比對過結果。
+> 狀態：批 1 的 37 支、批 2 的 8 支（註冊、UIAA）、E2EE (A) 的 7 支（金鑰、發 to-device，[wbf-e2ee.md](../design/wbf-e2ee.md) §2）與 E2EE (C) 的 14 支（金鑰備份，同文件 §4）**已實作**：server 的表（`src/api/client/wbf/bridge.rs` 的 `BRIDGED_ENDPOINTS`）逐列跟這份總表比對（單元測試 `the_specs_index_and_this_table_list_the_same_endpoints`，對不上就紅）；每支都在 e2e13（批 1 情境 1、批 2 情境 2、E2EE (A) 情境 3、E2EE (C) 情境 4）跟原本的 HTTP 端點比對過結果。
 
 ## 1. 一個走橋的 pack 怎麼讀
 
@@ -64,7 +64,7 @@ offset  bytes              意思
 - `session` 存在 server。註冊的 `session` 跟連線無關，**沒登入的連線只活 `wbf_ws_unauthenticated_timeout`（預設 30 秒）**，來不及就重連一條、帶同一個 `session` 接著送。
 - **做完之後這條連線還算不算數**：刪掉自己這個裝置、停用帳號之後，回覆照樣先到，**下一個 pack** 在橋之前被拒（§1.2 那一道：`Unauthorized`、沒有 bit4、關連線）。改密碼的 `logout_devices` 保留發請求的裝置，這條連線不受影響。
 
-## 2. 總表（批 1、批 2、E2EE (A)）
+## 2. 總表（批 1、批 2、E2EE (A)(C)）
 
 「前 4 bytes」是請求的 `version kind subtype flags`。method 與路徑省略 `/_matrix/client/v3` 前綴；不是 v3 的（只有較新的穩定版本的端點）寫完整路徑。批 2 的列在「做什麼」欄標 **（批 2）**，E2EE (A) 的標 **（E2EE）**。
 
@@ -164,8 +164,22 @@ offset  bytes              意思
 | `0x23` | `01 17 23 10` | KeyChanges | **（E2EE）** 兩個位置之間誰的金鑰變了（`left` 目前永遠是空的，見 0x17-keys.md） | `GET /keys/changes` | query `from`、`to` | — |
 | `0x24` | `01 17 24 10` | SigningKeysUpload | **（E2EE）** 上傳交叉簽章金鑰（換掉既有的要 UIAA） | `POST /keys/device_signing/upload` | — | JSON：`master_key`、`self_signing_key`、`user_signing_key`、`auth` |
 | `0x25` | `01 17 25 10` | SignaturesUpload | **（E2EE）** 上傳簽章（驗證裝置） | `POST /keys/signatures/upload` | — | JSON：使用者 → 金鑰 id → 簽過的金鑰 |
+| `0x30` | `01 17 30 10` | CreateBackupVersion | **（E2EE）** 開一份新的金鑰備份 | `POST /room_keys/version` | — | JSON：`algorithm`、`auth_data` |
+| `0x31` | `01 17 31 10` | LatestBackupInfo | **（E2EE）** 最新那份備份的資訊 | `GET /room_keys/version` | — | — |
+| `0x32` | `01 17 32 10` | GetBackupInfo | **（E2EE）** 指定版本的備份資訊 | `GET /room_keys/version/{version}` | `version` | — |
+| `0x33` | `01 17 33 10` | UpdateBackupVersion | **（E2EE）** 改某一版備份的 `auth_data` | `PUT /room_keys/version/{version}` | `version` | JSON：`algorithm`、`auth_data` |
+| `0x34` | `01 17 34 10` | DeleteBackupVersion | **（E2EE）** 刪掉一版備份（連金鑰） | `DELETE /room_keys/version/{version}` | `version` | — |
+| `0x35` | `01 17 35 10` | AddBackupKeys | **（E2EE）** 一次寫多房的金鑰 | `PUT /room_keys/keys` | query `version` | JSON：`rooms` |
+| `0x36` | `01 17 36 10` | AddBackupKeysForRoom | **（E2EE）** 寫一個房間的金鑰 | `PUT /room_keys/keys/{room_id}` | `room_id` ／ query `version` | JSON：`sessions` |
+| `0x37` | `01 17 37 10` | AddBackupKeysForSession | **（E2EE）** 寫一個 session 的金鑰 | `PUT /room_keys/keys/{room_id}/{session_id}` | `room_id`、`session_id` ／ query `version` | JSON：一筆 `KeyBackupData` |
+| `0x38` | `01 17 38 10` | GetBackupKeys | **（E2EE）** 讀整份備份 | `GET /room_keys/keys` | query `version` | — |
+| `0x39` | `01 17 39 10` | GetBackupKeysForRoom | **（E2EE）** 讀一個房間的 | `GET /room_keys/keys/{room_id}` | `room_id` ／ query `version` | — |
+| `0x3A` | `01 17 3A 10` | GetBackupKeysForSession | **（E2EE）** 讀一個 session 的 | `GET /room_keys/keys/{room_id}/{session_id}` | `room_id`、`session_id` ／ query `version` | — |
+| `0x3B` | `01 17 3B 10` | DeleteBackupKeys | **（E2EE）** 刪整份備份的金鑰 | `DELETE /room_keys/keys` | query `version` | — |
+| `0x3C` | `01 17 3C 10` | DeleteBackupKeysForRoom | **（E2EE）** 刪一個房間的 | `DELETE /room_keys/keys/{room_id}` | `room_id` ／ query `version` | — |
+| `0x3D` | `01 17 3D 10` | DeleteBackupKeysForSession | **（E2EE）** 刪一個 session 的 | `DELETE /room_keys/keys/{room_id}/{session_id}` | `room_id`、`session_id` ／ query `version` | — |
 
-**批 1 共 37 支**：Account 12、Room 13、Event 6、Receipt 3、Device 3。**批 2 共 8 支**：Session 4、Account 2、Device 2。**E2EE (A) 共 7 支**：Device 1、Keys 6。合計 52 支。
+**批 1 共 37 支**：Account 12、Room 13、Event 6、Receipt 3、Device 3。**批 2 共 8 支**：Session 4、Account 2、Device 2。**E2EE (A) 共 7 支**：Device 1、Keys 6。**E2EE (C) 共 14 支**：Keys 的金鑰備份。合計 66 支。
 
 ## 3. 不在這批
 

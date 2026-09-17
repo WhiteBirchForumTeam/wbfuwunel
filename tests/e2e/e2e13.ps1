@@ -565,5 +565,93 @@ Check '[3.9] without logging in, the key endpoints and SendToDevice are refused 
   "query=$($anonQuery.metaText) http=$($hanonQuery.status) $($hanonQuery.text) send=$($anonSend.metaText)"
 $anon6.Dispose(); $wsHold.Dispose(); $wsK.Dispose(); $wsL.Dispose()
 Stop-Server $server
+Log '################ Scenario 4: E2EE (C), server-side key backup through the bridge ################'
+# docs/design/wbf-e2ee.md §4. Fourteen rows, all of them the HTTP endpoint: what the bridge writes HTTP reads back,
+# what the bridge deletes HTTP no longer finds, and every refusal is the one HTTP gives.
+$db6 = "$S\e2e13db6"; Remove-Item -Recurse -Force $db6 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db6 | Out-Null
+$cfg6 = Write-Config $db6 86400
+$server = Start-Server $cfg6 's4'
+$regM = Api Post '/_matrix/client/v3/register' '{"username":"mona","password":"pw-mona-1","auth":{"type":"m.login.dummy"}}' $null
+$tokM = $regM.access_token
+$wsM = Ws-Open $tokM
+$room = (Http POST '/_matrix/client/v3/createRoom' @{ preset = 'public_chat' } $tokM).json.room_id
+$session = 'session-one'; $session2 = 'session-two'
+function Backup-Data([string]$text) { @{ first_message_index = 0; forwarded_count = 0; is_verified = $false; session_data = @{ ciphertext = $text; ephemeral = 'ZXBoZW1lcmFs'; mac = 'bWFj' } } }
+$AUTH_DATA = @{ public_key = 'cHVibGljLWtleS1mb3ItZTJlMTM'; signatures = @{} }
+
+$create = Bridge $wsM 0x17 0x30 $null @{ algorithm = 'm.megolm_backup.v1.curve25519-aes-sha2'; auth_data = $AUTH_DATA }
+$version = "$($create.body.version)"
+$latest = Bridge $wsM 0x17 0x31 $null $null
+$hlatest = Http GET '/_matrix/client/v3/room_keys/version' $null $tokM
+Check '[4.1] CreateBackupVersion through the bridge, and LatestBackupInfo agrees with HTTP' `
+  ((Is-Ack $create) -and $version -ne '' -and (Same-As-Http $latest $hlatest) -and "$($latest.body.version)" -eq $version) `
+  "create=$($create.text) latest=$($latest.text)"
+
+$info = Bridge $wsM 0x17 0x32 @{ version = $version } $null
+$hinfo = Http GET "/_matrix/client/v3/room_keys/version/$(Enc $version)" $null $tokM
+$update = Bridge $wsM 0x17 0x33 @{ version = $version } @{ algorithm = 'm.megolm_backup.v1.curve25519-aes-sha2'; auth_data = @{ public_key = 'cHVibGljLWtleS1mb3ItZTJlMTM'; signatures = @{}; note = 'updated through the bridge' } }
+$hinfoAfter = Http GET "/_matrix/client/v3/room_keys/version/$(Enc $version)" $null $tokM
+Check '[4.2] GetBackupInfo matches HTTP; UpdateBackupVersion through the bridge is what HTTP reads back' `
+  ((Same-As-Http $info $hinfo) -and (Is-Ack $update) -and $hinfoAfter.json.auth_data.note -eq 'updated through the bridge') `
+  "info=$($info.text) update=$($update.status) after=$($hinfoAfter.text)"
+
+$addSession = Bridge $wsM 0x17 0x37 @{ room_id = $room; session_id = $session; version = $version } (Backup-Data 'Y2lwaGVyLW9uZQ')
+$getSession = Bridge $wsM 0x17 0x3A @{ room_id = $room; session_id = $session; version = $version }
+$hgetSession = Http GET "/_matrix/client/v3/room_keys/keys/$(Enc $room)/$(Enc $session)?version=$(Enc $version)" $null $tokM
+Check '[4.3] AddBackupKeysForSession writes through the bridge (version as a query variable); GetBackupKeysForSession agrees with HTTP' `
+  ((Is-Ack $addSession) -and $addSession.body.count -ge 1 -and (Same-As-Http $getSession $hgetSession) -and $getSession.body.session_data.ciphertext -eq 'Y2lwaGVyLW9uZQ') `
+  "add=$($addSession.text) get=$($getSession.text)"
+
+$addRoom = Bridge $wsM 0x17 0x36 @{ room_id = $room; version = $version } @{ sessions = @{ $session2 = (Backup-Data 'Y2lwaGVyLXR3bw') } }
+$getRoom = Bridge $wsM 0x17 0x39 @{ room_id = $room; version = $version }
+$hgetRoom = Http GET "/_matrix/client/v3/room_keys/keys/$(Enc $room)?version=$(Enc $version)" $null $tokM
+Check '[4.4] AddBackupKeysForRoom, then GetBackupKeysForRoom: both sessions are there and the body is HTTP''s' `
+  ((Is-Ack $addRoom) -and (Same-As-Http $getRoom $hgetRoom) -and $null -ne $getRoom.body.sessions.$session -and $null -ne $getRoom.body.sessions.$session2) `
+  "add=$($addRoom.text) get=$($getRoom.text)"
+
+$addAll = Bridge $wsM 0x17 0x35 @{ version = $version } @{ rooms = @{ $room = @{ sessions = @{ 'session-three' = (Backup-Data 'Y2lwaGVyLXRocmVl') } } } }
+$getAll = Bridge $wsM 0x17 0x38 @{ version = $version }
+$hgetAll = Http GET "/_matrix/client/v3/room_keys/keys?version=$(Enc $version)" $null $tokM
+Check '[4.5] AddBackupKeys writes a whole tree; GetBackupKeys reads the three sessions back, as over HTTP' `
+  ((Is-Ack $addAll) -and (Same-As-Http $getAll $hgetAll) -and @($getAll.body.rooms.$room.sessions.PSObject.Properties.Name).Count -eq 3) `
+  "add=$($addAll.text) sessions=$(@($getAll.body.rooms.$room.sessions.PSObject.Properties.Name) -join ',')"
+
+$delSession = Bridge $wsM 0x17 0x3D @{ room_id = $room; session_id = $session; version = $version }
+$goneSession = Bridge $wsM 0x17 0x3A @{ room_id = $room; session_id = $session; version = $version }
+$hgoneSession = Http GET "/_matrix/client/v3/room_keys/keys/$(Enc $room)/$(Enc $session)?version=$(Enc $version)" $null $tokM
+Check '[4.6] DeleteBackupKeysForSession: gone through the bridge, and reading it back is refused exactly as HTTP refuses it' `
+  ((Is-Ack $delSession) -and (Same-Refusal $goneSession $hgoneSession)) "delete=$($delSession.text) gone=$($goneSession.metaText) http=$($hgoneSession.status) $($hgoneSession.text)"
+
+$delRoom = Bridge $wsM 0x17 0x3C @{ room_id = $room; version = $version }
+$afterRoom = Http GET "/_matrix/client/v3/room_keys/keys?version=$(Enc $version)" $null $tokM
+$addBack = Bridge $wsM 0x17 0x37 @{ room_id = $room; session_id = $session; version = $version } (Backup-Data 'Y2lwaGVyLWZvdXI')
+$delAll = Bridge $wsM 0x17 0x3B @{ version = $version }
+$afterAll = Bridge $wsM 0x17 0x38 @{ version = $version }
+$hafterAll = Http GET "/_matrix/client/v3/room_keys/keys?version=$(Enc $version)" $null $tokM
+Check '[4.7] DeleteBackupKeysForRoom empties the room; a key written again is removed by DeleteBackupKeys, and HTTP sees the same' `
+  ((Is-Ack $delRoom) -and $afterRoom.text -eq '{"rooms":{}}' -and (Is-Ack $addBack) -and (Is-Ack $delAll) -and (Same-As-Http $afterAll $hafterAll) -and $afterAll.text -eq '{"rooms":{}}') `
+  "room=$($delRoom.text) afterRoom=$($afterRoom.text) addBack=$($addBack.status) $($addBack.text) all=$($delAll.text) afterAll=$($afterAll.text) http=$($hafterAll.text)"
+
+# 📎 A version that does not exist is **not** a refusal on this server: reading its keys answers 200 with nothing, on
+# both roads. The bridge's job is to say the same thing HTTP says, whatever that is.
+$wrongVersion = Bridge $wsM 0x17 0x38 @{ version = '999' }
+$hwrongVersion = Http GET '/_matrix/client/v3/room_keys/keys?version=999' $null $tokM
+$missingVersion = Bridge $wsM 0x17 0x32 $null $null
+Check '[4.8] a version that does not exist answers as over HTTP; a missing path variable is the bridge''s own InvalidRequest' `
+  ((Same-As-Http $wrongVersion $hwrongVersion) -and $missingVersion.subtype -eq 3 -and $missingVersion.meta.code_id -eq 1201 -and (Is-BridgedReply $missingVersion) -and $missingVersion.text -eq '') `
+  "wrong=$($wrongVersion.status) $($wrongVersion.text) http=$($hwrongVersion.status) $($hwrongVersion.text) missing=$($missingVersion.metaText)"
+
+$delVersion = Bridge $wsM 0x17 0x34 @{ version = $version }
+$goneVersion = Bridge $wsM 0x17 0x32 @{ version = $version }
+$hgoneVersion = Http GET "/_matrix/client/v3/room_keys/version/$(Enc $version)" $null $tokM
+$anon7 = Ws-Open $null
+$anonBackup = Bridge $anon7 0x17 0x31 $null $null
+$hanonBackup = Http GET '/_matrix/client/v3/room_keys/version' $null $null
+Check '[4.9] DeleteBackupVersion: the version is gone for both roads; without logging in the backup endpoints refuse as HTTP does' `
+  ((Is-Ack $delVersion) -and (Same-Refusal $goneVersion $hgoneVersion) -and (Same-Refusal $anonBackup $hanonBackup) -and $anonBackup.meta.errcode -eq 'M_MISSING_TOKEN') `
+  "delete=$($delVersion.status) gone=$($goneVersion.metaText) anon=$($anonBackup.metaText) http=$($hanonBackup.status)"
+$anon7.Dispose(); $wsM.Dispose()
+Stop-Server $server
+
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"
 exit $(if ($script:Fail -gt 0) { 1 } else { 0 })

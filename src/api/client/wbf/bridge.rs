@@ -20,8 +20,8 @@ use http::{HeaderValue, Method, Request, StatusCode, header};
 use ruma::api::{
 	IncomingRequest,
 	client::{
-		account, alias, config, context, device, keys, membership, profile, read_marker, receipt, redact, room,
-		session, state, tag, to_device, typing,
+		account, alias, backup, config, context, device, keys, membership, profile, read_marker, receipt, redact,
+		room, session, state, tag, to_device, typing,
 	},
 	path_builder::PathBuilder,
 };
@@ -129,9 +129,29 @@ static BRIDGED_ENDPOINTS: &[BridgedEndpoint] = &[
 	row(Kind::Keys, 0x23, "KeyChanges", shape_of::<keys::get_key_changes::v3::Request>, &["from", "to"]),
 	row(Kind::Keys, 0x24, "SigningKeysUpload", shape_of::<keys::upload_signing_keys::v3::Request>, NO_QUERY),
 	row(Kind::Keys, 0x25, "SignaturesUpload", shape_of::<keys::upload_signatures::v3::Request>, NO_QUERY),
+
+	// Server-side key backup (docs/design/wbf-e2ee.md (C)): the versions first,
+	// then the keys in them, each of the three at all / one room / one session.
+	row(Kind::Keys, 0x30, "CreateBackupVersion", shape_of::<backup::create_backup_version::v3::Request>, NO_QUERY),
+	row(Kind::Keys, 0x31, "LatestBackupInfo", shape_of::<backup::get_latest_backup_info::v3::Request>, NO_QUERY),
+	row(Kind::Keys, 0x32, "GetBackupInfo", shape_of::<backup::get_backup_info::v3::Request>, NO_QUERY),
+	row(Kind::Keys, 0x33, "UpdateBackupVersion", shape_of::<backup::update_backup_version::v3::Request>, NO_QUERY),
+	row(Kind::Keys, 0x34, "DeleteBackupVersion", shape_of::<backup::delete_backup_version::v3::Request>, NO_QUERY),
+	row(Kind::Keys, 0x35, "AddBackupKeys", shape_of::<backup::add_backup_keys::v3::Request>, VERSION_QUERY),
+	row(Kind::Keys, 0x36, "AddBackupKeysForRoom", shape_of::<backup::add_backup_keys_for_room::v3::Request>, VERSION_QUERY),
+	row(Kind::Keys, 0x37, "AddBackupKeysForSession", shape_of::<backup::add_backup_keys_for_session::v3::Request>, VERSION_QUERY),
+	row(Kind::Keys, 0x38, "GetBackupKeys", shape_of::<backup::get_backup_keys::v3::Request>, VERSION_QUERY),
+	row(Kind::Keys, 0x39, "GetBackupKeysForRoom", shape_of::<backup::get_backup_keys_for_room::v3::Request>, VERSION_QUERY),
+	row(Kind::Keys, 0x3A, "GetBackupKeysForSession", shape_of::<backup::get_backup_keys_for_session::v3::Request>, VERSION_QUERY),
+	row(Kind::Keys, 0x3B, "DeleteBackupKeys", shape_of::<backup::delete_backup_keys::v3::Request>, VERSION_QUERY),
+	row(Kind::Keys, 0x3C, "DeleteBackupKeysForRoom", shape_of::<backup::delete_backup_keys_for_room::v3::Request>, VERSION_QUERY),
+	row(Kind::Keys, 0x3D, "DeleteBackupKeysForSession", shape_of::<backup::delete_backup_keys_for_session::v3::Request>, VERSION_QUERY),
 ];
 
 const NO_QUERY: &[&str] = &[];
+
+/// Every `/room_keys/keys` endpoint takes the backup version this way.
+const VERSION_QUERY: &[&str] = &["version"];
 
 const fn row(
 	kind: Kind,

@@ -1,7 +1,7 @@
 # E2EE 全走通道：金鑰端點上橋、發 to-device、OTK 數量與裝置清單變動
 
 > **這份文件回答：client 要讓 E2EE 完全不靠 `/sync`，server 要補哪幾件事、各自長什麼樣、分幾步做。**
-> 狀態：✅ 維護者 2026-09-16 同意（§6 五條的決定記在各條後面）。(A) 已實作（分支 `wbf/e2ee-bridge-keys`；每支的範例在 [0x17-keys.md](../bridge-specs/0x17-keys.md)、[0x16-device.md](../bridge-specs/0x16-device.md)）。起因是 issue #65（client 的需求）。
+> 狀態：✅ 維護者 2026-09-16 同意（§6 五條的決定記在各條後面）。(A) 已合併（PR #67），(C) 已實作（分支 `wbf/e2ee-backup`）；每支的範例在 [0x17-keys.md](../bridge-specs/0x17-keys.md)、[0x16-device.md](../bridge-specs/0x16-device.md)。起因是 issue #65（client 的需求）。
 > 維護者 2026-09-15：「原本第三批次要加入的 api，可以先 defer，先處理金鑰的部分。」
 > 上位文件：[wbf-api-bridge.md](wbf-api-bridge.md)（橋）、[wbf-to-device.md](wbf-to-device.md)（`0x16 Device`）、[../bridge-specs/index.md](../bridge-specs/index.md)（號碼總表）。
 
@@ -110,7 +110,9 @@ issue 提的是在 `Batch`／`Push` 的 meta 多帶 `otk_counts` 等欄位。我
 
 ## 4. (C) server 端金鑰備份：走橋（client 說可以晚一點）
 
-`/room_keys/version`（建立、查、改、刪、最新）與 `/room_keys/keys`（全部、單房、單 session 的讀寫刪），ruma 有 14 支，全部已經掛在 Router 上（`src/api/router.rs` 的 `register_client_keys_and_backup_routes`）。都是普通的一問一答，走橋只加表的列，`0x17` 的 `0x30`–`0x3D`。放在 (A)(B) 之後。
+`/room_keys/version`（建立、查、改、刪、最新）與 `/room_keys/keys`（全部、單房、單 session 的讀寫刪），ruma 有 14 支，全部已經掛在 Router 上（`src/api/router.rs` 的 `register_client_keys_and_backup_routes`）。都是普通的一問一答，走橋只加表的列，`0x17` 的 `0x30`–`0x3D`。
+
+✅ **已實作**：號碼與每支的形狀在 [0x17-keys.md](../bridge-specs/0x17-keys.md)，順序是先版本（`0x30`–`0x34`）再金鑰（`0x35`–`0x3D`，寫、讀、刪各三支：整份／單房／單 session）。`/room_keys/keys` 那九支的 `version` 是 **query 變數**，`/room_keys/version/{version}` 那四支的是 **path 變數** —— 同一個名字兩種位置，橋照 ruma 的模板自己分，client 兩邊都寫在 meta 裡就好。e2e13 情境 4。
 
 ## 5. 不做的
 

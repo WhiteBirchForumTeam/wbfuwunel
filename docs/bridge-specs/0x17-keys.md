@@ -3,8 +3,8 @@
 > 號碼總表與共通規則在 [index.md](index.md)。這份只寫**每支端點帶什麼、回什麼、會怎麼被拒**。
 > 請求的前 4 bytes 一律是 `01 17 SS 10`；成功回覆 `01 01 02 14`、失敗 `01 01 03 14`。`id` 填 0。
 > 為什麼搬、搬哪些：[wbf-e2ee.md](../design/wbf-e2ee.md) §2（E2EE 的 (A)）。**發** to-device 不在這個 kind，在 `0x16` 的 `0x25`（[0x16-device.md](0x16-device.md)）。
-> 這個 kind 目前沒有原生的 pack。自己的 OTK 剩幾把、同房的人誰的裝置清單變了，之後由 `0x16` 的原生 `CryptoState` 推（wbf-e2ee.md §3），不靠這裡的端點輪詢。
-> 下面的範例都是 e2e13 情境 3 實跑的回覆。金鑰是假的（server 存金鑰時不驗簽章，驗簽章的只有 `0x25`）。
+> 這個 kind 裝的是裝置金鑰（`0x20`–`0x25`）與 server 端金鑰備份（`0x30`–`0x3D`），目前沒有原生的 pack。自己的 OTK 剩幾把、同房的人誰的裝置清單變了，之後由 `0x16` 的原生 `CryptoState` 推（wbf-e2ee.md §3），不靠這裡的端點輪詢。
+> 下面的範例都是 e2e13 實跑的回覆（裝置金鑰是情境 3、備份是情境 4）。金鑰是假的（server 存金鑰時不驗簽章，驗簽章的只有 `0x25`）。
 
 ## `0x20` KeysUpload —— 上傳自己裝置的金鑰、補 OTK、換 fallback key
 
@@ -92,9 +92,48 @@
 - ⚠️ **簽章會真的驗**（對 server 存的金鑰），而且**個別失敗不是整支失敗**：回覆一樣是 `Ack`（200），失敗在 data 的 `failures` 裡，client 要自己看。
 - e2e 只驗到「走橋與走 HTTP 對同一份 body 回一樣的答案」，沒有造出真的 ed25519 簽章。
 
+## `0x30`–`0x34` 金鑰備份的版本
+
+server 端金鑰備份（[wbf-e2ee.md](../design/wbf-e2ee.md) §4 的 (C)）。一份備份有一個**版本**，金鑰都掛在版本底下。`0x32`–`0x34` 的 `version` 是 **path 變數**；`0x30`、`0x31` 沒有變數。
+
+| subtype | 端點 | 請求 meta | 請求 data | 回覆 data |
+|---|---|---|---|---|
+| `0x30` CreateBackupVersion | `POST /room_keys/version` | 空 | `{"algorithm":"m.megolm_backup.v1.curve25519-aes-sha2","auth_data":{"public_key":"…","signatures":{}}}` | `{"version":"97"}` |
+| `0x31` LatestBackupInfo | `GET /room_keys/version` | 空 | 空 | `{"algorithm":"m.megolm_backup.v1.curve25519-aes-sha2","auth_data":{"public_key":"…","signatures":{}},"count":0,"etag":"98","version":"97"}` |
+| `0x32` GetBackupInfo | `GET /room_keys/version/{version}` | `{"version":"97"}` | 空 | 同上 |
+| `0x33` UpdateBackupVersion | `PUT /room_keys/version/{version}` | `{"version":"97"}` | 同 `0x30` 的 body | `{}`；之後 `GetBackupInfo` 讀到新的 `auth_data`，`etag` 前進 |
+| `0x34` DeleteBackupVersion | `DELETE /room_keys/version/{version}` | `{"version":"97"}` | 空 | `{}`；這版的金鑰跟著沒了 |
+
+**會怎麼被拒**：版本不存在 → `NotFound`（1501），meta `{"code":"NotFound","code_id":1501,"errcode":"M_NOT_FOUND","message":"M_NOT_FOUND: Key backup does not exist at version \"97\"","status":404}`（e2e13 [4.9]）。
+
+## `0x35`–`0x3D` 金鑰備份的金鑰
+
+寫、讀、刪各三支：**整份**、**單一房間**、**單一 session**。
+
+| subtype | 端點 | 請求 meta | 請求 data | 回覆 data |
+|---|---|---|---|---|
+| `0x35` AddBackupKeys | `PUT /room_keys/keys` | `{"version":"97"}` | `{"rooms":{"!r:localhost":{"sessions":{"session-three":{…}}}}}` | `{"etag":"102","count":3}` |
+| `0x36` AddBackupKeysForRoom | `PUT /room_keys/keys/{room_id}` | `{"room_id":"!r:localhost","version":"97"}` | `{"sessions":{"session-two":{…}}}` | `{"etag":"101","count":2}` |
+| `0x37` AddBackupKeysForSession | `PUT /room_keys/keys/{room_id}/{session_id}` | `{"room_id":"!r:localhost","session_id":"session-one","version":"97"}` | `{"first_message_index":0,"forwarded_count":0,"is_verified":false,"session_data":{"ciphertext":"…","ephemeral":"…","mac":"…"}}` | `{"etag":"100","count":1}` |
+| `0x38` GetBackupKeys | `GET /room_keys/keys` | `{"version":"97"}` | 空 | `{"rooms":{"!r:localhost":{"sessions":{…三個…}}}}` |
+| `0x39` GetBackupKeysForRoom | `GET /room_keys/keys/{room_id}` | `{"room_id":"!r:localhost","version":"97"}` | 空 | `{"sessions":{"session-one":{…},"session-two":{…}}}` |
+| `0x3A` GetBackupKeysForSession | `GET /room_keys/keys/{room_id}/{session_id}` | `{"room_id":"!r:localhost","session_id":"session-one","version":"97"}` | 空 | 一筆 `KeyBackupData`，同 `0x37` 的 data |
+| `0x3B` DeleteBackupKeys | `DELETE /room_keys/keys` | `{"version":"97"}` | 空 | `{"etag":"103","count":0}` |
+| `0x3C` DeleteBackupKeysForRoom | `DELETE /room_keys/keys/{room_id}` | `{"room_id":"!r:localhost","version":"97"}` | 空 | `{"etag":"102","count":0}` |
+| `0x3D` DeleteBackupKeysForSession | `DELETE /room_keys/keys/{room_id}/{session_id}` | `{"room_id":"!r:localhost","session_id":"session-one","version":"97"}` | 空 | `{"etag":"102","count":2}` |
+
+- ⚠️ **`version` 在這九支是 query 變數**，在 `0x32`–`0x34` 是 path 變數。**client 兩邊都一樣寫進 meta**，橋照端點的模板自己決定放哪裡（wbf-e2ee.md §4）。
+- **`count` 是這份備份現在總共有幾把金鑰**，`etag` 每次寫入前進；刪除也回這兩個。
+- **`session_data` 是 client 加密過的東西**，server 不看內容。
+
+**會怎麼被拒**：
+- 金鑰不存在 → `NotFound`（1501），`M_NOT_FOUND: Backup key not found for this user's session.`（e2e13 [4.6]）。
+- 📎 **版本不存在不是拒絕**：讀那一版的金鑰回 `Ack`、`{"rooms":{}}`，走 HTTP 也一樣（e2e13 [4.8]）。這是 server 現在的行為，不是橋加的。
+- meta 少了 `version` → 橋自己的 `InvalidRequest`（1201），`message` 是 `` `version` is missing ``，data 是空的，端點沒有被呼叫（e2e13 [4.8]）。
+
 ## 這個 kind 共通的拒絕
 
 | 情況 | `code` | 來自 |
 |---|---|---|
-| meta 多了表上沒有的變數（`0x23` 以外的 meta 應該是空的） | `InvalidRequest`（1201） | 橋 |
+| meta 少了表上列的變數（`version`、`room_id`、`session_id`…）、或多了表上沒有的 | `InvalidRequest`（1201） | 橋 |
 | 沒登入 | `Unauthorized`（1301），`errcode` `M_MISSING_TOKEN`（e2e13 [3.9]） | 端點 |
