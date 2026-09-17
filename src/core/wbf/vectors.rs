@@ -179,12 +179,9 @@ fn current() -> Value {
 			// `CryptoState` (wbf-e2ee.md §3): same subscription as the `Push`
 			// above, so its id and the next seq. Every field is present even
 			// when empty — `unused_fallback_key_types: []` means "all used",
-			// which a missing field would not say. `dl_seq` is the
-			// subscription's, the same number as `latest_cd_seq`. The subscribe
-			// that asks for a device-list catch-up adds `dl_seq`.
-			pack("device_subscribe_dl_seq", Kind::Device, 0x04, Flags::default(), conversation(30), 0, br#"{"cd_seq":4711,"device_id":"RJYKSTBOIE","dl_seq":4700}"#, b""),
-			pack("device_crypto_state", Kind::Device, 0x08, Flags::IS_RESPONSE, conversation(30), 1, br#"{"device_lists":{"changed":["@bob:example.org"],"left":["@carol:example.org"]},"dl_seq":4730,"gap":false,"otk_counts":{"signed_curve25519":42},"unused_fallback_key_types":["signed_curve25519"]}"#, b""),
-			pack("device_crypto_state_empty", Kind::Device, 0x08, Flags::IS_RESPONSE, conversation(30), 2, br#"{"device_lists":{"changed":[],"left":[]},"dl_seq":4730,"gap":false,"otk_counts":{},"unused_fallback_key_types":[]}"#, b""),
+			// which a missing field would not say.
+			pack("device_crypto_state", Kind::Device, 0x08, Flags::IS_RESPONSE, conversation(30), 1, br#"{"gap":false,"otk_counts":{"signed_curve25519":42},"unused_fallback_key_types":["signed_curve25519"]}"#, b""),
+			pack("device_crypto_state_empty", Kind::Device, 0x08, Flags::IS_RESPONSE, conversation(30), 2, br#"{"gap":false,"otk_counts":{},"unused_fallback_key_types":[]}"#, b""),
 			// The destroy command and its result carry counts as raw big-endian
 			// u64s, eight bytes each with no separator: a separator byte would
 			// also occur inside a count.

@@ -28,12 +28,9 @@ mod devices;
 mod rooms;
 mod subscribers;
 
-use std::{
-	collections::HashMap,
-	sync::{
-		Arc, RwLock,
-		atomic::{AtomicU64, Ordering},
-	},
+use std::sync::{
+	Arc,
+	atomic::{AtomicU64, Ordering},
 };
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, mpsc};
@@ -233,11 +230,6 @@ pub struct Streams {
 	rooms: Subscribers<RoomTopic>,
 	/// The to-device queues (`0x16 Device`), at most one connection each.
 	devices: Subscribers<DeviceTopic>,
-	/// Each device subscription's `dl_seq`: where its device-list catch-up
-	/// started, stamped on every `CryptoState` it is sent
-	/// (docs/design/wbf-e2ee.md §3.4). A connection with no entry has not
-	/// been caught up yet, and is not pushed one.
-	device_list_positions: RwLock<HashMap<ConnectionId, u64>>,
 }
 
 /// Leaves every stream when the connection's task ends, whichever way it
@@ -267,7 +259,6 @@ impl Streams {
 			// arrives: the registry can enforce it without a gap between
 			// looking and entering, and a call site cannot.
 			devices: Subscribers::new(Occupancy::OneTheLatest),
-			device_list_positions: RwLock::new(HashMap::new()),
 		}
 	}
 
@@ -302,7 +293,7 @@ impl Streams {
 	/// only this.
 	pub fn remove_connection(&self, connection: ConnectionId) {
 		self.rooms.remove_connection(connection);
-		self.unsubscribe_device(connection);
+		self.devices.remove_connection(connection);
 	}
 
 	/// Whether `connection` holds any subscription at all; for tests.

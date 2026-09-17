@@ -436,20 +436,11 @@ async fn build_sync_events(
 
 	let account_data = collect_global_account_data(services, sender_user, since, next_batch);
 
-	// Own and every joined room's key changes, the layer shared with the wbf
-	// channel (docs/design/wbf-e2ee.md §3.4.1).
 	let keys_changed = services
 		.users
-		.list_key_changes_seen_by(sender_user, since, Some(next_batch));
-
-	// Decision 7: the members of rooms this user left are candidates for
-	// `left` too, not only those who left rooms this user is still in. An
-	// initial sync reports no membership-derived changes, as before.
-	let left_rooms_members = (since != 0).then_async(|| {
-		services
-			.users
-			.list_members_of_rooms_left(sender_user, since, Some(next_batch))
-	});
+		.keys_changed(sender_user, since, Some(next_batch))
+		.map(ToOwned::to_owned)
+		.collect::<HashSet<_>>();
 
 	let to_device_events = sender_device.map_async(|sender_device| {
 		services
@@ -481,7 +472,7 @@ async fn build_sync_events(
 
 	let (
 		account_data,
-		(keys_changed, left_rooms_members),
+		keys_changed,
 		presence_updates,
 		(_, to_device_events, device_one_time_keys_count, device_unused_fallback_key_types),
 		(
@@ -492,7 +483,7 @@ async fn build_sync_events(
 		),
 	) = join5(
 		account_data,
-		join(keys_changed, left_rooms_members),
+		keys_changed,
 		presence_updates,
 		join4(
 			remove_to_device_events,
@@ -507,8 +498,6 @@ async fn build_sync_events(
 
 	device_list_updates.extend(keys_changed);
 
-	let mut left_encrypted_users = left_encrypted_users;
-	left_encrypted_users.extend(left_rooms_members.into_iter().flatten());
 	let device_list_left =
 		collect_device_list_left(services, sender_user, left_encrypted_users).await;
 
@@ -1179,6 +1168,7 @@ async fn load_joined_room(
 		encrypted,
 		initial,
 		since,
+		next_batch,
 		last_privateread_update,
 		send_notification_counts,
 		filter,
@@ -1393,6 +1383,7 @@ async fn await_join_aggregates(
 	encrypted: bool,
 	initial: bool,
 	since: u64,
+	next_batch: u64,
 	last_privateread_update: u64,
 	send_notification_counts: bool,
 	filter: &FilterDefinition,
@@ -1416,6 +1407,8 @@ async fn await_join_aggregates(
 		timeline_membership_changes(&timeline_pdus, initial),
 		state_events,
 		initial,
+		since,
+		next_batch,
 	);
 
 	let room_events = collect_room_events(
@@ -1985,6 +1978,7 @@ fn extract_membership(event: &PduEvent) -> Option<(MembershipState, OwnedUserId)
 	Some((content.membership, user_id))
 }
 
+#[expect(clippy::too_many_arguments)]
 async fn gather_device_list_updates(
 	services: &Services,
 	sender_user: &UserId,
@@ -1992,10 +1986,17 @@ async fn gather_device_list_updates(
 	timeline_membership_changes: Vec<(MembershipState, OwnedUserId)>,
 	state_events: &[PduEvent],
 	initial: bool,
+	since: u64,
+	next_batch: u64,
 ) -> (HashSet<OwnedUserId>, HashSet<OwnedUserId>) {
-	// The room's key changes are in `list_key_changes_seen_by`, taken once
-	// for every joined room in `build_sync_events`.
-	let (dlu, leu) = state_events
+	let keys_changed = services
+		.users
+		.room_keys_changed(room_id, since, Some(next_batch))
+		.map(|(user_id, _)| user_id)
+		.map(ToOwned::to_owned)
+		.collect::<Vec<_>>();
+
+	let (mut dlu, leu) = state_events
 		.iter()
 		.stream()
 		.ready_filter(|_| !initial)
@@ -2019,6 +2020,7 @@ async fn gather_device_list_updates(
 		})
 		.await;
 
+	dlu.extend(keys_changed.await);
 	(dlu, leu)
 }
 

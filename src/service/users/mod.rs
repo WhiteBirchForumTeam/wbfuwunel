@@ -1,6 +1,5 @@
 mod dehydrated_device;
 pub mod device;
-mod device_lists;
 mod keys;
 mod ldap;
 pub mod login;
@@ -29,7 +28,6 @@ use tuwunel_database::{Deserialized, Json, Map};
 
 pub use self::{
 	dehydrated_device::DehydratedDevice,
-	device_lists::{DeviceListChanges, MembershipChange},
 	keys::parse_master_key,
 	login::{IssuedSession, RefreshedSession},
 	register::Register,

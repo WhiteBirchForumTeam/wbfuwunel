@@ -6,7 +6,7 @@ use ruma::{RoomId, UserId, events::TimelineEventType::RoomMember};
 use tuwunel_core::{
 	Error, PduCount, Result,
 	matrix::{Event, pdu::PduEvent},
-	utils::result::LogErr,
+	utils::{ReadyExt, result::LogErr, stream::BroadbandExt},
 };
 use tuwunel_service::Services;
 
@@ -115,9 +115,6 @@ async fn load_timeline_with_errors(
 	Ok((timeline_pdus, limited, last_timeline_count))
 }
 
-/// The judgment lives in the users service, shared with the wbf channel's
-/// device-list catch-up and `/keys/changes` (`docs/design/wbf-e2ee.md`
-/// §3.4.1); both sync versions keep calling it by this name.
 async fn share_encrypted_room(
 	services: &Services,
 	sender_user: &UserId,
@@ -125,8 +122,16 @@ async fn share_encrypted_room(
 	ignore_room: Option<&RoomId>,
 ) -> bool {
 	services
-		.users
-		.shares_encrypted_room(sender_user, user_id, ignore_room)
+		.state_cache
+		.get_shared_rooms(sender_user, user_id)
+		.ready_filter(|&room_id| Some(room_id) != ignore_room)
+		.map(ToOwned::to_owned)
+		.broad_any(async |other_room_id| {
+			services
+				.state_accessor
+				.is_encrypted_room(&other_room_id)
+				.await
+		})
 		.await
 }
 

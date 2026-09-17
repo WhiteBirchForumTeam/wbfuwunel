@@ -25,6 +25,8 @@ use tuwunel_core::{
 };
 use tuwunel_database::{Deserialized, Ignore, Interfix, Json, KeyBuf, Map, Txn, serialize_key};
 
+use crate::streams::CryptoState;
+
 type Servers = SmallVec<[OwnedServerName; 1]>;
 type Signatures = SmallVec<[(String, String); 1]>;
 
@@ -96,8 +98,7 @@ pub async fn add_one_time_keys(
 	txn.execute();
 	drop(oldest_count);
 
-	self.push_crypto_state(user_id, device_id, &[], &[])
-		.await;
+	self.push_crypto_state(user_id, device_id).await;
 
 	Ok(())
 }
@@ -197,8 +198,7 @@ where
 	txn.execute();
 	drop(oldest_count);
 
-	self.push_crypto_state(user_id, device_id, &[], &[])
-		.await;
+	self.push_crypto_state(user_id, device_id).await;
 
 	Ok(())
 }
@@ -270,8 +270,7 @@ pub async fn take_fallback_key(
 		.put(key, Json(&updated));
 
 	// The device learns its fallback key is used and should be replaced.
-	self.push_crypto_state(user_id, device_id, &[], &[])
-		.await;
+	self.push_crypto_state(user_id, device_id).await;
 
 	Ok((updated.key_id, updated.key))
 }
@@ -338,10 +337,34 @@ pub async fn take_one_time_key(
 
 	// Local and federated claims both pass here: the device learns it has one
 	// key fewer, without waiting for a sync it may never run.
-	self.push_crypto_state(user_id, device_id, &[], &[])
-		.await;
+	self.push_crypto_state(user_id, device_id).await;
 
 	Ok(claimed)
+}
+
+/// Pushes the device's current key supply as a `CryptoState` to the
+/// connection holding its to-device queue, if one does
+/// (docs/design/wbf-e2ee.md §3). Nobody holding it costs one lookup and no
+/// reads.
+#[implement(super::Service)]
+pub async fn push_crypto_state(&self, user_id: &UserId, device_id: &DeviceId) {
+	let streams = &self.services.streams;
+	if streams.device_holder(user_id, device_id).is_none() {
+		return;
+	}
+
+	let otk_counts = serde_json::to_value(self.count_one_time_keys(user_id, device_id).await)
+		.unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+	let unused_fallback_key_types: Vec<String> = self
+		.unused_fallback_key_algorithms(user_id, device_id)
+		.map(|algorithm| algorithm.to_string())
+		.collect()
+		.await;
+
+	streams.push_crypto_state(user_id, device_id, &CryptoState {
+		otk_counts: &otk_counts,
+		unused_fallback_key_types: &unused_fallback_key_types,
+	});
 }
 
 #[implement(super::Service)]
@@ -942,35 +965,17 @@ pub async fn mark_device_key_update(&self, user_id: &UserId) {
 		.keychangeid_userid
 		.put_raw(user_key, user_id);
 
-	let rooms: Vec<OwnedRoomId> = self
-		.services
+	self.services
 		.state_cache
 		.rooms_joined(user_id)
 		.filter(|room_id| all_or_is_encrypted(*room_id))
-		.map(ToOwned::to_owned)
-		.collect()
+		.ready_for_each(|room_id| {
+			let room_key = (room_id, *count);
+			self.db
+				.keychangeid_userid
+				.put_raw(room_key, user_id);
+		})
 		.await;
-	for room_id in &rooms {
-		let room_key = (room_id, *count);
-		self.db
-			.keychangeid_userid
-			.put_raw(room_key, user_id);
-	}
-
-	// The connected devices of everyone who sees this change learn of it now
-	// (wbf-e2ee.md §3.4). Written above first, so a device that subscribes
-	// meanwhile reads it in its catch-up instead; off the caller's path,
-	// because the recipients are every member of every one of those rooms.
-	if self.services.streams.is_any_device_held() {
-		let services = self.services.clone();
-		let changed_user = user_id.to_owned();
-		self.services.server.runtime().spawn(async move {
-			services
-				.users
-				.push_key_change(&changed_user, &rooms)
-				.await;
-		});
-	}
 
 	self.services
 		.sending
