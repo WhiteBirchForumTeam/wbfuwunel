@@ -169,7 +169,7 @@
 維護者提的「把裝置變動廣播到這個帳號所在的每個房間」：對 client 來說它就像一種成員變動，走同一套處理 —— 這個人的裝置過期了，下次發之前重查。
 
 - **短暫的訊號，不寫時間線**：只在記憶體裡扇出給那些房間**正連著**的訂閱者。不寫資料庫、不進歷史、不走聯邦、不需要任何人的權限。
-- **新的原生 subtype：`0x14 Event` 的 `0x07 DeviceChanged`**，server → client（→ 決定 2）。
+- **新的原生 subtype：`0x14 Event` 的 `0x07 DeviceChanged`**，server → client（維護者 2026-09-17 同意）。
   - ⚠️ **不能塞進 `Push` 的 data**：那裡每一則都帶 `g_seq`、推進 client 的水位，混進沒有 `g_seq` 的東西會弄壞水位。
 - **`id` 抄這條連線的 `Event/Subscribe`、跟 `Push` 共用 `seq` 與 `gap`**（跟 `CryptoState` 共用 `Device/Subscribe` 的做法一樣）。
 - meta：
@@ -271,7 +271,7 @@ HTTP 送訊息不帶這個欄位，所以**不檢查**。這條路的正確性�
 | 某人加入／離開房間時，對房裡每個線上成員判斷「還有沒有共同加密房」再推（`push_membership_change`，背景 task） | 產生上面的 `changed`／`left` | **不需要**。這是 (B) 最貴的一段：每次加入離開都要做「成員數 × 共同房間判斷」 |
 | 某人金鑰變動時，推 `changed: [他]` 給同房的人（`push_key_change`，背景 task） | 同上 | **不需要**：F3 取代 |
 | `Device/Subscribe{dl_seq}` 的補窗（掃成員索引＋共同房間判斷） | 重連時補上面那兩個清單 | **不需要** |
-| HTTP：`/sync` 共用的兩層、`left` 補上自己離開的房間（決定 7）、`/keys/changes` 的 `left` 不再是空的 | 給**一般 Matrix client** | **跟客製 client 無關，但一般 client 受惠**，應該保留 |
+| HTTP：`/sync` 共用的兩層、`left` 補上自己離開的房間（wbf-e2ee.md 決定 7）、`/keys/changes` 的 `left` 不再是空的 | 給**一般 Matrix client** | **跟客製 client 無關，但一般 client 受惠**，應該保留 |
 
 ### 9.2 兩個選項
 
@@ -281,7 +281,7 @@ HTTP 送訊息不帶這個欄位，所以**不檢查**。這條路的正確性�
 - **(b) (B) 合併前先拿掉通道上的「別人的裝置清單」**：
   - `CryptoState` 只剩 `otk_counts`、`unused_fallback_key_types`、`gap`；拿掉 `device_lists`、`dl_seq`，`Device/Subscribe` 不再收 `dl_seq`。
   - 拿掉 `push_membership_change`、`push_key_change` 兩個背景推送。
-  - **保留 HTTP 那半**（`/sync` 的共用層與決定 7、`/keys/changes` 的 `left`）。
+  - **保留 HTTP 那半**（`/sync` 的共用層與 wbf-e2ee.md 決定 7、`/keys/changes` 的 `left`）。
   - 好處：通道上只有一套機制；server 不做那段高成本的判斷。
   - 壞處：在這份提案實作完之前，客製 client 在通道上**沒有**裝置清單變動的訊號（要的話只能用橋的 `KeyChanges`）。📎 issue #65 的 client 計畫裡，「自己加密送訊息」這一步本來就排在等 server 的後面，還沒上線。
 
