@@ -74,7 +74,7 @@ client 用 `matrix-sdk-crypto` 的 `OlmMachine`（沒有網路 IO 的狀態機�
 |---|---|
 | `Device/Subscribe` 成功之後（`Ack` 與 to-device 補窗的 `Push` 之後），**一定送一個** | 這條連線 |
 | `take_one_time_key`（別人 claim、聯邦 claim 都經過它） | 被 claim 的那個裝置的持有連線 |
-| `add_one_time_keys`、`add_fallback_keys` | 那個裝置的持有連線 |
+| `add_one_time_keys`、`add_fallback_keys`，**真的寫進至少一把**才推（每次 `/keys/upload` 都會呼叫兩者，只傳裝置金鑰、或全是重複的 OTK 時存量沒變，不推；PR #68 審查） | 那個裝置的持有連線 |
 | `take_fallback_key`（fallback 被用掉） | 那個裝置的持有連線 |
 
 - 數字是「推的當下讀到的」。沒有連線持有這個裝置的佇列時，只多一次查找，不讀資料庫。

@@ -64,6 +64,13 @@ Check '[1.2] uploading OTKs and a fallback key pushes the new counts, and the fa
   ($upload.status -eq 200 -and $afterUpload.Count -ge 1 -and $last.otk_counts.signed_curve25519 -eq 2 -and @($last.unused_fallback_key_types) -contains 'signed_curve25519') `
   "pushes=$($afterUpload.Count) last=$(if ($last) { $afterUpload[$afterUpload.Count - 1].metaText } else { 'none' })"
 
+# An upload that changes nothing: the same OTK again and no fallback key. Both add_* run on every upload.
+$again = Http POST '/_matrix/client/v3/keys/upload' @{ one_time_keys = @{ 'signed_curve25519:AAAA1' = @{ key = 'a2V5MQ'; signatures = @{} } } } $tokA
+$afterNoChange = Only-Crypto (Drain $wsA)
+Check '[1.2b] an upload that adds no key (a repeated OTK, no fallback key) pushes nothing' `
+  ($again.status -eq 200 -and $again.json.one_time_key_counts.signed_curve25519 -eq 2 -and $afterNoChange.Count -eq 0) `
+  "upload=$($again.text) pushes=$(@($afterNoChange | ForEach-Object { $_.metaText }) -join ' | ')"
+
 $claim = Claim $tokB $alice $devA
 $afterClaim = Only-Crypto (Drain $wsA)
 Check '[1.3] another user claiming one of the keys pushes the count down' `

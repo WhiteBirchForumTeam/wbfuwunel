@@ -98,7 +98,11 @@ pub async fn add_one_time_keys(
 	txn.execute();
 	drop(oldest_count);
 
-	self.push_crypto_state(user_id, device_id).await;
+	// Every /keys/upload calls this, most with no keys of this kind: push only
+	// when the supply changed.
+	if last_count.is_some() {
+		self.push_crypto_state(user_id, device_id).await;
+	}
 
 	Ok(())
 }
@@ -198,7 +202,11 @@ where
 	txn.execute();
 	drop(oldest_count);
 
-	self.push_crypto_state(user_id, device_id).await;
+	// Every /keys/upload calls this, most with no keys of this kind: push only
+	// when the supply changed.
+	if last_count.is_some() {
+		self.push_crypto_state(user_id, device_id).await;
+	}
 
 	Ok(())
 }
