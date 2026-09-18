@@ -103,15 +103,16 @@ impl crate::Service for Service {
 /// Return:
 ///     Result<DeviceVersion>  the stored one; an account without one gets
 ///     `seq` 1 and the position of its last key change (0 when it has none),
-///     written back (§3.3). Err when its keys cannot be read or hashed.
+///     written back (§3.3), with `UNHASHABLE` when its keys cannot be read
+///     or hashed. Err only when the stored one cannot be read.
 #[implement(Service)]
 pub async fn get_device_version(&self, user_id: &UserId) -> Result<DeviceVersion> {
-	if let Ok(version) = self.find_stored_version(user_id).await {
+	if let Some(version) = to_found_or_none(self.find_stored_version(user_id).await)? {
 		return Ok(version);
 	}
 
 	let _user_guard = self.user_locks.lock(user_id).await;
-	if let Ok(version) = self.find_stored_version(user_id).await {
+	if let Some(version) = to_found_or_none(self.find_stored_version(user_id).await)? {
 		return Ok(version);
 	}
 
@@ -119,7 +120,7 @@ pub async fn get_device_version(&self, user_id: &UserId) -> Result<DeviceVersion
 	// in, and refuse their senders once for a change that never happened.
 	let version = DeviceVersion {
 		seq: 1,
-		hash: self.hash_current_keys(user_id).await?,
+		hash: self.get_hash_or_unhashable(user_id).await,
 		pos: self.find_last_key_change_position(user_id).await,
 	};
 	self.db
@@ -155,14 +156,11 @@ pub async fn bump_device_version(&self, user_id: &UserId, pos: u64) -> DeviceVer
 
 	// 🚨 A version that did not move would let a client that saw the old keys
 	// through; one that moved with a placeholder only costs it a refetch.
-	let hash = self
-		.hash_current_keys(user_id)
-		.await
-		.unwrap_or_else(|e| {
-			error!(%user_id, "keys that cannot be hashed: {e}");
-			UNHASHABLE.to_owned()
-		});
-	let version = DeviceVersion { seq, hash, pos };
+	let version = DeviceVersion {
+		seq,
+		hash: self.get_hash_or_unhashable(user_id).await,
+		pos,
+	};
 	self.db
 		.userid_wbfdeviceversion
 		.put(user_id, Json(&version));
@@ -317,22 +315,30 @@ async fn find_last_key_change_position(&self, user_id: &UserId) -> u64 {
 /// `device_keys_hash` of what `/keys/query` would show anyone: the master
 /// and self-signing keys with only the owner's signatures, and the keys of
 /// every device that has uploaded some.
+///
+/// 🚨 Only a key that is not there is left out. A read that fails, or a
+/// stored key that is not JSON, fails the whole hash: a hash of the keys that
+/// happened to be readable would look like a fingerprint of the account and be
+/// one of something else (PR #73 review).
 #[implement(Service)]
 async fn hash_current_keys(&self, user_id: &UserId) -> Result<String> {
 	let users = &self.services.users;
 	let only_own_signatures = |_: &UserId| false;
-	let to_json = |raw: &str| serde_json::from_str::<Value>(raw).ok();
 
-	let master_key = users
-		.get_master_key(None, user_id, &only_own_signatures)
-		.await
-		.ok()
-		.and_then(|raw| to_json(raw.json().get()));
-	let self_signing_key = users
-		.get_self_signing_key(None, user_id, &only_own_signatures)
-		.await
-		.ok()
-		.and_then(|raw| to_json(raw.json().get()));
+	let master_key = to_found_or_none(
+		users
+			.get_master_key(None, user_id, &only_own_signatures)
+			.await,
+	)?
+	.map(|raw| to_key_json(raw.json()))
+	.transpose()?;
+	let self_signing_key = to_found_or_none(
+		users
+			.get_self_signing_key(None, user_id, &only_own_signatures)
+			.await,
+	)?
+	.map(|raw| to_key_json(raw.json()))
+	.transpose()?;
 
 	let device_ids: Vec<OwnedDeviceId> = users
 		.all_device_ids(user_id)
@@ -341,17 +347,45 @@ async fn hash_current_keys(&self, user_id: &UserId) -> Result<String> {
 		.await;
 	let mut device_keys = Vec::with_capacity(device_ids.len());
 	for device_id in device_ids {
-		if let Some(keys) = users
-			.get_device_keys(user_id, &device_id)
-			.await
-			.ok()
-			.and_then(|raw| to_json(raw.json().get()))
-		{
-			device_keys.push((device_id, keys));
+		// A device that never uploaded keys is not in /keys/query either.
+		if let Some(raw) = to_found_or_none(users.get_device_keys(user_id, &device_id).await)? {
+			device_keys.push((device_id, to_key_json(raw.json())?));
 		}
 	}
 
 	device_keys_hash(user_id, master_key.as_ref(), self_signing_key.as_ref(), &device_keys)
+}
+
+/// Args:
+///     read: a key read, example: `Err(NotFound)` for an account with no
+///       master key
+/// Return:
+///     Result<Option<T>>  Some for a key, None only when it is not there; any
+///     other error stays an error.
+fn to_found_or_none<T>(read: Result<T>) -> Result<Option<T>> {
+	match read {
+		| Ok(found) => Ok(Some(found)),
+		| Err(e) if e.is_not_found() => Ok(None),
+		| Err(e) => Err(e),
+	}
+}
+
+/// Return:
+///     Result<Value>  the stored key as JSON; Err when it is not JSON.
+fn to_key_json(raw: &serde_json::value::RawValue) -> Result<Value> {
+	serde_json::from_str(raw.get()).map_err(|e| err!(Database("a stored key is not JSON: {e}")))
+}
+
+/// For the version's hash: the fingerprint, or `UNHASHABLE` when the keys
+/// cannot be read or hashed, so the version is still written and still moves.
+#[implement(Service)]
+async fn get_hash_or_unhashable(&self, user_id: &UserId) -> String {
+	self.hash_current_keys(user_id)
+		.await
+		.unwrap_or_else(|e| {
+			error!(%user_id, "keys that cannot be hashed: {e}");
+			UNHASHABLE.to_owned()
+		})
 }
 
 #[cfg(test)]
@@ -359,7 +393,21 @@ mod tests {
 	use ruma::events::room::member::MembershipState;
 	use tuwunel_core::matrix::PduCount;
 
-	use super::{DeviceVersion, is_membership_counted, to_room_position};
+	use tuwunel_core::err;
+
+	use super::{DeviceVersion, is_membership_counted, to_found_or_none, to_room_position};
+
+	/// 🚨 PR #73 review: only a key that is not there may be left out of the
+	/// hash. A read that failed any other way must not look like "no key",
+	/// or the hash is taken over whatever happened to be readable.
+	#[test]
+	fn only_a_missing_key_is_left_out_and_every_other_failure_stays_a_failure() {
+		assert_eq!(to_found_or_none(Ok(7)).ok(), Some(Some(7)));
+		assert_eq!(to_found_or_none::<u8>(Err(err!(Request(NotFound("no master key"))))).ok(), Some(None));
+
+		assert!(to_found_or_none::<u8>(Err(err!(Database("the row could not be read")))).is_err());
+		assert!(to_found_or_none::<u8>(Err(err!("anything else"))).is_err());
+	}
 
 	#[test]
 	fn only_join_leave_and_ban_move_a_room() {
