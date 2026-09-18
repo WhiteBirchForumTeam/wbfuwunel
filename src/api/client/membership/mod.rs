@@ -24,7 +24,7 @@ pub(crate) use self::{
 	kick::kick_user_route,
 	knock::knock_room_route,
 	leave::leave_room_route,
-	members::{get_member_events_route, joined_members_route},
+	members::{MEMBER_EVENTS_PATHS, get_member_events_route, joined_members_route},
 	unban::unban_user_route,
 };
 use crate::Ruma;

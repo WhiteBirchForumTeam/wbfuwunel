@@ -342,7 +342,10 @@ fn register_client_room_routes(router: Router<State>) -> Router<State> {
 		.ruma_route(&client::get_public_rooms_route)
 		.ruma_route(&client::get_public_rooms_filtered_route)
 		.ruma_route(&client::search_users_route)
-		.ruma_route(&client::get_member_events_route)
+		// Not `ruma_route`: the answer carries a field ruma's type has no room
+		// for (docs/design/wbf-room-device-version.md §5.2).
+		.route(client::MEMBER_EVENTS_PATHS[0], get(client::get_member_events_route))
+		.route(client::MEMBER_EVENTS_PATHS[1], get(client::get_member_events_route))
 		.ruma_route(&client::get_protocols_route)
 		.ruma_route(&client::get_protocol_route)
 		.ruma_route(&client::get_user_for_protocol_route)

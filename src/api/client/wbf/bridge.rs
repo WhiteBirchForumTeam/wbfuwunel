@@ -99,7 +99,7 @@ static BRIDGED_ENDPOINTS: &[BridgedEndpoint] = &[
 	row(Kind::Room, 0x26, "Ban", shape_of::<membership::ban_user::v3::Request>, NO_QUERY),
 	row(Kind::Room, 0x27, "Unban", shape_of::<membership::unban_user::v3::Request>, NO_QUERY),
 	row(Kind::Room, 0x28, "JoinedRooms", shape_of::<membership::joined_rooms::v3::Request>, NO_QUERY),
-	row(Kind::Room, 0x29, "Members", shape_of::<membership::get_member_events::v3::Request>, &["at", "membership", "not_membership"]),
+	row(Kind::Room, 0x29, "Members", shape_of::<membership::get_member_events::v3::Request>, &["membership", "not_membership"]),
 	row(Kind::Room, 0x2A, "GetAlias", shape_of::<alias::get_alias::v3::Request>, NO_QUERY),
 	row(Kind::Room, 0x2B, "SetAlias", shape_of::<alias::create_alias::v3::Request>, NO_QUERY),
 	row(Kind::Room, 0x2C, "DeleteAlias", shape_of::<alias::delete_alias::v3::Request>, NO_QUERY),

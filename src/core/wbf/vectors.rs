@@ -204,6 +204,11 @@ fn current() -> Value {
 			pack("ack_draft_abandon", Kind::Control, 0x02, Flags::IS_RESPONSE, anchor(DRAFT_G_SEQ), 41, br#"{"redaction_event_id":"$r:localhost"}"#, b""),
 			pack("send_encrypted_with_attachments", Kind::Event, 0x02, Flags::default(), 0, 13, br#"{"room_id":"!r:localhost","type":"m.room.encrypted","txn_id":"t1","attachments":["mxc://localhost/22334455667788"]}"#, br#"{"algorithm":"m.megolm.v1.aes-sha2","ciphertext":"AwgAEnACgAkLmt6qF84IK++J7UDH2Za1YVchHyprqTqsg","device_id":"RJYKSTBOIE","sender_key":"IlRMeOPX2e0MurIyfWEucYBRVOEEUMrOHqn/8mLqMjA","session_id":"X3lUlvLELLYxeTx4yOVu6UDpasGEVO0Jbu+QFnm0cKQ"}"#),
 			pack("ack_send", Kind::Control, 0x02, Flags::IS_RESPONSE, 0, 13, br#"{"event_id":"$Zm9vYmFy:localhost"}"#, b""),
+			// Device versions (wbf-room-device-version.md §7): the send names the
+			// room version its room key went out by, and is refused when the
+			// room's has moved, with the one it is now.
+			pack("send_encrypted_with_room_version", Kind::Event, 0x02, Flags::default(), 0, 19, br#"{"room_id":"!r:localhost","type":"m.room.encrypted","txn_id":"t2","room_version":81234}"#, br#"{"algorithm":"m.megolm.v1.aes-sha2","ciphertext":"AwgAEnACgAkLmt6qF84IK++J7UDH2Za1YVchHyprqTqsg","device_id":"RJYKSTBOIE","sender_key":"IlRMeOPX2e0MurIyfWEucYBRVOEEUMrOHqn/8mLqMjA","session_id":"X3lUlvLELLYxeTx4yOVu6UDpasGEVO0Jbu+QFnm0cKQ"}"#),
+			pack("error_room_devices_changed", Kind::Control, 0x03, Flags::IS_RESPONSE, 0, 19, br#"{"code":"RoomDevicesChanged","code_id":1506,"message":"the room's members or their devices changed since this room_version: fetch the members again","room_version":81240}"#, b""),
 			pack("login_password", Kind::Session, 0x01, Flags::default(), 0, 14, br#"{"type":"m.login.password","identifier":{"type":"m.id.user","user":"alice"},"password":"correct-horse-battery","initial_device_display_name":"wbf desktop","refresh_token":true}"#, b""),
 			pack("ack_login", Kind::Control, 0x02, Flags::IS_RESPONSE, 0, 14, br#"{"access_token":"syt_YWxpY2U_ExampleTokenExampleToken_1a2b3c","device_id":"RJYKSTBOIE","expires_in_ms":3600000,"refresh_token":"refresh_ExampleRefreshTokenExampleRefre","user_id":"@alice:localhost"}"#, b""),
 			pack("refresh", Kind::Session, 0x02, Flags::default(), 0, 15, br#"{"refresh_token":"refresh_ExampleRefreshTokenExampleRefre"}"#, b""),

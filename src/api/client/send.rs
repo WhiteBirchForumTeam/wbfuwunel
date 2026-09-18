@@ -59,9 +59,13 @@ pub(crate) async fn send_message_event_route(
 		declared_attachments: declared,
 		via_legacy_http: true,
 		may_write_reserved_type: false,
+		// HTTP is never checked (docs/design/wbf-room-device-version.md §7.3).
+		expected_room_device_version: None,
 	};
 
-	let event_id = send_message_event(&services, send).await?;
+	let event_id = send_message_event(&services, send)
+		.await?
+		.into_sent()?;
 
 	Ok(send_message_event::v3::Response { event_id })
 }
@@ -106,6 +110,35 @@ pub(crate) struct SendMessageEvent<'a> {
 	/// Set only by `Stream/Draft`, which is the one caller allowed to write a
 	/// draft anchor. See `RESERVED_EVENT_TYPES`.
 	pub(crate) may_write_reserved_type: bool,
+	/// The room device version the sender handed its room key out by: `Some`
+	/// only from `Event/Send`, and then checked under the room lock
+	/// (docs/design/wbf-room-device-version.md §7.1).
+	pub(crate) expected_room_device_version: Option<u64>,
+}
+
+/// What a send came to.
+pub(crate) enum SendOutcome {
+	Sent(OwnedEventId),
+	/// `expected_room_device_version` was not the room's any more; nothing
+	/// was written.
+	RoomDevicesChanged { room_device_version: u64 },
+}
+
+impl SendOutcome {
+	/// For the callers that never pass an expected version.
+	///
+	/// Return:
+	///     Result<OwnedEventId>  the event id; Err for `RoomDevicesChanged`,
+	///     which such a caller cannot get, so getting it is refused rather
+	///     than read as a send.
+	pub(crate) fn into_sent(self) -> Result<OwnedEventId> {
+		match self {
+			| Self::Sent(event_id) => Ok(event_id),
+			| Self::RoomDevicesChanged { .. } => {
+				Err!(Request(Unknown("the send was refused for a room device version it did not carry")))
+			},
+		}
+	}
 }
 
 /// Event types this server writes itself and refuses from clients.
@@ -124,13 +157,14 @@ const RESERVED_EVENT_TYPES: [&str; 1] = ["org.wbftw.wbfuwunel.draft"];
 /// Args:
 ///     send: see `SendMessageEvent`
 /// Return:
-///     Result<OwnedEventId>  the event id (the earlier one for a repeated
-///     transaction id); Err for a refused declaration (400, naming the
-///     attachment), or anything the event itself is refused for.
+///     Result<SendOutcome>  `Sent` with the event id (the earlier one for a
+///     repeated transaction id); `RoomDevicesChanged` when the expected room
+///     device version is not the room's; Err for a refused declaration (400,
+///     naming the attachment), or anything the event itself is refused for.
 pub(crate) async fn send_message_event(
 	services: &Services,
 	send: SendMessageEvent<'_>,
-) -> Result<OwnedEventId> {
+) -> Result<SendOutcome> {
 	let SendMessageEvent {
 		sender_user,
 		sender_device,
@@ -143,6 +177,7 @@ pub(crate) async fn send_message_event(
 		declared_attachments,
 		via_legacy_http,
 		may_write_reserved_type,
+		expected_room_device_version,
 	} = send;
 
 	// Forbid m.room.encrypted if encryption is disabled
@@ -161,7 +196,7 @@ pub(crate) async fn send_message_event(
 	// else is looked at, so a retry stays idempotent even if what it declares
 	// has changed or been removed since the first send.
 	if let Some(existing) = check_existing_txnid(services, sender_user, sender_device, txn_id).await {
-		return existing.map(|response| response.event_id);
+		return existing.map(|response| SendOutcome::Sent(response.event_id));
 	}
 
 	// Checked before anything is written: a refused attachment refuses the
@@ -236,7 +271,20 @@ pub(crate) async fn send_message_event(
 	.await?;
 
 	if let Some(existing_txnid) = existing_txnid {
-		return existing_txnid.map(|response| response.event_id);
+		return existing_txnid.map(|response| SendOutcome::Sent(response.event_id));
+	}
+
+	// Under the room lock, so no member event lands between this and the
+	// append (§4.4); after the repeated-transaction check, so a retry of a
+	// send that went through still answers with its event.
+	if let Some(expected) = expected_room_device_version {
+		let room_device_version = services
+			.device_versions
+			.get_room_device_version(room_id)
+			.await?;
+		if expected != room_device_version {
+			return Ok(SendOutcome::RoomDevicesChanged { room_device_version });
+		}
 	}
 
 	let mut unsigned = BTreeMap::new();
@@ -285,7 +333,7 @@ pub(crate) async fn send_message_event(
 			.await;
 	}
 
-	Ok(event_id)
+	Ok(SendOutcome::Sent(event_id))
 }
 
 async fn check_public_call_invite(

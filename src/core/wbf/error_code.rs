@@ -56,13 +56,17 @@ pub enum RejectCode {
 	/// over, and it has ended. ⚠️ The only code the server sends unasked: it
 	/// carries the *subscription's* id, not a request's (§3.4).
 	Superseded,
+	/// 1506: an encrypted send carried a room device version that is no
+	/// longer the room's; carries the current `room_version`. Nothing was
+	/// sent (docs/design/wbf-room-device-version.md §7).
+	RoomDevicesChanged,
 	/// 1901: the server's own fault.
 	Internal,
 }
 
 impl RejectCode {
 	/// Every code, so a test can hold the whole table at once.
-	pub const ALL: [Self; 16] = [
+	pub const ALL: [Self; 17] = [
 		Self::UnsupportedVersion,
 		Self::Corrupt,
 		Self::UnknownKind,
@@ -78,6 +82,7 @@ impl RejectCode {
 		Self::OutOfOrder,
 		Self::Truncated,
 		Self::Superseded,
+		Self::RoomDevicesChanged,
 		Self::Internal,
 	];
 
@@ -103,6 +108,7 @@ impl RejectCode {
 			| Self::OutOfOrder => 1503,
 			| Self::Truncated => 1504,
 			| Self::Superseded => 1505,
+			| Self::RoomDevicesChanged => 1506,
 			| Self::Internal => 1901,
 		}
 	}
@@ -127,6 +133,7 @@ impl RejectCode {
 			| Self::OutOfOrder => "OutOfOrder",
 			| Self::Truncated => "Truncated",
 			| Self::Superseded => "Superseded",
+			| Self::RoomDevicesChanged => "RoomDevicesChanged",
 			| Self::Internal => "Internal",
 		}
 	}
