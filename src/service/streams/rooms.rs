@@ -9,8 +9,10 @@
 //! that truth, kept current by two hooks — `follow` at join and `evict` at
 //! leave — both called from `state_cache`'s membership writes.
 
+use std::collections::BTreeMap;
+
 use ruma::{OwnedRoomId, OwnedUserId, RoomId, UserId};
-use serde_json::json;
+use serde_json::{Map, Value, json};
 
 use tuwunel_core::{
 	debug,
@@ -24,6 +26,10 @@ use super::{ConnectionId, PackQueue, Streams};
 
 /// `Event/Push`, server to client only.
 pub const EVENT_PUSH_SUBTYPE: u8 = 0x06;
+
+/// `Event/DeviceChanged`, server to client only, and only to connections that
+/// declared device versions (docs/design/wbf-room-device-version.md §6).
+pub const EVENT_DEVICE_CHANGED_SUBTYPE: u8 = 0x07;
 
 /// One event as it goes on the wire: its global position and its JSON as
 /// served to clients.
@@ -261,6 +267,57 @@ impl Streams {
 		self.rooms
 			.send_pack_to_topic(&RoomTopic::Room(room.to_owned()), connections, pack);
 	}
+
+	/// Whether any connection listening to `room` declared device versions:
+	/// the check before its room version is worth computing for a push.
+	#[must_use]
+	pub fn is_listened_by_device_versions(&self, room: &RoomId) -> bool {
+		self.listeners(room)
+			.iter()
+			.any(|(connection, _)| self.is_device_versions_declared(*connection))
+	}
+
+	/// Tells every connection that declared device versions and listens to one
+	/// of `room_versions`' rooms that `user`'s devices changed: **one pack per
+	/// connection**, naming the rooms it listens to among them, with the same
+	/// `id`, `seq` and `gap` as its `Push`. Same drop rule as `push`.
+	///
+	/// Args:
+	///     user: whose devices changed, example: "@bob:localhost"
+	///     device_version: the new one, example: "4-0123456789"
+	///     room_versions: the rooms `user` is in, each with its new room
+	///       version, example: [("!r1:localhost", 81240)]
+	pub fn push_device_changed(&self, user: &UserId, device_version: &str, room_versions: &[(OwnedRoomId, u64)]) {
+		let mut rooms_by_connection: BTreeMap<ConnectionId, Map<String, Value>> = BTreeMap::new();
+		for (room, room_version) in room_versions {
+			for (connection, _) in self.listeners(room) {
+				if self.is_device_versions_declared(connection) {
+					rooms_by_connection
+						.entry(connection)
+						.or_default()
+						.insert(room.to_string(), json!(room_version));
+				}
+			}
+		}
+
+		for (connection, rooms) in rooms_by_connection {
+			self.rooms
+				.push_with(None, &[connection], |id, seq, gap| {
+					device_changed_pack(id, seq, &device_changed_meta(user, device_version, &rooms, gap))
+				});
+		}
+	}
+}
+
+/// The meta of `Event/DeviceChanged`, every field present.
+fn device_changed_meta(user: &UserId, device_version: &str, rooms: &Map<String, Value>, gap: bool) -> Value {
+	json!({ "user_id": user, "device_version": device_version, "rooms": rooms, "gap": gap })
+}
+
+fn device_changed_pack(id: u64, seq: u32, meta: &Value) -> Result<Vec<u8>, PackError> {
+	Ok(PackBuilder::new(Kind::Event, EVENT_DEVICE_CHANGED_SUBTYPE, Flags::IS_RESPONSE, id, seq)
+		.json_meta(meta)?
+		.finish())
 }
 
 fn push_pack(id: u64, seq: u32, bc: usize, fs: i64, ls: i64, gap: bool, data: &[u8]) -> Result<Vec<u8>, PackError> {
@@ -279,7 +336,7 @@ mod tests {
 		events::{framed_len, split_length_prefixed},
 	};
 
-	use super::{EVENT_PUSH_SUBTYPE, PushedEvent};
+	use super::{EVENT_DEVICE_CHANGED_SUBTYPE, EVENT_PUSH_SUBTYPE, PushedEvent};
 	use crate::streams::{Outgoing, PackQueue, Queued, Streams};
 
 	/// A test queue: the count is what these tests exercise, so the byte
@@ -291,6 +348,125 @@ mod tests {
 			| Outgoing::Pack(pack) => pack,
 			| Outgoing::Close { .. } => panic!("expected a pack, got a close"),
 		}
+	}
+
+	fn device_changed_of(rx: &mut mpsc::Receiver<Queued>) -> Vec<serde_json::Value> {
+		let mut metas = Vec::new();
+		while let Ok(queued) = rx.try_recv() {
+			let Outgoing::Pack(mut pack) = queued.outgoing else { continue };
+			let view = decode(&mut pack).expect("decodes");
+			if view.header.subtype == EVENT_DEVICE_CHANGED_SUBTYPE {
+				metas.push(view.meta_json().expect("meta"));
+			}
+		}
+		metas
+	}
+
+	/// §6.2: a connection that did not declare device versions never sees the
+	/// pack; one that did gets **one** per change, naming only the rooms it
+	/// listens to.
+	#[test]
+	fn device_changed_goes_once_to_each_declared_connection_with_its_own_rooms() {
+		let streams = Streams::new();
+		let alice = user_id!("@alice:localhost");
+		let bob = user_id!("@bob:localhost");
+		let r1 = room_id!("!r1:localhost").to_owned();
+		let r2 = room_id!("!r2:localhost").to_owned();
+		let (both_tx, mut both_rx) = queue(8);
+		let (one_tx, mut one_rx) = queue(8);
+		let (undeclared_tx, mut undeclared_rx) = queue(8);
+		streams.subscribe(1, alice, both_tx, 7, &[r1.clone(), r2.clone()], false);
+		streams.subscribe(2, alice, one_tx, 7, &[r1.clone()], false);
+		streams.subscribe(3, alice, undeclared_tx, 7, &[r1.clone(), r2.clone()], false);
+		streams.set_device_versions_declared(1, true);
+		streams.set_device_versions_declared(2, true);
+
+		streams.push_device_changed(bob, "4-0123456789", &[(r1, 81240), (r2, 81241)]);
+
+		let both = device_changed_of(&mut both_rx);
+		assert_eq!(both.len(), 1, "two shared rooms, one pack");
+		assert_eq!(both[0]["user_id"], "@bob:localhost");
+		assert_eq!(both[0]["device_version"], "4-0123456789");
+		assert_eq!(both[0]["rooms"], serde_json::json!({ "!r1:localhost": 81240, "!r2:localhost": 81241 }));
+		assert_eq!(both[0]["gap"], false);
+
+		let one = device_changed_of(&mut one_rx);
+		assert_eq!(one.len(), 1);
+		assert_eq!(one[0]["rooms"], serde_json::json!({ "!r1:localhost": 81240 }), "only the room it listens to");
+
+		assert!(device_changed_of(&mut undeclared_rx).is_empty(), "never to a connection that did not declare");
+	}
+
+	#[test]
+	fn device_changed_and_push_share_one_subscription() {
+		let streams = Streams::new();
+		let alice = user_id!("@alice:localhost");
+		let room = room_id!("!r:localhost").to_owned();
+		let (tx, mut rx) = queue(8);
+		streams.subscribe(1, alice, tx, 42, &[room.clone()], false);
+		streams.set_device_versions_declared(1, true);
+
+		streams.push(&[1], &[PushedEvent { g_seq: 10, json: b"{\"e\":1}" }]);
+		streams.push_device_changed(user_id!("@bob:localhost"), "2-0123456789", &[(room, 11)]);
+
+		let headers: Vec<(u8, u64, u32)> = std::iter::from_fn(|| rx.try_recv().ok())
+			.map(|queued| match queued.outgoing {
+				| Outgoing::Pack(mut pack) => {
+					let view = decode(&mut pack).expect("decodes");
+					(view.header.subtype, view.header.id, view.header.seq)
+				},
+				| Outgoing::Close { .. } => panic!("expected a pack"),
+			})
+			.collect();
+		assert_eq!(headers, vec![(EVENT_PUSH_SUBTYPE, 42, 0), (EVENT_DEVICE_CHANGED_SUBTYPE, 42, 1)]);
+	}
+
+	#[test]
+	fn is_listened_by_device_versions_asks_only_about_declared_listeners() {
+		let streams = Streams::new();
+		let alice = user_id!("@alice:localhost");
+		let room = room_id!("!r:localhost").to_owned();
+		let (tx, _rx) = queue(4);
+		streams.subscribe(1, alice, tx, 1, &[room.clone()], false);
+
+		assert!(!streams.is_listened_by_device_versions(&room));
+		streams.set_device_versions_declared(1, true);
+		assert!(streams.is_listened_by_device_versions(&room));
+	}
+
+	/// Clients test their decoders against the golden vectors, so the
+	/// `DeviceChanged` vector must be the bytes this server builds.
+	#[test]
+	fn the_device_changed_vector_is_what_the_server_builds() {
+		const VECTORS: &str = include_str!("../../../docs/design/wbf-vectors.json");
+		let vectors: serde_json::Value = serde_json::from_str(VECTORS).expect("the vectors file is JSON");
+		let hex = vectors["packs"]
+			.as_array()
+			.expect("a packs list")
+			.iter()
+			.find(|vector| vector["name"] == "event_device_changed")
+			.expect("the DeviceChanged vector")["bytes_hex"]
+			.as_str()
+			.expect("hex")
+			.to_owned();
+		let documented: Vec<u8> = (0..hex.len())
+			.step_by(2)
+			.map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("hex digit"))
+			.collect();
+		let conversation_20 = tuwunel_core::wbf::IdType::ClientConversation
+			.compose(20)
+			.expect("fits");
+		let rooms: serde_json::Map<String, serde_json::Value> =
+			serde_json::from_str(r#"{"!r1:localhost":81240,"!r2:localhost":81240}"#).expect("rooms");
+
+		let built = super::device_changed_pack(
+			conversation_20,
+			4,
+			&super::device_changed_meta(user_id!("@bob:localhost"), "4-0123456789", &rooms, false),
+		)
+		.expect("builds");
+
+		assert_eq!(built, documented);
 	}
 
 	#[test]

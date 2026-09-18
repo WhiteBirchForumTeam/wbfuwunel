@@ -26,7 +26,7 @@ use ruma::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tuwunel_core::{
-	Result, err, error, implement,
+	Result, debug_warn, err, error, implement,
 	matrix::{Event, PduCount},
 	utils::{
 		MutexMap,
@@ -175,12 +175,48 @@ pub async fn bump_device_version(&self, user_id: &UserId, pos: u64) -> DeviceVer
 		.map(ToOwned::to_owned)
 		.collect()
 		.await;
-	let mut room_versions = self.room_versions.write().expect("room versions lock poisoned");
-	for room_id in &rooms {
-		room_versions.remove(room_id);
+	{
+		let mut room_versions = self.room_versions.write().expect("room versions lock poisoned");
+		for room_id in &rooms {
+			room_versions.remove(room_id);
+		}
 	}
 
+	// Still under the account's lock, so two changes of one account are
+	// announced in the order they were made (§6).
+	self.announce_device_change(user_id, &version, rooms)
+		.await;
+
 	version
+}
+
+/// F3 (§6): tells the connections that declared device versions and listen
+/// to a room `user_id` is in that the account's devices changed, with each
+/// such room's new version. Only the rooms somebody would be told about are
+/// computed; a room whose version cannot be computed is left out, and the
+/// send check (F4) still guards it.
+///
+/// Args:
+///     user_id: whose devices changed, example: "@bob:localhost"
+///     version: the account's new version
+///     rooms: the rooms the account is in
+#[implement(Service)]
+async fn announce_device_change(&self, user_id: &UserId, version: &DeviceVersion, rooms: Vec<OwnedRoomId>) {
+	let streams = &self.services.streams;
+	let mut room_versions = Vec::new();
+	for room_id in rooms {
+		if !streams.is_listened_by_device_versions(&room_id) {
+			continue;
+		}
+		match self.get_room_device_version(&room_id).await {
+			| Ok(room_version) => room_versions.push((room_id, room_version)),
+			| Err(e) => debug_warn!(%room_id, "no room version to announce a device change with: {e}"),
+		}
+	}
+
+	if !room_versions.is_empty() {
+		streams.push_device_changed(user_id, &version.to_wire(), &room_versions);
+	}
 }
 
 /// The room's device version (§4.1), cached by the room state it came from.

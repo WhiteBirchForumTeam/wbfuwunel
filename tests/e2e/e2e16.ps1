@@ -1,7 +1,8 @@
 . (Join-Path $PSScriptRoot 'wbf-helpers.ps1')
 # Device versions (docs/design/wbf-room-device-version.md): each joined member's device version and the room's
 # version on /members (F2), the account version that moves with its keys (F1), and the encrypted Event/Send that is
-# refused with 1506 once the room's version has moved (F4).
+# refused with 1506 once the room's version has moved (F4); scenario 2 is the DeviceChanged push to connections that
+# declared device versions (F3).
 $OUT = "$S\e2e16-out"; New-Item -ItemType Directory -Force $OUT | Out-Null
 $RESULT = "$OUT\results.txt"; '' | Out-File $RESULT -Encoding utf8
 $script:Pass = 0; $script:Fail = 0
@@ -228,5 +229,66 @@ Check '[1.15] after a restart the room version and every device version read the
   "before=$(Room-Version $before)/$(Device-Version $before $bob) after=$(Room-Version $after)/$(Device-Version $after $bob)"
 Stop-Server $server
 
+Log '################ Scenario 2: DeviceChanged, only to connections that declared (F3) ################'
+function Drain($ws, [int]$quietMs = 2500) {
+  $packs = @()
+  while ($true) { $p = Recv-Or-Null $ws $quietMs; if ($null -eq $p) { break }; $packs += ,$p }
+  ,$packs
+}
+function Only-DeviceChanged($packs) { ,@($packs | Where-Object { $_.kind -eq 0x14 -and $_.subtype -eq 7 }) }
+function New-Device-Keys($user, [string]$password, [string]$key) {
+  $login = Http POST '/_matrix/client/v3/login' @{ type = 'm.login.password'; identifier = @{ type = 'm.id.user'; user = $user.Split(':')[0].TrimStart('@') }; password = $password } $null
+  $null = Http POST '/_matrix/client/v3/keys/upload' @{ device_keys = (Device-Keys $user $login.json.device_id $key) } $login.json.access_token
+}
+$db2 = "$S\e2e16db2"; Remove-Item -Recurse -Force $db2 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db2 | Out-Null
+$cfg2 = Write-Config $db2 86400
+$server = Start-Server $cfg2 's3'
+$regA = Register 'alice'; $regB = Register 'bob'; $regC = Register 'carol'
+$alice = $regA.user_id; $bob = $regB.user_id; $carol = $regC.user_id
+$tokA = $regA.access_token; $tokB = $regB.access_token; $tokC = $regC.access_token
+$r1 = (Http POST '/_matrix/client/v3/createRoom' @{ preset = 'private_chat' } $tokA).json.room_id
+$r2 = (Http POST '/_matrix/client/v3/createRoom' @{ preset = 'private_chat' } $tokA).json.room_id
+foreach ($room in @($r1, $r2)) {
+  $null = Http POST "/_matrix/client/v3/rooms/$(Enc $room)/invite" @{ user_id = $bob } $tokA
+  $null = Http POST "/_matrix/client/v3/rooms/$(Enc $room)/join" @{} $tokB
+}
+$null = Http POST "/_matrix/client/v3/rooms/$(Enc $r1)/invite" @{ user_id = $carol } $tokA
+$null = Http POST "/_matrix/client/v3/rooms/$(Enc $r1)/join" @{} $tokC
+
+$wsDeclared = Ws-Open $tokA; $null = Hello $wsDeclared @($FEATURE)
+$wsPlain = Ws-Open $tokA; $null = Hello $wsPlain @('push')
+$subD = Call $wsDeclared (Json-Pack 0x14 0x04 (Conv 20) 0 @{} $null)
+$subP = Call $wsPlain (Json-Pack 0x14 0x04 (Conv 21) 0 @{} $null)
+$null = Drain $wsDeclared 1500; $null = Drain $wsPlain 1500
+
+New-Device-Keys $bob 'pw-bob' 'Ym9ic2Vjb25kZTJlMTY'
+$toDeclared = Only-DeviceChanged (Drain $wsDeclared)
+$toPlain = Only-DeviceChanged (Drain $wsPlain 1500)
+$mR1 = Members $tokA $r1; $mR2 = Members $tokA $r2
+$dc = if ($toDeclared.Count -gt 0) { $toDeclared[0] } else { $null }
+Check '[2.1] Bob adds a device: one DeviceChanged on the declared connection, both shared rooms in it, each with the version /members reads; the id is its Subscribe''s' `
+  ($subD.subtype -eq 2 -and $toDeclared.Count -eq 1 -and $dc.meta.user_id -eq $bob -and $dc.meta.device_version -eq (Device-Version $mR1 $bob) -and [uint64]$dc.meta.rooms.$r1 -eq [uint64](Room-Version $mR1) -and [uint64]$dc.meta.rooms.$r2 -eq [uint64](Room-Version $mR2) -and $dc.meta.gap -eq $false -and $dc.id -eq (Conv 20)) `
+  "packs=$($toDeclared.Count) meta=$(if ($dc) { $dc.metaText } else { 'none' }) r1=$(Room-Version $mR1) r2=$(Room-Version $mR2)"
+Check '[2.2] the connection that did not declare gets no DeviceChanged' `
+  ($subP.subtype -eq 2 -and $toPlain.Count -eq 0) "packs=$($toPlain.Count)"
+
+# A subscribed connection is pushed its own send, possibly before the reply: skip the pushes to reach the reply.
+$script:SendSeq++
+Ws-Send $wsDeclared (Json-Pack 0x14 0x02 0 $script:SendSeq ([ordered]@{ room_id = $r2; type = 'm.room.encrypted'; txn_id = 't-dc-1'; room_version = [uint64]$dc.meta.rooms.$r2 }) ([Text.Encoding]::UTF8.GetBytes($MEGOLM)))
+$sentWithPushed = $null
+for ($n = 0; $n -lt 10 -and $null -eq $sentWithPushed; $n++) { $p = Recv-Or-Null $wsDeclared 5000; if ($null -eq $p) { break }; if ($p.kind -eq 0x01) { $sentWithPushed = $p } }
+$null = Drain $wsDeclared 1500
+Check '[2.3] the room version from DeviceChanged is the one to send with' ((Is-SendAck $sentWithPushed)) "reply=$($sentWithPushed.metaText)"
+
+New-Device-Keys $carol 'pw-carol' 'Y2Fyb2xzZWNvbmRlMmUxNg'
+$carolChanged = Only-DeviceChanged (Drain $wsDeclared)
+$cc = if ($carolChanged.Count -gt 0) { $carolChanged[0] } else { $null }
+# @(if ...): an `if` unrolls a one-element array into its element, and [0] of a string is its first character.
+$carolRooms = @(if ($cc) { $cc.meta.rooms.PSObject.Properties.Name })
+Check '[2.4] Carol shares only one room with this connection: her DeviceChanged names only that room' `
+  ($carolChanged.Count -eq 1 -and $cc.meta.user_id -eq $carol -and $carolRooms.Count -eq 1 -and $carolRooms[0] -eq $r1) "packs=$($carolChanged.Count) rooms=$($carolRooms -join ',') r1=$r1"
+
+$wsDeclared.Dispose(); $wsPlain.Dispose()
+Stop-Server $server
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"
 exit $(if ($script:Fail -gt 0) { 1 } else { 0 })
