@@ -361,6 +361,14 @@ pub async fn push_crypto_state(&self, user_id: &UserId, device_id: &DeviceId) {
 		return;
 	}
 
+	// Read and push under one lock per device, so the last CryptoState sent is
+	// read after every committed change; otherwise a push that read an older
+	// supply could be sent last and stay the client's view.
+	let _crypto_state_guard = self
+		.crypto_state_locks
+		.lock(&(user_id.to_owned(), device_id.to_owned()))
+		.await;
+
 	let otk_counts = serde_json::to_value(self.count_one_time_keys(user_id, device_id).await)
 		.unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
 	let unused_fallback_key_types: Vec<String> = self

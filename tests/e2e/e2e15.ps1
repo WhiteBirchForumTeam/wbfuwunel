@@ -106,6 +106,31 @@ $changes = Http GET '/_matrix/client/v3/keys/changes?from=0&to=999999999999' $nu
 Check '[1.6] Matrix''s own key distribution is untouched: /keys/changes still answers left as upstream does (empty)' `
   ($changes.status -eq 200 -and @($changes.json.left).Count -eq 0) "keys/changes=$($changes.text)"
 
+# Concurrent claims: each claim reads and pushes the supply; claims only take keys away, so the pushed counts, in seq
+# order, must never go up, and the last one must be the real supply. Without the per-device lock a push that read an
+# older (larger) count can be sent after a newer one. A race: a green run does not prove the lock, a red one proves
+# the bug.
+$null = Drain $wsA2 1500
+$many = @{}; 1..30 | ForEach-Object { $many["signed_curve25519:RACE$_"] = @{ key = "cmFjZQ$_"; signatures = @{} } }
+$raceUpload = Http POST '/_matrix/client/v3/keys/upload' @{ one_time_keys = $many } $tokA
+$null = Drain $wsA2 1500
+$claimBody = ConvertTo-Json @{ one_time_keys = @{ $alice = @{ $devA = 'signed_curve25519' } } } -Compress -Depth 5
+$pending = 1..40 | ForEach-Object {
+  $req = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::Post, "$B/_matrix/client/v3/keys/claim")
+  $req.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $tokB)
+  $req.Content = New-Object System.Net.Http.StringContent ($claimBody, [Text.Encoding]::UTF8, 'application/json')
+  $script:PackHttpClient.SendAsync($req)
+}
+[void][Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]$pending, 30000)
+$raced = Only-Crypto (Drain $wsA2)
+$raced = @($raced | Sort-Object { [int]$_.seq })
+$counts = @($raced | ForEach-Object { [int]$_.meta.otk_counts.signed_curve25519 })
+$isNeverUp = $true; for ($n = 1; $n -lt $counts.Count; $n++) { if ($counts[$n] -gt $counts[$n - 1]) { $isNeverUp = $false } }
+$real = (Http POST '/_matrix/client/v3/keys/upload' @{} $tokA).json.one_time_key_counts.signed_curve25519
+Check '[1.7] 40 concurrent claims: the pushed counts never go back up, and the last one is the real supply' `
+  ($counts.Count -ge 1 -and $isNeverUp -and $counts[$counts.Count - 1] -eq $real -and $real -eq 0) `
+  "upload=$($raceUpload.text) claims200=$(@($pending | Where-Object { [int]$_.Result.StatusCode -eq 200 }).Count) real=$real pushes=$($counts.Count) counts=$($counts -join ',')"
+
 $wsA.Dispose(); $wsA2.Dispose()
 Stop-Server $server
 
