@@ -34,7 +34,7 @@ use tuwunel_service::Services;
 
 use super::{Failure, PackContext, Reject, Reply, ack};
 use crate::client::{
-	send::{SendMessageEvent, send_message_event},
+	send::{SendMessageEvent, SendOutcome, send_message_event},
 	utils::redact_event_as,
 };
 
@@ -181,8 +181,11 @@ async fn open_draft(
 		// The one caller that may: this is the command the anchor's policy
 		// (the room-size cap) lives in.
 		may_write_reserved_type: true,
+		// A plaintext anchor, no room key handed out.
+		expected_room_device_version: None,
 	})
 	.await
+	.and_then(SendOutcome::into_sent)
 	.map_err(Reject::from)?;
 
 	let g_seq = read_g_seq(services, &event_id).await?;

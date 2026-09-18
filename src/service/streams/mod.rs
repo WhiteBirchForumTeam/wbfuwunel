@@ -28,9 +28,12 @@ mod devices;
 mod rooms;
 mod subscribers;
 
-use std::sync::{
-	Arc,
-	atomic::{AtomicU64, Ordering},
+use std::{
+	collections::HashSet,
+	sync::{
+		Arc, RwLock as StdRwLock,
+		atomic::{AtomicU64, Ordering},
+	},
 };
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, mpsc};
@@ -48,6 +51,11 @@ use self::{
 /// One WebSocket connection, numbered at upgrade; unique for the life of the
 /// process, meaningless outside it.
 pub type ConnectionId = u64;
+
+/// What a client names in `Hello.features` to take part in device versions:
+/// sends it makes are checked against the room's version, and (later) it is
+/// told when a member's devices change.
+pub const DEVICE_VERSIONS_FEATURE: &str = "org.wbftw.device_versions";
 
 /// Something queued for a connection's send task. Defined here rather than in
 /// the API crate because publishing happens in the service layer.
@@ -230,6 +238,9 @@ pub struct Streams {
 	rooms: Subscribers<RoomTopic>,
 	/// The to-device queues (`0x16 Device`), at most one connection each.
 	devices: Subscribers<DeviceTopic>,
+	/// The connections whose last `Hello` declared `DEVICE_VERSIONS_FEATURE`
+	/// (docs/design/wbf-room-device-version.md §6.2, §7.1).
+	device_versions_declared: StdRwLock<HashSet<ConnectionId>>,
 }
 
 /// Leaves every stream when the connection's task ends, whichever way it
@@ -259,7 +270,41 @@ impl Streams {
 			// arrives: the registry can enforce it without a gap between
 			// looking and entering, and a call site cannot.
 			devices: Subscribers::new(Occupancy::OneTheLatest),
+			device_versions_declared: StdRwLock::new(HashSet::new()),
 		}
+	}
+
+	/// Records what the connection's `Hello` said about device versions; a
+	/// later `Hello` replaces it.
+	///
+	/// Args:
+	///     connection: example: 7; 0 (HTTP, no connection) is never recorded
+	///     is_declared: whether `features` named `DEVICE_VERSIONS_FEATURE`
+	pub fn set_device_versions_declared(&self, connection: ConnectionId, is_declared: bool) {
+		if connection == 0 {
+			return;
+		}
+		let mut declared = self
+			.device_versions_declared
+			.write()
+			.expect("declared lock poisoned");
+		if is_declared {
+			declared.insert(connection);
+		} else {
+			declared.remove(&connection);
+		}
+	}
+
+	/// Return:
+	///     bool  whether the connection's last `Hello` declared
+	///     `DEVICE_VERSIONS_FEATURE`; false for HTTP (0) and for a connection
+	///     that never said hello.
+	#[must_use]
+	pub fn is_device_versions_declared(&self, connection: ConnectionId) -> bool {
+		self.device_versions_declared
+			.read()
+			.expect("declared lock poisoned")
+			.contains(&connection)
 	}
 
 	/// The next connection's number. Handed out at upgrade, before anything
@@ -294,6 +339,7 @@ impl Streams {
 	pub fn remove_connection(&self, connection: ConnectionId) {
 		self.rooms.remove_connection(connection);
 		self.devices.remove_connection(connection);
+		self.set_device_versions_declared(connection, false);
 	}
 
 	/// Whether `connection` holds any subscription at all; for tests.
@@ -308,6 +354,33 @@ mod tests {
 	use ruma::{device_id, room_id, user_id};
 
 	use super::{Outgoing, PackQueue, QueueError, Streams};
+
+	#[test]
+	fn a_declaration_lasts_until_the_next_hello_or_the_end_of_the_connection() {
+		let streams = Streams::new();
+		assert!(!streams.is_device_versions_declared(7), "nothing declared before a Hello");
+
+		streams.set_device_versions_declared(7, true);
+		assert!(streams.is_device_versions_declared(7));
+		assert!(!streams.is_device_versions_declared(8), "one connection's declaration is its own");
+
+		streams.set_device_versions_declared(7, false);
+		assert!(!streams.is_device_versions_declared(7), "a later Hello without it takes it back");
+
+		streams.set_device_versions_declared(7, true);
+		streams.remove_connection(7);
+		assert!(!streams.is_device_versions_declared(7), "a closed connection forgets it");
+	}
+
+	/// 🚨 HTTP has no connection, and every HTTP pack shares the number 0: a
+	/// declaration there would be every HTTP client's.
+	#[test]
+	fn http_never_holds_a_declaration() {
+		let streams = Streams::new();
+		streams.set_device_versions_declared(0, true);
+
+		assert!(!streams.is_device_versions_declared(0));
+	}
 
 	/// 🚨 The bound the count never was. Four packs of a megabyte each fit
 	/// the count (four) and not the budget (2 MiB), and before this the

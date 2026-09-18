@@ -981,6 +981,13 @@ pub async fn mark_device_key_update(&self, user_id: &UserId) {
 		.keychangeid_userid
 		.put_raw(user_key, user_id);
 
+	// Every path that changes an account's keys ends here, so the wbf device
+	// version moves here and nowhere else (wbf-room-device-version.md §3.2).
+	self.services
+		.device_versions
+		.bump_device_version(user_id, *count)
+		.await;
+
 	self.services
 		.state_cache
 		.rooms_joined(user_id)

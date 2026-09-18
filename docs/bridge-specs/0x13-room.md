@@ -99,11 +99,14 @@ data  {"errcode":"M_FORBIDDEN","error":"Auth check failed: sender does not have 
 | | |
 |---|---|
 | 請求 meta | `{"room_id":"!AbCdEf:localhost"}`；只要加入中的：`{"room_id":"!AbCdEf:localhost","membership":"join"}` |
-| query 變數 | `membership`、`not_membership`（`join`／`invite`／`leave`／`ban`／`knock`）、`at`（分頁 token，取某個時間點的名單） |
+| query 變數 | `membership`、`not_membership`（`join`／`invite`／`leave`／`ban`／`knock`） |
 | 請求 data | 空 |
-| 回覆 data | `{"chunk":[{"type":"m.room.member","state_key":"@alice:localhost","content":{"membership":"join","displayname":"Alice"},…},…]}` |
+| 回覆 data | `{"chunk":[{"type":"m.room.member","state_key":"@alice:localhost","content":{"membership":"join","displayname":"Alice"},"unsigned":{"org.wbftw.device_version":"3-810b7c3be4",…},…},…],"org.wbftw.room_version":81234}` |
 
-**會怎麼被拒**：不在房裡、也看不到歷史 → `Forbidden`（403）。
+- **兩個 Matrix 沒有的欄位**（[wbf-room-device-version.md](../design/wbf-room-device-version.md) §5）：已加入的成員（`membership` 是 `join`）的 `unsigned["org.wbftw.device_version"]` 是他的裝置版本號；最外層的 `org.wbftw.room_version` 是房間版本號，跟清單是同一次讀到的房間狀態算的。不認得的 client 照 Matrix 的規則略過它們；HTTP 的回應一樣帶。
+- 🚫 **沒有 `at`**：上游忽略它（`// TODO`），帶了也拿不到「某個時間點的名單」，所以橋的表不收；帶了是橋自己的 `InvalidRequest`，不會默默忽略。
+
+**會怎麼被拒**：不在房裡、也看不到歷史 → `Forbidden`（403）；帶 `at` → `InvalidRequest`（1201，橋自己擋的，不會呼叫端點）。
 
 ## `0x2A` GetAlias —— 用 `#別名` 查房間 id
 

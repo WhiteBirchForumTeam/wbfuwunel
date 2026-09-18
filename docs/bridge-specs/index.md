@@ -111,7 +111,7 @@ offset  bytes              意思
 | `0x26` | `01 13 26 10` | Ban | 封鎖 | `POST /rooms/{room_id}/ban` | `room_id` | JSON：`user_id`、`reason` |
 | `0x27` | `01 13 27 10` | Unban | 解除封鎖 | `POST /rooms/{room_id}/unban` | `room_id` | JSON：`user_id`、`reason` |
 | `0x28` | `01 13 28 10` | JoinedRooms | 我加入了哪些房間 | `GET /joined_rooms` | — | — |
-| `0x29` | `01 13 29 10` | Members | 房間成員名單 | `GET /rooms/{room_id}/members` | `room_id` ／ `at`、`membership`、`not_membership` | — |
+| `0x29` | `01 13 29 10` | Members | 房間成員名單 | `GET /rooms/{room_id}/members` | `room_id` ／ `membership`、`not_membership` | — |
 | `0x2A` | `01 13 2A 10` | GetAlias | 用 `#別名` 查房間 id | `GET /directory/room/{room_alias}` | `room_alias` | — |
 | `0x2B` | `01 13 2B 10` | SetAlias | 替房間設一個別名 | `PUT /directory/room/{room_alias}` | `room_alias` | JSON：`room_id` |
 | `0x2C` | `01 13 2C 10` | DeleteAlias | 刪別名 | `DELETE /directory/room/{room_alias}` | `room_alias` | — |

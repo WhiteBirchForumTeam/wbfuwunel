@@ -1,7 +1,7 @@
 # 提案：裝置版本號、房間版本號，與送出時比對
 
 > **這份文件回答：server 要新增哪幾樣東西，才能讓客製 client「只在要發的時候、只對那個房間」確認房間金鑰該發給誰，並且在它看到的名單過期時被擋下來、而不是靜默送出別人解不開的訊息。**
-> 狀態：📄 提案，等維護者同意。討論的全過程（走過哪些路、為什麼不走）在 [wbf-device-index-notes.md](wbf-device-index-notes.md)；它回答的問題與達標條件在 [e2ee-send-guard-problem.md](e2ee-send-guard-problem.md)。
+> 狀態：✅ 維護者同意（PR #72 合併）。F1＋F2＋F4 在 PR（分支 `wbf/room-device-version`）實作，F3 是下一支；實作時跟這份不一樣的地方寫在各節的 📌。討論的全過程（走過哪些路、為什麼不走）在 [wbf-device-index-notes.md](wbf-device-index-notes.md)；它回答的問題與達標條件在 [e2ee-send-guard-problem.md](e2ee-send-guard-problem.md)。
 > 前提：[wbf-e2ee.md](wbf-e2ee.md) 的 (A) 已合併；(B) `CryptoState`（PR #68）與這份不衝突，§9 講兩者的關係（已定案：(B) 只帶自己的金鑰存量）。
 > 🚫 **HTTP 與一般 Matrix client 的行為不變**：這裡加的東西全是擴展，沒有約定的 client 不會被檢查、不會收到陌生的 pack。
 
@@ -36,7 +36,7 @@
 └──────────── 序號：這個人的裝置集合變動了幾次（從 1 起）
 ```
 
-資料庫一人一列（新 map，例 `userid_deviceversion`）：
+資料庫一人一列（新 map `userid_wbfdeviceversion`。📌 不叫 `userid_deviceversion`：上游已經有一張 `userid_devicelistversion`，是聯邦的裝置清單流水號，跟這個無關，名字太像會被混用）：
 
 | 欄位 | 型別 | 意思 |
 |---|---|---|
@@ -60,6 +60,7 @@
 
 - 換金鑰、換交叉簽章金鑰、簽章都算（維護者 2026-09-17）。所以**序號數的是「裝置集合的變動次數」**，不只是換了幾台裝置。
 - **同一個人的兩次變動同時發生**：用一把以帳號為鍵的鎖（`MutexMap`）把「讀舊值 → 寫新值」包起來，序號不會少加。
+- 📌 **版本號一定前進**：金鑰讀不出來或算不出雜湊時，序號照樣 +1，雜湊寫明確的佔位字 `unhashable`（不是空字串）。一個沒動的版本號會讓看過舊金鑰的 client 比對通過；前進了只是讓它多查一次。舊值讀不出來（不是「沒有」，是壞掉）時，序號用這次的 `pos`：`pos` 每次任何帳號變動都前進，一定大於這個帳號用過的任何序號。
 
 ### 3.3 沒有那一列時（既有帳號、剛升級）
 
@@ -81,6 +82,10 @@
 每一項只保留 `signatures` 裡**擁有者自己**（`user_id` 那一層）的簽章。
 
 **演算法**：每一項轉成 Matrix 的規範化 JSON（canonical JSON），依「主金鑰、自簽金鑰、各裝置（依裝置 ID）」的順序，每項前面加 4 byte 大端長度，串起來取 SHA-256，**十六進位小寫的前 10 個字元**。
+
+- 📌 **沒有主金鑰或自簽金鑰時，那一項是空的（長度 `00 00 00 00`、沒有內容），不是跳過**：跳過的話「沒有主金鑰、一台裝置」跟「有主金鑰、沒有裝置」會排成同一串。裝置只算上傳過金鑰的（跟 `/keys/query` 回的一樣）。
+- 📌 **黃金向量**（client 拿來驗自己的實作；`src/service/device_versions/keys_hash.rs` 的 `the_documented_vector`，另外在 Rust 之外照這段文字算過一次）：`@bob:localhost`，主金鑰 `{"keys":{"ed25519:MASTER":"bWFzdGVy"},"signatures":{"@bob:localhost":{"ed25519:DEV1":"c2VsZg"}},"usage":["master"],"user_id":"@bob:localhost"}`、自簽金鑰 `{"keys":{"ed25519:SSK":"c3Nr"},"signatures":{"@bob:localhost":{"ed25519:MASTER":"bXNr"}},"usage":["self_signing"],"user_id":"@bob:localhost"}`、兩台裝置 `DEV1`（金鑰 `b25l`）與 `DEV2`（金鑰 `dHdv`），各是 `{"algorithms":["m.olm.v1.curve25519-aes-sha2","m.megolm.v1.aes-sha2"],"device_id":"DEV1","keys":{"curve25519:DEV1":"b25l","ed25519:DEV1":"b25l"},"signatures":{"@bob:localhost":{"ed25519:DEV1":"ZGV2"}},"user_id":"@bob:localhost"}` 這個形狀 → **`810b7c3be4`**。
+- 📌 **應用服務（appservice）代答的金鑰不在裡面**，遠端帳號的金鑰也不是從這台 server 讀的：這個 fork 預設不開聯邦，開之前要重新檢查。
 
 - 雜湊只用來核對；「變沒變」靠序號，所以 40 bit 碰撞不影響正確性。
 - 別人的簽章不進雜湊，但序號照樣 +1（它經過 `mark_device_key_update`）。
@@ -114,10 +119,11 @@
 
 ### 4.3 快取
 
-- **放記憶體，不存資料庫**：`房間 → 版本號`。它隨時可以重算，所以重啟、失效都不怕，沒有 migration、不會漂移。
-- **失效時機**：
-  - 房間有成員事件寫入時（`state_cache::update_membership` 那組掛鉤，通道的 `follow`／`evict` 已經掛在那裡）。
-  - 某人的 F1 版本號變了 → 他加入的每個房間。這一步就是 F3 的扇出，**不多一條路**。
+- **放記憶體，不存資料庫**：`房間 → (算它時的房間狀態 shortstatehash, 版本號)`。它隨時可以重算，所以重啟、失效都不怕，沒有 migration、不會漂移。
+- 📌 **成員那一半不掛失效點，改成比房間狀態**（實作時改的，原本寫「成員事件寫入時失效」）：讀的時候先拿房間目前的 `shortstatehash`，跟快取記的不同就重算。任何成員事件都會換掉房間狀態，所以不必在 `update_membership` 裡找對的時間點失效 —— 失效點掛得比狀態寫入早，就會把還沒換的舊狀態算進快取。
+- **F1 那一半**：某人的 F1 版本號變了 → 刪掉他加入的每個房間的快取。
+  - ⚠️ 光刪不夠：一個正在算的房間可能已經讀到他的舊 `pos`，算完才寫回。所以再加一個「裝置變動次數」計數器：算之前記下、寫回之前再看一次，**中間動過就不寫回**（這次的結果照樣回，只是不留）。順序是「寫 F1 → 計數器 +1 → 刪快取」。
+  - 這一步之後也是 F3 扇出的起點，**不多一條路**。
 - **沒命中就當場算**：讀一次房間狀態的成員事件，加上已加入成員的 F1 `pos`。成本 O(成員數)。
 
 ### 4.4 剩下的競態（寫明，接受）
@@ -152,6 +158,8 @@
 ### 5.2 實作要動的地方
 
 - `api/client/membership/members.rs`：ruma 的 `get_member_events::v3::Response` 只有 `chunk`，**沒有地方放最外層的欄位**。要改成回自己組的 JSON（仍是 200、仍是 `application/json`）。⚠️ 這是動到上游檔案的地方，跟上游 merge 時是衝突點。
+  - 📌 所以這條路由**不走 `ruma_route`**（它要求回 ruma 的型別），在 `router.rs` 用兩行 `.route(...)` 手動掛 r0 與 v3 兩條路徑（`MEMBER_EVENTS_PATHS`）。有一條單元測試比對這兩條跟 ruma 列的路徑一樣，ruma 哪天加了一條，測試會紅。
+  - 每則事件照舊轉成 ruma 原本的格式（`Raw<StateEvent<RoomMemberEventContent>>`），只多加那一個 `unsigned` 欄位。
 - 橋那邊不用動程式：它回的就是 HTTP 的 body 原樣。
 
 ### 5.3 順手清掉 `at`
@@ -214,7 +222,9 @@
 | 是 | 是 | 檢查 |
 | **是** | **否，而且事件是加密的** | **`InvalidRequest`**：有約定卻漏帶，不能靜默繞過 |
 
-- 「加密的」＝事件類型是 `m.room.encrypted`。明文事件不檢查。
+- 「加密的」＝事件類型是 `m.room.encrypted`。明文事件不檢查：📌 帶了 `room_version` 也不檢查（明文不發房間金鑰，擋它沒有意義），上表四列都只講加密的。
+- 📌 **比對在「重複的 `txn_id`」檢查之後**：同一個 `txn_id` 已經送出過，就回原本那則的 `event_id`，不管帶的號碼是不是舊的 —— 重試不能因為號碼在中間變了而被擋。
+- 📌 宣告記在**連線**上，下一個 `Hello` 覆蓋（沒帶就收回）；HTTP 沒有連線（`connection_id` 是 0），永遠不算宣告過。
 - 檢查放在 `send_message_event` **持有房間鎖之後、寫入之前**（`api/client/send.rs`；函式多一個「預期的房間版本號」參數，HTTP 路由傳 `None`）。
 - **對不上** → 不寫入、不扇出，回：
 

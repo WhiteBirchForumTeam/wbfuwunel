@@ -763,6 +763,12 @@ pub(super) static MAPS: &[Descriptor] = &[
 		name: "userid_devicelistversion",
 		..descriptor::RANDOM_SMALL
 	},
+	// Not the one above (federation's device-list stream id): the wbf device
+	// version, `user → {seq, hash, pos}` (docs/design/wbf-room-device-version.md §3).
+	Descriptor {
+		name: "userid_wbfdeviceversion",
+		..descriptor::RANDOM_SMALL
+	},
 	Descriptor {
 		name: "userid_displayname",
 		..descriptor::RANDOM_SMALL
