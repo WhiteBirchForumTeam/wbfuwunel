@@ -36,7 +36,7 @@ use std::sync::{
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, mpsc};
 
 pub use self::{
-	devices::{DEVICE_PUSH_SUBTYPE, PushedItem},
+	devices::{CryptoState, DEVICE_CRYPTO_STATE_SUBTYPE, DEVICE_PUSH_SUBTYPE, PushedItem},
 	rooms::{EVENT_PUSH_SUBTYPE, PushedEvent, Subscribed},
 };
 use self::{

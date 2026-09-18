@@ -54,8 +54,8 @@
 | 請求 data | 空 |
 | 回覆 data | `{"changed":["@kate:localhost"],"left":[]}` |
 
-- ⚠️ **`left` 目前永遠是空陣列**（上游的 `// TODO`），而且 `changed` 只看金鑰變動、**不含「有人新加入跟我同一個加密房」**。所以它不能當裝置清單的正確來源；正確的來源是 `CryptoState`（wbf-e2ee.md §3）。補 `left` 排在 (B)（wbf-e2ee.md §6 決定 5）。
-- `from`／`to` 是 server 的 count：HTTP 的 client 拿 `/sync` 的 `next_batch`；走通道的 client 之後用 `CryptoState` 的 `dl_seq`。
+- ⚠️ **`left` 永遠是空陣列**（上游的 `// TODO`），而且 `changed` 只看金鑰變動、**不含「有人新加入跟我同一個加密房」**。這跟上游一致，**不改**（wbf-e2ee.md §3，維護者 2026-09-17 重作 (B)：Matrix 原本的金鑰分發不動）。客製 client 判斷要不要重新查裝置，走 [wbf-room-device-version.md](../design/wbf-room-device-version.md)。
+- `from`／`to` 是 server 的 count：HTTP 的 client 拿 `/sync` 的 `next_batch`。
 
 **會怎麼被拒**：`from` 或 `to` 不是數字 → `InvalidRequest`（1201），meta `{"code":"InvalidRequest","code_id":1201,"errcode":"M_INVALID_PARAM","message":"M_INVALID_PARAM: Invalid `from`.","status":400}`（e2e13 [3.4]）。
 

@@ -176,6 +176,12 @@ fn current() -> Value {
 			pack("device_fetch", Kind::Device, 0x01, Flags::default(), conversation(31), 0, br#"{"cd_seq":4711,"limit":1000}"#, b""),
 			pack("device_batch", Kind::Device, 0x02, Flags::IS_RESPONSE, conversation(31), 0, br#"{"bc":1,"counts":[4712],"more":false,"nt":4712,"ot":4712,"r":0,"tc":1}"#, &length_prefixed(&[OLM_ITEM])),
 			pack("device_push", Kind::Device, 0x06, Flags::IS_RESPONSE, conversation(30), 0, br#"{"bc":1,"counts":[4713],"gap":false,"nt":4713,"ot":4713}"#, &length_prefixed(&[OLM_ITEM])),
+			// `CryptoState` (wbf-e2ee.md §3): same subscription as the `Push`
+			// above, so its id and the next seq. Every field is present even
+			// when empty — `unused_fallback_key_types: []` means "all used",
+			// which a missing field would not say.
+			pack("device_crypto_state", Kind::Device, 0x08, Flags::IS_RESPONSE, conversation(30), 1, br#"{"gap":false,"otk_counts":{"signed_curve25519":42},"unused_fallback_key_types":["signed_curve25519"]}"#, b""),
+			pack("device_crypto_state_empty", Kind::Device, 0x08, Flags::IS_RESPONSE, conversation(30), 2, br#"{"gap":false,"otk_counts":{},"unused_fallback_key_types":[]}"#, b""),
 			// The destroy command and its result carry counts as raw big-endian
 			// u64s, eight bytes each with no separator: a separator byte would
 			// also occur inside a count.

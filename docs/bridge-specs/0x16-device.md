@@ -2,7 +2,7 @@
 
 > 號碼總表與共通規則在 [index.md](index.md)。這份只寫**每支端點帶什麼、回什麼、會怎麼被拒**。
 > 請求的前 4 bytes 一律是 `01 16 SS 10`；成功回覆 `01 01 02 14`、失敗 `01 01 03 14`。`id` 填 0。
-> ⚠️ 這個 kind 同時有**原生**的 pack（to-device 佇列）：`Fetch`（`0x01`）、`Batch`（`0x02`）、`ItemsDestroy`（`0x03`）、`Subscribe`（`0x04`）、`Unsubscribe`（`0x05`）、`Push`（`0x06`）、`ItemsDestroyed`（`0x07`）。那些**不帶** bit4，規格在 [wbf-to-device.md](../design/wbf-to-device.md)。
+> ⚠️ 這個 kind 同時有**原生**的 pack（to-device 佇列）：`Fetch`（`0x01`）、`Batch`（`0x02`）、`ItemsDestroy`（`0x03`）、`Subscribe`（`0x04`）、`Unsubscribe`（`0x05`）、`Push`（`0x06`）、`ItemsDestroyed`（`0x07`）、`CryptoState`（`0x08`）。那些**不帶** bit4，規格在 [wbf-to-device.md](../design/wbf-to-device.md)（`CryptoState` 在 [wbf-e2ee.md](../design/wbf-e2ee.md) §3）。
 > 刪裝置（`0x23`、`0x24`，批 2）要互動式認證（UIAA），兩輪怎麼走見 index §1.5。
 > **發** to-device（`0x25`）是 E2EE 的 (A)（[wbf-e2ee.md](../design/wbf-e2ee.md) §2）；**收**是上面那組原生的 `Subscribe`／`Push`。
 

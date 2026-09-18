@@ -42,8 +42,9 @@ function Call($ws, [byte[]]$pack) {
     $p = Recv-Or-Null $ws 10000
     if ($null -eq $p) { throw 'no reply within 10 s' }
     if ($p.closed) { throw "server closed the connection: $($p.code)" }
-    # A Device/Push may arrive first; the caller wants the reply to its request.
-    if (-not ($p.kind -eq 0x16 -and $p.subtype -eq 6)) { return $p }
+    # A Device/Push or Device/CryptoState may arrive first (a Subscribe is always followed by a CryptoState,
+    # wbf-e2ee.md 3.4); the caller wants the reply to its request.
+    if (-not ($p.kind -eq 0x16 -and ($p.subtype -eq 6 -or $p.subtype -eq 8))) { return $p }
   }
   throw 'only pushes, no reply'
 }
@@ -111,12 +112,14 @@ $ws2 = Ws-Open $tokA
 $took = Call $ws2 (Json-Pack 0x16 4 (Conv 11) 0 @{ device_id = $devA } $null)
 Check '[1.3a] a later connection of the same device -> Ack, it takes the queue over' ($took.subtype -eq 2 -and $took.meta.latest_cd_seq -gt 0) (Describe $took)
 $notice = Recv-Or-Null $ws 5000
+while ($null -ne $notice -and $notice.kind -eq 0x16 -and $notice.subtype -eq 8) { $notice = Recv-Or-Null $ws 5000 }
 Check '[1.3b] the displaced connection is told: Superseded, carrying its own subscription id, IS_LAST' `
   ($null -ne $notice -and $notice.subtype -eq 3 -and $notice.meta.code_id -eq 1505 -and $notice.meta.code -eq 'Superseded' -and $notice.id -eq (Conv 10) -and ($notice.flags -band 8) -eq 8) `
   "id=$($notice.id) flags=$($notice.flags) code=$($notice.meta.code_id)"
 # Taking it back, so the rest of this script speaks through $ws — and the same notice goes the other way.
 $back = Call $ws (Json-Pack 0x16 4 (Conv 10) 0 @{ device_id = $devA } $null)
 $notice2 = Recv-Or-Null $ws2 5000
+while ($null -ne $notice2 -and $notice2.kind -eq 0x16 -and $notice2.subtype -eq 8) { $notice2 = Recv-Or-Null $ws2 5000 }
 Check '[1.3c] it works in both directions: the second connection is displaced by its own id' `
   ($back.subtype -eq 2 -and $null -ne $notice2 -and $notice2.meta.code_id -eq 1505 -and $notice2.id -eq (Conv 11)) `
   "id=$($notice2.id) code=$($notice2.meta.code_id)"
