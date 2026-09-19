@@ -66,6 +66,14 @@ fn only_what_everyone_sees(owner: &UserId, key: &Value) -> Value {
 			.and_then(Value::as_object_mut)
 		{
 			signatures.retain(|signer, _| signer == owner.as_str());
+			// 🚨 Nothing left is the same as never having had any: a key that
+			// somebody else signed keeps an empty `signatures` where an
+			// unsigned key has no such field, and the two would hash
+			// differently — so a signature nobody else can see would move the
+			// hash (PR #74 follow-up, caught by e2e16 [1.8b]).
+			if signatures.is_empty() {
+				fields.remove("signatures");
+			}
 		}
 	}
 
@@ -137,6 +145,31 @@ mod tests {
 		let after = device_keys_hash(bob, Some(&signed_by_alice), Some(&self_signing()), &devices()).unwrap();
 
 		assert_eq!(before, after);
+	}
+
+	/// 🚨 A key nobody has signed has no `signatures` at all; one that only
+	/// somebody else signed keeps an empty `signatures` once theirs is
+	/// dropped. Hashing those two differently would let an invisible signature
+	/// move the hash, and the owner's own client — which sees the signature
+	/// and drops it the same way — would still disagree with a stranger's
+	/// client, which never saw it (e2e16 [1.8b] caught exactly this).
+	#[test]
+	fn a_key_left_with_no_signatures_hashes_as_one_that_never_had_any() {
+		let bob = user_id!("@bob:localhost");
+		let unsigned_master = json!({
+			"user_id": "@bob:localhost",
+			"usage": ["master"],
+			"keys": { "ed25519:MASTER": "bWFzdGVy" }
+		});
+		let mut signed_by_alice_only = unsigned_master.clone();
+		signed_by_alice_only["signatures"] = json!({ "@alice:localhost": { "ed25519:ALICE_USK": "YWxpY2U" } });
+		let mut empty_signatures = unsigned_master.clone();
+		empty_signatures["signatures"] = json!({});
+
+		let none = device_keys_hash(bob, Some(&unsigned_master), None, &[]).unwrap();
+
+		assert_eq!(none, device_keys_hash(bob, Some(&signed_by_alice_only), None, &[]).unwrap());
+		assert_eq!(none, device_keys_hash(bob, Some(&empty_signatures), None, &[]).unwrap());
 	}
 
 	#[test]
