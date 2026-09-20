@@ -110,7 +110,8 @@ function Http([string]$method, [string]$path, $body, $tok) {
   $json = $null; if ($text) { try { $json = $text | ConvertFrom-Json } catch {} }
   @{ status = [int]$resp.StatusCode; text = $text; json = $json }
 }
-$VOLATILE = @('age', 'last_seen_ts', 'last_seen_ip')
+# Fields whose value is "how long ago", so two calls a moment apart disagree and say nothing about the bridge.
+$VOLATILE = @('age', 'last_seen_ts', 'last_seen_ip', 'last_active_ago')
 function Canon($value) {
   if ($null -eq $value) { return 'null' }
   if ($value -is [System.Management.Automation.PSCustomObject]) {
@@ -651,6 +652,184 @@ Check '[4.9] DeleteBackupVersion: the version is gone for both roads; without lo
   ((Is-Ack $delVersion) -and (Same-Refusal $goneVersion $hgoneVersion) -and (Same-Refusal $anonBackup $hanonBackup) -and $anonBackup.meta.errcode -eq 'M_MISSING_TOKEN') `
   "delete=$($delVersion.status) gone=$($goneVersion.metaText) anon=$($anonBackup.metaText) http=$($hanonBackup.status)"
 $anon7.Dispose(); $wsM.Dispose()
+Stop-Server $server
+
+Log '################ Scenario 5: batch 3, the rest of the room, relations, presence, filters, capabilities, reports ################'
+# docs/design/wbf-api-bridge.md §3 batch 3. Same rule as every batch: each endpoint through the bridge and through
+# Matrix HTTP, the answers compared. Two things are new here and get their own checks: the kind `0x1D Report`
+# (opened by this batch, no native subtypes) and the `features` list in Hello.
+$db6 = "$S\e2e13db6"; Remove-Item -Recurse -Force $db6 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db6 | Out-Null
+$cfg6 = Write-Config $db6 86400
+$server = Start-Server $cfg6 's5'
+$regD = Api Post '/_matrix/client/v3/register' '{"username":"dana","password":"pw-dana-1","auth":{"type":"m.login.dummy"}}' $null
+$regE = Api Post '/_matrix/client/v3/register' '{"username":"erin","password":"pw-erin-1","auth":{"type":"m.login.dummy"}}' $null
+$dana = $regD.user_id; $tokD = $regD.access_token
+$erin = $regE.user_id; $tokE = $regE.access_token
+$wsD = Ws-Open $tokD; $wsE = Ws-Open $tokE
+function Send-Msg($tok, $room, $content) { (Http PUT "/_matrix/client/v3/rooms/$(Enc $room)/send/m.room.message/$([guid]::NewGuid().ToString('N'))" $content $tok).json.event_id }
+function Membership-Of($room, $who, $tok) { (Http GET "/_matrix/client/v3/rooms/$(Enc $room)/state/m.room.member/$(Enc $who)" $null $tok).json.membership }
+
+# ---- Hello: the capability strings ----
+$hello5 = Call $wsD (Json-Pack 1 1 0 5900 @{ protocol = 1; client = 'e2e13-s5'; features = @() } $null)
+$feat5 = @($hello5.meta.features)
+Check '[5.1] Hello names every capability this server speaks, including the ones added after batch 1: stream, device, bridge' `
+  (($feat5 -contains 'stream') -and ($feat5 -contains 'device') -and ($feat5 -contains 'bridge') -and ($feat5 -contains 'push') -and ($feat5 -contains 'org.wbftw.device_versions')) `
+  "features=$($feat5 -join ',')"
+
+# ---- 0x1C Misc, 0x12 Sync ----
+$caps = Bridge $wsD 0x1C 0x20 $null $null
+$hcaps = Http GET '/_matrix/client/v3/capabilities' $null $tokD
+Check '[5.2] Capabilities through the bridge is what HTTP answers' (Same-As-Http $caps $hcaps) "bridge=$($caps.status) http=$($hcaps.status) $($hcaps.text)"
+
+$filter = @{ room = @{ timeline = @{ limit = 7 } } }
+$made = Bridge $wsD 0x12 0x21 @{ user_id = $dana } $filter
+$filterId = $made.body.filter_id
+$got = Bridge $wsD 0x12 0x20 @{ user_id = $dana; filter_id = "$filterId" } $null
+$hgot = Http GET "/_matrix/client/v3/user/$(Enc $dana)/filter/$(Enc "$filterId")" $null $tokD
+$otherFilter = Bridge $wsE 0x12 0x20 @{ user_id = $dana; filter_id = "$filterId" } $null
+$hotherFilter = Http GET "/_matrix/client/v3/user/$(Enc $dana)/filter/$(Enc "$filterId")" $null $tokE
+Check '[5.3] CreateFilter gives an id the bridge reads back exactly as HTTP; somebody else is refused exactly as HTTP refuses them' `
+  ((Is-Ack $made) -and "$filterId" -ne '' -and (Same-As-Http $got $hgot) -and $got.body.room.timeline.limit -eq 7 -and (Same-Refusal $otherFilter $hotherFilter)) `
+  "id=$filterId got=$($got.text) other=$($otherFilter.metaText) http=$($hotherFilter.status)"
+
+# ---- 0x15 Receipt: presence ----
+$setPres = Bridge $wsD 0x15 0x24 @{ user_id = $dana } @{ presence = 'online'; status_msg = 'batch 3' }
+$getPres = Bridge $wsD 0x15 0x23 @{ user_id = $dana } $null
+$hgetPres = Http GET "/_matrix/client/v3/presence/$(Enc $dana)/status" $null $tokD
+$othersPres = Bridge $wsD 0x15 0x24 @{ user_id = $erin } @{ presence = 'online' }
+$hothersPres = Http PUT "/_matrix/client/v3/presence/$(Enc $erin)/status" @{ presence = 'online' } $tokD
+Check '[5.4] SetPresence then GetPresence through the bridge reads back what HTTP reads; setting somebody else''s is refused exactly as HTTP refuses it' `
+  ((Is-Ack $setPres) -and (Same-As-Http $getPres $hgetPres) -and $getPres.body.status_msg -eq 'batch 3' -and (Same-Refusal $othersPres $hothersPres)) `
+  "set=$($setPres.status) get=$($getPres.text) http=$($hgetPres.text) other=$($othersPres.metaText) hother=$($hothersPres.status)"
+
+# ---- 0x13 Room ----
+$roomD = (Http POST '/_matrix/client/v3/createRoom' @{ name = 'batch three'; preset = 'public_chat' } $tokD).json.room_id
+$null = Http POST "/_matrix/client/v3/join/$(Enc $roomD)" @{} $tokE
+$joined = Bridge $wsD 0x13 0x2F @{ room_id = $roomD } $null
+$hjoined = Http GET "/_matrix/client/v3/rooms/$(Enc $roomD)/joined_members" $null $tokD
+Check '[5.5] JoinedMembers through the bridge is what HTTP answers, and it holds both members' `
+  ((Same-As-Http $joined $hjoined) -and $null -ne $joined.body.joined.$dana -and $null -ne $joined.body.joined.$erin) `
+  "bridge=$($joined.status) http=$($hjoined.status) $($hjoined.text)"
+
+$setVis = Bridge $wsD 0x13 0x31 @{ room_id = $roomD } @{ visibility = 'public' }
+$getVis = Bridge $wsD 0x13 0x30 @{ room_id = $roomD } $null
+$hgetVis = Http GET "/_matrix/client/v3/directory/list/room/$(Enc $roomD)" $null $tokD
+Check '[5.6] SetVisibility through the bridge is read back by both roads as public' `
+  ((Is-Ack $setVis) -and (Same-As-Http $getVis $hgetVis) -and $getVis.body.visibility -eq 'public') `
+  "set=$($setVis.status) get=$($getVis.text) http=$($hgetVis.text)"
+
+$summary = Bridge $wsD 0x13 0x32 @{ room_id_or_alias = $roomD } $null
+$hsummary = Http GET "/_matrix/client/v1/room_summary/$(Enc $roomD)" $null $tokD
+$hierarchy = Bridge $wsD 0x13 0x33 @{ room_id = $roomD; limit = 10 } $null
+$hhierarchy = Http GET "/_matrix/client/v1/rooms/$(Enc $roomD)/hierarchy?limit=10" $null $tokD
+$mutual = Bridge $wsD 0x13 0x34 @{ user_id = $erin } $null
+$hmutual = Http GET "/_matrix/client/v1/mutual_rooms?user_id=$(Enc $erin)" $null $tokD
+# These three have no v3 path; the bridge takes the newest stable one, so the endpoint it reaches is the v1 one.
+Check '[5.7] Summary, Hierarchy and MutualRooms (v1 endpoints, no v3 path) answer through the bridge exactly as over HTTP' `
+  ((Same-As-Http $summary $hsummary) -and (Same-As-Http $hierarchy $hhierarchy) -and (Same-As-Http $mutual $hmutual) -and (@($mutual.body.joined) -contains $roomD)) `
+  "summary=$($summary.status) hierarchy=$($hierarchy.status) mutual=$($mutual.text)"
+
+# Comparing the two roads cannot catch a wrong example in 0x13-room.md: both roads answer the same shape, right or
+# wrong. So the shapes those examples claim are pinned here (PR #77 review, salvia). ⚠️ Reading the Rust field names
+# is what goes wrong: ruma's summary Response has a field called `summary`, but it serializes `#[serde(flatten)]`,
+# so on the wire the fields are at the top level, next to `membership`. The bytes decide, not the type.
+Check '[5.7b] the shapes 0x13-room.md shows are the shapes these two answer: Summary flat with `membership` beside it, MutualRooms with `count` and no `next_batch_token`' `
+  ($summary.body.room_id -eq $roomD -and $null -ne $summary.body.membership -and $null -eq $summary.body.summary `
+    -and $null -ne $mutual.body.count -and $null -eq $mutual.body.next_batch_token -and $null -ne $hierarchy.body.rooms) `
+  "summary=$($summary.text) mutual=$($mutual.text)"
+
+# ---- 0x14 Event: relations and threads ----
+$root = Send-Msg $tokD $roomD @{ msgtype = 'm.text'; body = 'the thread root' }
+$inThread = Send-Msg $tokE $roomD @{ msgtype = 'm.text'; body = 'in the thread'
+  'm.relates_to' = @{ rel_type = 'm.thread'; event_id = $root; is_falling_back = $true; 'm.in_reply_to' = @{ event_id = $root } } }
+$relations = Bridge $wsD 0x14 0x26 @{ room_id = $roomD; event_id = $root } $null
+$hrelations = Http GET "/_matrix/client/v1/rooms/$(Enc $roomD)/relations/$(Enc $root)" $null $tokD
+$byType = Bridge $wsD 0x14 0x27 @{ room_id = $roomD; event_id = $root; rel_type = 'm.thread' } $null
+$hbyType = Http GET "/_matrix/client/v1/rooms/$(Enc $roomD)/relations/$(Enc $root)/m.thread" $null $tokD
+$byBoth = Bridge $wsD 0x14 0x28 @{ room_id = $roomD; event_id = $root; rel_type = 'm.thread'; event_type = 'm.room.message' } $null
+$hbyBoth = Http GET "/_matrix/client/v1/rooms/$(Enc $roomD)/relations/$(Enc $root)/m.thread/m.room.message" $null $tokD
+Check '[5.8] the three Relations endpoints answer as HTTP does, and the reply really holds the threaded event (not an empty chunk)' `
+  ((Same-As-Http $relations $hrelations) -and (Same-As-Http $byType $hbyType) -and (Same-As-Http $byBoth $hbyBoth) -and (@($relations.body.chunk).Count -ge 1) -and (@($relations.body.chunk | ForEach-Object { $_.event_id }) -contains $inThread)) `
+  "chunk=$(@($relations.body.chunk).Count) byType=$(@($byType.body.chunk).Count) byBoth=$(@($byBoth.body.chunk).Count)"
+
+$threads = Bridge $wsD 0x14 0x29 @{ room_id = $roomD; include = 'all' } $null
+$hthreads = Http GET "/_matrix/client/v1/rooms/$(Enc $roomD)/threads?include=all" $null $tokD
+Check '[5.9] Threads answers as HTTP does and lists the root of the thread just made' `
+  ((Same-As-Http $threads $hthreads) -and (@($threads.body.chunk | ForEach-Object { $_.event_id }) -contains $root)) `
+  "threads=$(@($threads.body.chunk).Count) http=$($hthreads.status)"
+
+# ---- 0x1D Report ----
+$repEvent = Bridge $wsD 0x1D 0x20 @{ room_id = $roomD; event_id = $root } @{ reason = 'e2e: reporting the event' }
+$hrepEvent = Http POST "/_matrix/client/v3/rooms/$(Enc $roomD)/report/$(Enc $root)" @{ reason = 'e2e: the event over http' } $tokD
+$repRoom = Bridge $wsD 0x1D 0x21 @{ room_id = $roomD } @{ reason = 'e2e: reporting the room' }
+$hrepRoom = Http POST "/_matrix/client/v3/rooms/$(Enc $roomD)/report" @{ reason = 'e2e: the room over http' } $tokD
+$repUser = Bridge $wsD 0x1D 0x22 @{ user_id = $erin } @{ reason = 'e2e: reporting the user' }
+$hrepUser = Http POST "/_matrix/client/v3/users/$(Enc $erin)/report" @{ reason = 'e2e: the user over http' } $tokD
+# All three compared against HTTP, not just the room one (PR #77 review, rumia): a row pointed at the wrong ruma
+# type would still answer `{}` and still look like an Ack, so the check has to be that HTTP answers the same.
+Check '[5.10] each of the three reports answers through the bridge exactly what the same report answers over HTTP' `
+  ((Same-As-Http $repEvent $hrepEvent) -and (Same-As-Http $repRoom $hrepRoom) -and (Same-As-Http $repUser $hrepUser) -and $repEvent.text -eq '{}' -and $repRoom.text -eq '{}' -and $repUser.text -eq '{}' -and $hrepEvent.status -eq 200) `
+  "event=$($repEvent.status) $($repEvent.text) hevent=$($hrepEvent.status) room=$($repRoom.text) hroom=$($hrepRoom.status) user=$($repUser.text) huser=$($hrepUser.status)"
+
+$longReason = 'x' * 2001
+$tooLong = Bridge $wsD 0x1D 0x21 @{ room_id = $roomD } @{ reason = $longReason }
+$htooLong = Http POST "/_matrix/client/v3/rooms/$(Enc $roomD)/report" @{ reason = $longReason } $tokD
+$unknownRoom = Bridge $wsD 0x1D 0x21 @{ room_id = '!nosuchroom:localhost' } @{ reason = 'nope' }
+$hunknownRoom = Http POST "/_matrix/client/v3/rooms/$(Enc '!nosuchroom:localhost')/report" @{ reason = 'nope' } $tokD
+Check '[5.11] a reason over the limit and a room nobody here has joined are refused exactly as HTTP refuses them' `
+  ((Same-Refusal $tooLong $htooLong) -and (Same-Refusal $unknownRoom $hunknownRoom)) `
+  "long=$($tooLong.metaText) hlong=$($htooLong.status) $($htooLong.text) room=$($unknownRoom.metaText) hroom=$($hunknownRoom.status)"
+
+# 0x1D has no native subtypes at all, so the defences are the ordinary ones: the native road finds nothing, and
+# a subtype the bridge's table does not hold finds nothing either.
+$reportNative = Call $wsD (New-Pack 0x1D 0x20 0 0 5901 @() @())
+$reportUnknown = Bridge $wsD 0x1D 0x7F $null $null
+Check '[5.12] 0x1D without bit4 is UnknownKind on the native road, and a subtype not in the bridge''s table is UnknownKind on the bridge road' `
+  ($reportNative.meta.code_id -eq $UNKNOWN_KIND -and ($reportNative.flags -band $IS_BRIDGED) -eq 0 -and $reportUnknown.meta.code_id -eq $UNKNOWN_KIND -and (Is-BridgedReply $reportUnknown)) `
+  "native=$($reportNative.metaText) unknown=$($reportUnknown.metaText)"
+
+# ---- Knock and Upgrade, then the same two with a suspended account ----
+$knockRoom = (Http POST '/_matrix/client/v3/createRoom' @{ name = 'knock please'; room_version = '11'
+  initial_state = @(@{ type = 'm.room.join_rules'; state_key = ''; content = @{ join_rule = 'knock' } }) } $tokD).json.room_id
+$knock = Bridge $wsE 0x13 0x2E @{ room_id_or_alias = $knockRoom } @{ reason = 'let me in' }
+Check '[5.13] Knock through the bridge leaves the knocking member state HTTP reads back' `
+  ((Is-Ack $knock) -and $knock.body.room_id -eq $knockRoom -and (Membership-Of $knockRoom $erin $tokD) -eq 'knock') `
+  "knock=$($knock.status) $($knock.text) membership=$(Membership-Of $knockRoom $erin $tokD)"
+
+$roomUp = (Http POST '/_matrix/client/v3/createRoom' @{ name = 'to be upgraded' } $tokD).json.room_id
+$upgrade = Bridge $wsD 0x13 0x2D @{ room_id = $roomUp } @{ new_version = '11' }
+$tombstone = Http GET "/_matrix/client/v3/rooms/$(Enc $roomUp)/state/m.room.tombstone/" $null $tokD
+$badVersion = Bridge $wsD 0x13 0x2D @{ room_id = $roomUp } @{ new_version = 'not-a-version' }
+$hbadVersion = Http POST "/_matrix/client/v3/rooms/$(Enc $roomUp)/upgrade" @{ new_version = 'not-a-version' } $tokD
+Check '[5.14] Upgrade through the bridge leaves a tombstone pointing at the new room; an unsupported version is refused exactly as HTTP refuses it' `
+  ((Is-Ack $upgrade) -and "$($upgrade.body.replacement_room)" -ne '' -and $tombstone.status -eq 200 -and $tombstone.json.replacement_room -eq $upgrade.body.replacement_room -and (Same-Refusal $badVersion $hbadVersion)) `
+  "upgrade=$($upgrade.text) tombstone=$($tombstone.status) $($tombstone.text) bad=$($badVersion.metaText) hbad=$($hbadVersion.status)"
+
+$knockRoom2 = (Http POST '/_matrix/client/v3/createRoom' @{ name = 'knock please again'; room_version = '11'
+  initial_state = @(@{ type = 'm.room.join_rules'; state_key = ''; content = @{ join_rule = 'knock' } }) } $tokD).json.room_id
+$roomUpE = (Http POST '/_matrix/client/v3/createRoom' @{ name = 'erin owns this' } $tokE).json.room_id
+$suspendE = Http PUT "/_matrix/client/v1/admin/suspend/$(Enc $erin)" @{ suspended = $true } $tokD
+$susKnock = Bridge $wsE 0x13 0x2E @{ room_id_or_alias = $knockRoom2 } @{ reason = 'still suspended' }
+$hsusKnock = Http POST "/_matrix/client/v3/knock/$(Enc $knockRoom2)" @{ reason = 'still suspended' } $tokE
+$susUpgrade = Bridge $wsE 0x13 0x2D @{ room_id = $roomUpE } @{ new_version = '11' }
+$hsusUpgrade = Http POST "/_matrix/client/v3/rooms/$(Enc $roomUpE)/upgrade" @{ new_version = '11' } $tokE
+$null = Http PUT "/_matrix/client/v1/admin/suspend/$(Enc $erin)" @{ suspended = $false } $tokD
+# The gate is the HTTP one: batch 3 adds two more routes behind it, and the bridge must not walk past either.
+Check '[5.15] a suspended account cannot Knock or Upgrade through the bridge, exactly as over HTTP (403 M_USER_SUSPENDED)' `
+  ($suspendE.status -eq 200 -and (Same-Refusal $susKnock $hsusKnock) -and $susKnock.meta.errcode -eq 'M_USER_SUSPENDED' -and $susKnock.status -eq 403 -and (Same-Refusal $susUpgrade $hsusUpgrade) -and $susUpgrade.meta.errcode -eq 'M_USER_SUSPENDED') `
+  "suspend=$($suspendE.status) knock=$($susKnock.metaText) hknock=$($hsusKnock.status) upgrade=$($susUpgrade.metaText) hupgrade=$($hsusUpgrade.status)"
+
+# Somebody who is not in the room: the read endpoints of this batch must refuse exactly where HTTP refuses.
+$privateRoom = (Http POST '/_matrix/client/v3/createRoom' @{ name = 'dana only' } $tokD).json.room_id
+$outsiderMembers = Bridge $wsE 0x13 0x2F @{ room_id = $privateRoom } $null
+$houtsiderMembers = Http GET "/_matrix/client/v3/rooms/$(Enc $privateRoom)/joined_members" $null $tokE
+$outsiderHierarchy = Bridge $wsE 0x13 0x33 @{ room_id = $privateRoom } $null
+$houtsiderHierarchy = Http GET "/_matrix/client/v1/rooms/$(Enc $privateRoom)/hierarchy" $null $tokE
+Check '[5.16] someone outside the room is refused JoinedMembers and Hierarchy through the bridge exactly as over HTTP' `
+  ((Same-Refusal $outsiderMembers $houtsiderMembers) -and (Same-Refusal $outsiderHierarchy $houtsiderHierarchy)) `
+  "members=$($outsiderMembers.metaText) hmembers=$($houtsiderMembers.status) hierarchy=$($outsiderHierarchy.metaText) hhierarchy=$($houtsiderHierarchy.status)"
+
+$wsD.Dispose(); $wsE.Dispose()
 Stop-Server $server
 
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"

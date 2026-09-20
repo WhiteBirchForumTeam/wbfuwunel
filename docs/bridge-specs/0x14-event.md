@@ -88,6 +88,33 @@ data  {"errcode":"M_FORBIDDEN","error":"You don't have permission to post that t
 ⚠️ `filter` 在 Matrix 的 URL 裡就是一段 JSON **字串**，所以在 meta 裡也要是字串，🚫 不要放 JSON 物件（物件不是合法的 query 值，會 `InvalidRequest`）。
 **會怎麼被拒**：事件不存在或看不到 → `NotFound`（404）。
 
+## `0x26`–`0x28` Relations —— 一則事件被什麼關聯了（批 3）
+
+`GET /_matrix/client/v1/rooms/{room_id}/relations/{event_id}`
+`GET …/{rel_type}`（`0x27`）、`GET …/{rel_type}/{event_type}`（`0x28`）
+
+| | |
+|---|---|
+| 請求 meta | `0x26`：`{"room_id":"!AbCdEf:localhost","event_id":"$root"}`；`0x27` 再加 `"rel_type":"m.thread"`；`0x28` 再加 `"event_type":"m.room.message"` |
+| 請求 data | — |
+| 回覆 data | `{"chunk":[…事件…],"next_batch":"…","prev_batch":"…"}` |
+
+📎 三支是**同一個查詢愈縮愈窄**，不是三件事：不指定就是全部的關聯，`rel_type` 限一種（`m.thread`、`m.replace`、`m.annotation`），再加 `event_type` 又窄一層。
+📎 query 四個都可選：`from`／`to` 翻頁、`dir`（`b` 往舊、`f` 往新）、`limit`、`recurse`（連孫輩一起撈）。
+**會怎麼被拒**：那則事件看不到（不在房裡、或歷史可見性擋著） → `Forbidden`（403）／`NotFound`（404）。
+
+## `0x29` Threads —— 房間裡的討論串清單（批 3）
+
+`GET /_matrix/client/v1/rooms/{room_id}/threads`
+
+| | |
+|---|---|
+| 請求 meta | `{"room_id":"!AbCdEf:localhost","include":"all","limit":20}` |
+| 請求 data | — |
+| 回覆 data | `{"chunk":[…每串的根事件…],"next_batch":"…"}` |
+
+📎 `include` 是 `all`（預設）或 `participated`（只要我插過話的）。每串的內容用 `0x27` RelationsByRelType 帶 `rel_type: "m.thread"` 撈。
+
 ## 這個 kind 共通的拒絕
 
 | 情況 | `code` | 來自 |

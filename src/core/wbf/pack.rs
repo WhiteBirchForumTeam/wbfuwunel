@@ -78,8 +78,10 @@ pub enum Kind {
 	Search = 0x1A,
 	/// TURN and RTC.
 	Voip = 0x1B,
-	/// Everything else: capabilities, versions, well-known, tags, reports.
+	/// Everything else: capabilities, versions, well-known, tags.
 	Misc = 0x1C,
+	/// Reporting an event, a room or a user.
+	Report = 0x1D,
 	/// Administration commands and the admin API.
 	Admin = 0x20,
 }
@@ -106,6 +108,7 @@ impl TryFrom<u8> for Kind {
 			| 0x1A => Self::Search,
 			| 0x1B => Self::Voip,
 			| 0x1C => Self::Misc,
+			| 0x1D => Self::Report,
 			| 0x20 => Self::Admin,
 			| unknown => return Err(PackError::UnknownKind(unknown)),
 		})
@@ -621,27 +624,22 @@ mod tests {
 
 	#[test]
 	fn all_kind_bytes_round_trip() {
-		for kind in [
-			Kind::Control,
-			Kind::Stream,
-			Kind::Upload,
-			Kind::Download,
-			Kind::Session,
-			Kind::Account,
-			Kind::Sync,
-			Kind::Room,
-			Kind::Event,
-			Kind::Receipt,
-			Kind::Device,
-			Kind::Keys,
-			Kind::Push,
-			Kind::Media,
-			Kind::Search,
-			Kind::Voip,
-			Kind::Misc,
-			Kind::Admin,
-		] {
-			assert_eq!(Kind::try_from(kind as u8), Ok(kind));
+		// Every byte rather than a hand-written list of the variants: a list
+		// falls behind silently the first time someone adds a kind and does
+		// not think of this test (batch 3's `Report` nearly did). Sweeping the
+		// whole space cannot fall behind, and the count below turns adding or
+		// removing a kind into a deliberate edit here.
+		let decodable: Vec<u8> = (0..=u8::MAX).filter(|byte| Kind::try_from(*byte).is_ok()).collect();
+
+		for byte in &decodable {
+			let kind = Kind::try_from(*byte).expect("just filtered for the ones that decode");
+			assert_eq!(kind as u8, *byte, "0x{byte:02X} decodes to a kind that numbers itself differently");
 		}
+
+		assert_eq!(
+			decodable.len(),
+			19,
+			"a kind was added or removed; `docs/design/wbf-wire-format.md` §3.3 is the allocation table and has to say the same"
+		);
 	}
 }

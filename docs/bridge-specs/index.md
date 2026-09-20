@@ -3,8 +3,8 @@
 > **這份文件回答：哪些 Matrix 端點已經（或這一批要）走橋、每個的 kind／subtype 是幾號、送出去的 pack 前幾個 byte 長什麼樣、對到哪個端點、要帶哪些變數。**
 > 設計與規則在 [../design/wbf-api-bridge.md](../design/wbf-api-bridge.md)（下稱「橋的設計」），這裡只放**分配結果**。
 > ⭐ **這張表是走橋的 subtype 號的唯一權威**：[wbf-wire-format.md](../design/wbf-wire-format.md) §3.2 只列原生的 subtype，走橋的一律指到這裡 —— 兩份表遲早漂移。
-> 每個 kind 的完整範例（請求與回應的 meta、data、錯誤）在同一個目錄的 `KIND.md`，隨搬的那一批一起寫：[0x10-session.md](0x10-session.md)、[0x11-account.md](0x11-account.md)、[0x13-room.md](0x13-room.md)、[0x14-event.md](0x14-event.md)、[0x15-receipt.md](0x15-receipt.md)、[0x16-device.md](0x16-device.md)、[0x17-keys.md](0x17-keys.md)。
-> 狀態：批 1 的 37 支、批 2 的 8 支（註冊、UIAA）、E2EE (A) 的 7 支（金鑰、發 to-device，[wbf-e2ee.md](../design/wbf-e2ee.md) §2）與 E2EE (C) 的 14 支（金鑰備份，同文件 §4）**已實作**：server 的表（`src/api/client/wbf/bridge.rs` 的 `BRIDGED_ENDPOINTS`）逐列跟這份總表比對（單元測試 `the_specs_index_and_this_table_list_the_same_endpoints`，對不上就紅）；每支都在 e2e13（批 1 情境 1、批 2 情境 2、E2EE (A) 情境 3、E2EE (C) 情境 4）跟原本的 HTTP 端點比對過結果。
+> 每個 kind 的完整範例（請求與回應的 meta、data、錯誤）在同一個目錄的 `KIND.md`，隨搬的那一批一起寫：[0x10-session.md](0x10-session.md)、[0x11-account.md](0x11-account.md)、[0x12-sync.md](0x12-sync.md)、[0x13-room.md](0x13-room.md)、[0x14-event.md](0x14-event.md)、[0x15-receipt.md](0x15-receipt.md)、[0x16-device.md](0x16-device.md)、[0x17-keys.md](0x17-keys.md)、[0x1C-misc.md](0x1C-misc.md)、[0x1D-report.md](0x1D-report.md)。
+> 狀態：批 1 的 37 支、批 2 的 8 支（註冊、UIAA）、E2EE (A) 的 7 支（金鑰、發 to-device，[wbf-e2ee.md](../design/wbf-e2ee.md) §2）、E2EE (C) 的 14 支（金鑰備份，同文件 §4）與批 3 的 20 支（房間其餘、關聯與討論串、在線狀態／過濾器／capabilities、檢舉）**已實作**：server 的表（`src/api/client/wbf/bridge.rs` 的 `BRIDGED_ENDPOINTS`）逐列跟這份總表比對（單元測試 `the_specs_index_and_this_table_list_the_same_endpoints`，對不上就紅）；每支都在 e2e13（批 1 情境 1、批 2 情境 2、E2EE (A) 情境 3、E2EE (C) 情境 4、批 3 情境 5）跟原本的 HTTP 端點比對過結果。
 
 ## 1. 一個走橋的 pack 怎麼讀
 
@@ -98,6 +98,15 @@ offset  bytes              意思
 | `0x2C` | `01 11 2C 10` | ChangePassword | **（批 2）** 改密碼（要 UIAA） | `POST /account/password` | — | JSON：`new_password`、`logout_devices`、`auth` |
 | `0x2D` | `01 11 2D 10` | Deactivate | **（批 2）** 停用帳號（要 UIAA） | `POST /account/deactivate` | — | JSON：`erase`、`auth` |
 
+### `0x12 Sync`（同步與過濾器）
+
+📎 `/sync` 本身**不走橋**（通道上它的形狀是 `Subscribe`／`Push`）；這個 kind 這一批只用來放它讀的過濾器。
+
+| subtype | 前 4 bytes | 名稱 | 做什麼 | 端點 | 變數（path ／ query） | data |
+|---|---|---|---|---|---|---|
+| `0x20` | `01 12 20 10` | GetFilter | **（批 3）** 讀一個存過的過濾器 | `GET /user/{user_id}/filter/{filter_id}` | `user_id`、`filter_id` | — |
+| `0x21` | `01 12 21 10` | CreateFilter | **（批 3）** 存一個過濾器，拿到它的 id | `POST /user/{user_id}/filter` | `user_id` | JSON：過濾器本身 |
+
 ### `0x13 Room`（房間）
 
 | subtype | 前 4 bytes | 名稱 | 做什麼 | 端點 | 變數（path ／ query） | data |
@@ -115,6 +124,14 @@ offset  bytes              意思
 | `0x2A` | `01 13 2A 10` | GetAlias | 用 `#別名` 查房間 id | `GET /directory/room/{room_alias}` | `room_alias` | — |
 | `0x2B` | `01 13 2B 10` | SetAlias | 替房間設一個別名 | `PUT /directory/room/{room_alias}` | `room_alias` | JSON：`room_id` |
 | `0x2C` | `01 13 2C 10` | DeleteAlias | 刪別名 | `DELETE /directory/room/{room_alias}` | `room_alias` | — |
+| `0x2D` | `01 13 2D 10` | Upgrade | **（批 3）** 把房間換成新的房間版本 | `POST /rooms/{room_id}/upgrade` | `room_id` | JSON：`new_version` |
+| `0x2E` | `01 13 2E 10` | Knock | **（批 3）** 敲門（請求加入） | `POST /knock/{room_id_or_alias}` | `room_id_or_alias` ／ `via`（陣列）、`server_name`（陣列） | JSON，可帶 `reason` |
+| `0x2F` | `01 13 2F 10` | JoinedMembers | **（批 3）** 只要已加入的成員（帶顯示名與頭像） | `GET /rooms/{room_id}/joined_members` | `room_id` | — |
+| `0x30` | `01 13 30 10` | GetVisibility | **（批 3）** 房間在不在公開目錄上 | `GET /directory/list/room/{room_id}` | `room_id` | — |
+| `0x31` | `01 13 31 10` | SetVisibility | **（批 3）** 把房間放上公開目錄或拿下來 | `PUT /directory/list/room/{room_id}` | `room_id` | JSON：`visibility` |
+| `0x32` | `01 13 32 10` | Summary | **（批 3）** 房間簡介（沒加入也看得到） | `GET /_matrix/client/v1/room_summary/{room_id_or_alias}` | `room_id_or_alias` ／ `via`（陣列） | — |
+| `0x33` | `01 13 33 10` | Hierarchy | **（批 3）** space 底下的房間樹 | `GET /_matrix/client/v1/rooms/{room_id}/hierarchy` | `room_id` ／ `from`、`limit`、`max_depth`、`suggested_only` | — |
+| `0x34` | `01 13 34 10` | MutualRooms | **（批 3）** 我與某人共同在哪些房間 | `GET /_matrix/client/v1/mutual_rooms` | — ／ `user_id`、`from` | — |
 
 📎 `POST /rooms/{room_id}/join`（只收房間 id 的那個 join）**不在這批**：`Join`（`0x21`）收 id 也收別名，一個入口就夠。
 
@@ -130,6 +147,10 @@ offset  bytes              意思
 | `0x23` | `01 14 23 10` | SetStateEvent | 改房間的某一項狀態（改名、改 topic、改權限…） | `PUT /rooms/{room_id}/state/{event_type}/{state_key}` | `room_id`、`event_type`、`state_key`（常是 `""`） | JSON，該狀態的 content，例 `{"topic":"大家好"}` |
 | `0x24` | `01 14 24 10` | Redact | 收回一則訊息 | `PUT /rooms/{room_id}/redact/{event_id}/{txn_id}` | `room_id`、`event_id`、`txn_id` | JSON，可帶 `reason` |
 | `0x25` | `01 14 25 10` | Context | 跳到某則訊息，連同它前後幾則 | `GET /rooms/{room_id}/context/{event_id}` | `room_id`、`event_id` ／ `limit`、`filter`（字串形式的 JSON） | — |
+| `0x26` | `01 14 26 10` | Relations | **（批 3）** 查一則事件被什麼關聯了（回覆、編輯、反應） | `GET /_matrix/client/v1/rooms/{room_id}/relations/{event_id}` | `room_id`、`event_id` ／ `from`、`to`、`dir`、`limit`、`recurse` | — |
+| `0x27` | `01 14 27 10` | RelationsByRelType | **（批 3）** 同上，只要某一種關聯 | `GET /_matrix/client/v1/rooms/{room_id}/relations/{event_id}/{rel_type}` | 再加 `rel_type` ／ 同上 | — |
+| `0x28` | `01 14 28 10` | RelationsByRelTypeAndEventType | **（批 3）** 同上，再限事件型別 | `GET /_matrix/client/v1/rooms/{room_id}/relations/{event_id}/{rel_type}/{event_type}` | 再加 `event_type` ／ 同上 | — |
+| `0x29` | `01 14 29 10` | Threads | **（批 3）** 房間裡的討論串清單 | `GET /_matrix/client/v1/rooms/{room_id}/threads` | `room_id` ／ `from`、`include`、`limit` | — |
 
 ### `0x15 Receipt`（輸入中與已讀）
 
@@ -138,6 +159,8 @@ offset  bytes              意思
 | `0x20` | `01 15 20 10` | Typing | 「正在輸入…」開或關 | `PUT /rooms/{room_id}/typing/{user_id}` | `room_id`、`user_id` | JSON：`typing`、`timeout` |
 | `0x21` | `01 15 21 10` | ReadMarkers | 設「讀到哪裡」的標記 | `POST /rooms/{room_id}/read_markers` | `room_id` | JSON：`m.fully_read`、`m.read`… |
 | `0x22` | `01 15 22 10` | Receipt | 送一個已讀回條 | `POST /rooms/{room_id}/receipt/{receipt_type}/{event_id}` | `room_id`、`receipt_type`、`event_id` | JSON，可為 `{}` |
+| `0x23` | `01 15 23 10` | GetPresence | **（批 3）** 某人在不在線 | `GET /presence/{user_id}/status` | `user_id` | — |
+| `0x24` | `01 15 24 10` | SetPresence | **（批 3）** 設自己的在線狀態 | `PUT /presence/{user_id}/status` | `user_id` | JSON：`presence`、`status_msg` |
 
 ### `0x16 Device`（裝置）
 
@@ -179,7 +202,23 @@ offset  bytes              意思
 | `0x3C` | `01 17 3C 10` | DeleteBackupKeysForRoom | **（E2EE）** 刪一個房間的 | `DELETE /room_keys/keys/{room_id}` | `room_id` ／ query `version` | — |
 | `0x3D` | `01 17 3D 10` | DeleteBackupKeysForSession | **（E2EE）** 刪一個 session 的 | `DELETE /room_keys/keys/{room_id}/{session_id}` | `room_id`、`session_id` ／ query `version` | — |
 
-**批 1 共 37 支**：Account 12、Room 13、Event 6、Receipt 3、Device 3。**批 2 共 8 支**：Session 4、Account 2、Device 2。**E2EE (A) 共 7 支**：Device 1、Keys 6。**E2EE (C) 共 14 支**：Keys 的金鑰備份。合計 66 支。
+### `0x1C Misc`（其餘）
+
+| subtype | 前 4 bytes | 名稱 | 做什麼 | 端點 | 變數（path ／ query） | data |
+|---|---|---|---|---|---|---|
+| `0x20` | `01 1C 20 10` | Capabilities | **（批 3）** 這台 server 允許什麼（改密碼、改顯示名、房間版本…） | `GET /capabilities` | — | — |
+
+### `0x1D Report`（檢舉）
+
+📎 這個 kind 是批 3 開的（維護者 2026-09-20：三支檢舉放一起，而不是跟著被檢舉的東西散到三個 kind）。**沒有原生的 subtype**，`0x20` 起就是走橋的。subtype 照規格長出它們的順序：事件（1.0）、房間（1.13）、使用者（1.14）。
+
+| subtype | 前 4 bytes | 名稱 | 做什麼 | 端點 | 變數（path ／ query） | data |
+|---|---|---|---|---|---|---|
+| `0x20` | `01 1D 20 10` | ReportEvent | **（批 3）** 檢舉一則事件 | `POST /rooms/{room_id}/report/{event_id}` | `room_id`、`event_id` | JSON，可帶 `reason` |
+| `0x21` | `01 1D 21 10` | ReportRoom | **（批 3）** 檢舉一個房間 | `POST /rooms/{room_id}/report` | `room_id` | JSON，可帶 `reason` |
+| `0x22` | `01 1D 22 10` | ReportUser | **（批 3）** 檢舉一個使用者 | `POST /users/{user_id}/report` | `user_id` | JSON，可帶 `reason` |
+
+**批 1 共 37 支**：Account 12、Room 13、Event 6、Receipt 3、Device 3。**批 2 共 8 支**：Session 4、Account 2、Device 2。**E2EE (A) 共 7 支**：Device 1、Keys 6。**E2EE (C) 共 14 支**：Keys 的金鑰備份。**批 3 共 20 支**：Sync 2、Room 8、Event 4、Receipt 2、Misc 1、Report 3。合計 86 支。
 
 ## 3. 不在這批
 
