@@ -5,7 +5,7 @@
 # declared device versions (F3).
 $OUT = "$S\e2e16-out"; New-Item -ItemType Directory -Force $OUT | Out-Null
 $RESULT = "$OUT\results.txt"; '' | Out-File $RESULT -Encoding utf8
-$script:Pass = 0; $script:Fail = 0
+$script:Pass = 0; $script:Fail = 0; $script:Skipped = 0
 function Check([string]$name, [bool]$ok, [string]$detail) {
   if ($ok) { $script:Pass++; Log "  ok   $name  $detail" } else { $script:Fail++; Log "  FAIL $name  $detail" }
 }
@@ -30,6 +30,18 @@ function Recv-Or-Null($ws, [int]$ms) {
   $p = Read-Pack ($stream.ToArray()); $p.http = 'ws'; $p
 }
 function Call($ws, [byte[]]$pack) { Ws-Send $ws $pack; Recv-Or-Null $ws 5000 }
+# Every pack that arrives until $quietMs pass with nothing.
+function Drain($ws, [int]$quietMs = 2500) {
+  $packs = @()
+  while ($true) { $p = Recv-Or-Null $ws $quietMs; if ($null -eq $p) { break }; $packs += ,$p }
+  ,$packs
+}
+# The to-device items in a Device/Push's data (u32 length prefix each).
+function Push-Items([byte[]]$data) {
+  $items = @(); $at = 0
+  while ($at + 4 -le $data.Length) { $len = [int](RdBE32 $data $at); $at += 4; $items += ,([Text.Encoding]::UTF8.GetString($data, $at, $len) | ConvertFrom-Json); $at += $len }
+  @($items)
+}
 function Enc([string]$text) { [uri]::EscapeDataString($text) }
 function Register($name) { Api Post '/_matrix/client/v3/register' ('{"username":"' + $name + '","password":"pw-' + $name + '","auth":{"type":"m.login.dummy"}}') $null }
 function Hello($ws, [string[]]$features) { Call $ws (Json-Pack 0x01 0x01 0 1 @{ protocol = 1; client = 'e2e16'; features = $features } $null) }
@@ -72,7 +84,8 @@ function Canonical-Json($v) {
   if ($v -is [bool]) { return $(if ($v) { 'true' } else { 'false' }) }
   if ($v -is [int] -or $v -is [long] -or $v -is [uint64]) { return "$v" }
   if ($v -is [System.Management.Automation.PSCustomObject]) {
-    $names = [string[]]@($v.PSObject.Properties.Name); [Array]::Sort($names, [StringComparer]::Ordinal)
+    # Where-Object: an object with no members answers with one empty name here.
+    $names = [string[]]@($v.PSObject.Properties.Name | Where-Object { $_ }); [Array]::Sort($names, [StringComparer]::Ordinal)
     return '{' + ((@($names | ForEach-Object { (Canonical-Json $_) + ':' + (Canonical-Json $v.$_) })) -join ',') + '}'
   }
   return '[' + ((@($v | ForEach-Object { Canonical-Json $_ })) -join ',') + ']'
@@ -83,14 +96,16 @@ function Only-What-Everyone-Sees($key, [string]$owner) {
   $copy = $key | ConvertTo-Json -Depth 20 | ConvertFrom-Json
   $copy.PSObject.Properties.Remove('unsigned')
   if ($null -ne $copy.signatures) {
-    foreach ($signer in @($copy.signatures.PSObject.Properties.Name)) { if ($signer -ne $owner) { $copy.signatures.PSObject.Properties.Remove($signer) } }
+    foreach ($signer in @($copy.signatures.PSObject.Properties.Name | Where-Object { $_ })) { if ($signer -ne $owner) { $copy.signatures.PSObject.Properties.Remove($signer) } }
+    # Nothing left is the same as never having had any: an empty `signatures` must not hash differently.
+    if (@($copy.signatures.PSObject.Properties.Name | Where-Object { $_ }).Count -eq 0) { $copy.PSObject.Properties.Remove('signatures') }
   }
   $copy
 }
 function Recompute-Hash($query, [string]$owner) {
   $items = @((Only-What-Everyone-Sees $query.master_keys.$owner $owner), (Only-What-Everyone-Sees $query.self_signing_keys.$owner $owner))
   $devices = $query.device_keys.$owner
-  $ids = [string[]]@($devices.PSObject.Properties.Name); [Array]::Sort($ids, [StringComparer]::Ordinal)
+  $ids = [string[]]@($devices.PSObject.Properties.Name | Where-Object { $_ }); [Array]::Sort($ids, [StringComparer]::Ordinal)
   foreach ($id in $ids) { $items += ,(Only-What-Everyone-Sees $devices.$id $owner) }
   $framed = New-Object System.IO.MemoryStream
   foreach ($item in $items) {
@@ -157,6 +172,18 @@ $recomputed = Recompute-Hash $query $bob
 Check '[1.7] the hash is what a third party recomputes from /keys/query with the documented algorithm' `
   ($recomputed -eq $bobV2.Split('-')[1]) "server=$($bobV2.Split('-')[1]) recomputed=$recomputed"
 
+# The point of the whole thing: the round of keys Alice hands out after being refused reaches Bob's new device.
+$wsB2 = Ws-Open $bobLogin.json.access_token
+$subB2 = Call $wsB2 (Json-Pack 0x16 4 (Conv 30) 0 @{ device_id = $bobDevice2 } $null)
+$null = Drain $wsB2 1500
+$roomKey = @{ algorithm = 'm.megolm.v1.aes-sha2'; room_id = $room; session_id = 'c2Vzc2lvbg'; session_key = 'a2V5LWZvci1iMg' }
+$toDevice = Http PUT "/_matrix/client/v3/sendToDevice/m.room_key/$([guid]::NewGuid().ToString('N'))" @{ messages = @{ $bob = @{ $bobDevice2 = $roomKey } } } $tokA
+$pushed = @(Drain $wsB2 | Where-Object { $_.kind -eq 0x16 -and $_.subtype -eq 6 } | ForEach-Object { Push-Items $_.data } | ForEach-Object { $_.content })
+Check '[1.7b] the round of keys sent after the refusal reaches the new device: its holding connection is pushed the m.room_key' `
+  ($subB2.subtype -eq 2 -and $toDevice.status -eq 200 -and @($pushed | Where-Object { $_.session_key -eq 'a2V5LWZvci1iMg' }).Count -eq 1) `
+  "subscribe=$($subB2.subtype) send=$($toDevice.status) items=$(@($pushed | ForEach-Object { $_.session_id }) -join ',')"
+$wsB2.Dispose()
+
 # Each F1 path moves the seq: cross-signing keys (the first upload needs no UIAA), then deleting a device.
 $null = Http POST '/_matrix/client/v3/keys/device_signing/upload' @{ master_key = @{ user_id = $bob; usage = @('master'); keys = @{ 'ed25519:Ym9ibWFzdGVyZTJlMTY' = 'Ym9ibWFzdGVyZTJlMTY' } } } $tokB
 $bobV3 = Device-Version (Members $tokA $room) $bob
@@ -168,17 +195,51 @@ Check '[1.8] a master key upload and a device deletion each move the seq; the ha
   ((Seq-Of $bobV3) -gt (Seq-Of $bobV2) -and $del2.status -eq 200 -and (Seq-Of $bobV4) -gt (Seq-Of $bobV3) -and (Recompute-Hash $query4 $bob) -eq $bobV4.Split('-')[1] -and [uint64]$rv4 -gt [uint64]$rv2) `
   "bob=$bobV2 -> $bobV3 -> $bobV4 delete=$($del1.status)/$($del2.status) rv=$rv4"
 
+# A signature by someone else: the server verifies it for real (ed25519), so this one needs Python. A machine
+# without it skips the check rather than passing it.
+$keypair = @(& python (Join-Path $PSScriptRoot 'ed25519.py') keygen 2>$null) -join ''
+if ($LASTEXITCODE -ne 0 -or $keypair -notmatch '^\S+ \S+$') {
+  $script:Skipped++
+  Log "  skip [1.8b] a signature by someone else: needs python with the cryptography module (got '$keypair')"
+} else {
+  $userSigningPrivate, $userSigningPublic = $keypair.Split(' ')
+  $aliceKeys = @{
+    master_key = @{ user_id = $alice; usage = @('master'); keys = @{ 'ed25519:YWxpY2VtYXN0ZXJlMmUxNg' = 'YWxpY2VtYXN0ZXJlMmUxNg' } }
+    self_signing_key = @{ user_id = $alice; usage = @('self_signing'); keys = @{ 'ed25519:YWxpY2Vzc2tlMmUxNg' = 'YWxpY2Vzc2tlMmUxNg' } }
+    user_signing_key = @{ user_id = $alice; usage = @('user_signing'); keys = @{ "ed25519:$userSigningPublic" = $userSigningPublic } }
+  }
+  $aliceCross = Http POST '/_matrix/client/v3/keys/device_signing/upload' $aliceKeys $tokA
+  # What the server verifies: Bob's master key **as it holds it**, canonical, without `signatures` and `unsigned`
+  # — so read it back rather than assuming it is byte for byte what he uploaded.
+  $bobMasterStored = (Http POST '/_matrix/client/v3/keys/query' @{ device_keys = @{ $bob = @() } } $tokA).json.master_keys.$bob
+  $toSign = $bobMasterStored | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+  $toSign.PSObject.Properties.Remove('signatures'); $toSign.PSObject.Properties.Remove('unsigned')
+  $canonical = Canonical-Json $toSign
+  $bobMaster = @{ user_id = $bob; usage = @('master'); keys = @{ 'ed25519:Ym9ibWFzdGVyZTJlMTY' = 'Ym9ibWFzdGVyZTJlMTY' } }
+  $canonicalBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($canonical))
+  $signature = @(& python (Join-Path $PSScriptRoot 'ed25519.py') sign $userSigningPrivate $canonicalBase64) -join ''
+  $signedMaster = $bobMaster.Clone(); $signedMaster.signatures = @{ $alice = @{ "ed25519:$userSigningPublic" = $signature } }
+  $signatureUpload = Http POST '/_matrix/client/v3/keys/signatures/upload' @{ $bob = @{ 'Ym9ibWFzdGVyZTJlMTY' = $signedMaster } } $tokA
+  $bobV5 = Device-Version (Members $tokA $room) $bob
+  $asCarolSees = Recompute-Hash (Http POST '/_matrix/client/v3/keys/query' @{ device_keys = @{ $bob = @() } } $tokC).json $bob
+  Check '[1.8b] a signature by someone else moves Bob''s seq, and leaves his hash where it was (it is not shown to a third party)' `
+    ($aliceCross.status -eq 200 -and $signatureUpload.status -eq 200 -and @($signatureUpload.json.failures.PSObject.Properties.Name | Where-Object { $_ }).Count -eq 0 -and (Seq-Of $bobV5) -gt (Seq-Of $bobV4) -and $bobV5.Split('-')[1] -eq $bobV4.Split('-')[1] -and $asCarolSees -eq $bobV5.Split('-')[1]) `
+    "cross=$($aliceCross.status) upload=$($signatureUpload.status) $($signatureUpload.text) bob=$bobV4 -> $bobV5 carol_recomputes=$asCarolSees"
+}
+
 # Condition 2 of §10: an invite does not move the room; a join, a leave, a kick and a ban do.
+# Read it again here: the checks above moved it (every key upload of a member does).
+$rvBeforeInvite = Room-Version (Members $tokA $room)
 $null = Http POST "/_matrix/client/v3/rooms/$(Enc $room)/invite" @{ user_id = $dave } $tokA
 $rvInvite = Room-Version (Members $tokA $room)
-$afterInvite = Send-Event $wsA $room 'm.room.encrypted' $rv4 't-4'
+$afterInvite = Send-Event $wsA $room 'm.room.encrypted' $rvBeforeInvite 't-4'
 Check '[1.9] an invite leaves the room version where it was: the old one is still sent' `
-  ([uint64]$rvInvite -eq [uint64]$rv4 -and (Is-SendAck $afterInvite)) "rv=$rv4 after_invite=$rvInvite reply=$($afterInvite.metaText)"
+  ([uint64]$rvInvite -eq [uint64]$rvBeforeInvite -and (Is-SendAck $afterInvite)) "rv=$rvBeforeInvite after_invite=$rvInvite reply=$($afterInvite.metaText)"
 
 $null = Http POST "/_matrix/client/v3/rooms/$(Enc $room)/invite" @{ user_id = $carol } $tokA
 $null = Http POST "/_matrix/client/v3/rooms/$(Enc $room)/join" @{} $tokC
 $rvJoin = Room-Version (Members $tokA $room)
-$afterJoin = Send-Event $wsA $room 'm.room.encrypted' $rv4 't-5'
+$afterJoin = Send-Event $wsA $room 'm.room.encrypted' $rvBeforeInvite 't-5'
 $null = Http POST "/_matrix/client/v3/rooms/$(Enc $room)/leave" @{} $tokC
 $rvLeave = Room-Version (Members $tokA $room)
 $afterLeave = Send-Event $wsA $room 'm.room.encrypted' $rvJoin 't-6'
@@ -186,8 +247,8 @@ $null = Http POST "/_matrix/client/v3/rooms/$(Enc $room)/ban" @{ user_id = $dave
 $rvBan = Room-Version (Members $tokA $room)
 $afterBan = Send-Event $wsA $room 'm.room.encrypted' $rvLeave 't-7'
 Check '[1.10] a join, a leave and a ban each move the room version, and the one before is refused' `
-  ([uint64]$rvJoin -gt [uint64]$rv4 -and (Is-1506 $afterJoin $rvJoin) -and [uint64]$rvLeave -gt [uint64]$rvJoin -and (Is-1506 $afterLeave $rvLeave) -and [uint64]$rvBan -gt [uint64]$rvLeave -and (Is-1506 $afterBan $rvBan)) `
-  "rv=$rv4 join=$rvJoin leave=$rvLeave ban=$rvBan"
+  ([uint64]$rvJoin -gt [uint64]$rvBeforeInvite -and (Is-1506 $afterJoin $rvJoin) -and [uint64]$rvLeave -gt [uint64]$rvJoin -and (Is-1506 $afterLeave $rvLeave) -and [uint64]$rvBan -gt [uint64]$rvLeave -and (Is-1506 $afterBan $rvBan)) `
+  "rv=$rvBeforeInvite join=$rvJoin leave=$rvLeave ban=$rvBan"
 
 $null = Http POST "/_matrix/client/v3/rooms/$(Enc $room)/invite" @{ user_id = $carol } $tokA
 $null = Http POST "/_matrix/client/v3/rooms/$(Enc $room)/join" @{} $tokC
@@ -230,11 +291,6 @@ Check '[1.15] after a restart the room version and every device version read the
 Stop-Server $server
 
 Log '################ Scenario 2: DeviceChanged, only to connections that declared (F3) ################'
-function Drain($ws, [int]$quietMs = 2500) {
-  $packs = @()
-  while ($true) { $p = Recv-Or-Null $ws $quietMs; if ($null -eq $p) { break }; $packs += ,$p }
-  ,$packs
-}
 function Only-DeviceChanged($packs) { ,@($packs | Where-Object { $_.kind -eq 0x14 -and $_.subtype -eq 7 }) }
 function New-Device-Keys($user, [string]$password, [string]$key) {
   $login = Http POST '/_matrix/client/v3/login' @{ type = 'm.login.password'; identifier = @{ type = 'm.id.user'; user = $user.Split(':')[0].TrimStart('@') }; password = $password } $null
@@ -290,5 +346,5 @@ Check '[2.4] Carol shares only one room with this connection: her DeviceChanged 
 
 $wsDeclared.Dispose(); $wsPlain.Dispose()
 Stop-Server $server
-Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"
+Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) skipped=$($script:Skipped) ################"
 exit $(if ($script:Fail -gt 0) { 1 } else { 0 })
