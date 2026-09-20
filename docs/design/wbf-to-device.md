@@ -48,7 +48,7 @@ client 得讓兩個資料庫原子性地一起 commit —— 兩個 db、兩套�
 ⚠️ **`g_seq` 寫得進 PDU 的 `unsigned`，to-device 的 count 沒有地方放** —— 它不是 PDU，
 存起來的就是 `{ type, sender, content }`。所以每一則的 count 必須由 pack 的 meta 帶（§3 的 `counts`）。
 
-## 3. `0x16 Device` 的七個 subtype
+## 3. `0x16 Device` 的八個 subtype
 
 編號刻意跟 `0x14 Event` 對齊（同號同位置，好對照）：
 
@@ -63,6 +63,7 @@ client 得讓兩個資料庫原子性地一起 commit —— 兩個 db、兩套�
 | `0x05 Unsubscribe` | client → server | `{}` | 無 | 無序 |
 | `0x06 Push` | **server → client** | `{ "bc", "ot", "nt", "counts": [...], "gap": bool }`；`id` 抄 `Subscribe`，`seq` 每推一次 +1；`Subscribe{cd_seq}` 的補窗被上限截斷時，它的第一個 `Push` 帶 `gap: true`（PR #53） | 同 `Batch` 的切法 | 事件驅動 |
 | `0x07 ItemsDestroyed` | **server → client** | `{ "tc", "bc" }`；`id` 抄 `ItemsDestroy` | **`bc` × 8 byte**，銷毀掉的 count（§5.2） | 無序（一個命令一則） |
+| `0x08 CryptoState` | **server → client** | `{ "otk_counts", "unused_fallback_key_types", "gap" }`；`id` 抄 `Subscribe`，**跟 `Push` 共用 `seq` 與 `gap`**。E2EE 的 (B) 加的，規格在 [wbf-e2ee.md](wbf-e2ee.md) §3 | 無 | 事件驅動 |
 
 ### 3.1 跟 `Event` 那一套刻意不同的三處
 

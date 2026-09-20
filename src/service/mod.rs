@@ -13,6 +13,7 @@ pub mod client;
 pub mod config;
 pub mod connections;
 pub mod deactivate;
+pub mod device_versions;
 pub mod emergency;
 pub mod federation;
 pub mod fetcher;

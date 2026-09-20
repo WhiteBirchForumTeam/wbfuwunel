@@ -166,6 +166,10 @@ fn current() -> Value {
 			// layout is Batch's. gap=true says a push was dropped before this one.
 			pack("push_one", Kind::Event, 0x06, Flags::IS_RESPONSE, conversation(20), 0, br#"{"bc":1,"fs":4712,"gap":false,"ls":4712}"#, &length_prefixed(&[br#"{"content":{"body":"b","msgtype":"m.text"},"event_id":"$b:localhost","origin_server_ts":2,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":1,"org.wbftw.wbfuwunel.g_seq":4712,"org.wbftw.wbfuwunel.r_seq":2}}"#])),
 			pack("push_gap", Kind::Event, 0x06, Flags::IS_RESPONSE, conversation(20), 3, br#"{"bc":1,"fs":4720,"gap":true,"ls":4720}"#, &length_prefixed(&[br#"{"content":{"body":"c","msgtype":"m.text"},"event_id":"$c:localhost","origin_server_ts":3,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":1,"org.wbftw.wbfuwunel.g_seq":4720,"org.wbftw.wbfuwunel.r_seq":3}}"#])),
+			// Device versions, F3 (wbf-room-device-version.md §6): Bob's devices
+			// changed; one pack for the connection, naming the rooms it listens
+			// to that he is in, on the same subscription as its Push (seq 4).
+			pack("event_device_changed", Kind::Event, 0x07, Flags::IS_RESPONSE, conversation(20), 4, br#"{"device_version":"4-0123456789","gap":false,"rooms":{"!r1:localhost":81240,"!r2:localhost":81240},"user_id":"@bob:localhost"}"#, b""),
 			// 0x16 Device: the to-device queue. Oldest first, so `ot` is the first
 			// item in the pack and `nt` the last — the mirror of Event's `fs`/`ls`,
 			// with different names so the two cannot be read as the same thing.
@@ -176,6 +180,12 @@ fn current() -> Value {
 			pack("device_fetch", Kind::Device, 0x01, Flags::default(), conversation(31), 0, br#"{"cd_seq":4711,"limit":1000}"#, b""),
 			pack("device_batch", Kind::Device, 0x02, Flags::IS_RESPONSE, conversation(31), 0, br#"{"bc":1,"counts":[4712],"more":false,"nt":4712,"ot":4712,"r":0,"tc":1}"#, &length_prefixed(&[OLM_ITEM])),
 			pack("device_push", Kind::Device, 0x06, Flags::IS_RESPONSE, conversation(30), 0, br#"{"bc":1,"counts":[4713],"gap":false,"nt":4713,"ot":4713}"#, &length_prefixed(&[OLM_ITEM])),
+			// `CryptoState` (wbf-e2ee.md §3): same subscription as the `Push`
+			// above, so its id and the next seq. Every field is present even
+			// when empty — `unused_fallback_key_types: []` means "all used",
+			// which a missing field would not say.
+			pack("device_crypto_state", Kind::Device, 0x08, Flags::IS_RESPONSE, conversation(30), 1, br#"{"gap":false,"otk_counts":{"signed_curve25519":42},"unused_fallback_key_types":["signed_curve25519"]}"#, b""),
+			pack("device_crypto_state_empty", Kind::Device, 0x08, Flags::IS_RESPONSE, conversation(30), 2, br#"{"gap":false,"otk_counts":{},"unused_fallback_key_types":[]}"#, b""),
 			// The destroy command and its result carry counts as raw big-endian
 			// u64s, eight bytes each with no separator: a separator byte would
 			// also occur inside a count.
@@ -198,6 +208,11 @@ fn current() -> Value {
 			pack("ack_draft_abandon", Kind::Control, 0x02, Flags::IS_RESPONSE, anchor(DRAFT_G_SEQ), 41, br#"{"redaction_event_id":"$r:localhost"}"#, b""),
 			pack("send_encrypted_with_attachments", Kind::Event, 0x02, Flags::default(), 0, 13, br#"{"room_id":"!r:localhost","type":"m.room.encrypted","txn_id":"t1","attachments":["mxc://localhost/22334455667788"]}"#, br#"{"algorithm":"m.megolm.v1.aes-sha2","ciphertext":"AwgAEnACgAkLmt6qF84IK++J7UDH2Za1YVchHyprqTqsg","device_id":"RJYKSTBOIE","sender_key":"IlRMeOPX2e0MurIyfWEucYBRVOEEUMrOHqn/8mLqMjA","session_id":"X3lUlvLELLYxeTx4yOVu6UDpasGEVO0Jbu+QFnm0cKQ"}"#),
 			pack("ack_send", Kind::Control, 0x02, Flags::IS_RESPONSE, 0, 13, br#"{"event_id":"$Zm9vYmFy:localhost"}"#, b""),
+			// Device versions (wbf-room-device-version.md §7): the send names the
+			// room version its room key went out by, and is refused when the
+			// room's has moved, with the one it is now.
+			pack("send_encrypted_with_room_version", Kind::Event, 0x02, Flags::default(), 0, 19, br#"{"room_id":"!r:localhost","type":"m.room.encrypted","txn_id":"t2","room_version":81234}"#, br#"{"algorithm":"m.megolm.v1.aes-sha2","ciphertext":"AwgAEnACgAkLmt6qF84IK++J7UDH2Za1YVchHyprqTqsg","device_id":"RJYKSTBOIE","sender_key":"IlRMeOPX2e0MurIyfWEucYBRVOEEUMrOHqn/8mLqMjA","session_id":"X3lUlvLELLYxeTx4yOVu6UDpasGEVO0Jbu+QFnm0cKQ"}"#),
+			pack("error_room_devices_changed", Kind::Control, 0x03, Flags::IS_RESPONSE, 0, 19, br#"{"code":"RoomDevicesChanged","code_id":1506,"message":"the room's members or their devices changed since this room_version: fetch the members again","room_version":81240}"#, b""),
 			pack("login_password", Kind::Session, 0x01, Flags::default(), 0, 14, br#"{"type":"m.login.password","identifier":{"type":"m.id.user","user":"alice"},"password":"correct-horse-battery","initial_device_display_name":"wbf desktop","refresh_token":true}"#, b""),
 			pack("ack_login", Kind::Control, 0x02, Flags::IS_RESPONSE, 0, 14, br#"{"access_token":"syt_YWxpY2U_ExampleTokenExampleToken_1a2b3c","device_id":"RJYKSTBOIE","expires_in_ms":3600000,"refresh_token":"refresh_ExampleRefreshTokenExampleRefre","user_id":"@alice:localhost"}"#, b""),
 			pack("refresh", Kind::Session, 0x02, Flags::default(), 0, 15, br#"{"refresh_token":"refresh_ExampleRefreshTokenExampleRefre"}"#, b""),

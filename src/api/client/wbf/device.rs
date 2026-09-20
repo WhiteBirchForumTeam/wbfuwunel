@@ -84,7 +84,9 @@ struct ItemWindow {
 ///         one it thinks it is
 ///     view: meta example: `{"device_id":"PHONE","cd_seq":4711}`
 /// Return:
-///     Result<(), Failure>  Ack meta `{latest_cd_seq}`; `Forbidden` when the
+///     Result<(), Failure>  Ack meta `{latest_cd_seq}`, then the to-device
+///     catch-up as `Push` packs (with `cd_seq`), then one `CryptoState`;
+///     `Forbidden` when the
 ///     named device is not this session's. Another connection already
 ///     holding the queue is not a refusal: this one takes it over, and that
 ///     one is sent `Superseded` (1505).
@@ -159,6 +161,13 @@ pub(super) async fn handle_device_subscribe(
 			services.config.wbf_data_max_bytes,
 		);
 	}
+
+	// The device's key supply as it is now, so the client knows whether to
+	// upload keys without asking (docs/design/wbf-e2ee.md §3).
+	services
+		.users
+		.push_crypto_state(&session.user, &device)
+		.await;
 
 	Ok(())
 }

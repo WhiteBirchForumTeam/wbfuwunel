@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use futures::{Stream, StreamExt, TryFutureExt};
 use ruma::{
-	MilliSecondsSinceUnixEpoch, OwnedUserId, UserId,
+	MilliSecondsSinceUnixEpoch, OwnedDeviceId, OwnedUserId, UserId,
 	api::client::filter::FilterDefinition,
 	events::{
 		GlobalAccountDataEventType,
@@ -22,7 +22,7 @@ use tuwunel_core::{
 	Err, Result, debug_warn, err, is_equal_to,
 	matrix::pdu::PduCount,
 	trace,
-	utils::{self, BoolExt, ReadyExt, rate_limit::IpTokenBuckets, stream::TryIgnore},
+	utils::{self, BoolExt, MutexMap, ReadyExt, rate_limit::IpTokenBuckets, stream::TryIgnore},
 };
 use tuwunel_database::{Deserialized, Json, Map};
 
@@ -51,6 +51,8 @@ pub struct Service {
 	/// One bucket per client address for login attempts, shared by HTTP
 	/// `/login`, `/refresh` and the wbf channel (`login.rs`).
 	login_limiter: IpTokenBuckets,
+	/// One per device: a `CryptoState` is read and pushed under it (`keys.rs`).
+	crypto_state_locks: MutexMap<(OwnedUserId, OwnedDeviceId), ()>,
 }
 
 struct Data {
@@ -89,6 +91,7 @@ impl crate::Service for Service {
 		Ok(Arc::new(Self {
 			services: args.services.clone(),
 			login_limiter: IpTokenBuckets::new(),
+			crypto_state_locks: MutexMap::new(),
 			db: Data {
 				keychangeid_userid: args.db["keychangeid_userid"].clone(),
 				keyid_key: args.db["keyid_key"].clone(),

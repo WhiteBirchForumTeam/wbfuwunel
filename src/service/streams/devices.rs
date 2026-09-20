@@ -16,7 +16,7 @@
 //! only learns that at the idle timeout, if ever.
 
 use ruma::{DeviceId, OwnedDeviceId, OwnedUserId, UserId};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use tuwunel_core::{
 	debug,
@@ -30,6 +30,19 @@ use super::{ConnectionId, Outgoing, PackQueue, Streams};
 
 /// `Device/Push`, server to client only.
 pub const DEVICE_PUSH_SUBTYPE: u8 = 0x06;
+
+/// `Device/CryptoState`, server to client only (docs/design/wbf-e2ee.md §3).
+pub const DEVICE_CRYPTO_STATE_SUBTYPE: u8 = 0x08;
+
+/// A device's own key supply: what `/sync` carries as
+/// `device_one_time_keys_count` and `device_unused_fallback_key_types`.
+pub struct CryptoState<'a> {
+	/// example: `{"signed_curve25519": 42}`
+	pub otk_counts: &'a Value,
+	/// Always sent, empty or not: `[]` means "all used", absent would mean
+	/// "not supported". example: `["signed_curve25519"]`
+	pub unused_fallback_key_types: &'a [String],
+}
 
 /// One to-device item on the wire: its count (the position the client acks
 /// and later destroys by) and its JSON as stored.
@@ -123,6 +136,26 @@ impl Streams {
 	/// other connection can ever subscribe to it.
 	pub fn unsubscribe_device(&self, connection: ConnectionId) {
 		self.devices.remove_connection(connection);
+	}
+
+	/// Pushes a `CryptoState` to whoever holds this device's queue; nobody
+	/// holding it is the ordinary case and costs one lookup.
+	pub fn push_crypto_state(&self, user: &UserId, device: &DeviceId, state: &CryptoState<'_>) {
+		let topic = DeviceTopic::new(user, device);
+		let holder: Vec<ConnectionId> = self
+			.devices
+			.listeners(&topic)
+			.into_iter()
+			.map(|(connection, _)| connection)
+			.collect();
+		if holder.is_empty() {
+			return;
+		}
+
+		self.devices
+			.push_with(Some(&topic), &holder, |id, seq, gap| {
+				crypto_state_pack(id, seq, &crypto_state_meta(state, gap))
+			});
 	}
 
 	/// Whether this device's queue is held by a connection, and by which.
@@ -249,6 +282,22 @@ fn superseded_pack(id: u64, seq: u32) -> Result<Vec<u8>, PackError> {
 	)
 }
 
+/// Return:
+///     Value  the `CryptoState` meta, every field present
+fn crypto_state_meta(state: &CryptoState<'_>, gap: bool) -> Value {
+	json!({
+		"otk_counts": state.otk_counts,
+		"unused_fallback_key_types": state.unused_fallback_key_types,
+		"gap": gap,
+	})
+}
+
+fn crypto_state_pack(id: u64, seq: u32, meta: &Value) -> Result<Vec<u8>, PackError> {
+	Ok(PackBuilder::new(Kind::Device, DEVICE_CRYPTO_STATE_SUBTYPE, Flags::IS_RESPONSE, id, seq)
+		.json_meta(meta)?
+		.finish())
+}
+
 fn device_push_pack(
 	id: u64,
 	seq: u32,
@@ -271,7 +320,7 @@ mod tests {
 	use tokio::sync::mpsc;
 	use tuwunel_core::wbf::{CONTROL_ERROR_SUBTYPE, Kind, decode, events::split_length_prefixed};
 
-	use super::{DEVICE_PUSH_SUBTYPE, PushedItem};
+	use super::{CryptoState, DEVICE_CRYPTO_STATE_SUBTYPE, DEVICE_PUSH_SUBTYPE, PushedItem, crypto_state_meta, crypto_state_pack};
 	use crate::streams::{Outgoing, PackQueue, Queued, Streams};
 
 	/// A test queue: the count is what these tests exercise, so the byte
@@ -395,6 +444,95 @@ mod tests {
 			})
 			.collect();
 		assert_eq!(gaps, vec![true, false], "said once, on the first pack");
+	}
+
+	#[test]
+	fn a_crypto_state_carries_every_field_even_when_empty() {
+		let streams = Streams::new();
+		let alice = user_id!("@alice:localhost");
+		let phone = device_id!("PHONE");
+		let (tx, mut rx) = queue(4);
+		streams.subscribe_device(1, alice, phone, tx, 42);
+
+		let counts = serde_json::json!({});
+		streams.push_crypto_state(alice, phone, &CryptoState { otk_counts: &counts, unused_fallback_key_types: &[] });
+
+		let mut pack = next_pack(&mut rx);
+		let view = decode(&mut pack).expect("decodes");
+		assert_eq!(view.header.kind, Kind::Device);
+		assert_eq!(view.header.subtype, DEVICE_CRYPTO_STATE_SUBTYPE);
+		assert_eq!(view.header.id, 42, "the Subscribe's id, like Push");
+		assert_eq!(
+			view.meta_json().expect("meta"),
+			// ⚠️ `[]` is "all used"; leaving the field out would read as "this
+			// server does not support fallback keys".
+			serde_json::json!({ "otk_counts": {}, "unused_fallback_key_types": [], "gap": false })
+		);
+	}
+
+	#[test]
+	fn push_and_crypto_state_share_one_seq() {
+		let streams = Streams::new();
+		let alice = user_id!("@alice:localhost");
+		let phone = device_id!("PHONE");
+		let (tx, mut rx) = queue(8);
+		streams.subscribe_device(1, alice, phone, tx, 42);
+
+		let counts = serde_json::json!({"signed_curve25519": 3});
+		let state = CryptoState { otk_counts: &counts, unused_fallback_key_types: &[] };
+		streams.push_to_device(alice, phone, &[PushedItem { count: 5, json: b"{}" }], 10, 1024);
+		streams.push_crypto_state(alice, phone, &state);
+		streams.push_to_device(alice, phone, &[PushedItem { count: 6, json: b"{}" }], 10, 1024);
+
+		let seqs: Vec<(u8, u32)> = (0..3)
+			.map(|_| {
+				let mut pack = next_pack(&mut rx);
+				let view = decode(&mut pack).expect("decodes");
+				(view.header.subtype, view.header.seq)
+			})
+			.collect();
+		assert_eq!(
+			seqs,
+			vec![(DEVICE_PUSH_SUBTYPE, 0), (DEVICE_CRYPTO_STATE_SUBTYPE, 1), (DEVICE_PUSH_SUBTYPE, 2)],
+			"one subscription, one seq across both kinds"
+		);
+	}
+
+	/// The golden vectors are what clients test their decoders against, so the
+	/// two `CryptoState` vectors must be the bytes this server builds.
+	#[test]
+	fn the_crypto_state_vectors_are_what_the_server_builds() {
+		const VECTORS: &str = include_str!("../../../docs/design/wbf-vectors.json");
+		let vectors: serde_json::Value = serde_json::from_str(VECTORS).expect("the vectors file is JSON");
+		let bytes_of = |name: &str| -> Vec<u8> {
+			let hex = vectors["packs"]
+				.as_array()
+				.expect("a packs list")
+				.iter()
+				.find(|vector| vector["name"] == name)
+				.unwrap_or_else(|| panic!("no vector named {name}"))["bytes_hex"]
+				.as_str()
+				.expect("hex")
+				.to_owned();
+			(0..hex.len())
+				.step_by(2)
+				.map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("hex digit"))
+				.collect()
+		};
+		let conversation_30 = tuwunel_core::wbf::IdType::ClientConversation
+			.compose(30)
+			.expect("fits");
+
+		let counts = serde_json::json!({"signed_curve25519": 42});
+		let fallback = ["signed_curve25519".to_owned()];
+		let state = CryptoState { otk_counts: &counts, unused_fallback_key_types: &fallback };
+		let built = crypto_state_pack(conversation_30, 1, &crypto_state_meta(&state, false)).expect("builds");
+		assert_eq!(built, bytes_of("device_crypto_state"));
+
+		let empty_counts = serde_json::json!({});
+		let empty = CryptoState { otk_counts: &empty_counts, unused_fallback_key_types: &[] };
+		let built = crypto_state_pack(conversation_30, 2, &crypto_state_meta(&empty, false)).expect("builds");
+		assert_eq!(built, bytes_of("device_crypto_state_empty"));
 	}
 
 	#[test]

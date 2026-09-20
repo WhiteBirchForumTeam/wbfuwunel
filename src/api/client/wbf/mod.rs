@@ -39,7 +39,7 @@ use tuwunel_core::{
 };
 use tuwunel_service::{
 	Services,
-	streams::{ConnectionId, Outgoing, PackQueue},
+	streams::{ConnectionId, DEVICE_VERSIONS_FEATURE, Outgoing, PackQueue},
 	connections::ConnectionSlot,
 	media::{UploadError, UploadRequest},
 };
@@ -723,6 +723,13 @@ async fn dispatch_native(
 			draft::handle(services, ctx, subtype, view, reply).await?;
 			Ok(SessionChange::Keep)
 		},
+		// Not with the one-reply kinds below: whether the send is checked
+		// depends on what this connection's `Hello` declared.
+		| (Kind::Event, event::SEND) => {
+			let pack = send::handle_event_send(services, ctx, view).await?;
+			reply.send(pack).await?;
+			Ok(SessionChange::Keep)
+		},
 		| _ => {
 			let pack = handle_one_reply(services, ctx.user()?, view).await?;
 			reply.send(pack).await?;
@@ -741,7 +748,6 @@ async fn handle_one_reply(services: &Services, user: &UserId, view: &PackView<'_
 		| (Kind::Upload, upload::ABORT) => handle_upload_abort(services, user, view).await,
 		| (Kind::Download, download::INFO) => handle_download_info(services, view).await,
 		| (Kind::Download, download::READ) => handle_download_read(services, view).await,
-		| (Kind::Event, event::SEND) => send::handle_event_send(services, user, view).await,
 		// Admitted by the table but not routed here: the table and this match
 		// disagree, which is a bug, but it fails closed.
 		| _ => Err(Reject::code(RejectCode::UnknownKind, "no handler for this kind and subtype")),
@@ -1093,9 +1099,14 @@ fn mxc_from_meta(meta: &Value) -> std::result::Result<String, Reject> {
 		.ok_or_else(|| Reject::code(RejectCode::InvalidRequest, "mxc is required"))
 }
 
-/// The answer to `Hello`: what this server speaks. The client's own meta
-/// (its name, its feature list) is not read; nothing here depends on it yet.
+/// The answer to `Hello`: what this server speaks. Of the client's meta only
+/// `features` is read, and of it only `DEVICE_VERSIONS_FEATURE`: a meta that is
+/// not JSON, or has no such list, declares nothing.
 fn hello(services: &Services, ctx: &PackContext<'_>, view: &PackView<'_>) -> Vec<u8> {
+	services
+		.streams
+		.set_device_versions_declared(ctx.connection, is_device_versions_declared_in(view.meta));
+
 	ack(
 		view.header.id,
 		view.header.seq,
@@ -1104,7 +1115,7 @@ fn hello(services: &Services, ctx: &PackContext<'_>, view: &PackView<'_>) -> Vec
 			"server": services.globals.server_name(),
 			"engine": tuwunel_core::version::name(),
 			"engine_version": tuwunel_core::version::version(),
-			"features": ["upload", "download", "recent", "batch", "seq", "attachments", "login", "push"],
+			"features": ["upload", "download", "recent", "batch", "seq", "attachments", "login", "push", DEVICE_VERSIONS_FEATURE],
 			// For debugging; 0 over HTTP. A client need not use it.
 			"connection_id": ctx.connection,
 			"recent_default_limit": services.config.wbf_recent_default_limit,
@@ -1118,6 +1129,18 @@ fn hello(services: &Services, ctx: &PackContext<'_>, view: &PackView<'_>) -> Vec
 		}),
 		Vec::new(),
 	)
+}
+
+/// Args:
+///     meta: a `Hello` meta, example: `{"client":"x","features":["org.wbftw.device_versions"]}`
+/// Return:
+///     bool  true only when `features` is a list naming `DEVICE_VERSIONS_FEATURE`.
+fn is_device_versions_declared_in(meta: &[u8]) -> bool {
+	serde_json::from_slice::<Value>(meta).is_ok_and(|meta| {
+		meta["features"]
+			.as_array()
+			.is_some_and(|features| features.iter().any(|feature| feature == DEVICE_VERSIONS_FEATURE))
+	})
 }
 
 /// A `Pong` echoing the ping's meta (its nonce) back.
@@ -1187,9 +1210,21 @@ mod tests {
 	use tuwunel_core::err;
 
 	use super::{
-		Reject, admission, control, matrix_error_fields, refuse_session, refuse_wrong_id_type, reject_code_for_status,
-		unknown_token,
+		Reject, admission, control, is_device_versions_declared_in, matrix_error_fields, refuse_session,
+		refuse_wrong_id_type, reject_code_for_status, unknown_token,
 	};
+
+	#[test]
+	fn only_a_features_list_naming_device_versions_declares_them() {
+		assert!(is_device_versions_declared_in(br#"{"client":"x","features":["org.wbftw.device_versions"]}"#));
+		assert!(is_device_versions_declared_in(br#"{"features":["push","org.wbftw.device_versions"]}"#));
+
+		assert!(!is_device_versions_declared_in(br#"{"features":["push"]}"#));
+		assert!(!is_device_versions_declared_in(br#"{"features":"org.wbftw.device_versions"}"#), "not a list");
+		assert!(!is_device_versions_declared_in(br#"{"client":"x"}"#));
+		assert!(!is_device_versions_declared_in(b""), "an empty meta declares nothing");
+		assert!(!is_device_versions_declared_in(b"not json"));
+	}
 
 	#[test]
 	fn matrix_statuses_map_to_the_code_that_names_them_and_nothing_else_is_guessed() {
