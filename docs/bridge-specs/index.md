@@ -214,7 +214,7 @@ offset  bytes              意思
 
 | subtype | 前 4 bytes | 名稱 | 做什麼 | 端點 | 變數（path ／ query） | data |
 |---|---|---|---|---|---|---|
-| `0x20` | `01 1D 20 10` | ReportEvent | **（批 3）** 檢舉一則事件 | `POST /rooms/{room_id}/report/{event_id}` | `room_id`、`event_id` | JSON，可帶 `reason`、`score` |
+| `0x20` | `01 1D 20 10` | ReportEvent | **（批 3）** 檢舉一則事件 | `POST /rooms/{room_id}/report/{event_id}` | `room_id`、`event_id` | JSON，可帶 `reason` |
 | `0x21` | `01 1D 21 10` | ReportRoom | **（批 3）** 檢舉一個房間 | `POST /rooms/{room_id}/report` | `room_id` | JSON，可帶 `reason` |
 | `0x22` | `01 1D 22 10` | ReportUser | **（批 3）** 檢舉一個使用者 | `POST /users/{user_id}/report` | `user_id` | JSON，可帶 `reason` |
 

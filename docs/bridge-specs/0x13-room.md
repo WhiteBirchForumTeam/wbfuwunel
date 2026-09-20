@@ -205,7 +205,10 @@ data  {"errcode":"M_FORBIDDEN","error":"Auth check failed: sender does not have 
 |---|---|
 | 請求 meta | `{"room_id_or_alias":"#lobby:localhost","via":["other.example"]}` |
 | 請求 data | — |
-| 回覆 data | `{"room_id":"!AbCdEf:localhost","name":"Lobby","num_joined_members":12,"join_rule":"public","world_readable":true,…}` |
+| 回覆 data | `{"room_id":"!AbCdEf:localhost","name":"Lobby","num_joined_members":12,"world_readable":true,"guest_can_join":false,"room_version":"11","membership":"join"}` |
+
+⚠️ **摘要的欄位是攤平在最外層的，沒有 `summary` 那層外殼**（MSC3266 定的線上格式）。📎 ruma 的 `Response` 型別確實有一個叫 `summary` 的欄位，但它序列化時帶 `#[serde(flatten)]`，所以**讀 Rust 的欄位名會猜錯這個形狀** —— 以線上實際的 bytes 為準（e2e13 [5.7b] 釘住）。
+📎 `membership` 只有帶 token 問的時候才有，匿名問就沒有這個欄位。
 
 📎 **沒加入也看得到**（端點是 `AccessTokenOptional`）：這支就是給「點到一個連結，要不要進去」那一步用的。
 ⚠️ 橋上**只有這條穩定路徑**。MSC 還沒定案時的舊 URL（`/_matrix/client/unstable/im.nheko.summary/…`）在 HTTP 上照舊在，但不另給 subtype 號（橋的設計 §3 批 3-B 第 2 點，維護者 2026-09-20 定）。
@@ -230,7 +233,7 @@ data  {"errcode":"M_FORBIDDEN","error":"Auth check failed: sender does not have 
 |---|---|
 | 請求 meta | `{"user_id":"@bob:localhost"}` —— ⚠️ `user_id` 是 **query 變數，不是路徑的一段** |
 | 請求 data | — |
-| 回覆 data | `{"joined":["!AbCdEf:localhost"],"next_batch_token":"…"}` |
+| 回覆 data | `{"joined":["!AbCdEf:localhost"],"count":1,"next_batch":"…"}`；`count` 一定有（即使這頁被截斷，它算的是總數），`next_batch` 只有還有下一頁才出現 |
 
 ⚠️ 橋上**只有這條穩定路徑**（`uk.half-shot.msc2666` 那條舊 URL 同 `0x32` 的說明）。
 

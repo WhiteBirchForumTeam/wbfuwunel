@@ -729,6 +729,15 @@ Check '[5.7] Summary, Hierarchy and MutualRooms (v1 endpoints, no v3 path) answe
   ((Same-As-Http $summary $hsummary) -and (Same-As-Http $hierarchy $hhierarchy) -and (Same-As-Http $mutual $hmutual) -and (@($mutual.body.joined) -contains $roomD)) `
   "summary=$($summary.status) hierarchy=$($hierarchy.status) mutual=$($mutual.text)"
 
+# Comparing the two roads cannot catch a wrong example in 0x13-room.md: both roads answer the same shape, right or
+# wrong. So the shapes those examples claim are pinned here (PR #77 review, salvia). ⚠️ Reading the Rust field names
+# is what goes wrong: ruma's summary Response has a field called `summary`, but it serializes `#[serde(flatten)]`,
+# so on the wire the fields are at the top level, next to `membership`. The bytes decide, not the type.
+Check '[5.7b] the shapes 0x13-room.md shows are the shapes these two answer: Summary flat with `membership` beside it, MutualRooms with `count` and no `next_batch_token`' `
+  ($summary.body.room_id -eq $roomD -and $null -ne $summary.body.membership -and $null -eq $summary.body.summary `
+    -and $null -ne $mutual.body.count -and $null -eq $mutual.body.next_batch_token -and $null -ne $hierarchy.body.rooms) `
+  "summary=$($summary.text) mutual=$($mutual.text)"
+
 # ---- 0x14 Event: relations and threads ----
 $root = Send-Msg $tokD $roomD @{ msgtype = 'm.text'; body = 'the thread root' }
 $inThread = Send-Msg $tokE $roomD @{ msgtype = 'm.text'; body = 'in the thread'
