@@ -1,7 +1,7 @@
 # E2EE 全走通道：金鑰端點上橋、發 to-device、自己的金鑰存量
 
 > **這份文件回答：client 要讓 E2EE 完全不靠 `/sync`，server 要補哪幾件事、各自長什麼樣、分幾步做。**
-> 狀態：✅ 維護者 2026-09-16 同意（§6 五條的決定記在各條後面）。(A) 已合併（PR #67），(C) 已合併（PR #70），(B) 重作後在 PR #68；每支的範例在 [0x17-keys.md](../bridge-specs/0x17-keys.md)、[0x16-device.md](../bridge-specs/0x16-device.md)。起因是 issue #65（client 的需求）。
+> 狀態：✅ 維護者 2026-09-16 同意（§6 五條的決定記在各條後面）。✅ (A) PR #67、(B) PR #68（重作版）、(C) PR #70 都已合併；每支的範例在 [0x17-keys.md](../bridge-specs/0x17-keys.md)、[0x16-device.md](../bridge-specs/0x16-device.md)。起因是 issue #65（client 的需求）。
 > 維護者 2026-09-15：「原本第三批次要加入的 api，可以先 defer，先處理金鑰的部分。」
 > 上位文件：[wbf-api-bridge.md](wbf-api-bridge.md)（橋）、[wbf-to-device.md](wbf-to-device.md)（`0x16 Device`）、[../bridge-specs/index.md](../bridge-specs/index.md)（號碼總表）。
 
