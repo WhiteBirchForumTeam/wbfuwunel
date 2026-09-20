@@ -73,10 +73,11 @@ fork 專屬的文件都在 [`docs/design/`](docs/design/)。它們刻意不進�
 | pack 處理管線（§1–§6 已實作，PR #33；§8 第二部分 PR #48）：連線即佇列、每 device 4 條 WS（發 token 前的 `admit` 閘門）、發送 task 與**以 bytes 計的佇列預算**（PR #50）、handler 契約與准入表、`Recent` 的 client 拉窗 ＋ `Event/Batch` 串流（**窗的 bytes 上限與 `more`**，PR #53）、HTTP→WS 搬遷的模子 | [docs/design/wbf-pack-pipeline.md](docs/design/wbf-pack-pipeline.md) |
 | WebSocket 通道的二進位封包外框（兩者共用）；**§2.1 連線健康計數器**（連續 8 個解不開的框就關線）；**§3.4 錯誤詞表**（每個 `code` 的序號、意思、client 該怎麼辦；不認得就不認得）；§6.1 連線背後的 session（每個 message 重驗、關機 join）；§6.3 `Session` kind：`Login`／`Refresh`／`Logout` 走通道、匿名升級 30 秒、HTTP 與通道共用的登入限速 | [docs/design/wbf-wire-format.md](docs/design/wbf-wire-format.md) |
 | 每房連續序號 `r_seq`、全域序號 `g_seq`，與跨房間的 `Event/Recent`（client 帶快取水位、只拿差異） | [docs/design/room-seq-and-recent.md](docs/design/room-seq-and-recent.md) |
-| 🔧 **常用 Matrix API 走通道**（設計已同意 PR #55，實作中）：一座通用的橋 —— pack 轉成內部 HTTP request 丟進 Router，flags bit4 分流，關卡只有一份；分三批（一般已登入端點、註冊、要 UIAA 的） | [docs/design/wbf-api-bridge.md](docs/design/wbf-api-bridge.md) |
+| 🔧 **常用 Matrix API 走通道**（設計已同意 PR #55；批 1 的 37 支 PR #56、批 2 的 8 支 PR #63 已合併，批 3 等訊號）：一座通用的橋 —— pack 轉成內部 HTTP request 丟進 Router，flags bit4 分流，關卡只有一份 | [docs/design/wbf-api-bridge.md](docs/design/wbf-api-bridge.md) |
 | **橋的規格總表**：走橋的每個 kind／subtype 是幾號、請求前 4 個 byte、對到哪個 Matrix 端點、帶哪些變數；每個 kind 的詳細範例在同目錄 | [docs/bridge-specs/index.md](docs/bridge-specs/index.md) |
-| 🔧 **E2EE 全走通道**（設計已同意 PR #66）：金鑰端點與發 to-device 走橋、`0x16 CryptoState` 推 OTK 數量與裝置清單變動、金鑰備份走橋 | [docs/design/wbf-e2ee.md](docs/design/wbf-e2ee.md) |
-| 💭 **問題書：加密訊息送出時把關**（還沒有提案）：現在新裝置解不解得開靠推播鏈、掉一環就靜默失敗；核心目的、目標、候選格式、怎麼追蹤、達標條件 | [docs/design/e2ee-send-guard-problem.md](docs/design/e2ee-send-guard-problem.md) |
+| ✅ **E2EE 全走通道**（設計 PR #66；(A) 金鑰端點與發 to-device 走橋 PR #67、(B) `0x16 0x08 CryptoState` PR #68、(C) 金鑰備份走橋 PR #70）：client 不靠 `/sync` 也能做 E2EE。⚠️ (B) **只帶這個裝置自己的金鑰存量**（一次性金鑰數量、fallback key 用掉沒）—— 別人的裝置清單改由下一列那套負責，Matrix 原本的金鑰分發一個字都沒動 | [docs/design/wbf-e2ee.md](docs/design/wbf-e2ee.md) |
+| ✅ **裝置版本號、房間版本號，與送出時比對**（提案 PR #72；F1＋F2＋F4 PR #73、F3 PR #74、補件 PR #75）：每個帳號一個 `序號-雜湊`、每個房間一個版本號，`/members` 兩個都帶；有約定的 client 送加密訊息帶房間版本號，過期就回 **`1506 RoomDevicesChanged`**、訊息不會送出；裝置一變就推 `0x14 0x07 DeviceChanged` 給有約定的連線。🚫 沒有約定的 client（含 HTTP）行為完全不變 | [docs/design/wbf-room-device-version.md](docs/design/wbf-room-device-version.md) |
+| ✅ **問題書：加密訊息送出時把關**（答案已實作，達成狀態逐條在 §9）：原本「新裝置解不解得開」靠一條推播鏈、掉一環就靜默失敗；現在是 server 收訊息時檢查得出來的條件 | [docs/design/e2ee-send-guard-problem.md](docs/design/e2ee-send-guard-problem.md) |
 
 上游的使用文件（[`docs/`](docs/) 其餘部分：設定、部署、維護）大體仍適用，因為程式碼的骨架還是
 上游的。但凡 `CHANGELOG-fork.md` 寫了行為有變的地方，以它為準。

@@ -1,7 +1,7 @@
 # 提案：裝置版本號、房間版本號，與送出時比對
 
 > **這份文件回答：server 要新增哪幾樣東西，才能讓客製 client「只在要發的時候、只對那個房間」確認房間金鑰該發給誰，並且在它看到的名單過期時被擋下來、而不是靜默送出別人解不開的訊息。**
-> 狀態：✅ 維護者同意（PR #72 合併）。F1＋F2＋F4 已實作（PR #73 合併），F3 在分支 `wbf/device-changed`；實作時跟這份不一樣的地方寫在各節的 📌。討論的全過程（走過哪些路、為什麼不走）在 [wbf-device-index-notes.md](wbf-device-index-notes.md)；它回答的問題與達標條件在 [e2ee-send-guard-problem.md](e2ee-send-guard-problem.md)。
+> 狀態：✅ 維護者同意（PR #72 合併）。✅ **四個功能都已實作並合併**：F1＋F2＋F4（PR #73）、F3（PR #74）、補件（PR #75：只被別人簽過的金鑰，雜湊要跟沒被簽過一樣；問題書條件 2／6 的 e2e）；實作時跟這份不一樣的地方寫在各節的 📌。討論的全過程（走過哪些路、為什麼不走）在 [wbf-device-index-notes.md](wbf-device-index-notes.md)；它回答的問題與達標條件在 [e2ee-send-guard-problem.md](e2ee-send-guard-problem.md)。
 > 前提：[wbf-e2ee.md](wbf-e2ee.md) 的 (A) 已合併；(B) `CryptoState`（PR #68）與這份不衝突，§9 講兩者的關係（已定案：(B) 只帶自己的金鑰存量）。
 > 🚫 **HTTP 與一般 Matrix client 的行為不變**：這裡加的東西全是擴展，沒有約定的 client 不會被檢查、不會收到陌生的 pack。
 

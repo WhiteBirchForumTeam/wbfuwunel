@@ -137,11 +137,24 @@ client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
 連帶把「連兩次壞就關線」換成**連線健康計數器**（解不開的框 −1、解得開的 pack 歸零、到 `wbf_ws_corrupt_budget`（8）Close 1002）——📎 舊那條**從來沒被實作過**。
 表與規則在 [wbf-wire-format.md](wbf-wire-format.md) §2.1／§3.4。⚠️ 歸位（格式錯的請求 `Conflict`／`Corrupt` → `InvalidRequest`）與 `code_id` 是**線上看得見的改動**，client 要跟。
 
-### 2.11 🔧 常用 Matrix API 走通道（[wbf-api-bridge.md](wbf-api-bridge.md)，設計 PR #55 已合併；實作分支 `wbf/api-bridge`，號碼總表 [../bridge-specs/index.md](../bridge-specs/index.md)）
+### 2.11 🔧 常用 Matrix API 走通道（批 1、2 已合併，批 3 等訊號）（[wbf-api-bridge.md](wbf-api-bridge.md)，設計 PR #55 已合併；實作分支 `wbf/api-bridge`，號碼總表 [../bridge-specs/index.md](../bridge-specs/index.md)）
 
 維護者 2026-09-14：account 註冊／登入／登出、session、room、device 這些常用端點改成 WS pack，「看能做多少、多快，慢慢移植」。
 提案的核心是**一座通用的橋**而不是一支一支手搬：pack 轉成一個**內部的 HTTP request（不走網路）**丟進 axum 的 `Router`（維護者 2026-09-14 定的形狀）—— 認證、關卡（鎖定、暫停、UIAA）、ruma 解析、route 函式全部是 HTTP 那條路本身，只有一份，WS 不會漏抄，上游檔案也不用動。
-分三批：批 1 一般的已登入端點（約 35 支，每支＝分配表一列）、批 2 註冊（改變連線身份，手寫 `Session/Register`）、批 3 要 UIAA 的（停用帳號、改密碼、刪裝置）。等維護者決定 §5 的六件事。
+分三批：批 1 一般的已登入端點（37 支，PR #56 已合併）、批 2 註冊與要 UIAA 的 8 支（PR #63 已合併：註冊帶 `inhibit_login` 再送原生 `Login`，停用帳號、改密碼、刪裝置的 UIAA 兩輪）、批 3 其餘的等維護者的訊號。E2EE 的金鑰端點（21 支）也走這座橋，見 §2.12。
+
+### 2.12 ✅ E2EE 全走通道（[wbf-e2ee.md](wbf-e2ee.md)，設計 PR #66；(A) PR #67、(B) PR #68、(C) PR #70）
+
+起因是 client（issue #65）用 `matrix-sdk-crypto` 的 `OlmMachine`、**不靠 `/sync`**：金鑰上傳／查詢／claim／變動／交叉簽章／簽章、發 to-device、金鑰備份 14 支，全部走橋（wire 上沒有新東西）。
+唯一的新 pack 是 **`0x16 0x08 CryptoState`**：把**這個裝置自己的金鑰存量**（一次性金鑰還剩幾把、fallback key 用掉沒）推給持有它 to-device 佇列的那條連線。
+⚠️ **(B) 做過一次又重做**（維護者 2026-09-17：「matrix server 已經存在正常金鑰分發行為，而且可以讓官方 client work，那我們沒必要動」）：第一版還推「別人的裝置清單變動」並改了 `/sync`、`/keys/changes`，整段拿掉，Matrix 原本的金鑰分發回到上游。別人的裝置變動改由 §2.13 那套負責。
+
+### 2.13 ✅ 加密訊息送出時把關（[wbf-room-device-version.md](wbf-room-device-version.md)，提案 PR #72；F1＋F2＋F4 PR #73、F3 PR #74、補件 PR #75）
+
+題目與達標條件在問題書 [e2ee-send-guard-problem.md](e2ee-send-guard-problem.md)（維護者 2026-09-16 要的）：原本「Bob 的新裝置解不解得開」靠一條推播鏈，掉一環就**靜默**送出別人解不開的訊息，而且沒有人知道。
+答案是兩個號碼：每個帳號一個**裝置版本號**（`序號-雜湊`，金鑰一動就前進），每個房間一個**房間版本號**（成員事件位置與成員裝置版本位置的最大值），`/members` 兩個都帶；有約定的 client 送加密訊息時帶房間版本號，**在房間鎖內比對，對不上回 `1506 RoomDevicesChanged`、訊息不寫入也不扇出**；裝置一變就推 `0x14 0x07 DeviceChanged` 給有約定的連線（加速，不是正確性的來源）。
+🚫 **沒有約定的 client 一切照舊**：HTTP 不檢查、沒宣告 `org.wbftw.device_versions` 的連線不檢查，Matrix 的 `/sync`、`/keys/*` 語意沒動。
+達成狀態逐條（含維護者改過的決定與接受的缺口）在問題書 §9；client 端要做的在 `amaid/wbf-matrix-client#45`。
 
 ## 3. 候選（要不要做，由維護者決定）
 
@@ -151,7 +164,6 @@ client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
 | 💭 遠端媒體快取 TTL | 別台伺服器的媒體被抓來快取後沒有過期時間，收集器也不碰它 | **只有打開聯邦才會發生**（`allow_federation = false` 時連出去的請求在 `federation/execute.rs` 就被擋）。開聯邦之前必做 |
 | 💭 RocksDB 空間回收 | 刪除只寫 tombstone 記錄，空間靠 compaction；大量清理後可能要手動 compaction 或調 periodic compaction | 第一次大量刪房或 purge 之後量一次（`migrate-references` 已拔掉） |
 | 💭 Services 級的測試夾具 | 「可刪」決策（本地 ∧ 有 `mxc_managed` ∧ 無持有者）、purge 與備份到期的冪等，目前只有 e2e 涵蓋（雙扣本身已被集合語意消掉） | 需要能在測試裡建起 Services 的夾具；有了夾具很多「靠讀碼確認」的東西都能變測試 |
-| 💭 加密訊息送出時把關 | 現在「新裝置解不解得開」靠一條推播鏈，掉一環就靜默送出解不開的訊息；目標是 server 收訊息時檢查裝置清單版本、過期就拒。問題書與達標條件在 [e2ee-send-guard-problem.md](e2ee-send-guard-problem.md) | 維護者 2026-09-16 要的題目；E2EE (B) 照 Matrix 做完之後再寫提案 |
 | ✅ admin 指令顯示「誰持有」 | `!admin media refcount <mxc>` 從 #24 起印持有者清單與是否受管 | 持有者集合天然有這個答案，不用另做 |
 
 ## 4. 大的未定（核心設計 §7）
