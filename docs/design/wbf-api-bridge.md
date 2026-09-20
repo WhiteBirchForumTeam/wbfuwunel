@@ -1,7 +1,7 @@
 # 常用 Matrix API 走通道：一座通用的橋，而不是一支一支手搬
 
 > **這份文件回答：怎麼把大部分常用的 Matrix client API 改成 WebSocket pack，搬的順序是什麼，每一支要花多少。**
-> 狀態：✅ 維護者同意（PR #55）；橋的層與批 1 的 37 支在 PR #56 實作。批 2（註冊＋UIAA，8 支）提案在 PR #62 同意，實作在分支 `wbf/bridge-batch-2`。維護者 2026-09-14：「把大部分常用的 api 接口改成 web socket pack 的模式 —— account 註冊、登入、登出、session 相關、room 相關、device，看能做多少、多快；行數少就多做一點，難度高就少做一點，慢慢移植。」
+> 狀態：✅ 維護者同意（PR #55）；橋的層與批 1 的 37 支在 PR #56 實作，批 2（註冊＋UIAA，8 支）提案 PR #62、實作 PR #63，兩批都已合併。**批 3（20 支＋`Hello` 的 `features`）2026-09-20 提案中**（§3 批 3，三條待決定在 §5）。維護者 2026-09-14：「把大部分常用的 api 接口改成 web socket pack 的模式 —— account 註冊、登入、登出、session 相關、room 相關、device，看能做多少、多快；行數少就多做一點，難度高就少做一點，慢慢移植。」
 > 上位文件：[wbf-pack-pipeline.md](wbf-pack-pipeline.md) §7（搬一個端點的七步）、[wbf-wire-format.md](wbf-wire-format.md) §3.3（kind 分配表）。
 
 ## 0. 一句話
@@ -308,20 +308,87 @@ client                                          server
 - 完整流程：匿名 WS 連線 → `Register`（UIAA 兩輪）→ `Login` → `WhoAmI` 是新帳號；超過裝置名額的 `Login` 照樣 `TooManyConnections`。
 - UIAA：第一輪拿到 `flows`＋`session`、密碼錯拿到 `M_FORBIDDEN` 且 `session` 不變、第二輪成功；刪掉自己的裝置後下一個 pack 被拒並關連線。
 
-### 批 3 之後：候選清單（等維護者挑）
+### 批 3：房間其餘、關聯與討論串、在線狀態／filter／capabilities（20 支，2026-09-20 提案）
 
-> ⏸ **維護者 2026-09-15：先 defer，先處理金鑰**（issue #65，client 要讓 E2EE 全走通道）。金鑰那部分另有設計：[wbf-e2ee.md](wbf-e2ee.md)。下面這張清單保留，E2EE 那一列由 wbf-e2ee.md 取代。
+維護者 2026-09-20 從候選清單裡挑的範圍：**C（房間其餘）＋ D（關聯與討論串）＋ E（在線狀態／filter／capabilities）**，共 20 支。
+⭐ **這 20 支全部是既有 kind 的續號，不開新 kind、不需要新的 wire 格式** —— 每一支就是總表一列、`BRIDGED_ENDPOINTS` 一列、範例檔一段、e2e 跟 HTTP 比一次。
+🔲 **不在這一批**：推播與通知 12 支（要開新 kind `0x18`）、目錄與搜尋 4 支（要先決定算哪個 kind）—— 留在下面的候選清單等維護者再挑。
 
-批 2 做完，`account 註冊、登入、登出、session、room、device` 這幾類（維護者 2026-09-14 點名的）就都在通道上了。剩下常用、橋可以直接跑的：
+#### 3-A. 這一批的端點
 
-| 類 | 端點 | 備註 |
-|---|---|---|
-| 推播規則、pusher、通知列表 | `/pushrules/…`、`/pushers`、`/notifications` | `0x18` |
-| 使用者目錄、公開房間目錄 | `/user_directory/search`、`/publicRooms` | |
-| 房間：升級、敲門、回報 | `/rooms/{id}/upgrade`、`/knock/{id}`、`/rooms/{id}/report/{eventId}` | 升級與敲門有暫停帳號的關卡 |
-| 關聯、討論串、搜尋 | `/rooms/{id}/relations/…`、`/rooms/{id}/threads`、`/search` | |
-| 在線狀態、filter、capabilities | `/presence/…`、`/user/{id}/filter`、`/capabilities` | |
-| E2EE 金鑰、備份、cross-signing | `/keys/…`、`/room_keys/…` | `0x17`；量大，client 用的 matrix-sdk 走 HTTP，要先問 client 那邊要不要 |
+`0x13 Room` 從 `0x2C DeleteAlias` 之後續號：
+
+| subtype | 名稱 | 端點 | path 變數 | query 變數 |
+|---|---|---|---|---|
+| `0x2D` | Upgrade | `POST /rooms/{room_id}/upgrade` | `room_id` | — |
+| `0x2E` | Knock | `POST /knock/{room_id_or_alias}` | `room_id_or_alias` | `via`、`server_name` |
+| `0x2F` | JoinedMembers | `GET /rooms/{room_id}/joined_members` | `room_id` | — |
+| `0x30` | GetVisibility | `GET /directory/list/room/{room_id}` | `room_id` | — |
+| `0x31` | SetVisibility | `PUT /directory/list/room/{room_id}` | `room_id` | — |
+| `0x32` | Summary | `GET /_matrix/client/v1/room_summary/{room_id_or_alias}` | `room_id_or_alias` | `via` |
+| `0x33` | Hierarchy | `GET /_matrix/client/v1/rooms/{room_id}/hierarchy` | `room_id` | `from`、`limit`、`max_depth`、`suggested_only` |
+| `0x34` | MutualRooms | `GET /_matrix/client/v1/mutual_rooms` | — | `user_id`、`from` |
+| `0x35` | ReportRoom | `POST /rooms/{room_id}/report` | `room_id` | — |
+
+`0x14 Event` 從 `0x25 Context` 之後續號：
+
+| subtype | 名稱 | 端點 | path 變數 | query 變數 |
+|---|---|---|---|---|
+| `0x26` | Relations | `GET /_matrix/client/v1/rooms/{room_id}/relations/{event_id}` | `room_id`、`event_id` | `from`、`to`、`dir`、`limit`、`recurse` |
+| `0x27` | RelationsByRelType | `GET /_matrix/client/v1/rooms/{room_id}/relations/{event_id}/{rel_type}` | 再加 `rel_type` | 同上 |
+| `0x28` | RelationsByRelTypeAndEventType | `GET /_matrix/client/v1/rooms/{room_id}/relations/{event_id}/{rel_type}/{event_type}` | 再加 `event_type` | 同上 |
+| `0x29` | Threads | `GET /_matrix/client/v1/rooms/{room_id}/threads` | `room_id` | `from`、`include`、`limit` |
+| `0x2A` | ReportEvent | `POST /rooms/{room_id}/report/{event_id}` | `room_id`、`event_id` | — |
+
+`0x11 Account` 從 `0x2D Deactivate` 之後續號：
+
+| subtype | 名稱 | 端點 | path 變數 | query 變數 |
+|---|---|---|---|---|
+| `0x2E` | GetPresence | `GET /presence/{user_id}/status` | `user_id` | — |
+| `0x2F` | SetPresence | `PUT /presence/{user_id}/status` | `user_id` | — |
+| `0x30` | GetFilter | `GET /user/{user_id}/filter/{filter_id}` | `user_id`、`filter_id` | — |
+| `0x31` | CreateFilter | `POST /user/{user_id}/filter` | `user_id` | — |
+| `0x32` | Capabilities | `GET /capabilities` | — | — |
+| `0x33` | ReportUser | `POST /users/{user_id}/report` | `user_id` | — |
+
+📎 **三支回報分在三個 kind**：回報事件是事件的事（`0x14`）、回報房間是房間的事（`0x13`）、回報使用者沒有更好的去處，放帳號那一類（`0x11`）。→ **決定 1**。
+
+#### 3-B. 三件先查清楚的事（都已對著 pin 住的 ruma 查過）
+
+1. **每一支都有穩定路徑**，所以 `shape_of` 都拿得到（批 2 已經把「有 v3 取 v3，沒有取最新穩定路徑」做進 `pick_path`）。
+   其中 **8 支不是 v3**：Summary（v1，1.15）、Hierarchy（v1，1.2）、MutualRooms（v1，1.19）、Relations 三支與 Threads（v1，1.3／1.4）。總表的端點欄照批 2 的規矩寫完整路徑。
+2. **一個 subtype 對一個端點，所以 unstable 的那幾條路徑不搬**：房間摘要的 `im.nheko.summary`（`get_room_summary_legacy`，MSC3266 的「錯誤」路徑）與 MutualRooms 的 `uk.half-shot.msc2666`，HTTP 上照舊在，橋上只有穩定的那一條。→ **決定 3**。
+3. **認證等級照端點自己的**：Summary 是 `AccessTokenOptional`、GetVisibility 是 `NoAccessToken`，其餘都是 `AccessToken`。橋本來就不看這件事（它只在有 session 時帶上 token），所以匿名連線送 GetVisibility 會跟匿名 HTTP 拿到一樣的東西 —— 這是既有行為，批 1 的 e2e13 [1.13] 已經驗過同一條路。
+   📎 限速也一樣是 HTTP 那一份：Knock、ReportRoom、ReportUser、Hierarchy、Threads、SetPresence、Capabilities、MutualRooms 在端點上標了 `rate_limited`，走橋不會繞過它。
+
+#### 3-C. 順手補 `Hello` 的 `features`（維護者 2026-09-20 指定）
+
+現在是 `["upload","download","recent","batch","seq","attachments","login","push","org.wbftw.device_versions"]` ——
+**草稿（`0x02 Stream`，#45）、to-device（`0x16 Device`，#43）、還有整座橋**都沒有出現過。靠 `features` 偵測能力的 client 會以為這台 server 不支援它們（roadmap §2.9 記的缺口）。
+
+建議補三個字串：**`"stream"`、`"device"`、`"bridge"`**。
+
+- 🚫 **不是一批一個字串**（`bridge-batch-3` 之類）：能力表是給 client 問「有沒有這條路」，不是給它問「你做到第幾批」。某一支在不在橋上，client 送出去就知道 —— 不在表裡是 `UnknownKind`／`Unsupported`，那一條本來就要處理。→ **決定 2**。
+- 這是**線上契約的增補**（只加字串，舊 client 不受影響），但名字要跟 client repo 對一次再寫死。
+
+#### 3-D. e2e（沿用批 1 的規矩）
+
+每支橋打一次、HTTP 打一次、結果一致（e2e13 新增情境 5）；另外：
+
+- **要有內容才比得出東西**：Relations 三支與 Threads 得先在房間裡送出一串有 `m.relates_to` 的事件（回覆、編輯、`m.thread`），不能只驗空清單。
+- **反向檢查**（批 1 的規矩：關卡要驗，不能只驗正常路徑）：被暫停的帳號 `Knock`、`Upgrade`、`SetVisibility` 被拒；不在房間裡的帳號 `JoinedMembers`、`Hierarchy` 被拒 —— 跟 HTTP 一模一樣。
+- **`features`**：`Hello` 的回覆含這三個新字串（一條單元測試釘住字串本身，避免之後有人改字沒改文件）。
+
+### 批 4 之後：剩下的候選（等維護者挑）
+
+批 3 做完，維護者 2026-09-14 點名的那幾類（`account 註冊、登入、登出、session、room、device`）與 E2EE 全部在通道上，房間、事件、帳號三類也只剩下面這些。剩下常用、橋可以直接跑的：
+
+| 類 | 端點 | 支數 | 備註 |
+|---|---|---|---|
+| 推播規則、pusher、通知列表 | `/pushrules/…`（9）、`/pushers`（2）、`/notifications` | 12 | 要開新 kind `0x18`；量最大的一組 |
+| 使用者目錄、公開房間目錄、搜尋 | `/publicRooms`（GET／POST）、`/user_directory/search`、`/search` | 4 | 要先決定算哪個 kind：新開一個 `0x19 Directory`，還是拆進 `0x13`（目錄）與 `0x14`（事件搜尋） |
+
+📎 E2EE 的金鑰、備份、cross-signing 原本也在這張清單上，已經由 [wbf-e2ee.md](wbf-e2ee.md) 做完（`0x17`，(A) 7 支＋(C) 14 支）。
 
 ### 不搬（至少這一輪）
 
@@ -330,7 +397,9 @@ client                                          server
 | `/sync` | long-poll 在 WS 上的形狀是 server 推送，已經是 `Subscribe`／`Push`；另一件事 |
 | SSO、JWT、LDAP、appservice 登入 | 要瀏覽器或是給服務用的 |
 | 舊的整檔媒體、縮圖 | 已經有 `Upload`／`Download` |
-| keys、backup、cross-signing（`0x17`）、push rules（`0x18`）、search | 不在維護者這次點名的範圍；橋做好之後各是分配表的幾列，之後再排 |
+| push rules（`0x18`）、目錄、search | 不在維護者 2026-09-14 點名的範圍；橋做好之後各是分配表的幾列，排在批 4 之後的候選 |
+
+📎 keys、backup、cross-signing（`0x17`）本來也在這一列，2026-09-17 起已經搬完（[wbf-e2ee.md](wbf-e2ee.md)）。
 
 ## 4. 會不會跟正在進行的 PR 撞
 
@@ -366,6 +435,21 @@ client                                          server
    - (b) 沒登入的連線每送一個走橋的 pack 就延長時限。
    - 建議 **(a)**：時限存在是為了不讓匿名連線佔著資源；讓匿名連線自己延長，就等於沒有時限。
 5. **批 2 的號碼與清單**（§3 批 2-C 那 8 支）要增要減？
+
+### 批 3 要維護者決定的（2026-09-20 提案）
+
+範圍你已經挑了（C＋D＋E 共 20 支、`features` 一起補）。剩下三條：
+
+1. **`ReportUser` 放哪個 kind？**（§3 批 3-A）
+   - (a) `0x11 Account`（`0x33`）：回報的對象是一個使用者，帳號那一類最接近。
+   - (b) 新開一個「檢舉」kind，三支回報放一起。
+   - 建議 **(a)**：三支回報各自跟著它回報的東西走（事件在 `0x14`、房間在 `0x13`），一致；為三支開一個 kind 是把號碼空間切碎。
+2. **`features` 補哪幾個字串？**（§3 批 3-C）
+   - (a) `"stream"`、`"device"`、`"bridge"` —— 一個能力一個字串。
+   - (b) 再加一個「批號」字串（例 `"bridge3"`），client 可以問到搬了幾批。
+   - 建議 **(a)**：某一支在不在橋上，送出去就知道（`UnknownKind`／`Unsupported` 本來就要處理）；批號會在每一批之後變成要維護的第二份清單。
+   ⚠️ 不論選哪個，字串的名字要先跟 client repo 對一次 —— 這是線上契約。
+3. **unstable 路徑不搬**（§3 批 3-B 第 2 點）：房間摘要的 `im.nheko.summary` 與 MutualRooms 的 `uk.half-shot.msc2666`，橋上只放穩定路徑那一條，HTTP 上照舊。建議照做（「一個 subtype 對一個端點」本來就是這個意思）。
 
 ## 6. 同意之後的落點
 

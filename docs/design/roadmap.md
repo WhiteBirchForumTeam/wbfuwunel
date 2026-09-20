@@ -128,7 +128,7 @@ client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
 🔲 **兩件 PR #51 的 e2e 量到、還沒處理的**（等維護者決定要不要做）：
 - **連線死掉之後名額要 ~5 秒才回來**：有推播還排著的連線結束時會先把佇列排空（`DRAIN_TIMEOUT` 5 秒）才還 `wbf_ws_max_connections_per_device` 的名額，實測兩次都是 **5.1 秒**。
   ⚠️ 影響是實際的：手機切網路時舊連線來不及正常關，若它們還有推播沒送出，**新連線可能在這幾秒內被 `TooManyConnections` 拒絕**。可能的方向是「對端已經不在時就不必排空」，要先確認送出任務能不能分辨這件事。
-- **`Hello` 的 `features` 沒有列出後來加的 kind**：目前是 `["upload","download","recent","batch","seq","attachments","login","push"]`，**沒有草稿（`0x02 Stream`，#45）也沒有 to-device（`0x16 Device`，#43）**。靠 `features` 偵測能力的 client 會以為這台 server 不支援它們。加字串是相容的增補，但它是線上契約，要維護者點頭（也要跟 client repo 對一下名字）。
+- **`Hello` 的 `features` 沒有列出後來加的 kind**：目前是 `["upload","download","recent","batch","seq","attachments","login","push"]`，**沒有草稿（`0x02 Stream`，#45）也沒有 to-device（`0x16 Device`，#43）**。靠 `features` 偵測能力的 client 會以為這台 server 不支援它們。加字串是相容的增補，但它是線上契約，要維護者點頭（也要跟 client repo 對一下名字）。**→ 維護者 2026-09-20 指定跟橋的批 3 一起補**（§2.11）。
 
 ### 2.10 ✅ 錯誤詞表：`code_id` ＋ `RejectCode` ＋ 連線健康計數器（文件 ✅ PR #37，實作 ✅ PR #38，2026-09-11 合併）
 
@@ -137,11 +137,12 @@ client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
 連帶把「連兩次壞就關線」換成**連線健康計數器**（解不開的框 −1、解得開的 pack 歸零、到 `wbf_ws_corrupt_budget`（8）Close 1002）——📎 舊那條**從來沒被實作過**。
 表與規則在 [wbf-wire-format.md](wbf-wire-format.md) §2.1／§3.4。⚠️ 歸位（格式錯的請求 `Conflict`／`Corrupt` → `InvalidRequest`）與 `code_id` 是**線上看得見的改動**，client 要跟。
 
-### 2.11 🔧 常用 Matrix API 走通道（批 1、2 已合併，批 3 等訊號）（[wbf-api-bridge.md](wbf-api-bridge.md)，設計 PR #55 已合併；實作分支 `wbf/api-bridge`，號碼總表 [../bridge-specs/index.md](../bridge-specs/index.md)）
+### 2.11 🔧 常用 Matrix API 走通道（批 1、2 已合併，批 3 提案中）（[wbf-api-bridge.md](wbf-api-bridge.md)，設計 PR #55 已合併；實作分支 `wbf/api-bridge`，號碼總表 [../bridge-specs/index.md](../bridge-specs/index.md)）
 
 維護者 2026-09-14：account 註冊／登入／登出、session、room、device 這些常用端點改成 WS pack，「看能做多少、多快，慢慢移植」。
 提案的核心是**一座通用的橋**而不是一支一支手搬：pack 轉成一個**內部的 HTTP request（不走網路）**丟進 axum 的 `Router`（維護者 2026-09-14 定的形狀）—— 認證、關卡（鎖定、暫停、UIAA）、ruma 解析、route 函式全部是 HTTP 那條路本身，只有一份，WS 不會漏抄，上游檔案也不用動。
-分三批：批 1 一般的已登入端點（37 支，PR #56 已合併）、批 2 註冊與要 UIAA 的 8 支（PR #63 已合併：註冊帶 `inhibit_login` 再送原生 `Login`，停用帳號、改密碼、刪裝置的 UIAA 兩輪）、批 3 其餘的等維護者的訊號。E2EE 的金鑰端點（21 支）也走這座橋，見 §2.12。
+分批搬：批 1 一般的已登入端點（37 支，PR #56 已合併）、批 2 註冊與要 UIAA 的 8 支（PR #63 已合併：註冊帶 `inhibit_login` 再送原生 `Login`，停用帳號、改密碼、刪裝置的 UIAA 兩輪）。E2EE 的金鑰端點（21 支）也走這座橋，見 §2.12。
+**批 3 提案中（2026-09-20）**：維護者挑了房間其餘 9 支（升級、敲門、joined_members、目錄可見性、摘要、階層、mutual_rooms、回報房間）、關聯與討論串 5 支、在線狀態／filter／capabilities 與回報使用者 6 支 —— 共 20 支，全部是既有 kind 的續號，不開新 kind；順便補上 `Hello` 的 `features`（§2.9 記的那條缺口）。推播 12 支（要開 `0x18`）與目錄／搜尋 4 支留給批 4。三條待決定在 [wbf-api-bridge.md](wbf-api-bridge.md) §5。
 
 ### 2.12 ✅ E2EE 全走通道（[wbf-e2ee.md](wbf-e2ee.md)，設計 PR #66；(A) PR #67、(B) PR #68、(C) PR #70）
 
