@@ -4,7 +4,7 @@
 > 設計與規則在 [../design/wbf-api-bridge.md](../design/wbf-api-bridge.md)（下稱「橋的設計」），這裡只放**分配結果**。
 > ⭐ **這張表是走橋的 subtype 號的唯一權威**：[wbf-wire-format.md](../design/wbf-wire-format.md) §3.2 只列原生的 subtype，走橋的一律指到這裡 —— 兩份表遲早漂移。
 > 每個 kind 的完整範例（請求與回應的 meta、data、錯誤）在同一個目錄的 `KIND.md`，隨搬的那一批一起寫：[0x10-session.md](0x10-session.md)、[0x11-account.md](0x11-account.md)、[0x12-sync.md](0x12-sync.md)、[0x13-room.md](0x13-room.md)、[0x14-event.md](0x14-event.md)、[0x15-receipt.md](0x15-receipt.md)、[0x16-device.md](0x16-device.md)、[0x17-keys.md](0x17-keys.md)、[0x1C-misc.md](0x1C-misc.md)、[0x1D-report.md](0x1D-report.md)。
-> 狀態：批 1 的 37 支、批 2 的 8 支（註冊、UIAA）、E2EE (A) 的 7 支（金鑰、發 to-device，[wbf-e2ee.md](../design/wbf-e2ee.md) §2）與 E2EE (C) 的 14 支（金鑰備份，同文件 §4）**已實作**：server 的表（`src/api/client/wbf/bridge.rs` 的 `BRIDGED_ENDPOINTS`）逐列跟這份總表比對（單元測試 `the_specs_index_and_this_table_list_the_same_endpoints`，對不上就紅）；每支都在 e2e13（批 1 情境 1、批 2 情境 2、E2EE (A) 情境 3、E2EE (C) 情境 4）跟原本的 HTTP 端點比對過結果。
+> 狀態：批 1 的 37 支、批 2 的 8 支（註冊、UIAA）、E2EE (A) 的 7 支（金鑰、發 to-device，[wbf-e2ee.md](../design/wbf-e2ee.md) §2）、E2EE (C) 的 14 支（金鑰備份，同文件 §4）與批 3 的 20 支（房間其餘、關聯與討論串、在線狀態／過濾器／capabilities、檢舉）**已實作**：server 的表（`src/api/client/wbf/bridge.rs` 的 `BRIDGED_ENDPOINTS`）逐列跟這份總表比對（單元測試 `the_specs_index_and_this_table_list_the_same_endpoints`，對不上就紅）；每支都在 e2e13（批 1 情境 1、批 2 情境 2、E2EE (A) 情境 3、E2EE (C) 情境 4、批 3 情境 5）跟原本的 HTTP 端點比對過結果。
 
 ## 1. 一個走橋的 pack 怎麼讀
 

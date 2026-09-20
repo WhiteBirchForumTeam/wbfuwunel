@@ -17,7 +17,8 @@
 | 請求 data | — |
 | 回覆 data | 當初存進去的那份過濾器，例 `{"room":{"timeline":{"limit":20}}}` |
 
-**會怎麼被拒**：沒有這個 id → `NotFound`（404）；`user_id` 不是自己 → `Forbidden`（403）。
+⚠️ **`user_id` 只是路徑的一部分，端點讀的是 token 的主人**：拿別人的 `user_id` 加自己的 token 來讀，讀到的是**自己**名下有沒有這個 id，所以答案是 `NotFound`（404），不是 403。別把 404 讀成「這個 id 不存在於 server 上」。
+**會怎麼被拒**：自己名下沒有這個 id（含上面那種情形） → `NotFound`（404）。
 
 ## `0x21` CreateFilter —— 存一個過濾器，拿到它的 id
 
