@@ -604,8 +604,8 @@ mod tests {
 	use tuwunel_core::wbf::{RejectCode, decode};
 
 	use super::{
-		BRIDGED_ENDPOINTS, EndpointShape, MAX_MESSAGE_BYTES, build_reply_pack, build_request, list_path_variables,
-		pick_path, shape_of, to_bounded_message,
+		BRIDGED_ENDPOINTS, EndpointShape, MAX_MESSAGE_BYTES, RELATIONS_QUERY, build_reply_pack, build_request,
+		list_path_variables, pick_path, shape_of, to_bounded_message,
 	};
 	use crate::{ClientIp, router::ConfiguredIpSource};
 
@@ -694,6 +694,39 @@ mod tests {
 		assert_eq!(refused_code(build_request(&whoami, &[], b"[1,2]", b"", None, PEER)), RejectCode::InvalidRequest);
 		assert!(build_request(&whoami, &[], b"", b"", None, PEER).is_ok());
 		assert!(build_request(&whoami, &[], b"{}", b"", None, PEER).is_ok());
+	}
+
+	/// The three `/relations` rows share one list of query names, so one wrong
+	/// name would silently drop the same parameter from all three (PR #77
+	/// review, rumia). Every name is spent here, on the narrowest of the three.
+	#[test]
+	fn every_relations_query_name_reaches_the_url() {
+		let relations = EndpointShape {
+			method: Method::GET,
+			path_template: "/_matrix/client/v1/rooms/{room_id}/relations/{event_id}/{rel_type}/{event_type}",
+		};
+		let meta = br#"{"room_id":"!r:localhost","event_id":"$root","rel_type":"m.thread","event_type":"m.room.message",
+			"from":"t1","to":"t9","dir":"b","limit":20,"recurse":true}"#;
+
+		let request = build_request(&relations, RELATIONS_QUERY, meta, b"", None, PEER).expect("builds");
+
+		// `!` and `$` are sub-delims, legal in a path segment, so they stay as
+		// they are; `#` is what gets encoded (see the test below).
+		assert_eq!(
+			request.uri().path(),
+			"/_matrix/client/v1/rooms/!r:localhost/relations/$root/m.thread/m.room.message"
+		);
+		let query = request.uri().query().expect("all five were given");
+		for name in RELATIONS_QUERY {
+			assert!(query.contains(&format!("{name}=")), "{name} never reached the URL: {query}");
+		}
+		assert!(query.contains("limit=20") && query.contains("recurse=true"), "a number and a bool keep their JSON shape: {query}");
+
+		// Paging is what a client actually sends: the ones it leaves out must
+		// not turn into empty parameters the endpoint would then parse.
+		let paging = br#"{"room_id":"!r:localhost","event_id":"$root","rel_type":"m.thread","event_type":"m.room.message","from":"t1"}"#;
+		let next = build_request(&relations, RELATIONS_QUERY, paging, b"", None, PEER).expect("builds");
+		assert_eq!(next.uri().query(), Some("from=t1"));
 	}
 
 	#[test]

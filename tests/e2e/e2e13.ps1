@@ -751,12 +751,16 @@ Check '[5.9] Threads answers as HTTP does and lists the root of the thread just 
 
 # ---- 0x1D Report ----
 $repEvent = Bridge $wsD 0x1D 0x20 @{ room_id = $roomD; event_id = $root } @{ reason = 'e2e: reporting the event' }
+$hrepEvent = Http POST "/_matrix/client/v3/rooms/$(Enc $roomD)/report/$(Enc $root)" @{ reason = 'e2e: the event over http' } $tokD
 $repRoom = Bridge $wsD 0x1D 0x21 @{ room_id = $roomD } @{ reason = 'e2e: reporting the room' }
+$hrepRoom = Http POST "/_matrix/client/v3/rooms/$(Enc $roomD)/report" @{ reason = 'e2e: the room over http' } $tokD
 $repUser = Bridge $wsD 0x1D 0x22 @{ user_id = $erin } @{ reason = 'e2e: reporting the user' }
-$hrepRoom = Http POST "/_matrix/client/v3/rooms/$(Enc $roomD)/report" @{ reason = 'e2e: over http' } $tokD
-Check '[5.10] the three reports go through the new kind 0x1D and answer {} — the same empty body HTTP answers' `
-  ((Is-Ack $repEvent) -and (Is-Ack $repRoom) -and (Is-Ack $repUser) -and $repRoom.text -eq '{}' -and $hrepRoom.status -eq 200 -and (Canon $repRoom.body) -eq (Canon $hrepRoom.json)) `
-  "event=$($repEvent.status) room=$($repRoom.text) user=$($repUser.text) http=$($hrepRoom.status) $($hrepRoom.text)"
+$hrepUser = Http POST "/_matrix/client/v3/users/$(Enc $erin)/report" @{ reason = 'e2e: the user over http' } $tokD
+# All three compared against HTTP, not just the room one (PR #77 review, rumia): a row pointed at the wrong ruma
+# type would still answer `{}` and still look like an Ack, so the check has to be that HTTP answers the same.
+Check '[5.10] each of the three reports answers through the bridge exactly what the same report answers over HTTP' `
+  ((Same-As-Http $repEvent $hrepEvent) -and (Same-As-Http $repRoom $hrepRoom) -and (Same-As-Http $repUser $hrepUser) -and $repEvent.text -eq '{}' -and $repRoom.text -eq '{}' -and $repUser.text -eq '{}' -and $hrepEvent.status -eq 200) `
+  "event=$($repEvent.status) $($repEvent.text) hevent=$($hrepEvent.status) room=$($repRoom.text) hroom=$($hrepRoom.status) user=$($repUser.text) huser=$($hrepUser.status)"
 
 $longReason = 'x' * 2001
 $tooLong = Bridge $wsD 0x1D 0x21 @{ room_id = $roomD } @{ reason = $longReason }
