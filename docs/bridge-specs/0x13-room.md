@@ -144,6 +144,96 @@ data  {"errcode":"M_FORBIDDEN","error":"Auth check failed: sender does not have 
 
 **會怎麼被拒**：不存在 → `NotFound`（404）；不是設的人、也不是房間管理員 → `Forbidden`（403）。
 
+## `0x2D` Upgrade —— 把房間換成新的房間版本（批 3）
+
+`POST /_matrix/client/v3/rooms/{room_id}/upgrade`
+
+| | |
+|---|---|
+| 請求 meta | `{"room_id":"!AbCdEf:localhost"}` |
+| 請求 data | `{"new_version":"11"}` |
+| 回覆 data | `{"replacement_room":"!NewRoom:localhost"}` |
+
+📎 舊房間會被加上 `m.room.tombstone` 指向新房間，成員自己走過去；**舊房間不會消失**。
+**會怎麼被拒**：沒有改狀態的權限 → `Forbidden`（403）；`new_version` 這台 server 不支援 → `InvalidRequest`（400 `M_UNSUPPORTED_ROOM_VERSION`）—— 支援哪些問 `0x1C/0x20` Capabilities。
+
+## `0x2E` Knock —— 敲門（批 3）
+
+`POST /_matrix/client/v3/knock/{room_id_or_alias}`
+
+| | |
+|---|---|
+| 請求 meta | `{"room_id_or_alias":"!AbCdEf:localhost","via":["other.example"]}`；`via` 與 `server_name` 都是 query 陣列，跟 `0x21` Join 同一套 |
+| 請求 data | `{}`，可帶 `{"reason":"我是 alice 的朋友"}` |
+| 回覆 data | `{"room_id":"!AbCdEf:localhost"}` |
+
+📎 敲完是**等房內的人放行**：成員狀態變 `knock`，有人 `Invite` 之後才進得去。
+**會怎麼被拒**：房間的加入規則不是 `knock` → `Forbidden`（403）；被封鎖過 → `Forbidden`（403）；帳號被暫停 → `Forbidden`（403 `M_USER_SUSPENDED`）。
+
+## `0x2F` JoinedMembers —— 只要已加入的成員（批 3）
+
+`GET /_matrix/client/v3/rooms/{room_id}/joined_members`
+
+| | |
+|---|---|
+| 請求 meta | `{"room_id":"!AbCdEf:localhost"}` |
+| 請求 data | — |
+| 回覆 data | `{"joined":{"@alice:localhost":{"display_name":"Alice","avatar_url":"mxc://…"}}}` |
+
+📎 跟 `0x29` Members 的差別：Members 回的是**成員事件**（含離開、被邀請的），這支只回**已加入的人**與他們的顯示名、頭像，輕很多。
+⚠️ 這支**沒有**房間版本號（那是 `0x29` Members 專有的，見 [wbf-room-device-version.md](../design/wbf-room-device-version.md) §5.2）。要送加密訊息前比對的 client 要打 Members，不是這支。
+**會怎麼被拒**：自己不在房裡 → `Forbidden`（403）。
+
+## `0x30` GetVisibility / `0x31` SetVisibility —— 房間在不在公開目錄上（批 3）
+
+`GET` ／ `PUT /_matrix/client/v3/directory/list/room/{room_id}`
+
+| | |
+|---|---|
+| 請求 meta | `{"room_id":"!AbCdEf:localhost"}` |
+| 請求 data | 讀：無。寫：`{"visibility":"public"}` 或 `{"visibility":"private"}` |
+| 回覆 data | 讀：`{"visibility":"public"}`。寫：`{}` |
+
+📎 **讀那支端點不要求登入**（`NoAccessToken`），所以匿名連線也問得到 —— 跟匿名 HTTP 一樣。
+**會怎麼被拒**：寫的時候沒有權限（server 設定只准管理員上架） → `Forbidden`（403）。
+
+## `0x32` Summary —— 房間簡介（批 3）
+
+`GET /_matrix/client/v1/room_summary/{room_id_or_alias}`
+
+| | |
+|---|---|
+| 請求 meta | `{"room_id_or_alias":"#lobby:localhost","via":["other.example"]}` |
+| 請求 data | — |
+| 回覆 data | `{"room_id":"!AbCdEf:localhost","name":"Lobby","num_joined_members":12,"join_rule":"public","world_readable":true,…}` |
+
+📎 **沒加入也看得到**（端點是 `AccessTokenOptional`）：這支就是給「點到一個連結，要不要進去」那一步用的。
+⚠️ 橋上**只有這條穩定路徑**。MSC 還沒定案時的舊 URL（`/_matrix/client/unstable/im.nheko.summary/…`）在 HTTP 上照舊在，但不另給 subtype 號（橋的設計 §3 批 3-B 第 2 點，維護者 2026-09-20 定）。
+
+## `0x33` Hierarchy —— space 底下的房間樹（批 3）
+
+`GET /_matrix/client/v1/rooms/{room_id}/hierarchy`
+
+| | |
+|---|---|
+| 請求 meta | `{"room_id":"!TheSpace:localhost","limit":20,"suggested_only":false}` |
+| 請求 data | — |
+| 回覆 data | `{"rooms":[{"room_id":"!child:localhost","children_state":[…],…}],"next_batch":"…"}` |
+
+📎 翻頁用 `next_batch` 餵回 `from`；`max_depth` 限制往下幾層。
+
+## `0x34` MutualRooms —— 我與某人共同在哪些房間（批 3）
+
+`GET /_matrix/client/v1/mutual_rooms`
+
+| | |
+|---|---|
+| 請求 meta | `{"user_id":"@bob:localhost"}` —— ⚠️ `user_id` 是 **query 變數，不是路徑的一段** |
+| 請求 data | — |
+| 回覆 data | `{"joined":["!AbCdEf:localhost"],"next_batch_token":"…"}` |
+
+⚠️ 橋上**只有這條穩定路徑**（`uk.half-shot.msc2666` 那條舊 URL 同 `0x32` 的說明）。
+
 ## 這個 kind 共通的拒絕
 
 | 情況 | `code` | 來自 |

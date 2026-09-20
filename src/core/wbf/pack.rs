@@ -78,8 +78,10 @@ pub enum Kind {
 	Search = 0x1A,
 	/// TURN and RTC.
 	Voip = 0x1B,
-	/// Everything else: capabilities, versions, well-known, tags, reports.
+	/// Everything else: capabilities, versions, well-known, tags.
 	Misc = 0x1C,
+	/// Reporting an event, a room or a user.
+	Report = 0x1D,
 	/// Administration commands and the admin API.
 	Admin = 0x20,
 }
@@ -106,6 +108,7 @@ impl TryFrom<u8> for Kind {
 			| 0x1A => Self::Search,
 			| 0x1B => Self::Voip,
 			| 0x1C => Self::Misc,
+			| 0x1D => Self::Report,
 			| 0x20 => Self::Admin,
 			| unknown => return Err(PackError::UnknownKind(unknown)),
 		})

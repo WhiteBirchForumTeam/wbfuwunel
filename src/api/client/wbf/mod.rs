@@ -1099,6 +1099,27 @@ fn mxc_from_meta(meta: &Value) -> std::result::Result<String, Reject> {
 		.ok_or_else(|| Reject::code(RejectCode::InvalidRequest, "mxc is required"))
 }
 
+/// What `Hello` tells a client this server can do: one string per capability,
+/// never one per batch of migrated endpoints — whether a single endpoint is on
+/// the bridge is answered by sending it (`docs/design/wbf-api-bridge.md` §3
+/// batch 3-C). `bridge` says the `IS_BRIDGED` flag is understood at all; the
+/// numbers are in `docs/bridge-specs/index.md`.
+/// ⚠️ These strings are the wire contract: add, never rename or remove.
+const SERVER_FEATURES: &[&str] = &[
+	"upload",
+	"download",
+	"recent",
+	"batch",
+	"seq",
+	"attachments",
+	"login",
+	"push",
+	"stream",
+	"device",
+	"bridge",
+	DEVICE_VERSIONS_FEATURE,
+];
+
 /// The answer to `Hello`: what this server speaks. Of the client's meta only
 /// `features` is read, and of it only `DEVICE_VERSIONS_FEATURE`: a meta that is
 /// not JSON, or has no such list, declares nothing.
@@ -1115,7 +1136,7 @@ fn hello(services: &Services, ctx: &PackContext<'_>, view: &PackView<'_>) -> Vec
 			"server": services.globals.server_name(),
 			"engine": tuwunel_core::version::name(),
 			"engine_version": tuwunel_core::version::version(),
-			"features": ["upload", "download", "recent", "batch", "seq", "attachments", "login", "push", DEVICE_VERSIONS_FEATURE],
+			"features": SERVER_FEATURES,
 			// For debugging; 0 over HTTP. A client need not use it.
 			"connection_id": ctx.connection,
 			"recent_default_limit": services.config.wbf_recent_default_limit,
@@ -1210,9 +1231,30 @@ mod tests {
 	use tuwunel_core::err;
 
 	use super::{
-		Reject, admission, control, is_device_versions_declared_in, matrix_error_fields, refuse_session,
-		refuse_wrong_id_type, reject_code_for_status, unknown_token,
+		Reject, SERVER_FEATURES, admission, control, is_device_versions_declared_in, matrix_error_fields,
+		refuse_session, refuse_wrong_id_type, reject_code_for_status, unknown_token,
 	};
+
+	/// The strings are the wire contract, so this test spells them out rather
+	/// than deriving them: a rename here has to be a deliberate edit in two
+	/// places, and the client repo has to hear about it.
+	#[test]
+	fn hello_names_every_capability_this_server_speaks() {
+		assert_eq!(SERVER_FEATURES, &[
+			"upload",
+			"download",
+			"recent",
+			"batch",
+			"seq",
+			"attachments",
+			"login",
+			"push",
+			"stream",
+			"device",
+			"bridge",
+			"org.wbftw.device_versions",
+		]);
+	}
 
 	#[test]
 	fn only_a_features_list_naming_device_versions_declares_them() {

@@ -39,6 +39,20 @@
 | 請求 data | `{}`，thread 的回條帶 `{"thread_id":"$root"}` |
 | 回覆 data | `{}` |
 
+## `0x23` GetPresence / `0x24` SetPresence —— 在線狀態（批 3）
+
+`GET` ／ `PUT /_matrix/client/v3/presence/{user_id}/status`
+
+| | |
+|---|---|
+| 請求 meta | `{"user_id":"@bob:localhost"}`（寫的時候必須是自己） |
+| 請求 data | 讀：無。寫：`{"presence":"online","status_msg":"在忙"}`；`presence` 是 `online`／`offline`／`unavailable` |
+| 回覆 data | 讀：`{"presence":"online","last_active_ago":42,"currently_active":true,"status_msg":"在忙"}`。寫：`{}` |
+
+⚠️ **這台 server 可以整個關掉在線狀態**（`allow_local_presence`）：關著的時候兩支都回 `Forbidden`（403），跟 HTTP 一樣。client 不要把 403 當成「這個人不在線」。
+📎 讀得到別人的前提是**跟對方有共同房間**；沒有的話回的是空的狀態，不是錯誤。
+**會怎麼被拒**：寫別人的狀態 → `InvalidRequest`（400 `M_INVALID_PARAM`）。
+
 ## 這個 kind 共通的拒絕
 
 | 情況 | `code` | 來自 |

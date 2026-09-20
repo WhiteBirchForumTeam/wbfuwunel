@@ -20,8 +20,9 @@ use http::{HeaderValue, Method, Request, StatusCode, header};
 use ruma::api::{
 	IncomingRequest,
 	client::{
-		account, alias, backup, config, context, device, keys, membership, profile, read_marker, receipt, redact,
-		room, session, state, tag, to_device, typing,
+		account, alias, backup, config, context, device, directory, discovery, filter, keys, knock, membership,
+		presence, profile, read_marker, receipt, redact, relations, reporting, room, session, space, state, tag,
+		threads, to_device, typing,
 	},
 	path_builder::PathBuilder,
 };
@@ -89,6 +90,9 @@ static BRIDGED_ENDPOINTS: &[BridgedEndpoint] = &[
 	row(Kind::Account, 0x2B, "DeleteTag", shape_of::<tag::delete_tag::v3::Request>, NO_QUERY),
 	row(Kind::Account, 0x2C, "ChangePassword", shape_of::<account::change_password::v3::Request>, NO_QUERY),
 	row(Kind::Account, 0x2D, "Deactivate", shape_of::<account::deactivate::v3::Request>, NO_QUERY),
+	// 0x12 Sync (batch 3): `/sync` itself is not bridged, the filters it reads are.
+	row(Kind::Sync, 0x20, "GetFilter", shape_of::<filter::get_filter::v3::Request>, NO_QUERY),
+	row(Kind::Sync, 0x21, "CreateFilter", shape_of::<filter::create_filter::v3::Request>, NO_QUERY),
 	// 0x13 Room
 	row(Kind::Room, 0x20, "CreateRoom", shape_of::<room::create_room::v3::Request>, NO_QUERY),
 	row(Kind::Room, 0x21, "Join", shape_of::<membership::join_room_by_id_or_alias::v3::Request>, &["via", "server_name"]),
@@ -103,6 +107,15 @@ static BRIDGED_ENDPOINTS: &[BridgedEndpoint] = &[
 	row(Kind::Room, 0x2A, "GetAlias", shape_of::<alias::get_alias::v3::Request>, NO_QUERY),
 	row(Kind::Room, 0x2B, "SetAlias", shape_of::<alias::create_alias::v3::Request>, NO_QUERY),
 	row(Kind::Room, 0x2C, "DeleteAlias", shape_of::<alias::delete_alias::v3::Request>, NO_QUERY),
+	// Batch 3: the rest of the room.
+	row(Kind::Room, 0x2D, "Upgrade", shape_of::<room::upgrade_room::v3::Request>, NO_QUERY),
+	row(Kind::Room, 0x2E, "Knock", shape_of::<knock::knock_room::v3::Request>, &["via", "server_name"]),
+	row(Kind::Room, 0x2F, "JoinedMembers", shape_of::<membership::joined_members::v3::Request>, NO_QUERY),
+	row(Kind::Room, 0x30, "GetVisibility", shape_of::<directory::get_room_visibility::v3::Request>, NO_QUERY),
+	row(Kind::Room, 0x31, "SetVisibility", shape_of::<directory::set_room_visibility::v3::Request>, NO_QUERY),
+	row(Kind::Room, 0x32, "Summary", shape_of::<room::get_summary::v1::Request>, &["via"]),
+	row(Kind::Room, 0x33, "Hierarchy", shape_of::<space::get_hierarchy::v1::Request>, &["from", "limit", "max_depth", "suggested_only"]),
+	row(Kind::Room, 0x34, "MutualRooms", shape_of::<membership::mutual_rooms::v1::Request>, &["user_id", "from"]),
 	// 0x14 Event
 	row(Kind::Event, 0x20, "GetEvent", shape_of::<room::get_room_event::v3::Request>, NO_QUERY),
 	row(Kind::Event, 0x21, "GetState", shape_of::<state::get_state_events::v3::Request>, NO_QUERY),
@@ -110,10 +123,18 @@ static BRIDGED_ENDPOINTS: &[BridgedEndpoint] = &[
 	row(Kind::Event, 0x23, "SetStateEvent", shape_of::<state::send_state_event::v3::Request>, NO_QUERY),
 	row(Kind::Event, 0x24, "Redact", shape_of::<redact::redact_event::v3::Request>, NO_QUERY),
 	row(Kind::Event, 0x25, "Context", shape_of::<context::get_context::v3::Request>, &["limit", "filter"]),
+	// Batch 3: what hangs off an event.
+	row(Kind::Event, 0x26, "Relations", shape_of::<relations::get_relating_events::v1::Request>, RELATIONS_QUERY),
+	row(Kind::Event, 0x27, "RelationsByRelType", shape_of::<relations::get_relating_events_with_rel_type::v1::Request>, RELATIONS_QUERY),
+	row(Kind::Event, 0x28, "RelationsByRelTypeAndEventType", shape_of::<relations::get_relating_events_with_rel_type_and_event_type::v1::Request>, RELATIONS_QUERY),
+	row(Kind::Event, 0x29, "Threads", shape_of::<threads::get_threads::v1::Request>, &["from", "include", "limit"]),
 	// 0x15 Receipt
 	row(Kind::Receipt, 0x20, "Typing", shape_of::<typing::create_typing_event::v3::Request>, NO_QUERY),
 	row(Kind::Receipt, 0x21, "ReadMarkers", shape_of::<read_marker::set_read_marker::v3::Request>, NO_QUERY),
 	row(Kind::Receipt, 0x22, "Receipt", shape_of::<receipt::create_receipt::v3::Request>, NO_QUERY),
+	// Batch 3: presence belongs to this kind (wbf-wire-format.md §3.3).
+	row(Kind::Receipt, 0x23, "GetPresence", shape_of::<presence::get_presence::v3::Request>, NO_QUERY),
+	row(Kind::Receipt, 0x24, "SetPresence", shape_of::<presence::set_presence::v3::Request>, NO_QUERY),
 	// 0x16 Device
 	row(Kind::Device, 0x20, "ListDevices", shape_of::<device::get_devices::v3::Request>, NO_QUERY),
 	row(Kind::Device, 0x21, "GetDevice", shape_of::<device::get_device::v3::Request>, NO_QUERY),
@@ -146,12 +167,24 @@ static BRIDGED_ENDPOINTS: &[BridgedEndpoint] = &[
 	row(Kind::Keys, 0x3B, "DeleteBackupKeys", shape_of::<backup::delete_backup_keys::v3::Request>, VERSION_QUERY),
 	row(Kind::Keys, 0x3C, "DeleteBackupKeysForRoom", shape_of::<backup::delete_backup_keys_for_room::v3::Request>, VERSION_QUERY),
 	row(Kind::Keys, 0x3D, "DeleteBackupKeysForSession", shape_of::<backup::delete_backup_keys_for_session::v3::Request>, VERSION_QUERY),
+
+	// 0x1C Misc (batch 3)
+	row(Kind::Misc, 0x20, "Capabilities", shape_of::<discovery::get_capabilities::v3::Request>, NO_QUERY),
+
+	// 0x1D Report (batch 3): the three of them together, in the order the spec
+	// grew them — the event (1.0), the room (1.13), the user (1.14).
+	row(Kind::Report, 0x20, "ReportEvent", shape_of::<room::report_content::v3::Request>, NO_QUERY),
+	row(Kind::Report, 0x21, "ReportRoom", shape_of::<room::report_room::v3::Request>, NO_QUERY),
+	row(Kind::Report, 0x22, "ReportUser", shape_of::<reporting::report_user::v3::Request>, NO_QUERY),
 ];
 
 const NO_QUERY: &[&str] = &[];
 
 /// Every `/room_keys/keys` endpoint takes the backup version this way.
 const VERSION_QUERY: &[&str] = &["version"];
+
+/// The three `/relations` endpoints page the same way.
+const RELATIONS_QUERY: &[&str] = &["from", "to", "dir", "limit", "recurse"];
 
 const fn row(
 	kind: Kind,
