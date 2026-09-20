@@ -247,8 +247,9 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 | `0x19` | Media | 舊的整檔上傳、縮圖、preview、config（`media.rs`）—— 與 `Upload`/`Download` 分開，這裡是相容路徑 |
 | `0x1A` | Search | search、user directory（`search.rs`、`user_directory.rs`） |
 | `0x1B` | Voip | TURN、rtc（`voip.rs`、`rtc.rs`） |
-| `0x1C` | Misc | capabilities、versions、well-known、openid、thirdparty、report、tags（其餘） |
-| `0x1D`–`0x1F` | 保留給 Matrix 尚未引進的章節 | |
+| `0x1C` | Misc | capabilities、versions、well-known、openid、thirdparty、tags（其餘） |
+| `0x1D` | Report | 檢舉事件、房間、使用者（`report/` 三支都在裡面）—— 原本在 `0x1C Misc`，維護者 2026-09-20 決定三支放一起、自成一個 kind（[wbf-api-bridge.md](wbf-api-bridge.md) §3 批 3） |
+| `0x1E`–`0x1F` | 保留給 Matrix 尚未引進的章節 | |
 | `0x20` | Admin | `!admin` 指令與 synapse admin API（`admin/`） |
 | `0x21`–`0xEF` | 未分配 | |
 | `0xF0`–`0xFF` | 實驗用，不保證穩定 | |
