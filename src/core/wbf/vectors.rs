@@ -166,6 +166,10 @@ fn current() -> Value {
 			// layout is Batch's. gap=true says a push was dropped before this one.
 			pack("push_one", Kind::Event, 0x06, Flags::IS_RESPONSE, conversation(20), 0, br#"{"bc":1,"fs":4712,"gap":false,"ls":4712}"#, &length_prefixed(&[br#"{"content":{"body":"b","msgtype":"m.text"},"event_id":"$b:localhost","origin_server_ts":2,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":1,"org.wbftw.wbfuwunel.g_seq":4712,"org.wbftw.wbfuwunel.r_seq":2}}"#])),
 			pack("push_gap", Kind::Event, 0x06, Flags::IS_RESPONSE, conversation(20), 3, br#"{"bc":1,"fs":4720,"gap":true,"ls":4720}"#, &length_prefixed(&[br#"{"content":{"body":"c","msgtype":"m.text"},"event_id":"$c:localhost","origin_server_ts":3,"room_id":"!r:localhost","sender":"@a:localhost","type":"m.room.message","unsigned":{"age":1,"org.wbftw.wbfuwunel.g_seq":4720,"org.wbftw.wbfuwunel.r_seq":3}}"#])),
+			// Device versions, F3 (wbf-room-device-version.md §6): Bob's devices
+			// changed; one pack for the connection, naming the rooms it listens
+			// to that he is in, on the same subscription as its Push (seq 4).
+			pack("event_device_changed", Kind::Event, 0x07, Flags::IS_RESPONSE, conversation(20), 4, br#"{"device_version":"4-0123456789","gap":false,"rooms":{"!r1:localhost":81240,"!r2:localhost":81240},"user_id":"@bob:localhost"}"#, b""),
 			// 0x16 Device: the to-device queue. Oldest first, so `ot` is the first
 			// item in the pack and `nt` the last — the mirror of Event's `fs`/`ls`,
 			// with different names so the two cannot be read as the same thing.

@@ -40,7 +40,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, mpsc};
 
 pub use self::{
 	devices::{CryptoState, DEVICE_CRYPTO_STATE_SUBTYPE, DEVICE_PUSH_SUBTYPE, PushedItem},
-	rooms::{EVENT_PUSH_SUBTYPE, PushedEvent, Subscribed},
+	rooms::{EVENT_DEVICE_CHANGED_SUBTYPE, EVENT_PUSH_SUBTYPE, PushedEvent, Subscribed},
 };
 use self::{
 	devices::DeviceTopic,
