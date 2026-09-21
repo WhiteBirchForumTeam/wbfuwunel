@@ -731,6 +731,56 @@ mod tests {
 		assert!(build_request(&whoami, &[], b"{}", b"", None, PEER).is_ok());
 	}
 
+	/// The query names a row declares are the only thing standing between a
+	/// client's variable and a silently dropped parameter: the specs-index
+	/// comparison does not look at them, and an e2e only exercises the ones
+	/// its scenario happens to send. So every list is spelled out here, and
+	/// changing one has to be a deliberate edit in two places.
+	/// 📎 Found by mutation: dropping `after` from `SetPushRule` left all 59
+	/// tests green, because nothing sends `after`.
+	#[test]
+	fn every_query_name_the_table_declares_is_spelled_out_here() {
+		let declared: Vec<String> = BRIDGED_ENDPOINTS
+			.iter()
+			.filter(|endpoint| !endpoint.query.is_empty())
+			.map(|endpoint| format!("{}: {}", endpoint.name, endpoint.query.join(",")))
+			.collect();
+
+		assert_eq!(declared, [
+			"Register: kind",
+			"UsernameAvailable: username",
+			"RegistrationTokenValidity: token",
+			"Join: via,server_name",
+			"Members: membership,not_membership",
+			"Knock: via,server_name",
+			"Summary: via",
+			"Hierarchy: from,limit,max_depth,suggested_only",
+			"MutualRooms: user_id,from",
+			"PublicRooms: limit,since,server",
+			"PublicRoomsFiltered: server",
+			"Context: limit,filter",
+			"Relations: from,to,dir,limit,recurse",
+			"RelationsByRelType: from,to,dir,limit,recurse",
+			"RelationsByRelTypeAndEventType: from,to,dir,limit,recurse",
+			"Threads: from,include,limit",
+			"TimestampToEvent: ts,dir",
+			"KeyChanges: from,to",
+			"AddBackupKeys: version",
+			"AddBackupKeysForRoom: version",
+			"AddBackupKeysForSession: version",
+			"GetBackupKeys: version",
+			"GetBackupKeysForRoom: version",
+			"GetBackupKeysForSession: version",
+			"DeleteBackupKeys: version",
+			"DeleteBackupKeysForRoom: version",
+			"DeleteBackupKeysForSession: version",
+			"SetPushRule: before,after",
+			"Notifications: from,limit,only",
+			"MediaPreview: url",
+			"SearchEvents: next_batch",
+		]);
+	}
+
 	/// The three `/relations` rows share one list of query names, so one wrong
 	/// name would silently drop the same parameter from all three (PR #77
 	/// review, rumia). Every name is spent here, on the narrowest of the three.
