@@ -1,7 +1,7 @@
 # 常用 Matrix API 走通道：一座通用的橋，而不是一支一支手搬
 
 > **這份文件回答：怎麼把大部分常用的 Matrix client API 改成 WebSocket pack，搬的順序是什麼，每一支要花多少。**
-> 狀態：✅ 維護者同意（PR #55）；橋的層與批 1 的 37 支在 PR #56 實作，批 2（註冊＋UIAA，8 支）提案 PR #62、實作 PR #63，兩批都已合併。**批 3（20 支＋新 kind `0x1D Report` ＋ `Hello` 的 `features`）維護者 2026-09-20 同意**，實作等開工（§3 批 3，三條決定在 §5）。維護者 2026-09-14：「把大部分常用的 api 接口改成 web socket pack 的模式 —— account 註冊、登入、登出、session 相關、room 相關、device，看能做多少、多快；行數少就多做一點，難度高就少做一點，慢慢移植。」
+> 狀態：✅ 維護者同意（PR #55）；橋的層與批 1 的 37 支 PR #56、批 2（註冊＋UIAA，8 支）PR #62＋#63、批 3（20 支＋新 kind `0x1D Report` ＋ `features`）PR #76＋#77，**都已合併**（總表 86 列）。**批 4（21 支＋四個新 kind）2026-09-21 提案中**（§3 批 4，一條待決定在 §5）。維護者 2026-09-14：「把大部分常用的 api 接口改成 web socket pack 的模式 —— account 註冊、登入、登出、session 相關、room 相關、device，看能做多少、多快；行數少就多做一點，難度高就少做一點，慢慢移植。」
 > 上位文件：[wbf-pack-pipeline.md](wbf-pack-pipeline.md) §7（搬一個端點的七步）、[wbf-wire-format.md](wbf-wire-format.md) §3.3（kind 分配表）。
 
 ## 0. 一句話
@@ -401,25 +401,88 @@ client                                          server
 - **新 kind `0x1D` 的防呆**：`0x1D` 不帶 bit4（它沒有原生的 subtype）要是 `UnknownKind`、帶 bit4 但 subtype 不在表上也是 `UnknownKind` —— 跟其他 kind 同一條路，不是新規則。
 - **`features`**：`Hello` 的回覆含這三個新字串（一條單元測試釘住字串本身，避免之後有人改字沒改文件）。
 
-### 批 4 之後：剩下的候選（等維護者挑）
+### 批 4：推播、目錄與搜尋，加上補洞（21 支，2026-09-21 提案）
 
-批 3 做完，維護者 2026-09-14 點名的那幾類（`account 註冊、登入、登出、session、room、device`）與 E2EE 全部在通道上，房間、事件、帳號三類也只剩下面這些。剩下常用、橋可以直接跑的：
+維護者 2026-09-21：**🔴 與 🟡 都做**。起因是清點「常用的基礎還缺什麼」—— 拿 `src/api/router.rs` 註冊的 **177 個 client 端點**逐一對橋的 86 列，剩下的裡面只有兩塊是使用者會直接感覺到的（推播設定、找人找房找訊息），其餘是既有領域裡的小洞與明確不搬的那些。
 
-| 類 | 端點 | 支數 | 備註 |
-|---|---|---|---|
-| 推播規則、pusher、通知列表 | `/pushrules/…`（9）、`/pushers`（2）、`/notifications` | 12 | 要開新 kind `0x18`；量最大的一組 |
-| 使用者目錄、公開房間目錄、搜尋 | `/publicRooms`（GET／POST）、`/user_directory/search`、`/search` | 4 | 要先決定算哪個 kind：新開一個 `0x19 Directory`，還是拆進 `0x13`（目錄）與 `0x14`（事件搜尋） |
+⭐ **這一批沒有要維護者決定的 kind 歸屬**：每一支的 kind 都直接來自分配表（[wbf-wire-format.md](wbf-wire-format.md) §3.3），號碼早就留好了。批 3 的教訓是「挑一個看起來像的」會挑錯，所以這裡一律照表。
+開四個新 kind：`0x18 Push`、`0x19 Media`、`0x1A Search`、`0x1B Voip`。四個都**沒有原生 subtype**，所以不帶 bit4 一律 `UnknownKind`，跟 `0x1D Report` 同一條路，不是新規則。
 
-📎 E2EE 的金鑰、備份、cross-signing 原本也在這張清單上，已經由 [wbf-e2ee.md](wbf-e2ee.md) 做完（`0x17`，(A) 7 支＋(C) 14 支）。
+#### 4-A. 推播與通知：新 kind `0x18 Push`（12 支）
+
+分配表 §3.3：`0x18 Push` ＝ pushers、push rules、notifications（`push/`）。
+
+| subtype | 名稱 | 端點 | path 變數 | query 變數 |
+|---|---|---|---|---|
+| `0x20` | GetPushRules | `GET /pushrules/` | — | — |
+| `0x21` | GetGlobalPushRules | `GET /pushrules/global/` | — | — |
+| `0x22` | GetPushRule | `GET /pushrules/global/{kind}/{rule_id}` | `kind`、`rule_id` | — |
+| `0x23` | SetPushRule | `PUT /pushrules/global/{kind}/{rule_id}` | `kind`、`rule_id` | `before`、`after` |
+| `0x24` | DeletePushRule | `DELETE /pushrules/global/{kind}/{rule_id}` | `kind`、`rule_id` | — |
+| `0x25` | GetPushRuleEnabled | `GET /pushrules/global/{kind}/{rule_id}/enabled` | 同上 | — |
+| `0x26` | SetPushRuleEnabled | `PUT /pushrules/global/{kind}/{rule_id}/enabled` | 同上 | — |
+| `0x27` | GetPushRuleActions | `GET /pushrules/global/{kind}/{rule_id}/actions` | 同上 | — |
+| `0x28` | SetPushRuleActions | `PUT /pushrules/global/{kind}/{rule_id}/actions` | 同上 | — |
+| `0x29` | GetPushers | `GET /pushers` | — | — |
+| `0x2A` | SetPusher | `POST /pushers/set` | — | — |
+| `0x2B` | Notifications | `GET /notifications` | — | `from`、`limit`、`only` |
+
+📎 **`scope` 不是變數**：規格的路徑是 `/pushrules/{scope}/…`，但 ruma 這版把 scope 釘死成 `global`（只有 `global` 有意義），所以模板裡只有 `kind` 與 `rule_id`。
+📎 **前兩支的路徑結尾有斜線**（`/pushrules/`、`/pushrules/global/`），跟 `state_key` 為空那條一樣是**真的路徑**，不是筆誤。
+
+#### 4-B. 目錄與搜尋：`0x13 Room` 續號 ＋ 新 kind `0x1A Search`（4 支）
+
+分配表 §3.3 已經回答了批 3 留下的那個問題：**Room 那一列本來就含 `directory`**，而 **`0x1A Search` ＝ search、user directory**。所以不必另開 `0x19 Directory`（`0x19` 是 Media，早就分配掉了）。
+
+| kind | subtype | 名稱 | 端點 | 變數 |
+|---|---|---|---|---|
+| `0x13` | `0x35` | PublicRooms | `GET /publicRooms` | query `limit`、`since`、`server` |
+| `0x13` | `0x36` | PublicRoomsFiltered | `POST /publicRooms` | query `server`；data 是過濾條件 |
+| `0x1A` | `0x20` | SearchEvents | `POST /search` | query `next_batch`；data 是查詢 |
+| `0x1A` | `0x21` | SearchUsers | `POST /user_directory/search` | data：`search_term`、`limit` |
+
+#### 4-C. 補洞：既有領域裡漏掉的幾支（5 支）
+
+這幾支不成一類，但都落在**已經搬過的領域**裡，缺了就是 client 得為了一支掉回 HTTP。
+
+| kind | subtype | 名稱 | 端點 | 變數 |
+|---|---|---|---|---|
+| `0x13` | `0x37` | RoomAliases | `GET /rooms/{room_id}/aliases` | `room_id` |
+| `0x14` | `0x2A` | TimestampToEvent | `GET /_matrix/client/v1/rooms/{room_id}/timestamp_to_event` | `room_id` ／ query `ts`、`dir` |
+| `0x19` | `0x20` | MediaConfig | `GET /_matrix/client/v1/media/config` | — |
+| `0x19` | `0x21` | MediaPreview | `GET /_matrix/client/v1/media/preview_url` | query `url` |
+| `0x1B` | `0x20` | TurnServer | `GET /voip/turnServer` | — |
+
+⚠️ **`0x19 Media` 這個 kind 是「相容路徑」，不是 fork 的媒體通道**：分塊上傳／下載是原生的 `0x03 Upload`／`0x04 Download`，這兩支只是「這台 server 的媒體上限是多少」與「給我這個連結的預覽」。
+📎 這兩支走的是**認證媒體**的路徑（`/_matrix/client/v1/media/…`，MSC3916 已進規格 1.11），不是已經棄用的 `/_matrix/media/v3/…` —— tuwunel 的 handler 用的就是前者。
+
+#### 4-D. 🚫 帳號資料的「刪」搬不了，要維護者決定
+
+`0x11 Account` 有 `GetAccountData`／`SetAccountData` 與房間版兩支，但**刪**的那兩支（`DELETE …/account_data/{event_type}`、房間版）在這版 ruma 裡**只有 unstable 路徑**（`org.matrix.msc3391`，MSC 還沒進規格）。`pick_path` 只收 v3 與較新的穩定版本，所以 `shape_of` 對它們回 `None` —— **現在的橋搬不了**。
+
+所以「能讀能寫不能刪」不是我們漏搬，是 Matrix 還沒把它定案。→ **決定 1**（§5）。
+
+#### 4-E. e2e（沿用批 1 的規矩）
+
+每支橋打一次、HTTP 打一次、結果一致（e2e13 新增情境 6）；另外：
+
+- **推播規則要真的改到東西**：設一條規則 → HTTP 讀得到它 → 改 `enabled` 與 `actions` → 刪掉之後 HTTP 也讀不到。只驗「回 200」沒有意義。
+- **`before`／`after` 要驗順序**：插一條規則在另一條之前，讀回來的順序要跟 HTTP 讀到的一致 —— 這是這兩個 query 變數唯一看得出來的效果。
+- **搜尋要有東西可搜**：先送幾則訊息、建一個公開房間，再比對；不是驗空結果。
+- **四個新 kind 的防呆**：`0x18`／`0x19`／`0x1A`／`0x1B` 不帶 bit4 都要是 `UnknownKind`。
+- **形狀要釘**（批 3 的教訓，[5.7b] 那種）：範例檔宣稱的回應形狀直接斷言，不能只靠「兩條路一致」—— 兩條路回的是同一個形狀，文件寫錯照樣全綠。
 
 ### 不搬（至少這一輪）
 
 | 端點 | 為什麼 |
 |---|---|
 | `/sync` | long-poll 在 WS 上的形狀是 server 推送，已經是 `Subscribe`／`Push`；另一件事 |
+| `/messages`（翻歷史） | `Event/Recent` 帶 `rooms` ➕ `before` 就是單房歷史（PR #51），同一個問題不要兩個入口 |
 | SSO、JWT、LDAP、appservice 登入 | 要瀏覽器或是給服務用的 |
 | 舊的整檔媒體、縮圖 | 已經有 `Upload`／`Download` |
-| push rules（`0x18`）、目錄、search | 不在維護者 2026-09-14 點名的範圍；橋做好之後各是分配表的幾列，排在批 4 之後的候選 |
+| 3pid（綁 email／手機）、OpenID、dehydrated device、QR 登入（rendezvous）、第三方橋接協定 | client 日常用不到；要的時候再排，不用先占號 |
+| admin 端點（鎖定、暫停、admin 註冊） | 管理者用，不是 client 的日常路徑；`0x20 Admin` 還沒開 |
+| `/rooms/{id}/initialSync`、`/events` | 規格已棄用，`Recent`／`Subscribe` 已經取代 |
 
 📎 keys、backup、cross-signing（`0x17`）本來也在這一列，2026-09-17 起已經搬完（[wbf-e2ee.md](wbf-e2ee.md)）。
 
@@ -474,6 +537,16 @@ client                                          server
 3. **同一個端點的舊 URL 要不要也給一個 subtype 號？**（§3 批 3-B 第 2 點）
    ✅ **維護者 2026-09-20：不做**。橋的表只放穩定路徑那一條，`im.nheko.summary` 與 `uk.half-shot.msc2666` 兩條舊 URL 在 HTTP 上照舊，橋上沒有號碼。
    📎 維護者同時重申了橋的界線：**「如果只是個 msg extension，你就維持原樣就好，bridge 不管內容是什麼，只管怎麼原樣 forward。」** 這跟 §2.2 已經定的一致 —— 橋不看 body，這一條講的是 HTTP 路徑，不是訊息內容。
+
+### 批 4 要維護者決定的（2026-09-21 提案）
+
+範圍維護者 2026-09-21 已經定了（“🔴🟡都做”），kind 歸屬全部照 §3.3 的分配表，**沒有另外要挑的**。只剩一條：
+
+1. **帳號資料的「刪」只有 unstable 路徑，要不要為它放寬 `pick_path`？**（§3 批 4-D）
+   - (a) **不做**：這一批不搬，等 MSC3391 進規格、ruma 給出穩定路徑再說。client 要刪帳號資料就掉回 HTTP（或者照 Matrix 的做法寫空值 `{}`）。
+   - (b) **放寬**：`pick_path` 再加一層後備 —— 沒有 v3、也沒有任何穩定版本時，取 unstable 那條。兩支因此上得了橋，MSC 一進規格就會**自動**改走穩定路徑（表指的是型別，不是字串）。
+   - 建議 **(a)**：“一個 subtype 對一個端點”的前提是那個端點的形狀定了。MSC 還在動的時候把它放上線，等於拿一個永久的號碼押一個還會改的東西；而「不能刪」的代價是一支接口掉回 HTTP，不是功能不見了。
+   ⚠️ 選 (b) 的話要記得：放寬之後，**任何只有 unstable 路徑的端點都會變成“橋搬得了”**，這條規則不只管這兩支。
 
 ## 6. 同意之後的落點
 
