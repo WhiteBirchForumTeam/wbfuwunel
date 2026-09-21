@@ -37,6 +37,6 @@
 | 情況 | `code` | 來自 |
 |---|---|---|
 | meta 少了路徑變數、多了表上沒有的變數 | `InvalidRequest`（1201） | 橋 |
-| `0x12` 的 pack 沒帶 bit4，或 subtype 不在表上 | `UnknownKind`（1202） | 橋 |
+| `0x12` 的 pack 沒帶 bit4，或 subtype 不在表上 | `UnknownKind`（1101） | 橋 |
 | 過濾器不是合法的 JSON 結構 | `InvalidRequest`（400 `M_BAD_JSON`） | 端點 |
 | 沒登入 | `Unauthorized`（1301） | 端點 |

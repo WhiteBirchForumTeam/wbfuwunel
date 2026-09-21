@@ -3,8 +3,8 @@
 > **這份文件回答：哪些 Matrix 端點已經（或這一批要）走橋、每個的 kind／subtype 是幾號、送出去的 pack 前幾個 byte 長什麼樣、對到哪個端點、要帶哪些變數。**
 > 設計與規則在 [../design/wbf-api-bridge.md](../design/wbf-api-bridge.md)（下稱「橋的設計」），這裡只放**分配結果**。
 > ⭐ **這張表是走橋的 subtype 號的唯一權威**：[wbf-wire-format.md](../design/wbf-wire-format.md) §3.2 只列原生的 subtype，走橋的一律指到這裡 —— 兩份表遲早漂移。
-> 每個 kind 的完整範例（請求與回應的 meta、data、錯誤）在同一個目錄的 `KIND.md`，隨搬的那一批一起寫：[0x10-session.md](0x10-session.md)、[0x11-account.md](0x11-account.md)、[0x12-sync.md](0x12-sync.md)、[0x13-room.md](0x13-room.md)、[0x14-event.md](0x14-event.md)、[0x15-receipt.md](0x15-receipt.md)、[0x16-device.md](0x16-device.md)、[0x17-keys.md](0x17-keys.md)、[0x1C-misc.md](0x1C-misc.md)、[0x1D-report.md](0x1D-report.md)。
-> 狀態：批 1 的 37 支、批 2 的 8 支（註冊、UIAA）、E2EE (A) 的 7 支（金鑰、發 to-device，[wbf-e2ee.md](../design/wbf-e2ee.md) §2）、E2EE (C) 的 14 支（金鑰備份，同文件 §4）與批 3 的 20 支（房間其餘、關聯與討論串、在線狀態／過濾器／capabilities、檢舉）**已實作**：server 的表（`src/api/client/wbf/bridge.rs` 的 `BRIDGED_ENDPOINTS`）逐列跟這份總表比對（單元測試 `the_specs_index_and_this_table_list_the_same_endpoints`，對不上就紅）；每支都在 e2e13（批 1 情境 1、批 2 情境 2、E2EE (A) 情境 3、E2EE (C) 情境 4、批 3 情境 5）跟原本的 HTTP 端點比對過結果。
+> 每個 kind 的完整範例（請求與回應的 meta、data、錯誤）在同一個目錄的 `KIND.md`，隨搬的那一批一起寫：[0x10-session.md](0x10-session.md)、[0x11-account.md](0x11-account.md)、[0x12-sync.md](0x12-sync.md)、[0x13-room.md](0x13-room.md)、[0x14-event.md](0x14-event.md)、[0x15-receipt.md](0x15-receipt.md)、[0x16-device.md](0x16-device.md)、[0x17-keys.md](0x17-keys.md)、[0x18-push.md](0x18-push.md)、[0x19-media.md](0x19-media.md)、[0x1A-search.md](0x1A-search.md)、[0x1B-voip.md](0x1B-voip.md)、[0x1C-misc.md](0x1C-misc.md)、[0x1D-report.md](0x1D-report.md)。
+> 狀態：批 1 的 37 支、批 2 的 8 支（註冊、UIAA）、E2EE (A) 的 7 支（金鑰、發 to-device，[wbf-e2ee.md](../design/wbf-e2ee.md) §2）、E2EE (C) 的 14 支（金鑰備份，同文件 §4）、批 3 的 20 支（房間其餘、關聯與討論串、在線狀態／過濾器／capabilities、檢舉）與批 4 的 21 支（推播、目錄與搜尋、媒體設定與連結預覽、TURN、房間別名、時間戳跳轉）**已實作**：server 的表（`src/api/client/wbf/bridge.rs` 的 `BRIDGED_ENDPOINTS`）逐列跟這份總表比對（單元測試 `the_specs_index_and_this_table_list_the_same_endpoints`，對不上就紅）；每支都在 e2e13（批 1 情境 1、批 2 情境 2、E2EE (A) 情境 3、E2EE (C) 情境 4、批 3 情境 5、批 4 情境 6）跟原本的 HTTP 端點比對過結果。
 
 ## 1. 一個走橋的 pack 怎麼讀
 
@@ -132,6 +132,9 @@ offset  bytes              意思
 | `0x32` | `01 13 32 10` | Summary | **（批 3）** 房間簡介（沒加入也看得到） | `GET /_matrix/client/v1/room_summary/{room_id_or_alias}` | `room_id_or_alias` ／ `via`（陣列） | — |
 | `0x33` | `01 13 33 10` | Hierarchy | **（批 3）** space 底下的房間樹 | `GET /_matrix/client/v1/rooms/{room_id}/hierarchy` | `room_id` ／ `from`、`limit`、`max_depth`、`suggested_only` | — |
 | `0x34` | `01 13 34 10` | MutualRooms | **（批 3）** 我與某人共同在哪些房間 | `GET /_matrix/client/v1/mutual_rooms` | — ／ `user_id`、`from` | — |
+| `0x35` | `01 13 35 10` | PublicRooms | **（批 4）** 公開房間目錄（簡式） | `GET /publicRooms` | — ／ `limit`、`since`、`server` | — |
+| `0x36` | `01 13 36 10` | PublicRoomsFiltered | **（批 4）** 公開房間目錄（帶搜尋與過濾） | `POST /publicRooms` | — ／ `server` | JSON：`filter`、`limit`、`since`、`room_types` |
+| `0x37` | `01 13 37 10` | RoomAliases | **（批 4）** 這個房間有哪些別名 | `GET /rooms/{room_id}/aliases` | `room_id` | — |
 
 📎 `POST /rooms/{room_id}/join`（只收房間 id 的那個 join）**不在這批**：`Join`（`0x21`）收 id 也收別名，一個入口就夠。
 
@@ -151,6 +154,7 @@ offset  bytes              意思
 | `0x27` | `01 14 27 10` | RelationsByRelType | **（批 3）** 同上，只要某一種關聯 | `GET /_matrix/client/v1/rooms/{room_id}/relations/{event_id}/{rel_type}` | 再加 `rel_type` ／ 同上 | — |
 | `0x28` | `01 14 28 10` | RelationsByRelTypeAndEventType | **（批 3）** 同上，再限事件型別 | `GET /_matrix/client/v1/rooms/{room_id}/relations/{event_id}/{rel_type}/{event_type}` | 再加 `event_type` ／ 同上 | — |
 | `0x29` | `01 14 29 10` | Threads | **（批 3）** 房間裡的討論串清單 | `GET /_matrix/client/v1/rooms/{room_id}/threads` | `room_id` ／ `from`、`include`、`limit` | — |
+| `0x2A` | `01 14 2A 10` | TimestampToEvent | **（批 4）** 某個時間點的事件是哪一則（跳到某天） | `GET /_matrix/client/v1/rooms/{room_id}/timestamp_to_event` | `room_id` ／ `ts`、`dir` | — |
 
 ### `0x15 Receipt`（輸入中與已讀）
 
@@ -202,6 +206,53 @@ offset  bytes              意思
 | `0x3C` | `01 17 3C 10` | DeleteBackupKeysForRoom | **（E2EE）** 刪一個房間的 | `DELETE /room_keys/keys/{room_id}` | `room_id` ／ query `version` | — |
 | `0x3D` | `01 17 3D 10` | DeleteBackupKeysForSession | **（E2EE）** 刪一個 session 的 | `DELETE /room_keys/keys/{room_id}/{session_id}` | `room_id`、`session_id` ／ query `version` | — |
 
+### `0x18 Push`（推播規則、pusher、通知）
+
+📎 這個 kind 是批 4 開的，**沒有原生的 subtype**，所以 `0x18` 不帶 bit4 一律是 `UnknownKind`。
+📎 **`scope` 不是變數**：規格的路徑是 `/pushrules/{scope}/…`，但這版 ruma 把 scope 釘死成 `global`（只有它有意義），所以模板裡只有 `kind` 與 `rule_id`。
+
+| subtype | 前 4 bytes | 名稱 | 做什麼 | 端點 | 變數（path ／ query） | data |
+|---|---|---|---|---|---|---|
+| `0x20` | `01 18 20 10` | GetPushRules | **（批 4）** 全部的推播規則（所有 scope） | `GET /pushrules/` | — | — |
+| `0x21` | `01 18 21 10` | GetGlobalPushRules | **（批 4）** `global` scope 的規則 | `GET /pushrules/global/` | — | — |
+| `0x22` | `01 18 22 10` | GetPushRule | **（批 4）** 讀一條規則 | `GET /pushrules/global/{kind}/{rule_id}` | `kind`、`rule_id` | — |
+| `0x23` | `01 18 23 10` | SetPushRule | **（批 4）** 新增或改一條規則 | `PUT /pushrules/global/{kind}/{rule_id}` | `kind`、`rule_id` ／ `before`、`after` | JSON：規則本身（`actions`、`conditions`／`pattern`） |
+| `0x24` | `01 18 24 10` | DeletePushRule | **（批 4）** 刪一條規則 | `DELETE /pushrules/global/{kind}/{rule_id}` | `kind`、`rule_id` | — |
+| `0x25` | `01 18 25 10` | GetPushRuleEnabled | **（批 4）** 這條規則開著沒 | `GET /pushrules/global/{kind}/{rule_id}/enabled` | `kind`、`rule_id` | — |
+| `0x26` | `01 18 26 10` | SetPushRuleEnabled | **（批 4）** 開關一條規則 | `PUT /pushrules/global/{kind}/{rule_id}/enabled` | `kind`、`rule_id` | JSON：`{"enabled":true}` |
+| `0x27` | `01 18 27 10` | GetPushRuleActions | **（批 4）** 這條規則會做什麼 | `GET /pushrules/global/{kind}/{rule_id}/actions` | `kind`、`rule_id` | — |
+| `0x28` | `01 18 28 10` | SetPushRuleActions | **（批 4）** 改這條規則做什麼 | `PUT /pushrules/global/{kind}/{rule_id}/actions` | `kind`、`rule_id` | JSON：`{"actions":["notify",…]}` |
+| `0x29` | `01 18 29 10` | GetPushers | **（批 4）** 我註冊了哪些推播目的地 | `GET /pushers` | — | — |
+| `0x2A` | `01 18 2A 10` | SetPusher | **（批 4）** 註冊或移除一個推播目的地 | `POST /pushers/set` | — | JSON：`pushkey`、`app_id`、`kind`（`null` 是移除）… |
+| `0x2B` | `01 18 2B 10` | Notifications | **（批 4）** 已經產生的通知列表 | `GET /notifications` | — ／ `from`、`limit`、`only` | — |
+
+### `0x19 Media`（相容的媒體路徑）
+
+⚠️ **這個 kind 不是 fork 的媒體通道**：分塊上傳／下載是原生的 `0x03 Upload`／`0x04 Download`。這裡只放「這台 server 的媒體限制」與「連結預覽」。
+📎 批 4 開的，**沒有原生的 subtype**；走的是**認證媒體**的路徑（`/_matrix/client/v1/media/…`，MSC3916 進規格 1.11），不是已棄用的 `/_matrix/media/v3/…`。
+
+| subtype | 前 4 bytes | 名稱 | 做什麼 | 端點 | 變數（path ／ query） | data |
+|---|---|---|---|---|---|---|
+| `0x20` | `01 19 20 10` | MediaConfig | **（批 4）** 這台 server 的上傳上限 | `GET /_matrix/client/v1/media/config` | — | — |
+| `0x21` | `01 19 21 10` | MediaPreview | **（批 4）** 一個連結的預覽（標題、圖、描述） | `GET /_matrix/client/v1/media/preview_url` | — ／ `url` | — |
+
+### `0x1A Search`（搜尋與使用者目錄）
+
+📎 批 4 開的，**沒有原生的 subtype**。
+
+| subtype | 前 4 bytes | 名稱 | 做什麼 | 端點 | 變數（path ／ query） | data |
+|---|---|---|---|---|---|---|
+| `0x20` | `01 1A 20 10` | SearchEvents | **（批 4）** 全文搜尋訊息 | `POST /search` | — ／ `next_batch` | JSON：`search_categories` |
+| `0x21` | `01 1A 21 10` | SearchUsers | **（批 4）** 找人（使用者目錄） | `POST /user_directory/search` | — | JSON：`search_term`、`limit` |
+
+### `0x1B Voip`（通話）
+
+📎 批 4 開的，**沒有原生的 subtype**。
+
+| subtype | 前 4 bytes | 名稱 | 做什麼 | 端點 | 變數（path ／ query） | data |
+|---|---|---|---|---|---|---|
+| `0x20` | `01 1B 20 10` | TurnServer | **（批 4）** 打洞用的 TURN 憑證 | `GET /voip/turnServer` | — | — |
+
 ### `0x1C Misc`（其餘）
 
 | subtype | 前 4 bytes | 名稱 | 做什麼 | 端點 | 變數（path ／ query） | data |
@@ -218,7 +269,7 @@ offset  bytes              意思
 | `0x21` | `01 1D 21 10` | ReportRoom | **（批 3）** 檢舉一個房間 | `POST /rooms/{room_id}/report` | `room_id` | JSON，可帶 `reason` |
 | `0x22` | `01 1D 22 10` | ReportUser | **（批 3）** 檢舉一個使用者 | `POST /users/{user_id}/report` | `user_id` | JSON，可帶 `reason` |
 
-**批 1 共 37 支**：Account 12、Room 13、Event 6、Receipt 3、Device 3。**批 2 共 8 支**：Session 4、Account 2、Device 2。**E2EE (A) 共 7 支**：Device 1、Keys 6。**E2EE (C) 共 14 支**：Keys 的金鑰備份。**批 3 共 20 支**：Sync 2、Room 8、Event 4、Receipt 2、Misc 1、Report 3。合計 86 支。
+**批 1 共 37 支**：Account 12、Room 13、Event 6、Receipt 3、Device 3。**批 2 共 8 支**：Session 4、Account 2、Device 2。**E2EE (A) 共 7 支**：Device 1、Keys 6。**E2EE (C) 共 14 支**：Keys 的金鑰備份。**批 3 共 20 支**：Sync 2、Room 8、Event 4、Receipt 2、Misc 1、Report 3。**批 4 共 21 支**：Push 12、Media 2、Search 2、Voip 1、Room 3、Event 1。合計 **107 支**。
 
 ## 3. 不在這批
 
