@@ -937,6 +937,23 @@ Check '[6.9] SearchEvents finds the message just sent and SearchUsers finds the 
     -and (Same-As-Http $users $husers) -and (@($users.body.results | ForEach-Object { $_.user_id }) -contains $gwen)) `
   "search=$($search.body.search_categories.room_events.count) users=$(@($users.body.results).Count) http=$($hsearch.status)/$($husers.status)"
 
+# `next_batch` is a *query* variable on the request (ruma marks it `#[ruma_api(query)]`) and a body field on the
+# reply -- one name, two places. A reviewer read it the other way round (PR #81, rumia), so this settles it by
+# running it rather than by reading: if the bridge did not carry it in the query string, page two would repeat
+# page one forever. One matching message per page makes that visible.
+$hay2 = Send-Msg $tokF $roomP @{ msgtype = 'm.text'; body = 'another needle, later' }
+Start-Sleep -Milliseconds 500
+$pagedBody = @{ search_categories = @{ room_events = @{ search_term = 'needle'; keys = @('content.body'); filter = @{ limit = 1 } } } }
+$page1 = Bridge $wsF 0x1A 0x20 $null $pagedBody
+$token1 = $page1.body.search_categories.room_events.next_batch
+$page2 = Bridge $wsF 0x1A 0x20 @{ next_batch = "$token1" } $pagedBody
+$hpage2 = Http POST "/_matrix/client/v3/search?next_batch=$(Enc "$token1")" $pagedBody $tokF
+$first = @($page1.body.search_categories.room_events.results | ForEach-Object { $_.result.event_id })
+$second = @($page2.body.search_categories.room_events.results | ForEach-Object { $_.result.event_id })
+Check '[6.9b] search paging really advances through the bridge: `next_batch` goes out as a query variable, so page two is a different event, and it matches HTTP''s page two' `
+  ("$token1" -ne '' -and $first.Count -eq 1 -and $second.Count -eq 1 -and $first[0] -ne $second[0] -and (Same-As-Http $page2 $hpage2)) `
+  "token=$token1 page1=$($first -join ',') page2=$($second -join ',') http=$($hpage2.status)"
+
 # ---- 0x19 Media, 0x1B Voip ----
 $mediaConfig = Bridge $wsF 0x19 0x20 $null $null
 $hmediaConfig = Http GET '/_matrix/client/v1/media/config' $null $tokF
@@ -944,11 +961,17 @@ $preview = Bridge $wsF 0x19 0x21 @{ url = 'https://example.invalid/page' } $null
 $hpreview = Http GET "/_matrix/client/v1/media/preview_url?url=$(Enc 'https://example.invalid/page')" $null $tokF
 $turn = Bridge $wsF 0x1B 0x20 $null $null
 $hturn = Http GET '/_matrix/client/v3/voip/turnServer' $null $tokF
+# `ts` is the second query variable this endpoint takes. A row that forgot to declare it would make the bridge
+# answer its own InvalidRequest (1201) where HTTP answers the endpoint -- so sending it is what tells the two
+# apart, whatever the endpoint itself says (PR #81 review, cirno).
+$previewTs = Bridge $wsF 0x19 0x21 @{ url = 'https://example.invalid/page'; ts = 1789900000000 } $null
+$hpreviewTs = Http GET "/_matrix/client/v1/media/preview_url?url=$(Enc 'https://example.invalid/page')&ts=1789900000000" $null $tokF
 # 📎 This server has no TURN configured and cannot reach the invalid host, so these two answer refusals -- and the
 # point of the check is that the bridge refuses *exactly* where HTTP refuses, whatever the answer happens to be.
-Check '[6.10] MediaConfig, MediaPreview and TurnServer each answer through the bridge exactly what HTTP answers' `
-  ((Same-As-Http $mediaConfig $hmediaConfig) -and (($preview.status -eq $hpreview.status)) -and (($turn.status -eq $hturn.status)) -and $mediaConfig.status -eq 200) `
-  "config=$($mediaConfig.text) preview=$($preview.status)/$($hpreview.status) turn=$($turn.status)/$($hturn.status)"
+Check '[6.10] MediaConfig, MediaPreview and TurnServer each answer through the bridge exactly what HTTP answers, and `ts` reaches the endpoint instead of being refused by the bridge' `
+  ((Same-As-Http $mediaConfig $hmediaConfig) -and (($preview.status -eq $hpreview.status)) -and (($turn.status -eq $hturn.status)) -and $mediaConfig.status -eq 200 `
+    -and $previewTs.status -eq $hpreviewTs.status -and $previewTs.meta.code_id -ne 1201) `
+  "config=$($mediaConfig.text) preview=$($preview.status)/$($hpreview.status) withTs=$($previewTs.status)/$($hpreviewTs.status) turn=$($turn.status)/$($hturn.status)"
 
 # ---- 0x14 Event: timestamp_to_event ----
 $stamp = (Http GET "/_matrix/client/v3/rooms/$(Enc $roomP)/event/$(Enc $hay)" $null $tokF).json.origin_server_ts
@@ -976,8 +999,11 @@ $anonSearch = Bridge $anon8 0x1A 0x20 $null $searchBody
 $hanonSearch = Http POST '/_matrix/client/v3/search' $searchBody $null
 $badRuleKind = Bridge $wsF 0x18 0x22 @{ kind = 'not-a-kind'; rule_id = 'x' } $null
 $hbadRuleKind = Http GET '/_matrix/client/v3/pushrules/global/not-a-kind/x' $null $tokF
-Check '[6.13] without logging in the push rules and search are refused exactly as HTTP refuses them; so is a rule kind that does not exist' `
-  ((Same-Refusal $anonRules $hanonRules) -and $anonRules.meta.errcode -eq 'M_MISSING_TOKEN' -and (Same-Refusal $anonSearch $hanonSearch) -and (Same-Refusal $badRuleKind $hbadRuleKind)) `
+# 📎 A rule kind that is not one of the five is **404, not 400**: ruma's `RuleKind` takes any string, so an
+# unknown one simply finds no rule. Pinned absolutely, because `Same-Refusal` alone would pass either way and
+# 0x18-push.md claimed 400 until this was checked (PR #81 review, cirno).
+Check '[6.13] without logging in the push rules and search are refused exactly as HTTP refuses them; a rule kind that does not exist is 404 on both roads, not 400' `
+  ((Same-Refusal $anonRules $hanonRules) -and $anonRules.meta.errcode -eq 'M_MISSING_TOKEN' -and (Same-Refusal $anonSearch $hanonSearch) -and (Same-Refusal $badRuleKind $hbadRuleKind) -and $badRuleKind.status -eq 404) `
   "rules=$($anonRules.metaText) search=$($anonSearch.status)/$($hanonSearch.status) badKind=$($badRuleKind.status)/$($hbadRuleKind.status)"
 $anon8.Dispose()
 

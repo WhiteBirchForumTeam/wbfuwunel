@@ -33,7 +33,8 @@
 | 請求 data | — |
 | 回覆 data | 讀：`{"rule_id":"!AbCdEf:localhost","default":false,"enabled":true,"actions":["notify"]}`（欄位隨 `kind` 不同，`content` 型多一個 `pattern`、`override`／`underride` 多 `conditions`）。刪：`{}` |
 
-**會怎麼被拒**：沒有這條規則 → `NotFound`（404 `M_NOT_FOUND`）；`kind` 不是那五個字之一 → `InvalidRequest`（400）。
+**會怎麼被拒**：沒有這條規則 → `NotFound`（404 `M_NOT_FOUND`）。
+⚠️ **`kind` 不是那五個字之一，答案也是 404 而不是 400**：ruma 的 `RuleKind` 收任意字串（不認得的變成 `_Custom`），查表查不到就是「沒有這條規則」。所以 client 分辨不出「打錯 kind」與「規則不存在」 —— 兩者都是 404（PR #81 審查，cirno；e2e `[6.13]` 實跑 `badKind=404/404`）。
 
 ## `0x23` SetPushRule —— 新增或改一條規則
 

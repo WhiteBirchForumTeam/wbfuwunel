@@ -28,12 +28,13 @@
 
 | | |
 |---|---|
-| 請求 meta | `{"url":"https://example.org/article"}` |
+| 請求 meta | `{"url":"https://example.org/article"}`；可加 `"ts"`（毫秒，「想要哪個時間點的預覽」） |
 | 請求 data | — |
 | 回覆 data | `{"og:title":"…","og:description":"…","og:image":"mxc://…","matrix:image:size":12345}`；沒抓到東西是 `{}` |
 
 ⚠️ **這台 server 可以整個關掉預覽**，也可以用允許清單限制能預覽哪些網址 —— 關著的時候是 `Forbidden`（403），跟 HTTP 一樣。client 不要把 403 當成「這個連結壞了」。
 📎 是 **server 去抓那個網址**，不是 client。所以它看得到 server 的出口 IP，也受 server 的網路政策限制。
+📎 **`ts` 這台 server 收下但忽略**（沒有歷史版本的預覽）。橋還是宣告了它 —— **因為 HTTP 收得下它**，而橋要在 HTTP 拒絕的地方才拒絕；漏宣告的話，帶 `ts` 的 client 走橋會拿到橋自己的 `InvalidRequest`（1201），走 HTTP 卻正常 —— 兩條路就不一致了（PR #81 審查，cirno）。
 
 ## 這個 kind 共通的拒絕
 

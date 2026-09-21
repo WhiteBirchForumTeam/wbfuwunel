@@ -194,7 +194,7 @@ static BRIDGED_ENDPOINTS: &[BridgedEndpoint] = &[
 	// channel — chunked transfer is the native `Upload`/`Download`. These two
 	// take the authenticated-media paths (`/_matrix/client/v1/media/…`).
 	row(Kind::Media, 0x20, "MediaConfig", shape_of::<authenticated_media::get_media_config::v1::Request>, NO_QUERY),
-	row(Kind::Media, 0x21, "MediaPreview", shape_of::<authenticated_media::get_media_preview::v1::Request>, &["url"]),
+	row(Kind::Media, 0x21, "MediaPreview", shape_of::<authenticated_media::get_media_preview::v1::Request>, &["url", "ts"]),
 
 	// 0x1A Search (batch 4)
 	row(Kind::Search, 0x20, "SearchEvents", shape_of::<search::search_events::v3::Request>, &["next_batch"]),
@@ -776,7 +776,7 @@ mod tests {
 			"DeleteBackupKeysForSession: version",
 			"SetPushRule: before,after",
 			"Notifications: from,limit,only",
-			"MediaPreview: url",
+			"MediaPreview: url,ts",
 			"SearchEvents: next_batch",
 		]);
 	}

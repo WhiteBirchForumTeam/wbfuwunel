@@ -234,7 +234,7 @@ offset  bytes              意思
 | subtype | 前 4 bytes | 名稱 | 做什麼 | 端點 | 變數（path ／ query） | data |
 |---|---|---|---|---|---|---|
 | `0x20` | `01 19 20 10` | MediaConfig | **（批 4）** 這台 server 的上傳上限 | `GET /_matrix/client/v1/media/config` | — | — |
-| `0x21` | `01 19 21 10` | MediaPreview | **（批 4）** 一個連結的預覽（標題、圖、描述） | `GET /_matrix/client/v1/media/preview_url` | — ／ `url` | — |
+| `0x21` | `01 19 21 10` | MediaPreview | **（批 4）** 一個連結的預覽（標題、圖、描述） | `GET /_matrix/client/v1/media/preview_url` | — ／ `url`、`ts` | — |
 
 ### `0x1A Search`（搜尋與使用者目錄）
 
