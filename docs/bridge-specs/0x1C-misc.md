@@ -24,6 +24,6 @@
 | 情況 | `code` | 來自 |
 |---|---|---|
 | meta 出現表上沒有的變數 | `InvalidRequest`（1201） | 橋 |
-| `0x1C` 的 pack 沒帶 bit4，或 subtype 不在表上 | `UnknownKind`（1202） | 橋 |
+| `0x1C` 的 pack 沒帶 bit4，或 subtype 不在表上 | `UnknownKind`（1101） | 橋 |
 | 沒登入 | `Unauthorized`（1301） | 端點 |
 | 問太快 | `RateLimited`（429 `M_LIMIT_EXCEEDED`） | 端點 |

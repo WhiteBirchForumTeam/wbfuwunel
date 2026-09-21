@@ -20,9 +20,9 @@ use http::{HeaderValue, Method, Request, StatusCode, header};
 use ruma::api::{
 	IncomingRequest,
 	client::{
-		account, alias, backup, config, context, device, directory, discovery, filter, keys, knock, membership,
-		presence, profile, read_marker, receipt, redact, relations, reporting, room, session, space, state, tag,
-		threads, to_device, typing,
+		account, alias, authenticated_media, backup, config, context, device, directory, discovery, filter, keys,
+		knock, membership, presence, profile, push, read_marker, receipt, redact, relations, reporting, room,
+		search, session, space, state, tag, threads, to_device, typing, user_directory, voip,
 	},
 	path_builder::PathBuilder,
 };
@@ -116,6 +116,10 @@ static BRIDGED_ENDPOINTS: &[BridgedEndpoint] = &[
 	row(Kind::Room, 0x32, "Summary", shape_of::<room::get_summary::v1::Request>, &["via"]),
 	row(Kind::Room, 0x33, "Hierarchy", shape_of::<space::get_hierarchy::v1::Request>, &["from", "limit", "max_depth", "suggested_only"]),
 	row(Kind::Room, 0x34, "MutualRooms", shape_of::<membership::mutual_rooms::v1::Request>, &["user_id", "from"]),
+	// Batch 4: the public directory (wbf-wire-format.md §3.3 puts the directory in this kind) and a room's aliases.
+	row(Kind::Room, 0x35, "PublicRooms", shape_of::<directory::get_public_rooms::v3::Request>, &["limit", "since", "server"]),
+	row(Kind::Room, 0x36, "PublicRoomsFiltered", shape_of::<directory::get_public_rooms_filtered::v3::Request>, &["server"]),
+	row(Kind::Room, 0x37, "RoomAliases", shape_of::<room::aliases::v3::Request>, NO_QUERY),
 	// 0x14 Event
 	row(Kind::Event, 0x20, "GetEvent", shape_of::<room::get_room_event::v3::Request>, NO_QUERY),
 	row(Kind::Event, 0x21, "GetState", shape_of::<state::get_state_events::v3::Request>, NO_QUERY),
@@ -128,6 +132,8 @@ static BRIDGED_ENDPOINTS: &[BridgedEndpoint] = &[
 	row(Kind::Event, 0x27, "RelationsByRelType", shape_of::<relations::get_relating_events_with_rel_type::v1::Request>, RELATIONS_QUERY),
 	row(Kind::Event, 0x28, "RelationsByRelTypeAndEventType", shape_of::<relations::get_relating_events_with_rel_type_and_event_type::v1::Request>, RELATIONS_QUERY),
 	row(Kind::Event, 0x29, "Threads", shape_of::<threads::get_threads::v1::Request>, &["from", "include", "limit"]),
+	// Batch 4: which event a room was at, at a given moment.
+	row(Kind::Event, 0x2A, "TimestampToEvent", shape_of::<room::get_event_by_timestamp::v1::Request>, &["ts", "dir"]),
 	// 0x15 Receipt
 	row(Kind::Receipt, 0x20, "Typing", shape_of::<typing::create_typing_event::v3::Request>, NO_QUERY),
 	row(Kind::Receipt, 0x21, "ReadMarkers", shape_of::<read_marker::set_read_marker::v3::Request>, NO_QUERY),
@@ -167,6 +173,35 @@ static BRIDGED_ENDPOINTS: &[BridgedEndpoint] = &[
 	row(Kind::Keys, 0x3B, "DeleteBackupKeys", shape_of::<backup::delete_backup_keys::v3::Request>, VERSION_QUERY),
 	row(Kind::Keys, 0x3C, "DeleteBackupKeysForRoom", shape_of::<backup::delete_backup_keys_for_room::v3::Request>, VERSION_QUERY),
 	row(Kind::Keys, 0x3D, "DeleteBackupKeysForSession", shape_of::<backup::delete_backup_keys_for_session::v3::Request>, VERSION_QUERY),
+
+	// 0x18 Push (batch 4): the rules, the pushers that act on them, and what
+	// they have produced. ruma pins the scope to `global`, so the templates
+	// carry only `kind` and `rule_id`.
+	row(Kind::Push, 0x20, "GetPushRules", shape_of::<push::get_pushrules_all::v3::Request>, NO_QUERY),
+	row(Kind::Push, 0x21, "GetGlobalPushRules", shape_of::<push::get_pushrules_global_scope::v3::Request>, NO_QUERY),
+	row(Kind::Push, 0x22, "GetPushRule", shape_of::<push::get_pushrule::v3::Request>, NO_QUERY),
+	row(Kind::Push, 0x23, "SetPushRule", shape_of::<push::set_pushrule::v3::Request>, &["before", "after"]),
+	row(Kind::Push, 0x24, "DeletePushRule", shape_of::<push::delete_pushrule::v3::Request>, NO_QUERY),
+	row(Kind::Push, 0x25, "GetPushRuleEnabled", shape_of::<push::get_pushrule_enabled::v3::Request>, NO_QUERY),
+	row(Kind::Push, 0x26, "SetPushRuleEnabled", shape_of::<push::set_pushrule_enabled::v3::Request>, NO_QUERY),
+	row(Kind::Push, 0x27, "GetPushRuleActions", shape_of::<push::get_pushrule_actions::v3::Request>, NO_QUERY),
+	row(Kind::Push, 0x28, "SetPushRuleActions", shape_of::<push::set_pushrule_actions::v3::Request>, NO_QUERY),
+	row(Kind::Push, 0x29, "GetPushers", shape_of::<push::get_pushers::v3::Request>, NO_QUERY),
+	row(Kind::Push, 0x2A, "SetPusher", shape_of::<push::set_pusher::v3::Request>, NO_QUERY),
+	row(Kind::Push, 0x2B, "Notifications", shape_of::<push::get_notifications::v3::Request>, &["from", "limit", "only"]),
+
+	// 0x19 Media (batch 4): the compatibility media path, not the fork's own
+	// channel — chunked transfer is the native `Upload`/`Download`. These two
+	// take the authenticated-media paths (`/_matrix/client/v1/media/…`).
+	row(Kind::Media, 0x20, "MediaConfig", shape_of::<authenticated_media::get_media_config::v1::Request>, NO_QUERY),
+	row(Kind::Media, 0x21, "MediaPreview", shape_of::<authenticated_media::get_media_preview::v1::Request>, &["url", "ts"]),
+
+	// 0x1A Search (batch 4)
+	row(Kind::Search, 0x20, "SearchEvents", shape_of::<search::search_events::v3::Request>, &["next_batch"]),
+	row(Kind::Search, 0x21, "SearchUsers", shape_of::<user_directory::search_users::v3::Request>, NO_QUERY),
+
+	// 0x1B Voip (batch 4)
+	row(Kind::Voip, 0x20, "TurnServer", shape_of::<voip::get_turn_server_info::v3::Request>, NO_QUERY),
 
 	// 0x1C Misc (batch 3)
 	row(Kind::Misc, 0x20, "Capabilities", shape_of::<discovery::get_capabilities::v3::Request>, NO_QUERY),
@@ -694,6 +729,56 @@ mod tests {
 		assert_eq!(refused_code(build_request(&whoami, &[], b"[1,2]", b"", None, PEER)), RejectCode::InvalidRequest);
 		assert!(build_request(&whoami, &[], b"", b"", None, PEER).is_ok());
 		assert!(build_request(&whoami, &[], b"{}", b"", None, PEER).is_ok());
+	}
+
+	/// The query names a row declares are the only thing standing between a
+	/// client's variable and a silently dropped parameter: the specs-index
+	/// comparison does not look at them, and an e2e only exercises the ones
+	/// its scenario happens to send. So every list is spelled out here, and
+	/// changing one has to be a deliberate edit in two places.
+	/// 📎 Found by mutation: dropping `after` from `SetPushRule` left all 59
+	/// tests green, because nothing sends `after`.
+	#[test]
+	fn every_query_name_the_table_declares_is_spelled_out_here() {
+		let declared: Vec<String> = BRIDGED_ENDPOINTS
+			.iter()
+			.filter(|endpoint| !endpoint.query.is_empty())
+			.map(|endpoint| format!("{}: {}", endpoint.name, endpoint.query.join(",")))
+			.collect();
+
+		assert_eq!(declared, [
+			"Register: kind",
+			"UsernameAvailable: username",
+			"RegistrationTokenValidity: token",
+			"Join: via,server_name",
+			"Members: membership,not_membership",
+			"Knock: via,server_name",
+			"Summary: via",
+			"Hierarchy: from,limit,max_depth,suggested_only",
+			"MutualRooms: user_id,from",
+			"PublicRooms: limit,since,server",
+			"PublicRoomsFiltered: server",
+			"Context: limit,filter",
+			"Relations: from,to,dir,limit,recurse",
+			"RelationsByRelType: from,to,dir,limit,recurse",
+			"RelationsByRelTypeAndEventType: from,to,dir,limit,recurse",
+			"Threads: from,include,limit",
+			"TimestampToEvent: ts,dir",
+			"KeyChanges: from,to",
+			"AddBackupKeys: version",
+			"AddBackupKeysForRoom: version",
+			"AddBackupKeysForSession: version",
+			"GetBackupKeys: version",
+			"GetBackupKeysForRoom: version",
+			"GetBackupKeysForSession: version",
+			"DeleteBackupKeys: version",
+			"DeleteBackupKeysForRoom: version",
+			"DeleteBackupKeysForSession: version",
+			"SetPushRule: before,after",
+			"Notifications: from,limit,only",
+			"MediaPreview: url,ts",
+			"SearchEvents: next_batch",
+		]);
 	}
 
 	/// The three `/relations` rows share one list of query names, so one wrong

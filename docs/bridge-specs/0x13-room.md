@@ -237,6 +237,33 @@ data  {"errcode":"M_FORBIDDEN","error":"Auth check failed: sender does not have 
 
 ⚠️ 橋上**只有這條穩定路徑**（`uk.half-shot.msc2666` 那條舊 URL 同 `0x32` 的說明）。
 
+## `0x35` PublicRooms / `0x36` PublicRoomsFiltered —— 公開房間目錄（批 4）
+
+`GET` ／ `POST /_matrix/client/v3/publicRooms`
+
+| | |
+|---|---|
+| 請求 meta | `0x35`：`{"limit":20}`，可加 `since`、`server`。`0x36`：只有 `{"server":"other.example"}`（其餘條件在 data 裡） |
+| 請求 data | `0x35`：無。`0x36`：`{"filter":{"generic_search_term":"讀書"},"limit":20,"since":"…","room_types":[null,"m.space"]}` |
+| 回覆 data | `{"chunk":[{"room_id":…,"name":…,"num_joined_members":12,"topic":…,"join_rule":"public",…}],"next_batch":"…","prev_batch":"…","total_room_count_estimate":3}` |
+
+📎 兩支是**同一個目錄的兩種問法**：`GET` 只能翻頁，`POST` 可以帶搜尋字串與過濾條件。要搜尋就用 `0x36`。
+📎 `server` 是「問哪一台的目錄」；這個 fork 預設不開聯邦，所以通常省略。
+📎 房間要先被 `0x31` SetVisibility 設成 `public` 才會出現在這裡 —— **公開房間（join_rule）跟上架目錄（visibility）是兩件事**，房間可以是公開的但不上架。
+
+## `0x37` RoomAliases —— 這個房間有哪些別名（批 4）
+
+`GET /_matrix/client/v3/rooms/{room_id}/aliases`
+
+| | |
+|---|---|
+| 請求 meta | `{"room_id":"!AbCdEf:localhost"}` |
+| 請求 data | — |
+| 回覆 data | `{"aliases":["#lobby:localhost","#main:localhost"]}` |
+
+📎 跟 `0x2A` GetAlias 方向相反：那支是「別名 → 房間」，這支是「房間 → 它所有的別名」。
+**會怎麼被拒**：房間不是世界可讀、而自己又不在裡面 → `Forbidden`（403）。
+
 ## 這個 kind 共通的拒絕
 
 | 情況 | `code` | 來自 |

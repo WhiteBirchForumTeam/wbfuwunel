@@ -115,6 +115,20 @@ data  {"errcode":"M_FORBIDDEN","error":"You don't have permission to post that t
 
 📎 `include` 是 `all`（預設）或 `participated`（只要我插過話的）。每串的內容用 `0x27` RelationsByRelType 帶 `rel_type: "m.thread"` 撈。
 
+## `0x2A` TimestampToEvent —— 某個時間點的事件是哪一則（批 4）
+
+`GET /_matrix/client/v1/rooms/{room_id}/timestamp_to_event`
+
+| | |
+|---|---|
+| 請求 meta | `{"room_id":"!AbCdEf:localhost","ts":1789911855000,"dir":"b"}` |
+| 請求 data | — |
+| 回覆 data | `{"event_id":"$Zm9vYmFy","origin_server_ts":1789911854000}` |
+
+📎 **`ts` 是毫秒**，`dir` 是 `b`（找那個時間點**之前**最近的一則）或 `f`（之後最近的一則）。兩個都是必填。
+📎 這支是「跳到某天」的做法：拿到 `event_id` 之後用 `0x25` Context 或 `Event/Recent` 帶 `before` 把附近的讀出來。
+**會怎麼被拒**：那個方向沒有事件 → `NotFound`（404）；不在房裡 → `Forbidden`（403）。
+
 ## 這個 kind 共通的拒絕
 
 | 情況 | `code` | 來自 |

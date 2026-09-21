@@ -50,7 +50,7 @@
 | 情況 | `code` | 來自 |
 |---|---|---|
 | meta 少了路徑變數、多了表上沒有的變數 | `InvalidRequest`（1201） | 橋 |
-| `0x1D` 的 pack 沒帶 bit4，或 subtype 不在表上 | `UnknownKind`（1202） | 橋 |
+| `0x1D` 的 pack 沒帶 bit4，或 subtype 不在表上 | `UnknownKind`（1101） | 橋 |
 | `reason` 超過 2000 字元 | `InvalidRequest`（400 `M_INVALID_PARAM`） | 端點 |
 | 沒登入 | `Unauthorized`（1301） | 端點 |
 | 送太快 | `RateLimited`（429 `M_LIMIT_EXCEEDED`） | 端點 |
