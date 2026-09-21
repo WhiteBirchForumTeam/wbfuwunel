@@ -16,9 +16,10 @@
 |---|---|
 | 請求 meta | 空的（長度 0）或 `{}` |
 | 請求 data | — |
-| 回覆 data | `0x20`：`{"global":{"override":[…],"content":[…],"room":[],"sender":[],"underride":[…]}}`。`0x21`：**只有** `global` 底下那層 `{"override":[…],"content":[…],…}` |
+| 回覆 data | `0x20`：`{"global":{"override":[…],"underride":[…]}}`。`0x21`：**只有** `global` 底下那層 `{"override":[…],"underride":[…]}` |
 
 📎 兩支的差別只是外面那層 `global`。`0x20` 是「全部 scope」，但實際上只有 `global` 一個。
+⚠️ **一條規則都沒有的那幾類，鍵會整個不出現，不是空陣列。** 全新的帳號只看得到 `override` 與 `underride`（server 的預設規則在那兩類裡）；`content`／`room`／`sender` 要等你建了第一條才長出來。client 讀的時候當成「可能沒有這個鍵」，不要直接取陣列長度。
 📎 每一類都是**陣列，順序就是優先序**，第一條命中的規則決定結果 —— 所以 `0x23` SetPushRule 的 `before`／`after` 才有意義。
 📎 回覆裡會有 server 預設的規則（`.m.rule.master`、`.m.rule.contains_display_name`…），**開頭是 `.` 的是 server 的**，client 不要當成自己建的。
 

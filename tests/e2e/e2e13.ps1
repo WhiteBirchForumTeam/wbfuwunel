@@ -832,5 +832,166 @@ Check '[5.16] someone outside the room is refused JoinedMembers and Hierarchy th
 $wsD.Dispose(); $wsE.Dispose()
 Stop-Server $server
 
+Log '################ Scenario 6: batch 4, push rules, the directory, search, media config, TURN ################'
+# docs/design/wbf-api-bridge.md §3 batch 4. Same rule as every batch: each endpoint through the bridge and through
+# Matrix HTTP, the answers compared. Four kinds are opened here (0x18 Push, 0x19 Media, 0x1A Search, 0x1B Voip) and
+# none of them has a native subtype, so each one's "without bit4" defence is checked too.
+$db7 = "$S\e2e13db7"; Remove-Item -Recurse -Force $db7 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db7 | Out-Null
+$cfg7 = Write-Config $db7 86400
+$server = Start-Server $cfg7 's6'
+$regF = Api Post '/_matrix/client/v3/register' '{"username":"finn","password":"pw-finn-1","auth":{"type":"m.login.dummy"}}' $null
+$regG = Api Post '/_matrix/client/v3/register' '{"username":"gwen","password":"pw-gwen-1","auth":{"type":"m.login.dummy"}}' $null
+$finn = $regF.user_id; $tokF = $regF.access_token
+$gwen = $regG.user_id; $tokG = $regG.access_token
+$wsF = Ws-Open $tokF; $wsG = Ws-Open $tokG
+
+# ---- 0x18 Push: the rules ----
+$allRules = Bridge $wsF 0x18 0x20 $null $null
+$hallRules = Http GET '/_matrix/client/v3/pushrules/' $null $tokF
+$globalRules = Bridge $wsF 0x18 0x21 $null $null
+$hglobalRules = Http GET '/_matrix/client/v3/pushrules/global/' $null $tokF
+# 📎 The two paths end in a slash on purpose (the spec's, not a typo); `0x20` wraps what `0x21` answers in `global`.
+Check '[6.1] both push-rule readers answer what HTTP answers, and the all-scopes one wraps the global one' `
+  ((Same-As-Http $allRules $hallRules) -and (Same-As-Http $globalRules $hglobalRules) -and (Canon $allRules.body.global) -eq (Canon $globalRules.body)) `
+  "all=$($allRules.status) global=$($globalRules.status) http=$($hglobalRules.status)"
+
+$roomP = (Http POST '/_matrix/client/v3/createRoom' @{ name = 'push rules here'; preset = 'public_chat' } $tokF).json.room_id
+$madeRule = Bridge $wsF 0x18 0x23 @{ kind = 'room'; rule_id = $roomP } @{ actions = @('notify') }
+$hreadRule = Http GET "/_matrix/client/v3/pushrules/global/room/$(Enc $roomP)" $null $tokF
+$readRule = Bridge $wsF 0x18 0x22 @{ kind = 'room'; rule_id = $roomP } $null
+Check '[6.2] SetPushRule through the bridge is a rule HTTP reads back, and GetPushRule agrees with HTTP' `
+  ((Is-Ack $madeRule) -and $hreadRule.status -eq 200 -and (Same-As-Http $readRule $hreadRule) -and (@($readRule.body.actions) -contains 'notify')) `
+  "set=$($madeRule.status) bridge=$($readRule.text) http=$($hreadRule.status) $($hreadRule.text)"
+
+$mute = Bridge $wsF 0x18 0x28 @{ kind = 'room'; rule_id = $roomP } @{ actions = @() }
+$readActions = Bridge $wsF 0x18 0x27 @{ kind = 'room'; rule_id = $roomP } $null
+$hreadActions = Http GET "/_matrix/client/v3/pushrules/global/room/$(Enc $roomP)/actions" $null $tokF
+$disable = Bridge $wsF 0x18 0x26 @{ kind = 'room'; rule_id = $roomP } @{ enabled = $false }
+$readEnabled = Bridge $wsF 0x18 0x25 @{ kind = 'room'; rule_id = $roomP } $null
+$hreadEnabled = Http GET "/_matrix/client/v3/pushrules/global/room/$(Enc $roomP)/enabled" $null $tokF
+# Muting a room is exactly these two calls, so they have to change something real -- not just answer 200.
+Check '[6.3] muting a room through the bridge really empties its actions and turns it off, and both readers agree with HTTP' `
+  ((Is-Ack $mute) -and (Same-As-Http $readActions $hreadActions) -and (@($readActions.body.actions).Count -eq 0) `
+    -and (Is-Ack $disable) -and (Same-As-Http $readEnabled $hreadEnabled) -and $readEnabled.body.enabled -eq $false) `
+  "actions=$($readActions.text) http=$($hreadActions.text) enabled=$($readEnabled.text) http=$($hreadEnabled.text)"
+
+# `before`/`after` are the only thing these two query variables do, so the check is the order they produce.
+$roomQ = (Http POST '/_matrix/client/v3/createRoom' @{ name = 'second rule' } $tokF).json.room_id
+$insert = Bridge $wsF 0x18 0x23 @{ kind = 'room'; rule_id = $roomQ; before = $roomP } @{ actions = @('notify') }
+$order = Bridge $wsF 0x18 0x21 $null $null
+$horder = Http GET '/_matrix/client/v3/pushrules/global/' $null $tokF
+$bridgeOrder = @($order.body.room | ForEach-Object { $_.rule_id })
+$httpOrder = @($horder.json.room | ForEach-Object { $_.rule_id })
+Check '[6.4] `before` puts the new rule ahead of the named one, and the order the bridge reads is the order HTTP reads' `
+  ((Is-Ack $insert) -and ($bridgeOrder -join ',') -eq ($httpOrder -join ',') -and ([array]::IndexOf($bridgeOrder, $roomQ) -lt [array]::IndexOf($bridgeOrder, $roomP))) `
+  "bridge=$($bridgeOrder -join ',') http=$($httpOrder -join ',')"
+
+$dropRule = Bridge $wsF 0x18 0x24 @{ kind = 'room'; rule_id = $roomQ } $null
+$hgoneRule = Http GET "/_matrix/client/v3/pushrules/global/room/$(Enc $roomQ)" $null $tokF
+$goneRule = Bridge $wsF 0x18 0x22 @{ kind = 'room'; rule_id = $roomQ } $null
+Check '[6.5] DeletePushRule: gone for both roads, and reading it back is refused exactly as HTTP refuses it' `
+  ((Is-Ack $dropRule) -and (Same-Refusal $goneRule $hgoneRule) -and $hgoneRule.status -eq 404) `
+  "delete=$($dropRule.status) gone=$($goneRule.metaText) http=$($hgoneRule.status)"
+
+# ---- 0x18 Push: pushers and notifications ----
+$setPusher = Bridge $wsF 0x18 0x2A $null @{ pushkey = 'e2e13-push-key'; kind = 'http'; app_id = 'cc.zooy.wbf.e2e'
+  app_display_name = 'WBF e2e'; device_display_name = 'e2e device'; lang = 'en'
+  data = @{ url = 'https://push.invalid/_matrix/push/v1/notify'; format = 'event_id_only' } }
+$pushers = Bridge $wsF 0x18 0x29 $null $null
+$hpushers = Http GET '/_matrix/client/v3/pushers' $null $tokF
+$notifications = Bridge $wsF 0x18 0x2B @{ limit = 10 } $null
+$hnotifications = Http GET '/_matrix/client/v3/notifications?limit=10' $null $tokF
+Check '[6.6] SetPusher through the bridge is a pusher HTTP lists, and Notifications agrees with HTTP' `
+  ((Is-Ack $setPusher) -and (Same-As-Http $pushers $hpushers) -and (@($pushers.body.pushers | ForEach-Object { $_.pushkey }) -contains 'e2e13-push-key') -and (Same-As-Http $notifications $hnotifications)) `
+  "set=$($setPusher.status) pushers=$(@($pushers.body.pushers).Count) http=$($hpushers.status) notifications=$($notifications.status)"
+
+# ---- 0x13 Room: the public directory ----
+$null = Bridge $wsF 0x13 0x31 @{ room_id = $roomP } @{ visibility = 'public' }
+$publicRooms = Bridge $wsF 0x13 0x35 @{ limit = 20 } $null
+$hpublicRooms = Http GET '/_matrix/client/v3/publicRooms?limit=20' $null $tokF
+$filtered = Bridge $wsF 0x13 0x36 $null @{ filter = @{ generic_search_term = 'push rules here' }; limit = 20 }
+$hfiltered = Http POST '/_matrix/client/v3/publicRooms' @{ filter = @{ generic_search_term = 'push rules here' }; limit = 20 } $tokF
+Check '[6.7] the public directory answers as HTTP does on both roads, and the room just listed is really in it' `
+  ((Same-As-Http $publicRooms $hpublicRooms) -and (Same-As-Http $filtered $hfiltered) -and (@($publicRooms.body.chunk | ForEach-Object { $_.room_id }) -contains $roomP) -and (@($filtered.body.chunk | ForEach-Object { $_.room_id }) -contains $roomP)) `
+  "public=$(@($publicRooms.body.chunk).Count) filtered=$(@($filtered.body.chunk).Count) http=$($hpublicRooms.status)"
+
+$alias = "#e2e13-batch4:localhost"
+$null = Http PUT "/_matrix/client/v3/directory/room/$(Enc $alias)" @{ room_id = $roomP } $tokF
+$aliases = Bridge $wsF 0x13 0x37 @{ room_id = $roomP } $null
+$haliases = Http GET "/_matrix/client/v3/rooms/$(Enc $roomP)/aliases" $null $tokF
+Check '[6.8] RoomAliases answers as HTTP does and holds the alias just set' `
+  ((Same-As-Http $aliases $haliases) -and (@($aliases.body.aliases) -contains $alias)) `
+  "bridge=$($aliases.text) http=$($haliases.status) $($haliases.text)"
+
+# ---- 0x1A Search ----
+$null = Http POST "/_matrix/client/v3/join/$(Enc $roomP)" @{} $tokG
+$hay = Send-Msg $tokF $roomP @{ msgtype = 'm.text'; body = 'the needle is in this sentence' }
+Start-Sleep -Milliseconds 500
+$searchBody = @{ search_categories = @{ room_events = @{ search_term = 'needle'; keys = @('content.body') } } }
+$search = Bridge $wsF 0x1A 0x20 $null $searchBody
+$hsearch = Http POST '/_matrix/client/v3/search' $searchBody $tokF
+$users = Bridge $wsF 0x1A 0x21 $null @{ search_term = 'gwen'; limit = 10 }
+$husers = Http POST '/_matrix/client/v3/user_directory/search' @{ search_term = 'gwen'; limit = 10 } $tokF
+Check '[6.9] SearchEvents finds the message just sent and SearchUsers finds the other account, both exactly as over HTTP' `
+  ((Same-As-Http $search $hsearch) -and (@($search.body.search_categories.room_events.results | ForEach-Object { $_.result.event_id }) -contains $hay) `
+    -and (Same-As-Http $users $husers) -and (@($users.body.results | ForEach-Object { $_.user_id }) -contains $gwen)) `
+  "search=$($search.body.search_categories.room_events.count) users=$(@($users.body.results).Count) http=$($hsearch.status)/$($husers.status)"
+
+# ---- 0x19 Media, 0x1B Voip ----
+$mediaConfig = Bridge $wsF 0x19 0x20 $null $null
+$hmediaConfig = Http GET '/_matrix/client/v1/media/config' $null $tokF
+$preview = Bridge $wsF 0x19 0x21 @{ url = 'https://example.invalid/page' } $null
+$hpreview = Http GET "/_matrix/client/v1/media/preview_url?url=$(Enc 'https://example.invalid/page')" $null $tokF
+$turn = Bridge $wsF 0x1B 0x20 $null $null
+$hturn = Http GET '/_matrix/client/v3/voip/turnServer' $null $tokF
+# 📎 This server has no TURN configured and cannot reach the invalid host, so these two answer refusals -- and the
+# point of the check is that the bridge refuses *exactly* where HTTP refuses, whatever the answer happens to be.
+Check '[6.10] MediaConfig, MediaPreview and TurnServer each answer through the bridge exactly what HTTP answers' `
+  ((Same-As-Http $mediaConfig $hmediaConfig) -and (($preview.status -eq $hpreview.status)) -and (($turn.status -eq $hturn.status)) -and $mediaConfig.status -eq 200) `
+  "config=$($mediaConfig.text) preview=$($preview.status)/$($hpreview.status) turn=$($turn.status)/$($hturn.status)"
+
+# ---- 0x14 Event: timestamp_to_event ----
+$stamp = (Http GET "/_matrix/client/v3/rooms/$(Enc $roomP)/event/$(Enc $hay)" $null $tokF).json.origin_server_ts
+$atTime = Bridge $wsF 0x14 0x2A @{ room_id = $roomP; ts = $stamp; dir = 'b' } $null
+$hatTime = Http GET "/_matrix/client/v1/rooms/$(Enc $roomP)/timestamp_to_event?ts=$stamp&dir=b" $null $tokF
+Check '[6.11] TimestampToEvent answers as HTTP does and lands on the message sent at that moment' `
+  ((Same-As-Http $atTime $hatTime) -and $atTime.body.event_id -eq $hay) `
+  "bridge=$($atTime.text) http=$($hatTime.status) $($hatTime.text)"
+
+# ---- the four new kinds' defences, and the gates ----
+$pushNative = Call $wsF (New-Pack 0x18 0x20 0 0 6901 @() @())
+$mediaNative = Call $wsF (New-Pack 0x19 0x20 0 0 6902 @() @())
+$searchNative = Call $wsF (New-Pack 0x1A 0x20 0 0 6903 @() @())
+$voipNative = Call $wsF (New-Pack 0x1B 0x20 0 0 6904 @() @())
+$pushUnknown = Bridge $wsF 0x18 0x7F $null $null
+Check '[6.12] none of the four new kinds has a native subtype: without bit4 all four are UnknownKind, and an unlisted subtype is too' `
+  ($pushNative.meta.code_id -eq $UNKNOWN_KIND -and $mediaNative.meta.code_id -eq $UNKNOWN_KIND -and $searchNative.meta.code_id -eq $UNKNOWN_KIND -and $voipNative.meta.code_id -eq $UNKNOWN_KIND `
+    -and ($pushNative.flags -band $IS_BRIDGED) -eq 0 -and $pushUnknown.meta.code_id -eq $UNKNOWN_KIND -and (Is-BridgedReply $pushUnknown)) `
+  "push=$($pushNative.metaText) media=$($mediaNative.meta.code_id) search=$($searchNative.meta.code_id) voip=$($voipNative.meta.code_id) unlisted=$($pushUnknown.meta.code_id)"
+
+$anon8 = Ws-Open $null
+$anonRules = Bridge $anon8 0x18 0x20 $null $null
+$hanonRules = Http GET '/_matrix/client/v3/pushrules/' $null $null
+$anonSearch = Bridge $anon8 0x1A 0x20 $null $searchBody
+$hanonSearch = Http POST '/_matrix/client/v3/search' $searchBody $null
+$badRuleKind = Bridge $wsF 0x18 0x22 @{ kind = 'not-a-kind'; rule_id = 'x' } $null
+$hbadRuleKind = Http GET '/_matrix/client/v3/pushrules/global/not-a-kind/x' $null $tokF
+Check '[6.13] without logging in the push rules and search are refused exactly as HTTP refuses them; so is a rule kind that does not exist' `
+  ((Same-Refusal $anonRules $hanonRules) -and $anonRules.meta.errcode -eq 'M_MISSING_TOKEN' -and (Same-Refusal $anonSearch $hanonSearch) -and (Same-Refusal $badRuleKind $hbadRuleKind)) `
+  "rules=$($anonRules.metaText) search=$($anonSearch.status)/$($hanonSearch.status) badKind=$($badRuleKind.status)/$($hbadRuleKind.status)"
+$anon8.Dispose()
+
+# The shapes 0x18-push.md claims, pinned directly: comparing the two roads cannot catch a wrong example, because
+# both roads answer the same shape (PR #77 review, salvia -- that is how three wrong examples got through).
+Check '[6.14] the shapes the spec files show are the shapes these answer: push rules keyed by rule kind, a kind with no rules absent (not an empty array), pushers under `pushers`, search under `search_categories.room_events`' `
+  ($null -ne $allRules.body.global -and $null -ne $allRules.body.global.override -and $null -ne $allRules.body.global.underride `
+    -and $null -eq $allRules.body.global.room -and $null -ne $globalRules.body.override `
+    -and $null -eq $globalRules.body.global -and $null -ne $pushers.body.pushers -and $null -ne $search.body.search_categories.room_events.count `
+    -and $null -ne $users.body.results -and $null -ne $mediaConfig.body.'m.upload.size') `
+  "rules=$(($allRules.body.global.PSObject.Properties.Name) -join ',') mediaConfig=$($mediaConfig.text)"
+
+$wsF.Dispose(); $wsG.Dispose()
+Stop-Server $server
+
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"
 exit $(if ($script:Fail -gt 0) { 1 } else { 0 })
