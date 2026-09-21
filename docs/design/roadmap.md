@@ -137,14 +137,17 @@ client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
 連帶把「連兩次壞就關線」換成**連線健康計數器**（解不開的框 −1、解得開的 pack 歸零、到 `wbf_ws_corrupt_budget`（8）Close 1002）——📎 舊那條**從來沒被實作過**。
 表與規則在 [wbf-wire-format.md](wbf-wire-format.md) §2.1／§3.4。⚠️ 歸位（格式錯的請求 `Conflict`／`Corrupt` → `InvalidRequest`）與 `code_id` 是**線上看得見的改動**，client 要跟。
 
-### 2.11 🔧 常用 Matrix API 走通道（批 1、2、3 已合併，批 4 提案中）（[wbf-api-bridge.md](wbf-api-bridge.md)，設計 PR #55 已合併；實作分支 `wbf/api-bridge`，號碼總表 [../bridge-specs/index.md](../bridge-specs/index.md)）
+### 2.11 ✅ 常用 Matrix API 走通道（批 1、2、3、4 全部合併，常用的基礎已齊）（[wbf-api-bridge.md](wbf-api-bridge.md)，設計 PR #55 已合併；實作分支 `wbf/api-bridge`，號碼總表 [../bridge-specs/index.md](../bridge-specs/index.md)）
 
 維護者 2026-09-14：account 註冊／登入／登出、session、room、device 這些常用端點改成 WS pack，「看能做多少、多快，慢慢移植」。
 提案的核心是**一座通用的橋**而不是一支一支手搬：pack 轉成一個**內部的 HTTP request（不走網路）**丟進 axum 的 `Router`（維護者 2026-09-14 定的形狀）—— 認證、關卡（鎖定、暫停、UIAA）、ruma 解析、route 函式全部是 HTTP 那條路本身，只有一份，WS 不會漏抄，上游檔案也不用動。
 分批搬：批 1 一般的已登入端點（37 支，PR #56 已合併）、批 2 註冊與要 UIAA 的 8 支（PR #63 已合併：註冊帶 `inhibit_login` 再送原生 `Login`，停用帳號、改密碼、刪裝置的 UIAA 兩輪）。E2EE 的金鑰端點（21 支）也走這座橋，見 §2.12。
 **批 3 ✅ PR #77（2026-09-21 合併，提案 #76）**：房間其餘 8 支（升級、敲門、joined_members、目錄可見性兩支、摘要、階層、mutual_rooms）、關聯與討論串 4 支、過濾器 2 支（`0x12 Sync`）、在線狀態 2 支（`0x15 Receipt`）、capabilities 1 支（`0x1C Misc`），加上**新 kind `0x1D Report`** 的三支檢舉（維護者決定三支放一起，而不是跟著被檢舉的東西分到三個 kind）—— 共 20 支，總表 86 列。⭐ **kind 照 [wbf-wire-format.md](wbf-wire-format.md) §3.3 的分配表走**，不是挑一個看起來像的。順便補上 `Hello` 的 `features`（`"stream"`、`"device"`、`"bridge"` —— §2.9 記的那條缺口，**client 要跟**）。同一個端點的舊 URL（`im.nheko.summary`、`uk.half-shot.msc2666`）**不另給 subtype 號**，HTTP 上照舊 —— 維護者 2026-09-20 定的界線：「**bridge 不管內容是什麼，只管怎麼原樣 forward**」。
-🔧 **批 4 提案中（2026-09-21，21 支）**：起於清點「常用的基礎還缺什麼」—— 拿 `src/api/router.rs` 註冊的 **177 個 client 端點**逐一對橋的 86 列，維護者 2026-09-21 定了「兩塊都做」：**推播與通知 12 支**（新 kind `0x18 Push`；沒它就是手機推播設不了）、**目錄與搜尋 4 支**（`0x13` 續號➕新 kind `0x1A Search`；沒它就是找不到人、房、訊息），再加**既有領域裡漏掉的 5 支**（房間別名、時間戳跳轉、媒體設定與連結預覽、TURN）。四個新 kind（`0x18`、`0x19 Media`、`0x1A Search`、`0x1B Voip`）的號碼本來就在 §3.3 的分配表上，**這一批沒有要挑的 kind**。
-⚠️ 一條待決定：**帳號資料的「刪」只有 unstable 路徑**（MSC3391 未進規格），現在的橋搬不了 —— 不搬，還是為它放寬 `pick_path`？見 [wbf-api-bridge.md](wbf-api-bridge.md) §5。
+**批 4 ✅ PR #81（2026-09-21 合併，提案 #80）**：起於回答「常用的做完了沒」—— 拿 `src/api/router.rs` 註冊的 **177 個 client 端點**逐一對橋的 86 列（而不是照這份文件自己的說法），維護者定了「兩塊都做」：**推播與通知 12 支**（新 kind `0x18 Push`）、**目錄與搜尋 4 支**（`0x13` 續號➕新 kind `0x1A Search`），再加**既有領域裡漏掉的 5 支**（房間別名、時間戳跳轉、媒體設定與連結預覽、TURN）—— 共 21 支，總表 **107 列**。四個新 kind（`0x18`、`0x19 Media`、`0x1A Search`、`0x1B Voip`）的號碼本來就在 §3.3 的分配表上，**這一批沒有要挑的 kind**，`pack.rs` 也一行沒改。
+🚫 **帳號資料的「刪」不搬**（維護者 2026-09-21 同意）：它只有 unstable 路徑（MSC3391 未進規格），`pick_path` 只收 v3 與較新的穩定版本 —— 所以「能讀能寫不能刪」不是漏搬，是 Matrix 還沒定案。
+
+⭐ **到這裡，常用面沒有洞了**：登入註冊、房間與成員、訊息與歷史、媒體、E2EE、裝置與 to-device、已讀與輸入中、關聯與討論串、推播設定、目錄與搜尋、檢舉 —— 全部在通道上。剩下的是明確不搬的（`/sync`、SSO、舊媒體、`/messages`）與 client 日常用不到的（3pid、OpenID、QR 登入、admin），清單在 [wbf-api-bridge.md](wbf-api-bridge.md) §3「不搬」。
+🔲 **剩下的一件後續**（審查提的，cirno）：現在的釘名測試守得住「宣告的名字拼錯」，守不住「ruma 有而我沒宣告」（`MediaPreview` 漏了 `ts` 就是這一類）。要結構性消掉，得從 ruma 型別枚舉 query 欄位去反核宣告名單。
 
 ### 2.12 ✅ E2EE 全走通道（[wbf-e2ee.md](wbf-e2ee.md)，設計 PR #66；(A) PR #67、(B) PR #68、(C) PR #70）
 
