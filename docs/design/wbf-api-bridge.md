@@ -308,7 +308,7 @@ client                                          server
 - 完整流程：匿名 WS 連線 → `Register`（UIAA 兩輪）→ `Login` → `WhoAmI` 是新帳號；超過裝置名額的 `Login` 照樣 `TooManyConnections`。
 - UIAA：第一輪拿到 `flows`＋`session`、密碼錯拿到 `M_FORBIDDEN` 且 `session` 不變、第二輪成功；刪掉自己的裝置後下一個 pack 被拒並關連線。
 
-### 批 3：房間其餘、關聯與討論串、在線狀態／filter／capabilities、檢舉（20 支，✅ 維護者 2026-09-20 同意）
+### 批 3：房間其餘、關聯與討論串、在線狀態／filter／capabilities、檢舉（20 支，✅ PR #77，2026-09-21 合併）
 
 維護者 2026-09-20 從候選清單裡挑的範圍：**C（房間其餘）＋ D（關聯與討論串）＋ E（在線狀態／filter／capabilities）**，共 20 支，並指定順便補齊 `Hello` 的 `features`（3-C）。
 17 支落在**分配表（[wbf-wire-format.md](wbf-wire-format.md) §3.3）已經給過號的 kind** 裡，**唯一的新 kind 是 `0x1D Report`**（維護者 2026-09-20 決定：三支檢舉放一起，決定 1）—— 除此之外不需要新的 wire 格式，每一支就是總表一列、`BRIDGED_ENDPOINTS` 一列、範例檔一段、e2e 跟 HTTP 比一次。
