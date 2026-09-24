@@ -43,6 +43,11 @@ pub enum RejectCode {
 	RateLimited,
 	/// 1402: this device holds as many connections as it may.
 	TooManyConnections,
+	/// 1403: this source address already holds as many connections as it may.
+	/// ⚠️ Separate from `TooManyConnections` because the remedy differs: the
+	/// connections in the way may be none of the caller's (one NAT, one
+	/// office, one proxy), so "close one of yours" is advice it cannot take.
+	TooManyConnectionsFromAddress,
 	/// 1501: the named thing does not exist.
 	NotFound,
 	/// 1502: a legal request that the current state refuses.
@@ -66,7 +71,7 @@ pub enum RejectCode {
 
 impl RejectCode {
 	/// Every code, so a test can hold the whole table at once.
-	pub const ALL: [Self; 17] = [
+	pub const ALL: [Self; 18] = [
 		Self::UnsupportedVersion,
 		Self::Corrupt,
 		Self::UnknownKind,
@@ -77,6 +82,7 @@ impl RejectCode {
 		Self::Forbidden,
 		Self::RateLimited,
 		Self::TooManyConnections,
+		Self::TooManyConnectionsFromAddress,
 		Self::NotFound,
 		Self::Conflict,
 		Self::OutOfOrder,
@@ -103,6 +109,7 @@ impl RejectCode {
 			| Self::Forbidden => 1302,
 			| Self::RateLimited => 1401,
 			| Self::TooManyConnections => 1402,
+			| Self::TooManyConnectionsFromAddress => 1403,
 			| Self::NotFound => 1501,
 			| Self::Conflict => 1502,
 			| Self::OutOfOrder => 1503,
@@ -128,6 +135,7 @@ impl RejectCode {
 			| Self::Forbidden => "Forbidden",
 			| Self::RateLimited => "RateLimited",
 			| Self::TooManyConnections => "TooManyConnections",
+			| Self::TooManyConnectionsFromAddress => "TooManyConnectionsFromAddress",
 			| Self::NotFound => "NotFound",
 			| Self::Conflict => "Conflict",
 			| Self::OutOfOrder => "OutOfOrder",

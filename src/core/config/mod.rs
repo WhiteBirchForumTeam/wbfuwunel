@@ -3654,14 +3654,42 @@ pub struct Config {
 	/// once. A connection that would exceed it is refused (the new one, never
 	/// an existing one): a bearer upgrade answers 429, a `Login` over the
 	/// channel is refused and that connection closed. Connections that have
-	/// not logged in are not counted; they live at most
-	/// `wbf_ws_unauthenticated_timeout` seconds. HTTP requests are not counted.
+	/// not logged in are not counted here — they have no identity to count
+	/// yet, and what bounds them is `wbf_ws_max_connections_per_address`.
+	/// HTTP requests are not counted.
 	/// A client is expected to open a few (one for events, one for media);
 	/// this guards against a client that leaks them. 0 disables the limit.
 	///
-	/// default: 4
+	/// default: 8
 	#[serde(default = "default_wbf_ws_max_connections_per_device")]
 	pub wbf_ws_max_connections_per_device: u32,
+
+	/// How many wbf WebSocket connections one source address may hold at
+	/// once, counting connections that have not logged in. A connection that
+	/// would exceed it is refused before the upgrade and before the token is
+	/// read: 429 with `TooManyConnectionsFromAddress`. The new one is turned
+	/// away; connections that are already open are left alone. HTTP requests
+	/// are not counted.
+	///
+	/// This is the only limit that reaches a connection with no identity:
+	/// `wbf_ws_max_connections_per_device` counts per (user, device), so
+	/// until a connection logs in it is outside that limit entirely.
+	///
+	/// IPv6 is counted per /64, not per address: one household is normally
+	/// given a whole /64, so counting exact addresses would let a client move
+	/// to a new one for free and the limit would mean nothing. IPv4 is
+	/// counted per address.
+	///
+	/// ⚠️ Behind a reverse proxy this counts the proxy unless `ip_source` is
+	/// set to read the forwarded header — then every connection shares one
+	/// address and this becomes a limit on the whole server. The server logs
+	/// a warning at startup when this limit is on and `ip_source` is unset.
+	///
+	/// 0 disables the limit.
+	///
+	/// default: 40
+	#[serde(default = "default_wbf_ws_max_connections_per_address")]
+	pub wbf_ws_max_connections_per_address: u32,
 
 	/// How many outgoing packs one wbf WebSocket connection may have queued
 	/// for sending before the handler producing them waits. This is the count
@@ -6125,7 +6153,9 @@ fn default_login_rc_per_second() -> u32 { 1 }
 
 fn default_login_rc_burst_count() -> u32 { 10 }
 
-fn default_wbf_ws_max_connections_per_device() -> u32 { 4 }
+fn default_wbf_ws_max_connections_per_device() -> u32 { 8 }
+
+fn default_wbf_ws_max_connections_per_address() -> u32 { 40 }
 
 fn default_wbf_ws_send_queue_len() -> usize { 32 }
 

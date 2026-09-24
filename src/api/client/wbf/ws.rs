@@ -49,11 +49,14 @@ use tuwunel_core::{
 	wbf::{HEADER_LEN, PackError, RejectCode, decode},
 };
 
-use tuwunel_service::streams::{ConnectionId, Outgoing, PackQueue, Queued};
+use tuwunel_service::{
+	connections::AddressSlot,
+	streams::{ConnectionId, Outgoing, PackQueue, Queued},
+};
 
 use super::{
-	CloseReason, PackContext, Reply, Session, SessionChange, Transport, authenticate, error_pack, handle_pack,
-	header_id_seq, pack_response, refuse_session, reserve_connection_slot, revalidate,
+	CloseReason, PackContext, Reject, Reply, Session, SessionChange, Transport, authenticate, error_pack,
+	handle_pack, header_id_seq, pack_response, refuse_session, reserve_connection_slot, revalidate,
 };
 use crate::{ClientIp, router::BridgeRouter};
 
@@ -89,6 +92,23 @@ pub(crate) async fn ws_route(
 		let reply = error_pack(0, 0, RejectCode::Internal, "server is shutting down");
 		return pack_response(StatusCode::SERVICE_UNAVAILABLE, reply);
 	}
+
+	// Before the token, because this one costs a lock and that one costs a
+	// database read: a connection this gate turns away should not pay for a
+	// lookup first. It is also the only gate a connection that never logs in
+	// ever meets — the per-device count needs an identity, and an anonymous
+	// upgrade has none (`docs/design/wbf-pack-pipeline.md` §2.2).
+	let max_per_address = services.config.wbf_ws_max_connections_per_address;
+	let address_slot = match services
+		.connections
+		.take_address_slot(client, max_per_address)
+	{
+		| Some(slot) => slot,
+		| None => {
+			let refused = Reject::too_many_connections_from_address(max_per_address);
+			return pack_response(StatusCode::TOO_MANY_REQUESTS, refused.into_pack(0, 0));
+		},
+	};
 
 	// A header that is there must be right; only its absence means "log in
 	// over the channel". A wrong token is refused, not downgraded.
@@ -131,10 +151,14 @@ pub(crate) async fn ws_route(
 			// when shutdown began between the check above and here: the
 			// socket is then dropped, which closes it (and the session with
 			// its slot is dropped with it).
-			if !services
-				.connections
-				.spawn(serve(services, client, session, bridge.map(|Extension(bridge)| bridge), socket))
-			{
+			if !services.connections.spawn(serve(
+				services,
+				client,
+				session,
+				address_slot,
+				bridge.map(|Extension(bridge)| bridge),
+				socket,
+			)) {
 				debug!("wbf WebSocket refused: server is shutting down");
 			}
 		})
@@ -157,6 +181,11 @@ async fn serve(
 	services: crate::State,
 	client: IpAddr,
 	session: Option<Session>,
+	// Held, never read: this is the connection's place in its address's count,
+	// and it is given back when this function returns, however it returns
+	// (`docs/design/wbf-pack-pipeline.md` §2.2). The device's place lives on
+	// the `Session` instead, because a `Login` can replace it.
+	_address_slot: Option<AddressSlot>,
 	bridge: Option<BridgeRouter>,
 	socket: WebSocket,
 ) {

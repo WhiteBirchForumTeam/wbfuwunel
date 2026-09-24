@@ -791,6 +791,24 @@ impl Reject {
 		}
 	}
 
+	/// This source address already holds `max` connections; this one is turned
+	/// away and the ones already open are left alone.
+	///
+	/// ⚠️ The message deliberately does not say "close one of yours": the
+	/// connections in the way may belong to somebody else behind the same
+	/// NAT, office or proxy, and telling a client to close what it does not
+	/// own sends it after a remedy it cannot reach.
+	pub(super) fn too_many_connections_from_address(max: u32) -> Self {
+		Self {
+			code: RejectCode::TooManyConnectionsFromAddress,
+			message: format!(
+				"this address already holds {max} wbf connections; wait for one to end, or connect from elsewhere"
+			),
+			extra: json!({ "max_connections": max }),
+			closes_connection: true,
+		}
+	}
+
 	pub(crate) fn into_pack(self, id: u64, seq: u32) -> Vec<u8> { self.into_reply_pack(id, seq, Flags::IS_RESPONSE) }
 
 	/// Args:
@@ -1144,6 +1162,7 @@ fn hello(services: &Services, ctx: &PackContext<'_>, view: &PackView<'_>) -> Vec
 			"recent_default_batch": services.config.wbf_recent_default_batch,
 			"recent_max_batch": services.config.wbf_recent_max_batch,
 			"max_connections_per_device": services.config.wbf_ws_max_connections_per_device,
+			"max_connections_per_address": services.config.wbf_ws_max_connections_per_address,
 			"chunk_size_default": services.config.media_chunk_size_default,
 			"chunk_size_large": services.config.media_chunk_size_large,
 			"data_max_bytes": services.config.wbf_data_max_bytes,

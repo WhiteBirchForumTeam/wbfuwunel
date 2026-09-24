@@ -76,6 +76,7 @@ pub fn check(config: &Config) -> Result {
 
 	check_observability(config)?;
 	check_wbf_device_window(config)?;
+	warn_wbf_address_limit_without_ip_source(config);
 	check_wbf_send_queue_bytes(config)?;
 	check_wbf_window_max_bytes(config)?;
 	check_s3_part_size(config)?;
@@ -105,6 +106,30 @@ fn check_observability(config: &Config) -> Result {
 	}
 
 	Ok(())
+}
+
+/// The per-address connection limit counts whatever address the transport
+/// resolved. Behind a reverse proxy, with no `ip_source` telling the server
+/// to read the forwarded header, that address is the proxy — so the limit
+/// stops being "per client" and becomes one for the whole server.
+///
+/// 🚨 That failure is silent: nothing errors, connections are simply refused
+/// once the server as a whole holds `wbf_ws_max_connections_per_address` of
+/// them. It is a warning rather than a refusal to start, because facing
+/// clients directly is a legitimate deployment and a note is not worth taking
+/// the whole process down (CLAUDE.md P).
+fn warn_wbf_address_limit_without_ip_source(config: &Config) {
+	if config.wbf_ws_max_connections_per_address == 0 || config.ip_source.is_some() {
+		return;
+	}
+
+	warn!(
+		"wbf_ws_max_connections_per_address is {} but ip_source is unset: if this server sits \
+		 behind a reverse proxy, every connection counts as coming from the proxy and the limit \
+		 applies to the whole server instead of to each client. Set ip_source when proxied; \
+		 ignore this when clients connect directly.",
+		config.wbf_ws_max_connections_per_address,
+	);
 }
 
 /// The to-device window must fit in the send queue, which
