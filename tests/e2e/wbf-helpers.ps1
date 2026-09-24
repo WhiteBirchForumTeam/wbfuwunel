@@ -214,9 +214,12 @@ function Exec([string]$cfg, [string[]]$cmds, [string]$tag) {
 }
 
 # ---------- WebSocket ----------
-function Ws-Open($tok) {
+function Ws-Open($tok, [string]$forwarded) {
   $ws = New-Object System.Net.WebSockets.ClientWebSocket
   if ($tok) { $ws.Options.SetRequestHeader('Authorization', "Bearer $tok") }
+  # Only e2e17 passes this: it is how a same-host proxy names the real client,
+  # and whether the server believes it is the whole of the localhost_ip rule.
+  if ($forwarded) { $ws.Options.SetRequestHeader('X-Forwarded-For', $forwarded) }
   $ws.ConnectAsync([Uri]'ws://127.0.0.1:8015/_wbf/v1/ws', [Threading.CancellationToken]::None).Wait()
   $ws
 }

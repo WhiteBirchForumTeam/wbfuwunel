@@ -309,7 +309,10 @@ function Password-Auth($user, $password, $session) { @{ type = 'm.login.password
 function Login-Http-Device($user, $password) { Http POST '/_matrix/client/v3/login' @{ type = 'm.login.password'; identifier = @{ type = 'm.id.user'; user = $user }; password = $password } $null }
 
 $db2 = "$S\e2e13db2"; Remove-Item -Recurse -Force $db2 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db2 | Out-Null
-$cfg2 = Write-Config $db2 86400
+# 🚨 The per-device limit is pinned here rather than left to the default: [2.7] reaches it by holding
+# connections open, so it depends on the number. It used to ride on the default being 4, and when PR #85
+# raised that to 8 the check went green-but-meaningless (the login it expected to be refused succeeded).
+$cfg2 = Write-Config $db2 86400 0 0 0 @('wbf_ws_max_connections_per_device = 4')
 $server = Start-Server $cfg2 's2'
 $admin2 = Api Post '/_matrix/client/v3/register' '{"username":"root","password":"pw-pw-pw-pw","auth":{"type":"m.login.dummy"}}' $null
 

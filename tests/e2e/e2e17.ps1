@@ -15,8 +15,8 @@ function Check([string]$name, [bool]$ok, [string]$detail) {
 
 # Opens a connection and says what happened. A refused upgrade throws; the status code is in the innermost
 # exception's message (the same read e2e7 does).
-function Try-Open($tok) {
-  try { $ws = Ws-Open $tok; @{ ws = $ws; ok = $true; why = 'open' } }
+function Try-Open($tok, [string]$forwarded) {
+  try { $ws = Ws-Open $tok $forwarded; @{ ws = $ws; ok = $true; why = 'open' } }
   catch {
     $error_ = $_.Exception; while ($error_.InnerException) { $error_ = $error_.InnerException }
     @{ ws = $null; ok = $false; why = $error_.Message }
@@ -32,13 +32,14 @@ function Close-Ws($ws) {
 # The refusal's body is a pack, and `ClientWebSocket` throws away the response of a failed handshake — so the only
 # way to read the `code_id` is to do the upgrade by hand and look at what comes back. The handshake is deliberately
 # well-formed: a request the server would otherwise accept, refused only by the gate under test.
-function Refused-Upgrade-Pack([string]$tok) {
+function Refused-Upgrade-Pack([string]$tok, [string]$forwarded) {
   $request = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::Get, "http://127.0.0.1:8015/_wbf/v1/ws")
   $request.Headers.TryAddWithoutValidation('Connection', 'Upgrade') | Out-Null
   $request.Headers.TryAddWithoutValidation('Upgrade', 'websocket') | Out-Null
   $request.Headers.TryAddWithoutValidation('Sec-WebSocket-Version', '13') | Out-Null
   $request.Headers.TryAddWithoutValidation('Sec-WebSocket-Key', [Convert]::ToBase64String((1..16 | ForEach-Object { [byte](Get-Random -Max 256 ) }))) | Out-Null
   if ($tok) { $request.Headers.TryAddWithoutValidation('Authorization', "Bearer $tok") | Out-Null }
+  if ($forwarded) { $request.Headers.TryAddWithoutValidation('X-Forwarded-For', $forwarded) | Out-Null }
   try {
     $response = $script:PackHttpClient.SendAsync($request).Result
     $bytes = $response.Content.ReadAsByteArrayAsync().Result
@@ -157,6 +158,65 @@ for ($n = 0; $n -lt 6; $n++) {
 Check '[3.1] with the limit set to 0 the address gate takes no place at all: six anonymous connections open' `
   ($allOpen) "opened=$(@($opened | Where-Object { $_.ok }).Count)/6"
 foreach ($attempt in $opened) { Close-Ws $attempt.ws }
+Stop-Server $server
+
+Log '################ Scenario 4: a loopback peer names the client (localhost_ip, default) ################'
+# ⭐ This is the rule 維護者 2026-09-25 added, and the only e2e that reaches it: the script connects from
+# 127.0.0.1, which is in the default localhost_ip, so X-Forwarded-For decides which bucket each connection
+# counts against. Without it every same-host-proxy and unix-socket deployment would put every client in one
+# bucket — the collapse cirno found in the PR #85 second review.
+$db3 = "$S\e2e17db3"; Remove-Item -Recurse -Force $db3 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db3 | Out-Null
+$cfg3 = "$S\e2e17-3.toml"
+@('[global]','server_name = "localhost"',('database_path = "' + ($db3 -replace '\\','/') + '"'),'port = 8015','address = ["127.0.0.1"]',
+  'allow_registration = true','yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse = true','allow_federation = false',
+  'wbf_ws_idle_timeout = 60','wbf_ws_unauthenticated_timeout = 30',
+  'wbf_ws_max_connections_per_address = 2','wbf_ws_max_connections_per_device = 2','log = "info"') -join "`n" | Set-Content -Path $cfg3 -Encoding ascii
+$server = Start-Server $cfg3 's4'
+
+# Three clients behind the same local proxy, three addresses: the limit of 2 is per client, not per proxy.
+$separate = @('198.51.100.1','198.51.100.2','198.51.100.3') | ForEach-Object { Try-Open $null $_ }
+Check '[4.1] three connections forwarded from three addresses all open: the header, not the loopback peer, is what is counted' `
+  (@($separate | Where-Object { $_.ok }).Count -eq 3) "opened=$(@($separate | Where-Object { $_.ok }).Count)/3"
+foreach ($attempt in $separate) { Close-Ws $attempt.ws }
+
+# Same client twice over, then a third: the limit still bites, it just bites the right party.
+$sameA = Try-Open $null '198.51.100.9'
+$sameB = Try-Open $null '198.51.100.9'
+$sameC = Try-Open $null '198.51.100.9'
+Check '[4.2] two from one forwarded address open and the third is refused: the limit follows the client' `
+  ($sameA.ok -and $sameB.ok -and (Is-Refused-429 $sameC)) "1=$($sameA.why) 2=$($sameB.why) 3=$($sameC.why)"
+
+# A fourth client is untouched by the third one's refusal — the proof that these are separate buckets and not
+# one shared count that happens to be full.
+$other = Try-Open $null '198.51.100.8'
+Check '[4.3] another forwarded address still gets in while that one is full: separate buckets, not one shared count' `
+  ($other.ok) "other=$($other.why)"
+
+$refused = Refused-Upgrade-Pack $null '198.51.100.9'
+Check '[4.4] the refusal is still 1403 with the same remedy: the forwarded address changed who is counted, nothing else' `
+  ($refused.status -eq 429 -and $refused.pack -and $refused.pack.meta.code_id -eq 1403) `
+  "status=$($refused.status) code=$($refused.pack.meta.code) code_id=$($refused.pack.meta.code_id)"
+
+Close-Ws $sameA.ws; Close-Ws $sameB.ws; Close-Ws $other.ws
+Stop-Server $server
+
+Log '################ Scenario 5: localhost_ip = [] turns the header off again ################'
+# 🚨 Same script, same headers, opposite outcome — and the only thing that changed is one config line. That is
+# what makes this pair worth having: it pins the rule to the setting rather than to the server happening to
+# behave a certain way.
+$db4 = "$S\e2e17db4"; Remove-Item -Recurse -Force $db4 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db4 | Out-Null
+$cfg4 = "$S\e2e17-4.toml"
+@('[global]','server_name = "localhost"',('database_path = "' + ($db4 -replace '\\','/') + '"'),'port = 8015','address = ["127.0.0.1"]',
+  'allow_registration = true','yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse = true','allow_federation = false',
+  'wbf_ws_idle_timeout = 60','wbf_ws_unauthenticated_timeout = 30','localhost_ip = []',
+  'wbf_ws_max_connections_per_address = 2','wbf_ws_max_connections_per_device = 2','log = "info"') -join "`n" | Set-Content -Path $cfg4 -Encoding ascii
+$server = Start-Server $cfg4 's5'
+
+$ignored = @('198.51.100.1','198.51.100.2','198.51.100.3') | ForEach-Object { Try-Open $null $_ }
+Check '[5.1] with localhost_ip emptied the same three headers are ignored: all three count as the loopback peer, so the third is refused' `
+  ($ignored[0].ok -and $ignored[1].ok -and (Is-Refused-429 $ignored[2])) `
+  "1=$($ignored[0].why) 2=$($ignored[1].why) 3=$($ignored[2].why)"
+foreach ($attempt in $ignored) { Close-Ws $attempt.ws }
 Stop-Server $server
 
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"
