@@ -52,14 +52,16 @@ client 那邊「開幾條、哪條走什麼、pending → sending → sent」是
 
 ## 2. 連線的規則
 
-### 2.1 每個 (user, device) 最多 4 條（`wbf_ws_max_connections_per_device`，預設 4，0 = 不限）
+### 2.1 每個 (user, device) 最多 8 條（`wbf_ws_max_connections_per_device`，預設 8，0 = 不限）
+
+📌 **預設從 4 改成 8**（維護者 2026-09-24）。理由沒變（§2.1 末段：防一個 client 失控，不是配額），只是 4 對「手機＋桌機＋平板，每台開幾條分工」來說太緊。
 
 計數的 key 是 `Session` 裡的 `(user_id, device_id)`。規則照 §0-2：
 
 | 時刻 | 做什麼 |
 |---|---|
 | 帶 Bearer 升級 | `authenticate` 過了之後、升級之前，向 `connections` 要一個名額。沒有 → **不升級**，HTTP 回 `429 Too Many Requests`，body 是 `Error(TooManyConnections)`。 |
-| 匿名升級 | 不算名額（沒有身份可算）。它最多活 `wbf_ws_unauthenticated_timeout` 秒，不會被拿來囤。 |
+| 匿名升級 | **不算這個名額**（沒有身份可算）。它最多活 `wbf_ws_unauthenticated_timeout` 秒。⚠️ 「不會被拿來囤」這句話在 §2.2 之前是**靠時限撐著的** —— 30 秒內開幾條沒有上限。擋它的是 §2.2 的位址名額，不是這一道。 |
 | `Login`／`Refresh` 拿到新 `Session` | **先要新名額，再放舊的**。要不到 → 回 `Error(TooManyConnections)`，然後 Close 1008；連線上原本的 session（若有）也一起結束。「踢新的」在這裡的意思是：這次登入沒成，這條線走人；別條線不受影響。📎 **名額要在 users service 寫任何 token 之前拿**：Matrix 語意下同一 device 再登入會換掉它的 access token，若先發 token 再拒，被拒的 Login 已經把該裝置其他連線的 token 廢了。所以 `issue_session`／`refresh_session` 多一個 `admit: &mut dyn FnMut(&UserId, &DeviceId) -> Result` 閘門，在裝置定下來、token 還沒寫時問一次；HTTP 路由傳 `admit_any`。 |
 | `Refresh` 同一個 (user, device) | 名額不動（是同一個）。 |
 | `Logout` | 名額隨連線結束一起放。 |
@@ -76,7 +78,52 @@ client 那邊「開幾條、哪條走什麼、pending → sending → sent」是
 **為什麼不是 per user**：維護者定 per device。同一個人手機加桌機各兩條就是 4，若算 user 第三台裝置會被擠掉；算 device 則上限幾乎不會撞到，
 它的意義是防**一個 client 失控**（重連風暴、忘了關），不是配額。
 
-### 2.2 一條連線的一生
+### 2.2 每個來源位址最多 40 條（`wbf_ws_max_connections_per_address`，預設 40，0 = 不限）（📄 提案，維護者 2026-09-24 要求）
+
+§2.1 那道閘門按 `(user, device)` 算，所以它**只擋得到已經有身份的連線**。⭐ **匿名升級完全不佔它的名額** —— 一個沒有 token 的人要開幾條就開幾條，只受 `wbf_ws_unauthenticated_timeout`（30 秒）限制。
+30 秒對一台機器來說很長：只要持續重連，未登入的連線數就沒有上限，而每一條都要佔一個 socket、一個 task、一份讀寫緩衝。**這一節就是補那個洞**，而且它是唯一能補的那道 —— 匿名連線沒有身份，但它一定有一個來源位址。
+
+| 時刻 | 做什麼 |
+|---|---|
+| 任何 WS 升級（**匿名或帶 Bearer 都算**） | 在**認證之前**向 `connections` 要一個位址名額。沒有 → **不升級**，HTTP 回 `429`，body 是 `Error(TooManyConnectionsFromAddress)`。 |
+| 連線結束（任何原因） | 名額放掉。 |
+| HTTP pack（`POST /_wbf/v1/pack`） | 🚫 不算。它不是長連線，一問一答就結束（跟 §2.1 同一個理由）。 |
+
+⭐ **兩道閘門的順序是「先位址、後 token」**：位址名額只看一張記憶體表，token 要讀資料庫。**擋得掉的連線不該先讓它花一次 DB 讀** —— 這跟 `ws_route` 開頭那句「正在關機的 server 不欠任何人一次資料庫讀」是同一個理由。
+⭐ **兩道都要過**：位址名額過了仍可能被 §2.1 擋下，兩者各擋各的，不互相取代。
+
+**實作跟 §2.1 同一個形狀**（A4：同一個問題只留一份機制）：`service/connections.rs` 多一張 `Mutex<HashMap<IpAddr, u32>>` 與一個 RAII 的 `AddressSlot`，drop 時減計數。
+名額在 `ws_route` 裡拿，**放進 `on_upgrade` 的 closure**，所以連線怎麼結束都會還；升級沒成（token 壞、§2.1 擋下、關機中）時它在 `ws_route` 結束就 drop，不會漏。
+
+**位址從哪來**：`ws_route` 已經收 `ClientIp(client)`，那是**傳輸層照 `ip_source` 解析好的 client IP**（`router/client_ip.rs`）。⭐ 這一節不自己解析任何 header —— 解析點只有一個，在那裡（A4）。
+
+🚨 **部署上最容易踩的一個坑，要寫進設定說明**：如果 server 前面有反向代理，而 `ip_source` **沒有**設成讀轉發 header，那麼**每一條連線看起來都來自代理那一個位址** —— 40 就不是「每個使用者 40」，而是**整台 server 只能有 40 條**。
+所以這個功能跟 `ip_source` 是綁在一起的：有代理就一定要設。⚠️ 值得考慮在啟動時檢查「有設 `ip_source` 嗎」並在沒設時留一行 warning，但那是另一件事（下面的決定 4）。
+
+#### 要維護者決定的
+
+1. **錯誤碼用新的還是沿用 `TooManyConnections`（1402）？**
+   - (a) **新開一個 `TooManyConnectionsFromAddress`（1403）**。
+   - (b) 沿用 1402。
+   - 建議 **(a)**：詞表的規矩是「一個 code 對一種處置」（wire-format §3.4）。1402 現在的處置是**「關掉一條你自己的舊連線再連」** —— 那對位址名額是錯的建議：撞到上限的人**可能一條都不是他開的**（同一個 NAT 後面的鄰居、同一間辦公室、同一台代理）。他關不掉別人的連線，只能等或換網路。**處置不同就該是不同的 code**，否則 client 會照錯的建議做。
+2. **IPv6 要不要按前綴聚合？**
+   - (a) **按確切位址算**（跟「每個 IP」字面一致，實作最簡單）。
+   - (b) IPv6 按 `/64` 聚合（IPv4 仍按確切位址）。
+   - ⚠️ 這條有**實質差別**：一般家用 IPv6 會拿到一整個 `/64`（甚至 `/56`），client 端換一個位址是零成本的。所以 (a) 在 IPv6 下**等於沒有上限**。如果這個限制的用意是**防濫用**，就要 (b)；如果只是「防一台機器的 client 失控」（跟 §2.1 同一個用意），(a) 就夠。
+   - 🚫 我不自己選：這取決於你要擋的是「失控的 client」還是「故意的人」，那是你的判斷不是我的。
+3. **要不要有豁免？** 例如 loopback（同機的工具、健康檢查）或設定裡的信任網段不計入。
+   - 建議：**先不做**。多一條豁免就多一條要驗的路徑，而同機的工具通常走 HTTP（本來就不算）。要的話之後再加。
+4. **沒設 `ip_source` 卻開著這個限制，要不要在啟動時 warning？**
+   - 建議：**要**，但只是一行 log，不擋啟動（P 條：不為了一個設定把整支 app 收掉）。它防的是上面那個「整台 server 只有 40 條」的坑 —— 那種壞法是**安靜的**，不講一聲沒人會發現。
+
+#### 驗收
+
+- e2e：同一個位址開到第 41 條被 `429` ＋ `Error(TooManyConnectionsFromAddress)` 拒；關掉一條之後可以再開一條（名額真的有還）。
+- **匿名也要算**：不帶 Bearer 開到上限一樣被拒 —— 這是整個功能的理由，不驗等於沒做。
+- **兩道閘門各擋各的**：位址沒滿但裝置滿了 → `TooManyConnections`（1402）；位址滿了 → 1403。
+- HTTP pack 不受影響：位址名額滿的時候，同一個位址打 `POST /_wbf/v1/pack` 照常。
+
+### 2.3 一條連線的一生
 
 ```
 升級 ──▶ [匿名：只答 Hello/Ping/Login/Refresh；30 秒內要登入] ──Login──▶ [已登入] ──▶ 結束
