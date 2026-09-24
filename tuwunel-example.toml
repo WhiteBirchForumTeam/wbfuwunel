@@ -1680,7 +1680,7 @@
 # throttling runs before credentials are checked — so at the default
 # of one attempt per second an unauthenticated client can keep
 # login and refresh answering 429 site-wide. Behind a reverse proxy,
-# set `ip_source` (rightmost, with the proxy's subnet trusted). On a
+# set `ip_source` to the header that proxy controls. On a
 # Unix socket, per-address throttling cannot work at all: throttle in
 # the layer in front, and set this to `0` rather than leaving a shared
 # bucket up.
