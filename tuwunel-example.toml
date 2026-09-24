@@ -667,17 +667,23 @@
 # Source of the client IP address for rate limiting, logging, and
 # security tooling.
 #
-# When unset (the default), the `ClientIp` extractor scans common
-# proxy headers in leftmost-IP mode (`X-Forwarded-For`, RFC 7239
-# `Forwarded`, `X-Real-IP`, `Fly-Client-IP`, `True-Client-IP`,
-# `CF-Connecting-IP`, `CloudFront-Viewer-Address`) and falls back
-# to the TCP peer address; clients can spoof their address via
-# request headers in that mode.
+# Setting this says "I am behind a reverse proxy, and it puts the
+# client's address in this header".
 #
-# When set, `ClientIp` resolves exclusively from the selected
-# source. The rightmost value is used for multi-valued headers;
-# only the proxy can append to the right, so this is resistant to
-# client spoofing.
+# When set, that header is read and believed. A request that did
+# not come through the proxy has no such header, and then the TCP
+# peer is used instead. The rightmost value is used for
+# multi-valued headers; only the proxy can append to the right.
+#
+# When unset (the default), the TCP peer address is the only
+# answer and forwarding headers are never consulted.
+#
+# ⚠️ This changed: the extractor used to scan proxy headers even
+# when unset, taking the leftmost `X-Forwarded-For` ahead of the
+# peer, which made the address client-controlled by default. Both
+# the login rate limiter and `wbf_ws_max_connections_per_address`
+# key on this value, so that let a directly-connected client take a
+# fresh bucket per request just by varying a header.
 #
 # Supported values:
 # - "connect_info" - TCP peer address only (direct connections)
@@ -698,14 +704,19 @@
 #
 #ip_source = "connect_info"
 
-# Subnets whose TCP peers are treated as trusted and bypass the
-# `ip_source`-based extraction, falling through to the same
-# insecure header-scan + `ConnectInfo` fallback used when
-# `ip_source` is unset. Each entry is CIDR notation, including
-# the prefix length (use `/32` or `/128` to trust a single host).
+# 🚧 Currently has no effect; the server warns at startup when it
+# is set.
 #
-# Loopback (`127.0.0.0/8`, `::1/128`) is always bypassed and
-# need not be listed.
+# It used to make a peer in one of these subnets *skip* the
+# `ip_source` extraction and fall back to scanning headers — the
+# opposite of what the name suggests, and one of the ways the
+# client's address became client-controlled. The rule it would fit
+# is "believe the header only when the peer is the proxy", which
+# has not been decided yet; until then it does nothing rather than
+# doing the wrong thing quietly.
+#
+# Each entry is CIDR notation, including the prefix length (use
+# `/32` or `/128` for a single host).
 #
 # Use this when locally attached bridges or other server-side
 # clients connect from a private container or VPN subnet that

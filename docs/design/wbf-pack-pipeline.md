@@ -95,7 +95,12 @@ client 那邊「開幾條、哪條走什麼、pending → sending → sent」是
 **實作跟 §2.1 同一個形狀**（A4：同一個問題只留一份機制）：`service/connections.rs` 多一張 `Mutex<HashMap<IpAddr, u32>>` 與一個 RAII 的 `AddressSlot`，drop 時減計數。
 名額在 `ws_route` 裡拿，**放進 `on_upgrade` 的 closure**，所以連線怎麼結束都會還；升級沒成（token 壞、§2.1 擋下、關機中）時它在 `ws_route` 結束就 drop，不會漏。
 
-**位址從哪來**：`ws_route` 已經收 `ClientIp(client)`，那是**傳輸層照 `ip_source` 解析好的 client IP**（`router/client_ip.rs`）。⭐ 這一節不自己解析任何 header —— 解析點只有一個，在那裡（A4）。
+**位址從哪來**：`ws_route` 已經收 `ClientIp(client)`，而 `ClientIp` 的規則是（維護者 2026-09-24）：**有設 `ip_source` 就讀那個 header，有就信、沒有就退回 TCP peer；沒設就只信 TCP peer、完全不碰 header**。⭐ 這一節不自己解析任何 header —— 解析點只有一個，在那裡（A4）。
+
+🚨 **這條規則是 PR #85 審查改出來的，不是本來就長這樣**：舊的 `ClientIp` 在 `ip_source` **未設**時會**優先**取 leftmost `X-Forwarded-For`，TCP peer 只是最後手段 —— 位址因此預設就是 **client 可控**的，這道閘門對「故意的人」等於不存在（三位審查都指出）。
+⚠️ **剩下的信任邊界，說白一點**：`ip_source` 設了之後，能**直連**到 server（不經過代理）的人還是可以自己送那個 header。要堵它得再加一條「只有 peer 是代理才信 header」—— `ip_source_trusted_subnets` 這個設定本來就在，而且它現在的用法是**反的**（見下一段）。這是一件待決定的事。
+
+🚧 **`ip_source_trusted_subnets` 目前不生效**（啟動時有 warning）：它原本的作用是「peer 在信任網段 → **跳過**安全解析、改去掃 header」，跟名字給人的印象相反，也是位址變成 client 可控的路徑之一。它**該有的意思是反過來的**。
 
 🚨 **部署上最容易踩的一個坑，要寫進設定說明**：如果 server 前面有反向代理，而 `ip_source` **沒有**設成讀轉發 header，那麼**每一條連線看起來都來自代理那一個位址** —— 40 就不是「每個使用者 40」，而是**整台 server 只能有 40 條**。
 所以這個功能跟 `ip_source` 是綁在一起的：有代理就一定要設。**啟動時會檢查並留一行 warning**（`warn_wbf_address_limit_without_ip_source`）—— 🚫 不擋啟動，直面 client 的部署是合法的（P 條）。
