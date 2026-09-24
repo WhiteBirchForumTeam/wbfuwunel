@@ -299,7 +299,8 @@ client                                          server
 共 8 支。`0x10` 的 `0x01`–`0x03`（Login／Refresh／Logout）是原生的，橋的號碼照慣例從 `0x20` 起。`LoginTypes` 不是註冊，但 client 在登入畫面前要知道 server 支援哪些登入方式，順手放進來。
 
 - 🔧 **橋要改的一處**：`RegistrationTokenValidity` 只有 v1 路徑（MSC3231 進規格時就是 v1），而 `shape_of` 現在只收 v3。改成「**有 v3 取 v3，沒有就取 ruma 列的最新穩定路徑**」，批 1 的 37 支全是 v3，不受影響；總表的端點欄照寫完整路徑。→ **決定 3**。
-- 🔧 **補一條測試**（批 1 留下的待查，已查清楚）：`ip_source` 與信任網段是外層 Router 用 layer 放進請求的 extension（`router/layers.rs`），橋的 Router 沒有這些 layer、橋組的請求也只帶 `ConnectInfo`。所以走橋的呼叫在端點一定走「沒設 `ip_source`」的路：掃轉發 header（橋一個都不帶）→ `ConnectInfo`，而那個位址是**傳輸層已經照 `ip_source` 解析好的 client IP**。行為正確、client 偽造不了；測試把它釘住。
+- 🔧 **補一條測試**（批 1 留下的待查，已查清楚）：`ip_source` 與信任網段是外層 Router 用 layer 放進請求的 extension（`router/layers.rs`），橋的 Router 沒有這些 layer、橋組的請求也只帶 `ConnectInfo`。所以走橋的呼叫在端點一定走「沒設 `ip_source`」的路，也就是只看 `ConnectInfo` —— 而橋組請求時放進去的，正是**外層已經解析好的那個 client IP**。行為正確、client 偽造不了；測試把它釘住。
+📎 **PR #85 之後這句更強了**：`ClientIp` 現在**沒設 `ip_source` 就完全不碰 header**，所以就算有人把轉發 header 塞進 pack 的 meta，橋這一側也不可能讀到它。
 
 #### 2-D. e2e（沿用批 1 的規矩）
 

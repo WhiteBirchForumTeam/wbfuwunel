@@ -70,8 +70,7 @@ pub struct Connections {
 /// hands IPv4 peers over as `::ffff:a.b.c.d`, whose IPv4 part lives in the
 /// very bytes the /64 mask clears — without it every IPv4 client in the world
 /// would share the group `::`, and the limit would silently become one for
-/// the whole server (PR #85 review, cirno). `peer_is_trusted` in
-/// `api/router/client_ip.rs` canonicalizes for the same reason.
+/// the whole server (PR #85 review, cirno).
 #[must_use]
 pub fn to_address_group(address: IpAddr) -> IpAddr {
 	match address.to_canonical() {
@@ -260,7 +259,13 @@ impl Connections {
 	where
 		F: Future<Output = ()> + Send + 'static,
 	{
-		let mut tasks = self.tasks.lock().expect("connections lock poisoned");
+		// A poisoned lock must not take the process down: refusing every new
+		// connection for the server's life is worse than the panic that poisoned
+		// it (CLAUDE.md P).
+		let mut tasks = match self.tasks.lock() {
+			| Ok(tasks) => tasks,
+			| Err(poisoned) => poisoned.into_inner(),
+		};
 		match tasks.as_mut() {
 			| Some(set) => {
 				set.spawn(task);
@@ -276,12 +281,15 @@ impl Connections {
 	/// has not after `JOIN_TIMEOUT` is aborted, which drops its future and
 	/// with it every borrow of `Services`.
 	pub async fn close_and_join(&self) {
-		let Some(mut set) = self
-			.tasks
-			.lock()
-			.expect("connections lock poisoned")
-			.take()
-		else {
+		// The guard is taken in its own scope: it is not `Send`, and what
+		// follows is awaited. Poisoned here would mean shutdown never waits for
+		// the open connections — the one path where panicking helps least
+		// (CLAUDE.md P).
+		let taken = match self.tasks.lock() {
+			| Ok(mut tasks) => tasks.take(),
+			| Err(poisoned) => poisoned.into_inner().take(),
+		};
+		let Some(mut set) = taken else {
 			return;
 		};
 

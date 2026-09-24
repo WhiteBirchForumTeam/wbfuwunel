@@ -76,7 +76,7 @@ pub fn check(config: &Config) -> Result {
 
 	check_observability(config)?;
 	check_wbf_device_window(config)?;
-	warn_wbf_address_limit_without_ip_source(config);
+	warn_address_keyed_limits_share_one_bucket(config);
 	warn_ip_source_trusted_subnets_is_inert(config);
 	check_wbf_send_queue_bytes(config)?;
 	check_wbf_window_max_bytes(config)?;
@@ -132,29 +132,55 @@ fn warn_ip_source_trusted_subnets_is_inert(config: &Config) {
 	);
 }
 
-/// The per-address connection limit counts whatever address the transport
-/// resolved. Behind a reverse proxy, with no `ip_source` telling the server
-/// to read the forwarded header, that address is the proxy — so the limit
-/// stops being "per client" and becomes one for the whole server.
+/// Several limits are keyed on the client address: the login/refresh
+/// token bucket, the OIDC ones, and the per-address WebSocket connection
+/// limit. Two deployment shapes make every request carry the *same* address,
+/// so each of those limits collapses into one bucket for the whole server:
+/// behind a reverse proxy with no `ip_source` telling the server to read the
+/// forwarded header (the address is the proxy), and on a Unix socket (there is
+/// no peer address, so `router/serve/unix.rs` synthesises `127.0.0.1`).
 ///
-/// 🚨 That failure is silent: nothing errors, connections are simply refused
-/// once the server as a whole holds `wbf_ws_max_connections_per_address` of
-/// them. It is a warning rather than a refusal to start, because facing
-/// clients directly is a legitimate deployment and a note is not worth taking
-/// the whole process down (CLAUDE.md P).
+/// 🚨 The failure is silent, and an outsider can hold it open: rate limiting
+/// runs before credentials are checked, so an unauthenticated client can keep
+/// a shared login bucket empty and leave the whole server answering 429. It is
+/// a warning rather than a refusal to start, because facing clients directly
+/// is a legitimate deployment and a note is not worth taking the whole process
+/// down (CLAUDE.md P).
+fn warn_address_keyed_limits_share_one_bucket(config: &Config) {
+	let on = [
+		(config.wbf_ws_max_connections_per_address > 0)
+			.then_some("wbf_ws_max_connections_per_address"),
+		(config.login_rc_per_second > 0).then_some("login_rc_per_second"),
+		(config.oidc_rc_per_second > 0).then_some("oidc_rc_per_second"),
+	];
+	let limits: Vec<&str> = on.into_iter().flatten().collect();
+	if limits.is_empty() {
+		return;
+	}
+	let limits = limits.join(", ");
 
-fn warn_wbf_address_limit_without_ip_source(config: &Config) {
-	if config.wbf_ws_max_connections_per_address == 0 || config.ip_source.is_some() {
+	if config.unix_socket_path.is_some() {
+		warn!(
+			"unix_socket_path is set, so every request carries the same synthesised client \
+			 address and these address-keyed limits apply to the whole server instead of to \
+			 each client: {limits}. The device user-code throttle is always on and collapses \
+			 the same way. Rate limiting runs before credentials are checked, so anyone can \
+			 keep the shared bucket empty. Limit in the layer in front of the socket and set \
+			 these to 0 here.",
+		);
 		return;
 	}
 
-	warn!(
-		"wbf_ws_max_connections_per_address is {} but ip_source is unset: if this server sits \
-		 behind a reverse proxy, every connection counts as coming from the proxy and the limit \
-		 applies to the whole server instead of to each client. Set ip_source when proxied; \
-		 ignore this when clients connect directly.",
-		config.wbf_ws_max_connections_per_address,
-	);
+	if config.ip_source.is_none() {
+		warn!(
+			"ip_source is unset, so the client address is the TCP peer. If this server sits \
+			 behind a reverse proxy that is the proxy for every request, and these \
+			 address-keyed limits apply to the whole server instead of to each client: \
+			 {limits}. Rate limiting runs before credentials are checked, so anyone can keep \
+			 the shared login bucket empty. Set ip_source when proxied; ignore this when \
+			 clients connect directly.",
+		);
+	}
 }
 
 /// The to-device window must fit in the send queue, which

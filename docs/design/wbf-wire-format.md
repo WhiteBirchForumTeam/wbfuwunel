@@ -444,7 +444,7 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 - **每個來源位址最多 `wbf_ws_max_connections_per_address` 條 WS**（預設 40；[pack-pipeline](wbf-pack-pipeline.md) §2.2，維護者 2026-09-24 定）：⭐ 跟上一條不同，**匿名連線也算**，而且在**認證之前**就檢查 ——
   上一條按身份算，所以擋不到還沒有身份的連線；這一條按位址算，是唯一擋得到匿名連線的那道。超過 → **不升級**（舊的照常跑），429 ＋ `Error(TooManyConnectionsFromAddress)`。HTTP 不算。
   **IPv6 按 `/64` 算**，不按確切位址：家用 IPv6 本來就拿一整個 `/64`，換位址零成本，按確切位址算等於沒有上限。
-  ⚠️ 位址取自傳輸層照 `ip_source` 解析好的 client IP：**前面有反向代理卻沒設 `ip_source` 的話，全部連線會算成同一個位址**（啟動時有 warning）。
+  ⚠️ 位址取自 `ClientIp`，而它的規則是：**有設 `ip_source` 就讀那個 header（代理寫的）、沒有就退回 TCP peer；沒設就只信 TCP peer**。所以**前面有反向代理卻沒設 `ip_source` 的話，全部連線會算成代理那一個位址**（啟動時有 warning）。
 
 ### 6.2 HTTP（選用，測試與腳本用）
 
@@ -516,8 +516,13 @@ HTTP `/login` 現在**沒有**限速（只有 OIDC 端點有 `oidc_rc_per_second
   登入不同：一個人手打密碼打不到這個速度，NAT 後面十個人同時登入也剛好夠。
 - 超過回 `Error(RateLimited)`，meta 多 `retry_after_ms`；HTTP 側回 429 `M_LIMIT_EXCEEDED`（Matrix 既有）。
 - **限速先於憑證檢查**：洪水不該還花一次 DB 查找。所以 bucket 空時，鎖定帳號的 Login 也回 `RateLimited` 而不是 `M_USER_LOCKED`。
-- ⚠️ **限速的 key 是 client IP，它的效力前提是那個 IP 可信**（review，rumia／salvia）。沒設 `ip_source` 時 `ClientIp` 先讀 `X-Forwarded-For` 等 header 才退回 socket 位址，攻擊者每次換 header 就拿到一個新 bucket。
-  **部署須知**：直接向公網的伺服器要設 `ip_source`（`rightmost` 加受信代理 subnet），或者確定反向代理覆寫 XFF。這是 OIDC 限速既有的前提，登入限速預設開、所以要講明。
+- ⚠️ **限速的 key 是 client IP，而那個 IP 可不可信、會不會撞在一起，全看 `ip_source`**（review，rumia／salvia；PR #85 改過規則）。
+  **可不可信**：現在沒設 `ip_source` 時 `ClientIp` **完全不碰 header**，只用 TCP peer —— 「換一個 header 就拿一個新 bucket」這條路已經不存在（舊版本有）。
+  🚨 **會不會撞在一起：這才是現在要看的那一面**。bucket 只以位址為 key，所以**任何讓全部請求看起來都來自同一個位址的部署，就是全站共用一個登入限速桶**：
+  • 反代後面**沒設** `ip_source` → 全部算代理那一個位址；
+  • **unix socket 部署** → `router/serve/unix.rs` 給每個請求注入合成的 `127.0.0.1`，而 `ip_source` 在那裡**本來就該不設**。
+  ⚠️ 後果是**可用性**，而且外人維持得住：預設 `login_rc_per_second = 1`，限速又在憑證檢查**之前**，所以一個未登入的人每秒一發 login 就能把補回來的 token 抽乾 → **全站 login／refresh 長期 429**。
+  **部署須知**：反代後面**一定要設** `ip_source`（例 `rightmost_x_forwarded_for`）—— 不只為了限速準不準，是為了別讓全站共用一個桶。unix socket 部署則**本質上做不到按位址限速**（位址是合成的），要限速就得在前面那層做；要麼把 `login_rc_per_second` 設成 `0` 關掉它，別留一個任何人都抽得乾的共用桶。
 - 🚫 不做「連錯 N 次鎖帳號」：那是讓攻擊者能鎖住別人帳號的 DoS 入口。
 
 #### 6.3.5 `Hello`

@@ -103,7 +103,10 @@ client 那邊「開幾條、哪條走什麼、pending → sending → sent」是
 🚧 **`ip_source_trusted_subnets` 目前不生效**（啟動時有 warning）：它原本的作用是「peer 在信任網段 → **跳過**安全解析、改去掃 header」，跟名字給人的印象相反，也是位址變成 client 可控的路徑之一。它**該有的意思是反過來的**。
 
 🚨 **部署上最容易踩的一個坑，要寫進設定說明**：如果 server 前面有反向代理，而 `ip_source` **沒有**設成讀轉發 header，那麼**每一條連線看起來都來自代理那一個位址** —— 40 就不是「每個使用者 40」，而是**整台 server 只能有 40 條**。
-所以這個功能跟 `ip_source` 是綁在一起的：有代理就一定要設。**啟動時會檢查並留一行 warning**（`warn_wbf_address_limit_without_ip_source`）—— 🚫 不擋啟動，直面 client 的部署是合法的（P 條）。
+所以這個功能跟 `ip_source` 是綁在一起的：有代理就一定要設。**啟動時會檢查並留一行 warning**（`warn_address_keyed_limits_share_one_bucket`）—— 🚫 不擋啟動，直面 client 的部署是合法的（P 條）。
+
+⚠️ **塌成一個桶的不只這道閘門**：登入／refresh 的限速桶、OIDC 的兩個限速桶也都以位址為 key，所以同一個部署失誤會讓它們**一起**變成全站共用。而限速跑在**憑證檢查之前**，共用的桶任何人都抽得乾 —— 預設 `login_rc_per_second = 1`，一個未登入的人每秒一發就能讓全站 login／refresh 長期 429。⭐ 所以那行 warning 列的是**所有**開著的位址型限制，不只這一個。
+🚨 **unix socket 部署是同一個病的另一種形狀**：那裡根本沒有 peer 位址，`router/serve/unix.rs` 給每個請求合成一個 `127.0.0.1`，而 `ip_source` 在那裡本來就該不設 —— 於是按位址限速**本質上做不到**。處置是在前面那層做，並把這些設定設成 `0`，別留一個誰都抽得乾的共用桶。warning 對這個形狀另外講一句。
 
 #### 維護者 2026-09-24 定的四條
 

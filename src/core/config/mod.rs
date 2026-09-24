@@ -1984,11 +1984,19 @@ pub struct Config {
 	/// open a second, faster road for guessing passwords. `0` disables the
 	/// throttle. The key is the client IP: a rate low enough to bite a guesser
 	/// also throttles many users behind one NAT, which is what the burst is
-	/// for. The IP is only as trustworthy as `ip_source` makes it: without
-	/// it, forwarded-for headers are believed, and a client that rewrites
-	/// them gets a fresh bucket each time. Behind a reverse proxy set
-	/// `ip_source` (rightmost, with the proxy's subnet trusted) or make the
-	/// proxy overwrite the header.
+	/// for. The address is the transport-layer peer unless `ip_source` is
+	/// set, and forwarding headers are read only when it is. So behind a
+	/// reverse proxy with `ip_source` unset, every request carries the
+	/// proxy's address and the whole site shares one bucket; the same is
+	/// true of a Unix-socket deployment, where the peer address is the
+	/// synthesised `127.0.0.1`. That bucket is drainable by anyone —
+	/// throttling runs before credentials are checked — so at the default
+	/// of one attempt per second an unauthenticated client can keep
+	/// login and refresh answering 429 site-wide. Behind a reverse proxy,
+	/// set `ip_source` (rightmost, with the proxy's subnet trusted). On a
+	/// Unix socket, per-address throttling cannot work at all: throttle in
+	/// the layer in front, and set this to `0` rather than leaving a shared
+	/// bucket up.
 	///
 	/// reloadable: yes
 	/// default: 1
@@ -3693,8 +3701,11 @@ pub struct Config {
 	///
 	/// ⚠️ Behind a reverse proxy this counts the proxy unless `ip_source` is
 	/// set to read the forwarded header — then every connection shares one
-	/// address and this becomes a limit on the whole server. The server logs
-	/// a warning at startup when this limit is on and `ip_source` is unset.
+	/// address and this becomes a limit on the whole server. A Unix-socket
+	/// deployment collapses the same way: there is no peer address, so every
+	/// request is given a synthesised `127.0.0.1` and per-address counting
+	/// cannot work at all — limit in the layer in front and set this to `0`.
+	/// The server warns at startup in both shapes.
 	///
 	/// 0 disables the limit.
 	///

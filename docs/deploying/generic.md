@@ -202,23 +202,32 @@ Regardless of which reverse proxy you choose, you will need to:
 
 ### Client IP source
 
-Set `ip_source` when you want Tuwunel to use a spoofing-resistant client IP
-source for rate limiting, logging, and security tooling. Leave it unset to keep
-the legacy fallback behavior.
+Tuwunel takes the client address from the transport-layer peer. Forwarding
+headers are read **only** when `ip_source` is set, and then only the one source
+it names; with `ip_source` unset no header can move the address.
 
-Use `ip_source = "connect_info"` only when Tuwunel accepts direct TCP
-connections and should use the TCP peer address. Do not use `connect_info` for
-Unix-socket deployments; leave `ip_source` unset there.
+That address keys the login/refresh rate limiter and
+`wbf_ws_max_connections_per_address`, so getting it wrong costs availability in
+both directions:
 
-If Tuwunel is behind a trusted reverse proxy, set `ip_source` to match the
-header that proxy controls. Caddy, Nginx, and Traefik usually use
-`ip_source = "rightmost_x_forwarded_for"`. Cloudflare and cloudflared
-deployments can use `ip_source = "cf_connecting_ip"` when Cloudflare supplies
-that header.
-
-Only use header-based values when clients cannot connect to Tuwunel directly.
-If clients can reach Tuwunel without going through the trusted proxy, they can
-send forged forwarding headers and choose the IP address Tuwunel sees.
+- **Direct TCP, no proxy:** leave `ip_source` unset, or set
+  `ip_source = "connect_info"`. Do **not** set a header source — a client that
+  can reach Tuwunel directly would then pick its own address, and with it its
+  own rate-limit bucket and connection quota.
+- **Behind a reverse proxy:** you **must** set `ip_source` to the header that
+  proxy controls — Caddy, Nginx and Traefik usually
+  `ip_source = "rightmost_x_forwarded_for"`; Cloudflare and cloudflared
+  `ip_source = "cf_connecting_ip"`. Leave it unset and every request arrives
+  bearing the proxy's address, so the whole site shares **one** login bucket and
+  **one** WebSocket connection quota. The rate limiter runs before credentials
+  are checked, so at the default `login_rc_per_second = 1` any unauthenticated
+  client can keep that shared bucket empty and leave login and refresh
+  answering 429 site-wide.
+- **Unix socket:** leave `ip_source` unset — `connect_info` needs a TCP peer,
+  and there is none. Tuwunel synthesises `127.0.0.1` for every request there, so
+  per-address limiting cannot work at all: do it in the layer in front, and set
+  `login_rc_per_second = 0` and `wbf_ws_max_connections_per_address = 0` rather
+  than leaving shared buckets that anyone can drain.
 
 See the following spec pages for more details on well-known files:
 - [`/.well-known/matrix/server`](https://spec.matrix.org/latest/client-server-api/#getwell-knownmatrixserver)
