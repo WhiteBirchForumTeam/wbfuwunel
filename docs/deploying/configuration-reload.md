@@ -60,10 +60,11 @@ a freshly started server reads `Running`.
 ## What a reload applies
 
 Options documented `reloadable: yes` in `tuwunel-example.toml` take effect
-immediately. Two are rejected outright, failing the whole reload:
+immediately. Three are rejected outright, failing the whole reload:
 
 - `server_name`
-- `ip_source`
+- `reverse_proxy_ip_header`
+- `localhost_ip`
 
 Two more are refused outright rather than merely ignored, because the server
 would refuse to start with them set in a file: `maintenance` and

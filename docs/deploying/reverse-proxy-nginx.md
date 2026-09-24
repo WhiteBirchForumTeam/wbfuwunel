@@ -64,9 +64,11 @@ server {
 
 - **Replace `matrix.example.com`** with your actual server name
 - **`client_max_body_size`**: Must match or exceed `max_request_size` in your `tuwunel.toml`
-- **`ip_source`**: If Nginx is the only way clients can reach Tuwunel, set
-  `ip_source = "rightmost_x_forwarded_for"` so Tuwunel uses the trusted
-  `X-Forwarded-For` value
+- **Client IP**: If Nginx runs on the same host, nothing to configure — its
+  peer address is loopback, which is in the default `localhost_ip`, so Tuwunel
+  reads `X-Forwarded-For`. If Nginx runs elsewhere and is the only way clients
+  can reach Tuwunel, set
+  `reverse_proxy_ip_header = "rightmost_x_forwarded_for"`
 - **Do NOT use `$request_uri`** in `proxy_pass` - while some guides suggest this, it's not necessary for Tuwunel and can cause issues
 - **IPv6**: The `listen [::]:443` and `listen [::]:8448` lines enable IPv6 support. Remove them if you don't need IPv6
 

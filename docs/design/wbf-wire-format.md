@@ -444,7 +444,7 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 - **每個來源位址最多 `wbf_ws_max_connections_per_address` 條 WS**（預設 40；[pack-pipeline](wbf-pack-pipeline.md) §2.2，維護者 2026-09-24 定）：⭐ 跟上一條不同，**匿名連線也算**，而且在**認證之前**就檢查 ——
   上一條按身份算，所以擋不到還沒有身份的連線；這一條按位址算，是唯一擋得到匿名連線的那道。超過 → **不升級**（舊的照常跑），429 ＋ `Error(TooManyConnectionsFromAddress)`。HTTP 不算。
   **IPv6 按 `/64` 算**，不按確切位址：家用 IPv6 本來就拿一整個 `/64`，換位址零成本，按確切位址算等於沒有上限。
-  ⚠️ 位址取自 `ClientIp`，而它的規則是：**有設 `ip_source` 就讀那個 header（代理寫的）、沒有就退回 TCP peer；沒設就只信 TCP peer**。所以**前面有反向代理卻沒設 `ip_source` 的話，全部連線會算成代理那一個位址**（啟動時有 warning）。
+  ⚠️ 位址取自 `ClientIp`，而它的規則是（維護者 2026-09-25）：**有設 `reverse_proxy_ip_header` 就讀那個 header，OR peer 落在 `localhost_ip`（預設 loopback）就讀 `X-Forwarded-For`；兩條都不成立就只信傳輸層 peer、完全不碰 header**。所以**代理在另一台、又沒設 `reverse_proxy_ip_header` 的話，全部連線會算成代理那一個位址**（啟動時有 warning）；同機代理與 unix socket 不必設定，peer 就是 loopback。
 
 ### 6.2 HTTP（選用，測試與腳本用）
 
@@ -516,13 +516,14 @@ HTTP `/login` 現在**沒有**限速（只有 OIDC 端點有 `oidc_rc_per_second
   登入不同：一個人手打密碼打不到這個速度，NAT 後面十個人同時登入也剛好夠。
 - 超過回 `Error(RateLimited)`，meta 多 `retry_after_ms`；HTTP 側回 429 `M_LIMIT_EXCEEDED`（Matrix 既有）。
 - **限速先於憑證檢查**：洪水不該還花一次 DB 查找。所以 bucket 空時，鎖定帳號的 Login 也回 `RateLimited` 而不是 `M_USER_LOCKED`。
-- ⚠️ **限速的 key 是 client IP，而那個 IP 可不可信、會不會撞在一起，全看 `ip_source`**（review，rumia／salvia；PR #85 改過規則）。
-  **可不可信**：現在沒設 `ip_source` 時 `ClientIp` **完全不碰 header**，只用 TCP peer —— 「換一個 header 就拿一個新 bucket」這條路已經不存在（舊版本有）。
-  🚨 **會不會撞在一起：這才是現在要看的那一面**。bucket 只以位址為 key，所以**任何讓全部請求看起來都來自同一個位址的部署，就是全站共用一個登入限速桶**：
-  • 反代後面**沒設** `ip_source` → 全部算代理那一個位址；
-  • **unix socket 部署** → `router/serve/unix.rs` 給每個請求注入合成的 `127.0.0.1`，而 `ip_source` 在那裡**本來就該不設**。
-  ⚠️ 後果是**可用性**，而且外人維持得住：預設 `login_rc_per_second = 1`，限速又在憑證檢查**之前**，所以一個未登入的人每秒一發 login 就能把補回來的 token 抽乾 → **全站 login／refresh 長期 429**。
-  **部署須知**：反代後面**一定要設** `ip_source`（例 `rightmost_x_forwarded_for`）—— 不只為了限速準不準，是為了別讓全站共用一個桶。unix socket 部署則**本質上做不到按位址限速**（位址是合成的），要限速就得在前面那層做；要麼把 `login_rc_per_second` 設成 `0` 關掉它，別留一個任何人都抽得乾的共用桶。
+- ⚠️ **限速的 key 是 client IP，而那個 IP 可不可信、會不會撞在一起，全看 `reverse_proxy_ip_header` 與 `localhost_ip`**（review，rumia／salvia／cirno；PR #85 改過兩次規則）。
+  **可不可信**：`ClientIp` 只在兩種情況讀 header —— 操作者用 `reverse_proxy_ip_header` 指名了它，或 peer 落在 `localhost_ip`（預設 loopback）。外面的 client 送什麼 header 都推不動自己的位址，「換一個 header 就拿一個新 bucket」這條路已經不存在（舊版本有）。
+  🚨 **會不會撞在一起**：bucket 只以位址為 key，所以**任何讓全部請求看起來都來自同一個位址的部署，就是全站共用一個登入限速桶**。
+  • **同機代理／unix socket** → peer 是 loopback，落在預設 `localhost_ip` 裡，所以只要前面那層送 `X-Forwarded-For` 就**不會**塌。📎 unix socket 沒有 peer 位址，`router/serve/unix.rs` 合成的 `127.0.0.1` 就是為了落進這裡。
+  • **代理在另一台、又沒設 `reverse_proxy_ip_header`** → 全部算代理那一個位址，塌。
+  • **`localhost_ip = []` 又走 unix socket** → 沒有東西救得了，塌。
+  ⚠️ 塌掉的後果是**可用性**，而且外人維持得住：預設 `login_rc_per_second = 1`，限速又在憑證檢查**之前**，所以一個未登入的人每秒一發 login 就能把補回來的 token 抽乾 → **全站 login／refresh 長期 429**。
+  **部署須知**：代理在另一台就**一定要設** `reverse_proxy_ip_header`（例 `rightmost_x_forwarded_for`）—— 不只為了限速準不準，是為了別讓全站共用一個桶。真的兩條都做不到（前面那層不送任何 header），就把 `login_rc_per_second` 設成 `0`、在前面那層限速，別留一個任何人都抽得乾的共用桶。
 - 🚫 不做「連錯 N 次鎖帳號」：那是讓攻擊者能鎖住別人帳號的 DoS 入口。
 
 #### 6.3.5 `Hello`

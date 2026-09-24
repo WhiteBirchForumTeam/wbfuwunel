@@ -95,25 +95,31 @@ client 那邊「開幾條、哪條走什麼、pending → sending → sent」是
 **實作跟 §2.1 同一個形狀**（A4：同一個問題只留一份機制）：`service/connections.rs` 多一張 `Mutex<HashMap<IpAddr, u32>>` 與一個 RAII 的 `AddressSlot`，drop 時減計數。
 名額在 `ws_route` 裡拿，**放進 `on_upgrade` 的 closure**，所以連線怎麼結束都會還；升級沒成（token 壞、§2.1 擋下、關機中）時它在 `ws_route` 結束就 drop，不會漏。
 
-**位址從哪來**：`ws_route` 已經收 `ClientIp(client)`，而 `ClientIp` 的規則是（維護者 2026-09-24）：**有設 `ip_source` 就讀那個 header，有就信、沒有就退回 TCP peer；沒設就只信 TCP peer、完全不碰 header**。⭐ 這一節不自己解析任何 header —— 解析點只有一個，在那裡（A4）。
+**位址從哪來**：`ws_route` 已經收 `ClientIp(client)`，而 `ClientIp` 的規則是（維護者 2026-09-25）：**有設 `reverse_proxy_ip_header` 就讀那個 header，OR peer 落在 `localhost_ip` 裡就讀 `X-Forwarded-For`（最右邊那個）；兩條都不成立就只信傳輸層 peer、完全不碰 header。** header 有就信、沒有就退回 peer。⭐ 這一節不自己解析任何 header —— 解析點只有一個，在那裡（A4）。
 
-🚨 **這條規則是 PR #85 審查改出來的，不是本來就長這樣**：舊的 `ClientIp` 在 `ip_source` **未設**時會**優先**取 leftmost `X-Forwarded-For`，TCP peer 只是最後手段 —— 位址因此預設就是 **client 可控**的，這道閘門對「故意的人」等於不存在（三位審查都指出）。
-⚠️ **剩下的信任邊界，說白一點**：`ip_source` 設了之後，能**直連**到 server（不經過代理）的人還是可以自己送那個 header。要堵它得再加一條「只有 peer 是代理才信 header」—— `ip_source_trusted_subnets` 這個設定本來就在，而且它現在的用法是**反的**（見下一段）。這是一件待決定的事。
+🚨 **這條規則是 PR #85 審查改出來的，不是本來就長這樣**：舊的 `ClientIp` 對**每一個** peer 都掃轉發 header，而且**優先**取 leftmost `X-Forwarded-For`，peer 只是最後手段 —— 位址因此預設就是 **client 可控**的，這道閘門對「故意的人」等於不存在（三位審查都指出）。
 
-🚧 **`ip_source_trusted_subnets` 目前不生效**（啟動時有 warning）：它原本的作用是「peer 在信任網段 → **跳過**安全解析、改去掃 header」，跟名字給人的印象相反，也是位址變成 client 可控的路徑之一。它**該有的意思是反過來的**。
+**兩個條件各講一件事，缺一不可：**
 
-🚨 **部署上最容易踩的一個坑，要寫進設定說明**：如果 server 前面有反向代理，而 `ip_source` **沒有**設成讀轉發 header，那麼**每一條連線看起來都來自代理那一個位址** —— 40 就不是「每個使用者 40」，而是**整台 server 只能有 40 條**。
-所以這個功能跟 `ip_source` 是綁在一起的：有代理就一定要設。**啟動時會檢查並留一行 warning**（`warn_address_keyed_limits_share_one_bucket`）—— 🚫 不擋啟動，直面 client 的部署是合法的（P 條）。
+| 設定 | 它說的是 | 誰的 header 被信 |
+|---|---|---|
+| `reverse_proxy_ip_header` | 「我前面有代理，它把 client 寫在**這個** header」 | 任何 peer —— 因為操作者保證沒人繞得過代理 |
+| `localhost_ip`（預設 loopback） | 「這個 peer 不是 client，是跟我跑在同一台的東西」 | 只有本機：同機代理、unix socket |
 
-⚠️ **塌成一個桶的不只這道閘門**：登入／refresh 的限速桶、OIDC 的兩個限速桶也都以位址為 key，所以同一個部署失誤會讓它們**一起**變成全站共用。而限速跑在**憑證檢查之前**，共用的桶任何人都抽得乾 —— 預設 `login_rc_per_second = 1`，一個未登入的人每秒一發就能讓全站 login／refresh 長期 429。⭐ 所以那行 warning 列的是**所有**開著的位址型限制，不只這一個。
-🚨 **unix socket 部署是同一個病的另一種形狀**：那裡根本沒有 peer 位址，`router/serve/unix.rs` 給每個請求合成一個 `127.0.0.1`，而 `ip_source` 在那裡本來就該不設 —— 於是按位址限速**本質上做不到**。處置是在前面那層做，並把這些設定設成 `0`，別留一個誰都抽得乾的共用桶。warning 對這個形狀另外講一句。
+⚠️ **剩下的信任邊界，說白一點**：設了 `reverse_proxy_ip_header` 之後，能**直連**到 server（不經過代理）的人還是可以自己送那個 header。那是操作者的部署承諾，文件講明了（`generic.md`）。`localhost_ip` 那一半沒有這個問題 —— 它只信本機。
+
+🚨 **為什麼 `localhost_ip` 非回來不可**（cirno 在 PR #85 二審點出的）：unix socket **根本沒有 peer 位址**，`router/serve/unix.rs` 給每個請求合成一個 `127.0.0.1`。少了這條規則，那種部署的**每一個請求位址都一樣** —— 登入／refresh 的限速桶、OIDC 的兩個限速桶、這道連線上限，全部塌成**一個全站共用的桶**。而限速跑在**憑證檢查之前**，共用的桶任何人都抽得乾：預設 `login_rc_per_second = 1`，一個未登入的人每秒一發就能讓全站 login／refresh 長期 429。
+📎 所以合成 `127.0.0.1` 不是隨便挑的 —— 它就是為了落進 `localhost_ip`。同機代理是同一個形狀。
+
+🚨 **剩下的那個坑**：代理在**另一台**、又**沒設** `reverse_proxy_ip_header`，那麼每一條連線還是算成代理那一個位址 —— 40 不是「每個使用者 40」，而是**整台 server 只能有 40 條**。這個 server 從設定看不出來，所以**啟動時留一行 warning**（`warn_address_keyed_limits_share_one_bucket`，列出所有開著的位址型限制）—— 🚫 不擋啟動，直面 client 的部署是合法的（P 條）。
 
 #### 維護者 2026-09-24 定的四條
 
 1. **錯誤碼新開 `TooManyConnectionsFromAddress`（1403）**，不沿用 1402。詞表的規矩是「一個 code 對一種處置」（wire-format §3.4），而 1402 的處置是**「關掉一條你自己的舊連線」** —— 那對位址名額是**錯的建議**：撞到上限的人可能一條都不是他開的（同一個 NAT、同一間辦公室、同一台代理），他關不掉別人的。訊息因此**刻意不說「關掉一條你的」**，只說等或換網路。
 2. **IPv6 按 `/64` 聚合**（IPv4 仍按確切位址）。理由：一般家用 IPv6 會拿到一整個 `/64`（甚至 `/56`），**換一個位址是零成本的** —— 按確切位址算等於在 IPv6 下沒有上限。實作是 `to_address_group`（`service/connections.rs`）。
-3. **沒有豁免**：loopback 與信任網段照樣計入。多一條豁免就多一條要驗的路徑。
-4. **沒設 `ip_source` 時啟動留 warning**，不擋啟動。
+3. **沒有豁免**：loopback 與本機網段照樣**計入**。多一條豁免就多一條要驗的路徑。
+   ⚠️ 別跟 2026-09-25 加的 `localhost_ip` 搞混：那條管的是**位址怎麼解析出來的**（本機 peer 可以指名 client），不是**誰不用算**。解析完之後每個位址一視同仁。
+4. **位址可能塌成一個桶時啟動留 warning**，不擋啟動。
 
 📎 **撞到上限的處置**（維護者同日明訂）：**拒新的，舊的照常跑**。升級根本不發生 —— 429 帶一個 `Error` pack，沒有 WebSocket 被建立，所以也沒有「關掉哪一條」的問題。跟 §2.1 「踢的永遠是新的那條」同一個方向。
 

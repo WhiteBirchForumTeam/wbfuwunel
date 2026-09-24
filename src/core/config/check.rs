@@ -17,7 +17,10 @@ use itertools::Itertools;
 use regex::RegexSet;
 use url::Url;
 
-use super::{DEPRECATED_KEYS, IdentityProvider, IpSource, KNOWN_KEYS, S3_MIN_PART_SIZE, StorageProvider};
+use super::{
+	DEPRECATED_KEYS, IdentityProvider, KNOWN_KEYS, ReverseProxyIpHeader, S3_MIN_PART_SIZE,
+	StorageProvider,
+};
 use crate::{
 	Config, Err, Result, debug, debug_info, err, error,
 	wbf::pack::OVERHEAD as PACK_OVERHEAD,
@@ -42,10 +45,18 @@ pub fn reload(old: &Config, new: &Config) -> Result {
 		));
 	}
 
-	if new.ip_source != old.ip_source {
+	if new.reverse_proxy_ip_header != old.reverse_proxy_ip_header {
 		return Err!(Config(
-			"ip_source",
-			"ip_source cannot be changed at runtime; restart the server to apply this change."
+			"reverse_proxy_ip_header",
+			"reverse_proxy_ip_header cannot be changed at runtime; restart the server to apply \
+			 this change."
+		));
+	}
+
+	if new.localhost_ip != old.localhost_ip {
+		return Err!(Config(
+			"localhost_ip",
+			"localhost_ip cannot be changed at runtime; restart the server to apply this change."
 		));
 	}
 
@@ -76,8 +87,8 @@ pub fn check(config: &Config) -> Result {
 
 	check_observability(config)?;
 	check_wbf_device_window(config)?;
+	check_renamed_client_address_keys(config)?;
 	warn_address_keyed_limits_share_one_bucket(config);
-	warn_ip_source_trusted_subnets_is_inert(config);
 	check_wbf_send_queue_bytes(config)?;
 	check_wbf_window_max_bytes(config)?;
 	check_s3_part_size(config)?;
@@ -109,36 +120,18 @@ fn check_observability(config: &Config) -> Result {
 	Ok(())
 }
 
-/// 🚧 `ip_source_trusted_subnets` no longer does anything.
+/// Several limits are keyed on the client address: the login/refresh token
+/// bucket, the OIDC ones, and the per-address WebSocket connection limit. A
+/// deployment where the client's real address never reaches the server makes
+/// every request carry the same one, and each of those limits collapses into a
+/// single bucket for the whole server.
 ///
-/// It used to make a peer in one of those subnets **skip** the configured
-/// extraction and fall back to scanning headers — the opposite of what the
-/// name suggests, and one of the ways the client's address became
-/// client-controlled (PR #85 review, salvia). The rule it would fit is
-/// "believe the header only when the peer is the proxy", which is still open.
-///
-/// Until then this says so out loud: a setting that looks like it hardens
-/// something, while doing nothing, is worse than no setting at all.
-fn warn_ip_source_trusted_subnets_is_inert(config: &Config) {
-	if config.ip_source_trusted_subnets.is_empty() {
-		return;
-	}
-
-	warn!(
-		"ip_source_trusted_subnets is set ({} entries) but currently has no effect. The client \
-		 address is now the header named by ip_source when that header is present, and the TCP \
-		 peer otherwise — which subnet the peer is in is not consulted either way.",
-		config.ip_source_trusted_subnets.len(),
-	);
-}
-
-/// Several limits are keyed on the client address: the login/refresh
-/// token bucket, the OIDC ones, and the per-address WebSocket connection
-/// limit. Two deployment shapes make every request carry the *same* address,
-/// so each of those limits collapses into one bucket for the whole server:
-/// behind a reverse proxy with no `ip_source` telling the server to read the
-/// forwarded header (the address is the proxy), and on a Unix socket (there is
-/// no peer address, so `router/serve/unix.rs` synthesises `127.0.0.1`).
+/// Since `localhost_ip` came back that is no longer the default outcome: a
+/// proxy on the same host, and the Unix socket, are believed when they forward
+/// an address. What is left is a proxy that either sits on another host with no
+/// `reverse_proxy_ip_header` naming its header, or sends no forwarding header
+/// at all — neither of which the server can see from here, which is why this
+/// warns rather than decides.
 ///
 /// 🚨 The failure is silent, and an outsider can hold it open: rate limiting
 /// runs before credentials are checked, so an unauthenticated client can keep
@@ -159,28 +152,66 @@ fn warn_address_keyed_limits_share_one_bucket(config: &Config) {
 	}
 	let limits = limits.join(", ");
 
-	if config.unix_socket_path.is_some() {
+	// The one shape that is certain rather than suspected: a Unix socket has
+	// no peer address, the synthesised one is loopback, and localhost_ip is
+	// what would have let it name the client.
+	if config.unix_socket_path.is_some() && config.localhost_ip.is_empty() {
 		warn!(
-			"unix_socket_path is set, so every request carries the same synthesised client \
-			 address and these address-keyed limits apply to the whole server instead of to \
-			 each client: {limits}. The device user-code throttle is always on and collapses \
-			 the same way. Rate limiting runs before credentials are checked, so anyone can \
-			 keep the shared bucket empty. Limit in the layer in front of the socket and set \
-			 these to 0 here.",
+			"unix_socket_path is set and localhost_ip is empty, so every request carries the \
+			 same synthesised loopback address and these address-keyed limits apply to the \
+			 whole server instead of to each client: {limits}. The device user-code throttle is \
+			 always on and collapses the same way. Rate limiting runs before credentials are \
+			 checked, so anyone can keep the shared bucket empty. Either leave localhost_ip at \
+			 its default and have the layer in front send X-Forwarded-For, or limit in that \
+			 layer and set these to 0 here.",
 		);
 		return;
 	}
 
-	if config.ip_source.is_none() {
+	if config.reverse_proxy_ip_header.is_none() {
 		warn!(
-			"ip_source is unset, so the client address is the TCP peer. If this server sits \
-			 behind a reverse proxy that is the proxy for every request, and these \
+			"reverse_proxy_ip_header is unset, so a forwarding header is read only from a peer \
+			 in localhost_ip, and then only X-Forwarded-For. If a reverse proxy in front of \
+			 this server is not covered by that, every request carries its address and these \
 			 address-keyed limits apply to the whole server instead of to each client: \
 			 {limits}. Rate limiting runs before credentials are checked, so anyone can keep \
-			 the shared login bucket empty. Set ip_source when proxied; ignore this when \
-			 clients connect directly.",
+			 the shared login bucket empty. Name the proxy's header here, or make sure it \
+			 sends X-Forwarded-For from an address in localhost_ip; ignore this when clients \
+			 connect directly.",
 		);
 	}
+}
+
+/// 🚨 Refuses to start on a config that still uses the old names for the two
+/// client-address settings (renamed 2026-09-25). They would otherwise land in
+/// the catchall and be ignored with a warning, and being ignored is the
+/// dangerous direction here: an operator who set `ip_source` for a proxy would
+/// silently get a server that reads no header at all, collapsing every
+/// address-keyed limit into one bucket. A rename is cheap to act on; a silently
+/// unapplied security setting is not (CLAUDE.md A5).
+fn check_renamed_client_address_keys(config: &Config) -> Result {
+	if config.catchall.contains_key("ip_source") {
+		return Err!(Config(
+			"ip_source",
+			"ip_source was renamed to reverse_proxy_ip_header. Rename it in your config: left \
+			 under the old name it would be ignored, and then no forwarding header would be \
+			 read at all."
+		));
+	}
+
+	if config
+		.catchall
+		.contains_key("ip_source_trusted_subnets")
+	{
+		return Err!(Config(
+			"ip_source_trusted_subnets",
+			"ip_source_trusted_subnets was renamed to localhost_ip, and it now does what its \
+			 name says: a peer in one of these ranges may name the client in a forwarding \
+			 header. Rename it in your config, and check the ranges are ones you control."
+		));
+	}
+
+	Ok(())
 }
 
 /// The to-device window must fit in the send queue, which
@@ -347,13 +378,14 @@ fn check_network(config: &Config) -> Result {
 		));
 	}
 
-	if let Some(source) = config.ip_source
-		&& !matches!(source, IpSource::ConnectInfo)
+	if let Some(header) = config.reverse_proxy_ip_header
+		&& !matches!(header, ReverseProxyIpHeader::ConnectInfo)
 	{
 		warn!(
-			"ip_source is set to {source:?}, a header-based source. Ensure a trusted reverse \
-			 proxy populates this header for every request; otherwise clients can spoof their \
-			 IP address."
+			"reverse_proxy_ip_header is set to {header:?}, a header-based source, which is \
+			 believed whoever the peer is. Ensure a trusted reverse proxy overwrites this \
+			 header on every request and that clients cannot reach this server around it; \
+			 otherwise they can choose their own IP address."
 		);
 	}
 

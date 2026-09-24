@@ -79,9 +79,14 @@ http:
 
 ### Client IP source
 
-If Traefik is the only way clients can reach Tuwunel, set
-`ip_source = "rightmost_x_forwarded_for"` in `tuwunel.toml` so Tuwunel uses the
-trusted `X-Forwarded-For` value.
+If Traefik runs on the same host as Tuwunel, there is nothing to configure: its
+peer address is loopback, which is in the default `localhost_ip`, so Tuwunel
+reads the `X-Forwarded-For` value it sets.
+
+If Traefik runs elsewhere and is the only way clients can reach Tuwunel, set
+`reverse_proxy_ip_header = "rightmost_x_forwarded_for"` in `tuwunel.toml`. ⚠️
+The header is then believed from any peer, so only do this when clients cannot
+reach Tuwunel around Traefik.
 
 ### Federation
 

@@ -22,10 +22,12 @@ pub(super) async fn serve<'a>(
 ) -> Result<Vec<BoxFuture<'a, Result<(), std::io::Error>>>> {
 	// A unix-socket peer has no IP address, but `ClientIp` must answer with
 	// something, so every request here is given a synthesised loopback one.
-	// 🚨 That makes every request share it: the address-keyed limits (login
-	// and OIDC rate limiting, `wbf_ws_max_connections_per_address`) become one
-	// bucket for the whole server. `config::check` warns about it at startup;
-	// `docs/deploying/generic.md` says to limit in the layer in front instead.
+	// 🚨 Loopback is not an arbitrary choice: it is what puts these requests
+	// inside the default `localhost_ip`, so the layer in front can name the
+	// real client in `X-Forwarded-For` and the address-keyed limits (login and
+	// OIDC rate limiting, `wbf_ws_max_connections_per_address`) stay per
+	// client. Empty `localhost_ip` here and they all share one bucket instead
+	// — `config::check` warns about exactly that pair.
 	let router = router
 		.clone()
 		.layer(Extension(ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))))
