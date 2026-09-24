@@ -136,7 +136,6 @@ fn rightmost_forwarded(headers: &HeaderMap) -> Option<IpAddr> {
 		.next_back()
 }
 
-
 fn parse_forwarded_for(stanza: &str) -> Option<IpAddr> {
 	let for_value = stanza
 		.split(';')
