@@ -64,10 +64,18 @@ pub struct Connections {
 /// ⚠️ IPv6 is grouped because a household is normally given a whole /64 (often
 /// a /56): counting exact addresses would let a client take a fresh one per
 /// connection at no cost, and the limit would bound nothing.
+///
+/// 🚨 The address is canonicalized first, and that line is load-bearing: a
+/// dual-stack listener (`[::]`, which `router/serve.rs` sets up on purpose)
+/// hands IPv4 peers over as `::ffff:a.b.c.d`, whose IPv4 part lives in the
+/// very bytes the /64 mask clears — without it every IPv4 client in the world
+/// would share the group `::`, and the limit would silently become one for
+/// the whole server (PR #85 review, cirno). `peer_is_trusted` in
+/// `api/router/client_ip.rs` canonicalizes for the same reason.
 #[must_use]
 pub fn to_address_group(address: IpAddr) -> IpAddr {
-	match address {
-		| IpAddr::V4(_) => address,
+	match address.to_canonical() {
+		| IpAddr::V4(v4) => IpAddr::V4(v4),
 		| IpAddr::V6(v6) => {
 			let mut octets = v6.octets();
 			octets[8..].fill(0);
@@ -377,6 +385,27 @@ mod address_tests {
 		// IPv4 keeps its exact address: there is no prefix a client picks from.
 		assert_eq!(to_address_group(ip("203.0.113.7")), ip("203.0.113.7"));
 		assert_ne!(to_address_group(ip("203.0.113.7")), to_address_group(ip("203.0.113.8")));
+	}
+
+	/// 🚨 A dual-stack listener hands IPv4 peers over as `::ffff:a.b.c.d`, and
+	/// the /64 mask clears exactly the bytes the IPv4 address lives in. Without
+	/// canonicalizing first, every one of them would group as `::` — one bucket
+	/// for every IPv4 client there is (PR #85 review, cirno).
+	#[test]
+	fn an_ipv4_peer_arriving_mapped_groups_as_itself_not_as_the_whole_world() {
+		assert_eq!(to_address_group(ip("::ffff:203.0.113.7")), ip("203.0.113.7"));
+		assert_eq!(
+			to_address_group(ip("::ffff:203.0.113.7")),
+			to_address_group(ip("203.0.113.7")),
+			"the same client counts once whether the listener reports it mapped or not"
+		);
+
+		// The failure this guards against: two unrelated IPv4 clients sharing a group.
+		assert_ne!(to_address_group(ip("::ffff:203.0.113.7")), to_address_group(ip("::ffff:198.51.100.9")));
+		assert_ne!(to_address_group(ip("::ffff:203.0.113.7")), ip("::"));
+
+		// `::1` is loopback, not the mapped-IPv4 range, and keeps its own group.
+		assert_eq!(to_address_group(ip("::1")), ip("::"));
 	}
 
 	#[test]
