@@ -280,7 +280,7 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 | 1302 | `Forbidden` | 身分驗過了但**不准**：憑證錯、帳號停用、不支援的登入 `type` | 登入 | | 不要自動重試；看 `errcode` |
 | 1401 | `RateLimited` | 太快了 | 限速閘門 | `retry_after_ms` | 等那麼久再試，🚫 不要立刻重打 |
 | 1402 | `TooManyConnections` | 這個 device 的 WS 名額滿了（`wbf_ws_max_connections_per_device`） | `admit` 閘門 | `max_connections` | 關掉一條舊的再連；這條連線隨即被關 |
-| 1403 | `TooManyConnectionsFromAddress` | 📄 **提案中**：這個來源位址的 WS 名額滿了（`wbf_ws_max_connections_per_address`） | 升級前的位址閘門 | `max_connections` | ⚠️ **不要建議使用者「關掉一條舊的」** —— 撞到的連線可能一條都不是他開的（同一個 NAT／辦公室／代理後面的別人）。等一下再試，或換一條網路 |
+| 1403 | `TooManyConnectionsFromAddress` | 這個來源位址的 WS 名額滿了（`wbf_ws_max_connections_per_address`；IPv6 按 `/64` 算） | 升級前的位址閘門（**在讀 token 之前**） | `max_connections` | ⚠️ **不要建議使用者「關掉一條舊的」** —— 撞到的連線可能一條都不是他開的（同一個 NAT／辦公室／代理後面的別人）。等一下再試，或換一條網路 |
 | 1501 | `NotFound` | 指名的東西不存在（上傳 id、媒體） | 各 handler | | 重建那個東西，或放棄 |
 | 1502 | `Conflict` | 請求**合法**，但跟 server 目前的狀態衝突（例：這個上傳已經封存／已經完成） | 上傳等有狀態的 kind | | 先讀狀態（`Upload/Status`）再決定；重送同一個請求還是會衝突 |
 | 1503 | `OutOfOrder` | 有序類的 `seq` 不是接收端等的那個（§4） | 有序類 | `expected_seq` | 從 `expected_seq` 重送，🚫 不要自己重排 |
@@ -441,9 +441,10 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 - **每個 (user, device) 最多 `wbf_ws_max_connections_per_device` 條 WS**（預設 **8**，2026-09-24 從 4 調高；[pack-pipeline](wbf-pack-pipeline.md) §2.1，維護者 2026-09-07 定）：帶 Bearer 升級超過 → **不升級**，429 ＋ `Error(TooManyConnections)`；
   匿名連線不算，`Login`／`Refresh` 拿到身份那刻才算，超過 → `Error(TooManyConnections)` 然後 Close 1008，**而且不發任何 token**（名額在 users service 寫 token 之前的 `admit` 閘門檢查，被拒的登入不會換掉該裝置其他連線的 token）；
   同一連線同一裝置再登入不多佔一格；連線結束名額就回來（RAII，`Services.connections` 的 `ConnectionSlot`）。HTTP 不算。踢的永遠是新的那條。
-- 📄 **每個來源位址最多 `wbf_ws_max_connections_per_address` 條 WS**（提案，預設 40；[pack-pipeline](wbf-pack-pipeline.md) §2.2，維護者 2026-09-24 要求）：⭐ 跟上一條不同，**匿名連線也算**，而且在**認證之前**就檢查 ——
-  上一條按身份算，所以擋不到還沒有身份的連線；這一條按位址算，是唯一擋得到匿名連線的那道。超過 → **不升級**，429 ＋ `Error(TooManyConnectionsFromAddress)`。HTTP 不算。
-  ⚠️ 位址取自傳輸層照 `ip_source` 解析好的 client IP：**前面有反向代理卻沒設 `ip_source` 的話，全部連線會算成同一個位址**。
+- **每個來源位址最多 `wbf_ws_max_connections_per_address` 條 WS**（預設 40；[pack-pipeline](wbf-pack-pipeline.md) §2.2，維護者 2026-09-24 定）：⭐ 跟上一條不同，**匿名連線也算**，而且在**認證之前**就檢查 ——
+  上一條按身份算，所以擋不到還沒有身份的連線；這一條按位址算，是唯一擋得到匿名連線的那道。超過 → **不升級**（舊的照常跑），429 ＋ `Error(TooManyConnectionsFromAddress)`。HTTP 不算。
+  **IPv6 按 `/64` 算**，不按確切位址：家用 IPv6 本來就拿一整個 `/64`，換位址零成本，按確切位址算等於沒有上限。
+  ⚠️ 位址取自傳輸層照 `ip_source` 解析好的 client IP：**前面有反向代理卻沒設 `ip_source` 的話，全部連線會算成同一個位址**（啟動時有 warning）。
 
 ### 6.2 HTTP（選用，測試與腳本用）
 
