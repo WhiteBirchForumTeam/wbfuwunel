@@ -125,7 +125,12 @@ impl ConnectionSlot {
 
 impl Drop for ConnectionSlot {
 	fn drop(&mut self) {
-		let mut table = self.table.lock().expect("connection slots lock poisoned");
+		// Same reasoning as `AddressSlot::drop`: a panic elsewhere must not cost
+		// this device a place for the rest of the server's life (CLAUDE.md P).
+		let mut table = match self.table.lock() {
+			| Ok(table) => table,
+			| Err(poisoned) => poisoned.into_inner(),
+		};
 		match table.get_mut(&self.key) {
 			| Some(count) if *count > 1 => *count -= 1,
 			| _ => {
@@ -166,7 +171,10 @@ impl Connections {
 		}
 
 		let key = (user.to_owned(), device.to_owned());
-		let mut table = self.slots.lock().expect("connection slots lock poisoned");
+		let mut table = match self.slots.lock() {
+			| Ok(table) => table,
+			| Err(poisoned) => poisoned.into_inner(),
+		};
 		let count = table.entry(key.clone()).or_insert(0);
 		if *count >= max {
 			return None;
@@ -230,9 +238,10 @@ impl Connections {
 	/// the admin room.
 	#[must_use]
 	pub fn count_for(&self, user: &UserId, device: &DeviceId) -> u32 {
-		self.slots
-			.lock()
-			.expect("connection slots lock poisoned")
+		match self.slots.lock() {
+			| Ok(table) => table,
+			| Err(poisoned) => poisoned.into_inner(),
+		}
 			.get(&(user.to_owned(), device.to_owned()))
 			.copied()
 			.unwrap_or(0)

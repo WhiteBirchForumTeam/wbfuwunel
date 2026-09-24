@@ -77,6 +77,7 @@ pub fn check(config: &Config) -> Result {
 	check_observability(config)?;
 	check_wbf_device_window(config)?;
 	warn_wbf_address_limit_without_ip_source(config);
+	warn_ip_source_trusted_subnets_is_inert(config);
 	check_wbf_send_queue_bytes(config)?;
 	check_wbf_window_max_bytes(config)?;
 	check_s3_part_size(config)?;
@@ -108,6 +109,29 @@ fn check_observability(config: &Config) -> Result {
 	Ok(())
 }
 
+/// 🚧 `ip_source_trusted_subnets` no longer does anything.
+///
+/// It used to make a peer in one of those subnets **skip** the configured
+/// extraction and fall back to scanning headers — the opposite of what the
+/// name suggests, and one of the ways the client's address became
+/// client-controlled (PR #85 review, salvia). The rule it would fit is
+/// "believe the header only when the peer is the proxy", which is still open.
+///
+/// Until then this says so out loud: a setting that looks like it hardens
+/// something, while doing nothing, is worse than no setting at all.
+fn warn_ip_source_trusted_subnets_is_inert(config: &Config) {
+	if config.ip_source_trusted_subnets.is_empty() {
+		return;
+	}
+
+	warn!(
+		"ip_source_trusted_subnets is set ({} entries) but currently has no effect. The client \
+		 address is now the header named by ip_source when that header is present, and the TCP \
+		 peer otherwise — which subnet the peer is in is not consulted either way.",
+		config.ip_source_trusted_subnets.len(),
+	);
+}
+
 /// The per-address connection limit counts whatever address the transport
 /// resolved. Behind a reverse proxy, with no `ip_source` telling the server
 /// to read the forwarded header, that address is the proxy — so the limit
@@ -118,6 +142,7 @@ fn check_observability(config: &Config) -> Result {
 /// them. It is a warning rather than a refusal to start, because facing
 /// clients directly is a legitimate deployment and a note is not worth taking
 /// the whole process down (CLAUDE.md P).
+
 fn warn_wbf_address_limit_without_ip_source(config: &Config) {
 	if config.wbf_ws_max_connections_per_address == 0 || config.ip_source.is_some() {
 		return;

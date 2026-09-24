@@ -199,8 +199,12 @@ $mark2 = [int64]$ackNamed.meta.latest_g_seq
 $mBoth1 = Send-Msg $r1 'after the mark, room one' $tokB
 $mBoth2 = Send-Msg $r2 'after the mark, room two' $tokB
 # ⚠️ alice already holds four connections here ($wsSub, $wsNot, $wsLate,
-# $wsNamed) and four is `wbf_ws_max_connections_per_device`, so this needs a
-# slot rather than a fifth: $wsNot has done its job ([1.1c]) and goes.
+# $wsNamed). This frees one rather than opening a fifth: $wsNot has done its
+# job ([1.1c]) and goes.
+# 📎 It used to say "four is `wbf_ws_max_connections_per_device`" — that default
+# is 8 since PR #85, so the number is no longer the reason. Freeing one first
+# is still the right shape here, and it keeps this script off the limit
+# whatever the default becomes.
 $wsNot.Dispose()
 $wsScoped = (Ws-Open-Usable $tokA).ws
 $ackScoped = Subscribe $wsScoped 11 @($r1) $mark2

@@ -1,18 +1,23 @@
 //! Tuwunel's client-IP extractor.
 //!
-//! Two modes:
+//! One rule, and it is the operator's `ip_source` that turns it on (維護者
+//! 2026-09-24): **configured means "I am behind a reverse proxy, and it puts
+//! the client's address in this header" — so read the header, believe it when
+//! it is there, and fall back to the TCP peer when it is not. Unconfigured
+//! means there is no proxy, so the TCP peer is the only answer.**
 //!
-//! * If the operator configured `ip_source`, a [`ConfiguredIpSource`] marker is
-//!   installed in request extensions and the extractor reads from the chosen
-//!   source. Exception: if the peer shown by `ConnectInfo` is on a loopback
-//!   interface, or sits inside an operator-listed trusted subnet (see
-//!   [`TrustedPeerSubnets`]), the insecure header-scan + `ConnectInfo` fallback
-//!   runs instead, since such peers (e.g. a locally-connected appservice
-//!   bridge, or a containerized bridge on a private Docker network) cannot have
-//!   spoofed the address at the IP layer.
-//! * Otherwise the insecure header-scan + `ConnectInfo` fallback runs directly,
-//!   preserving the prior default behaviour, including the socket-address
-//!   fallback that matters for Unix-socket deployments.
+//! 🚨 What this replaced, and why: the extractor used to scan forwarding
+//! headers *even with `ip_source` unset*, taking the leftmost `X-Forwarded-For`
+//! ahead of the TCP peer. That made the address client-controlled by default —
+//! fine for a log line, not fine for anything that bounds a resource by it.
+//! Both the login rate limiter and the per-address connection limit key on
+//! this value, so a directly-connected client could take a fresh bucket per
+//! request just by varying a header (PR #85 review: rumia, cirno, salvia).
+//!
+//! ⚠️ The remaining trust boundary, stated plainly: with `ip_source` set, a
+//! client that can reach the server directly (not through the proxy) can still
+//! send that header itself. Closing that needs the peer to be checked against
+//! the proxy's address — see the note on `TrustedPeerSubnets`.
 
 use std::{
 	fmt,
@@ -34,9 +39,15 @@ pub(crate) struct ClientIp(pub(crate) IpAddr);
 #[derive(Clone, Copy, Debug)]
 pub struct ConfiguredIpSource(pub IpSource);
 
-/// Operator-configured subnets whose TCP peers bypass the secure
-/// `ip_source` extraction in the same way loopback peers do. Installed
-/// in request extensions only when the configured list is non-empty.
+/// Operator-configured subnets that the reverse proxy connects from.
+///
+/// 🚧 **Nothing reads this any more.** It used to make a trusted peer *skip*
+/// the configured extraction and fall back to scanning headers — the opposite
+/// of what the name suggests, and one of the ways the address became
+/// client-controlled (PR #85 review, salvia). The rule it would fit is the one
+/// still open: with `ip_source` set, believe the header **only when the peer
+/// is the proxy**. Until that is decided the server warns at startup that this
+/// setting has no effect, rather than letting it look like it does.
 #[derive(Clone, Debug)]
 pub struct TrustedPeerSubnets(pub Arc<[IpNet]>);
 
@@ -49,15 +60,20 @@ where
 	async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
 		const ERROR: StatusCode = StatusCode::INTERNAL_SERVER_ERROR;
 
+		// Configured: the named header is where the proxy writes the client's
+		// address. A header that is there is believed; one that is missing
+		// means this request did not come through the proxy (a health check on
+		// the socket, a direct call), and then the peer is the honest answer.
 		if let Some(&ConfiguredIpSource(source)) = parts.extensions.get::<ConfiguredIpSource>()
-			&& !peer_is_trusted(&parts.extensions)
+			&& let Some(address) = secure_extract(source, &parts.headers, &parts.extensions)
 		{
-			return secure_extract(source, &parts.headers, &parts.extensions)
-				.map(Self)
-				.ok_or((ERROR, "Can't extract client IP from configured ip_source"));
+			return Ok(Self(address));
 		}
 
-		insecure_fallback(&parts.headers, &parts.extensions)
+		// Unconfigured, or configured but the header was absent: the TCP peer.
+		// 🚨 Headers are never consulted here — see the module docs for what
+		// scanning them by default used to cost.
+		peer_address(&parts.extensions)
 			.map(Self)
 			.ok_or((ERROR, "Can't extract `ClientIp`, provide `axum::extract::ConnectInfo`"))
 	}
@@ -67,17 +83,18 @@ impl fmt::Display for ClientIp {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::Display::fmt(&self.0, f) }
 }
 
-fn peer_is_trusted(extensions: &Extensions) -> bool {
-	let Some(ConnectInfo(addr)) = extensions.get::<ConnectInfo<SocketAddr>>() else {
-		return false;
-	};
-
-	let peer = addr.ip().to_canonical();
-
-	peer.is_loopback()
-		|| extensions
-			.get::<TrustedPeerSubnets>()
-			.is_some_and(|TrustedPeerSubnets(nets)| nets.iter().any(|net| net.contains(&peer)))
+/// The address the transport itself saw, which no header can move.
+///
+/// Args:
+///     extensions: the request's extensions, example: the ones axum fills with
+///         `ConnectInfo` for a TCP listener
+/// Return:
+///     Option<IpAddr>  None only when nothing put a `ConnectInfo` there (a
+///     Unix socket), and then the caller has no address to report at all.
+fn peer_address(extensions: &Extensions) -> Option<IpAddr> {
+	extensions
+		.get::<ConnectInfo<SocketAddr>>()
+		.map(|ConnectInfo(addr)| addr.ip())
 }
 
 fn secure_extract(
@@ -119,41 +136,6 @@ fn rightmost_forwarded(headers: &HeaderMap) -> Option<IpAddr> {
 		.next_back()
 }
 
-/// Leftmost header scan with `ConnectInfo` fallback.
-fn insecure_fallback(headers: &HeaderMap, extensions: &Extensions) -> Option<IpAddr> {
-	leftmost_x_forwarded_for(headers)
-		.or_else(|| leftmost_forwarded(headers))
-		.or_else(|| single_ip_header(headers, "x-real-ip"))
-		.or_else(|| single_ip_header(headers, "fly-client-ip"))
-		.or_else(|| single_ip_header(headers, "true-client-ip"))
-		.or_else(|| single_ip_header(headers, "cf-connecting-ip"))
-		.or_else(|| cloudfront_viewer_address(headers))
-		.or_else(|| {
-			extensions
-				.get::<ConnectInfo<SocketAddr>>()
-				.map(|ConnectInfo(addr)| addr.ip())
-		})
-}
-
-fn leftmost_x_forwarded_for(headers: &HeaderMap) -> Option<IpAddr> {
-	headers
-		.get_all("x-forwarded-for")
-		.iter()
-		.filter_map(|v| v.to_str().ok())
-		.flat_map(|s| s.split(','))
-		.find_map(|s| s.trim().parse::<IpAddr>().ok())
-}
-
-/// Parse `for=` from the leftmost RFC 7239 stanza. Tolerates quoted
-/// values, bracketed IPv6, and an optional `:port` suffix.
-fn leftmost_forwarded(headers: &HeaderMap) -> Option<IpAddr> {
-	headers
-		.get_all("forwarded")
-		.iter()
-		.filter_map(|v| v.to_str().ok())
-		.flat_map(|s| s.split(','))
-		.find_map(parse_forwarded_for)
-}
 
 fn parse_forwarded_for(stanza: &str) -> Option<IpAddr> {
 	let for_value = stanza
@@ -195,25 +177,15 @@ fn cloudfront_viewer_address(headers: &HeaderMap) -> Option<IpAddr> {
 
 #[cfg(test)]
 mod tests {
-	use std::{iter, net::SocketAddr, sync::Arc};
+	use std::{iter, net::SocketAddr};
 
 	use axum::{
 		extract::{ConnectInfo, FromRequestParts},
 		http::{Request, StatusCode, request::Parts},
 	};
-	use ipnet::IpNet;
 	use tuwunel_core::config::IpSource;
 
-	use super::{ClientIp, ConfiguredIpSource, TrustedPeerSubnets};
-
-	fn trusted(nets: &[&str]) -> TrustedPeerSubnets {
-		let nets: Arc<[IpNet]> = nets
-			.iter()
-			.map(|s| s.parse().expect("test CIDR"))
-			.collect();
-
-		TrustedPeerSubnets(nets)
-	}
+	use super::{ClientIp, ConfiguredIpSource};
 
 	fn parts(headers: impl IntoIterator<Item = (&'static str, &'static str)>) -> Parts {
 		let mut request = Request::builder().uri("/");
@@ -224,253 +196,145 @@ mod tests {
 		parts
 	}
 
+	fn parts_from(
+		peer: Option<SocketAddr>,
+		source: Option<IpSource>,
+		headers: impl IntoIterator<Item = (&'static str, &'static str)>,
+	) -> Parts {
+		let mut parts = parts(headers);
+		if let Some(peer) = peer {
+			parts.extensions.insert(ConnectInfo(peer));
+		}
+		if let Some(source) = source {
+			parts.extensions.insert(ConfiguredIpSource(source));
+		}
+		parts
+	}
+
 	async fn extract_client_ip(
 		parts: &mut Parts,
 	) -> Result<ClientIp, (StatusCode, &'static str)> {
 		ClientIp::from_request_parts(parts, &()).await
 	}
 
+	const PEER: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 9)), 4567);
+
+	/// 🚨 The whole point of the rule: with no `ip_source` the address is the
+	/// socket's, and a client that sends forwarding headers gets nowhere. The
+	/// login rate limiter and the per-address connection limit both key on
+	/// this, so a header that moved it would hand out a fresh bucket per
+	/// request (PR #85 review).
 	#[tokio::test]
-	async fn x_forwarded_for_uses_leftmost_ip() {
-		let mut parts = parts([("X-Forwarded-For", "1.1.1.1, 2.2.2.2")]);
-		let ClientIp(ip) = extract_client_ip(&mut parts).await.unwrap();
-		assert_eq!(ip.to_string(), "1.1.1.1");
+	async fn without_ip_source_headers_are_ignored_and_the_peer_decides() {
+		for header in [
+			("X-Forwarded-For", "9.9.9.9"),
+			("X-Real-Ip", "9.9.9.9"),
+			("Forwarded", "for=9.9.9.9"),
+			("CF-Connecting-IP", "9.9.9.9"),
+			("True-Client-IP", "9.9.9.9"),
+			("Fly-Client-IP", "9.9.9.9"),
+		] {
+			let mut parts = parts_from(Some(PEER), None, [header]);
+			let ClientIp(ip) = extract_client_ip(&mut parts).await.unwrap();
+			assert_eq!(ip, PEER.ip(), "{} must not move the address", header.0);
+		}
 	}
 
 	#[tokio::test]
-	async fn x_forwarded_for_takes_priority_over_x_real_ip() {
+	async fn with_ip_source_the_named_header_is_believed() {
+		let mut parts = parts_from(
+			Some(PEER),
+			Some(IpSource::RightmostXForwardedFor),
+			[("X-Forwarded-For", "1.1.1.1, 2.2.2.2")],
+		);
+		let ClientIp(ip) = extract_client_ip(&mut parts).await.unwrap();
+		assert_eq!(ip.to_string(), "2.2.2.2", "the rightmost hop is the one the proxy added");
+	}
+
+	/// A request that did not come through the proxy has no such header — a
+	/// health check straight at the port, say. That is not an error: the peer
+	/// is the honest answer (維護者 2026-09-24).
+	#[tokio::test]
+	async fn with_ip_source_but_no_header_the_peer_is_used_rather_than_failing() {
+		let mut parts = parts_from(Some(PEER), Some(IpSource::RightmostXForwardedFor), iter::empty());
+		let ClientIp(ip) = extract_client_ip(&mut parts).await.unwrap();
+		assert_eq!(ip, PEER.ip());
+	}
+
+	#[tokio::test]
+	async fn with_ip_source_an_unparseable_header_falls_back_to_the_peer() {
+		let mut parts = parts_from(
+			Some(PEER),
+			Some(IpSource::RightmostXForwardedFor),
+			[("X-Forwarded-For", "not-an-address")],
+		);
+		let ClientIp(ip) = extract_client_ip(&mut parts).await.unwrap();
+		assert_eq!(ip, PEER.ip(), "a header that says nothing usable is a header that is not there");
+	}
+
+	/// Only the configured header counts: naming one does not open the others.
+	#[tokio::test]
+	async fn with_ip_source_a_different_header_is_not_consulted() {
 		let mut parts =
-			parts([("X-Forwarded-For", "1.1.1.1, 2.2.2.2"), ("X-Real-Ip", "3.3.3.3")]);
+			parts_from(Some(PEER), Some(IpSource::XRealIp), [("X-Forwarded-For", "9.9.9.9")]);
 		let ClientIp(ip) = extract_client_ip(&mut parts).await.unwrap();
-		assert_eq!(ip.to_string(), "1.1.1.1");
+		assert_eq!(ip, PEER.ip());
 	}
 
 	#[tokio::test]
-	async fn x_forwarded_for_accepts_ipv6() {
-		let mut parts = parts([("X-Forwarded-For", "2001:db8::1, 2001:db8::2")]);
+	async fn ip_source_connect_info_is_the_peer_whatever_the_headers_say() {
+		let mut parts =
+			parts_from(Some(PEER), Some(IpSource::ConnectInfo), [("X-Forwarded-For", "9.9.9.9")]);
 		let ClientIp(ip) = extract_client_ip(&mut parts).await.unwrap();
-		assert_eq!(ip.to_string(), "2001:db8::1");
+		assert_eq!(ip, PEER.ip());
+	}
+
+	/// 📎 Loopback used to be special-cased into the header scan. It is not any
+	/// more: the rule keys on the configuration, not on who the peer happens
+	/// to be (PR #85 review, salvia — that bypass also applied with
+	/// `ip_source` set, which made the gate meaningless from loopback).
+	#[tokio::test]
+	async fn a_loopback_peer_gets_no_special_treatment() {
+		let loopback = SocketAddr::from(([127, 0, 0, 1], 38000));
+		let mut unconfigured = parts_from(Some(loopback), None, [("X-Forwarded-For", "9.9.9.9")]);
+		let ClientIp(ip) = extract_client_ip(&mut unconfigured).await.unwrap();
+		assert_eq!(ip, loopback.ip(), "no ip_source: the header is ignored here too");
+
+		let mut configured = parts_from(
+			Some(loopback),
+			Some(IpSource::RightmostXForwardedFor),
+			[("X-Forwarded-For", "9.9.9.9")],
+		);
+		let ClientIp(ip) = extract_client_ip(&mut configured).await.unwrap();
+		assert_eq!(ip.to_string(), "9.9.9.9", "ip_source set: the named header is read, as anywhere else");
 	}
 
 	#[tokio::test]
-	async fn x_real_ip_works() {
-		let mut parts = parts([("X-Real-Ip", "1.2.3.4")]);
-		let ClientIp(ip) = extract_client_ip(&mut parts).await.unwrap();
-		assert_eq!(ip.to_string(), "1.2.3.4");
+	async fn ipv6_forwarded_and_cloudfront_sources_parse() {
+		let mut forwarded = parts_from(
+			Some(PEER),
+			Some(IpSource::RightmostForwarded),
+			[("Forwarded", "for=1.1.1.1, for=\"[2001:db8::2]:443\"")],
+		);
+		let ClientIp(ip) = extract_client_ip(&mut forwarded).await.unwrap();
+		assert_eq!(ip.to_string(), "2001:db8::2");
+
+		let mut cloudfront = parts_from(
+			Some(PEER),
+			Some(IpSource::CloudFrontViewerAddress),
+			[("CloudFront-Viewer-Address", "198.51.100.4:12345")],
+		);
+		let ClientIp(ip) = extract_client_ip(&mut cloudfront).await.unwrap();
+		assert_eq!(ip.to_string(), "198.51.100.4");
 	}
 
+	/// Nothing to report at all: a Unix socket has no peer address, and with
+	/// headers no longer consulted there is no second place to look.
 	#[tokio::test]
-	async fn malformed_headers_fall_through_to_next_valid_source() {
-		let mut parts = parts([
-			("X-Forwarded-For", "foo"),
-			("X-Real-Ip", "foo"),
-			("Forwarded", "foo"),
-			("Forwarded", "for=1.1.1.1;proto=https;by=2.2.2.2"),
-		]);
-		let ClientIp(ip) = extract_client_ip(&mut parts).await.unwrap();
-		assert_eq!(ip.to_string(), "1.1.1.1");
-	}
-
-	#[tokio::test]
-	async fn no_headers_or_connect_info_rejects() {
-		let mut parts = parts(iter::empty());
+	async fn without_a_peer_there_is_no_address() {
+		let mut parts = parts_from(None, None, [("X-Forwarded-For", "9.9.9.9")]);
 		let err = extract_client_ip(&mut parts).await.unwrap_err();
 		assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
 		assert!(err.1.contains("ConnectInfo"), "{err:?}");
-	}
-
-	#[tokio::test]
-	async fn configured_source_uses_secure_extraction() {
-		let mut parts = parts([("X-Forwarded-For", "1.1.1.1, 2.2.2.2")]);
-		parts
-			.extensions
-			.insert(ConfiguredIpSource(IpSource::RightmostXForwardedFor));
-		let ClientIp(ip) = extract_client_ip(&mut parts).await.unwrap();
-		assert_eq!(ip.to_string(), "2.2.2.2");
-	}
-
-	#[tokio::test]
-	async fn configured_source_without_matching_header_rejects() {
-		let mut parts = parts(iter::empty());
-		parts
-			.extensions
-			.insert(ConfiguredIpSource(IpSource::RightmostXForwardedFor));
-		let err = extract_client_ip(&mut parts).await.unwrap_err();
-		assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
-		assert_eq!(err.1, "Can't extract client IP from configured ip_source");
-	}
-
-	#[tokio::test]
-	async fn connect_info_fallback_uses_real_socket_addr_without_config() {
-		let socket_addr = SocketAddr::from(([203, 0, 113, 9], 4567));
-		let mut parts = parts(iter::empty());
-		parts.extensions.insert(ConnectInfo(socket_addr));
-
-		let ClientIp(ip) = extract_client_ip(&mut parts).await.unwrap();
-		assert_eq!(ip, socket_addr.ip());
-	}
-
-	#[tokio::test]
-	async fn loopback_peer_bypasses_configured_source_for_locally_connected_bridges() {
-		let socket_addr = SocketAddr::from(([127, 0, 0, 1], 38000));
-		let mut parts = parts(iter::empty());
-		parts.extensions.insert(ConnectInfo(socket_addr));
-		parts
-			.extensions
-			.insert(ConfiguredIpSource(IpSource::RightmostXForwardedFor));
-
-		let ClientIp(ip) = extract_client_ip(&mut parts).await.unwrap();
-		assert_eq!(ip, socket_addr.ip());
-	}
-
-	#[tokio::test]
-	async fn loopback_peer_with_proxy_header_still_uses_insecure_fallback() {
-		// When a loopback peer also forwards a proxy header (e.g. a local
-		// reverse proxy in a sidecar), the insecure leftmost-XFF behaviour wins
-		// over the loopback ConnectInfo fallback, matching how the unconfigured
-		// path already behaves.
-		let socket_addr = SocketAddr::from(([127, 0, 0, 1], 38000));
-		let mut parts = parts([("X-Forwarded-For", "9.9.9.9")]);
-		parts.extensions.insert(ConnectInfo(socket_addr));
-		parts
-			.extensions
-			.insert(ConfiguredIpSource(IpSource::RightmostXForwardedFor));
-
-		let ClientIp(ip) = extract_client_ip(&mut parts).await.unwrap();
-		assert_eq!(ip.to_string(), "9.9.9.9");
-	}
-
-	#[tokio::test]
-	async fn ipv6_loopback_peer_also_bypasses_configured_source() {
-		let socket_addr = SocketAddr::from(([0_u16, 0, 0, 0, 0, 0, 0, 1], 38000));
-		let mut parts = parts(iter::empty());
-		parts.extensions.insert(ConnectInfo(socket_addr));
-		parts
-			.extensions
-			.insert(ConfiguredIpSource(IpSource::RightmostXForwardedFor));
-
-		let ClientIp(ip) = extract_client_ip(&mut parts).await.unwrap();
-		assert_eq!(ip, socket_addr.ip());
-	}
-
-	#[tokio::test]
-	async fn non_loopback_peer_with_configured_source_still_rejects() {
-		let socket_addr = SocketAddr::from(([203, 0, 113, 9], 38000));
-		let mut parts = parts(iter::empty());
-		parts.extensions.insert(ConnectInfo(socket_addr));
-		parts
-			.extensions
-			.insert(ConfiguredIpSource(IpSource::RightmostXForwardedFor));
-
-		let err = extract_client_ip(&mut parts).await.unwrap_err();
-		assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
-		assert_eq!(err.1, "Can't extract client IP from configured ip_source");
-	}
-
-	#[tokio::test]
-	async fn trusted_subnet_peer_bypasses_configured_source() {
-		let socket_addr = SocketAddr::from(([172, 18, 0, 5], 38000));
-		let mut parts = parts(iter::empty());
-		parts.extensions.insert(ConnectInfo(socket_addr));
-		parts
-			.extensions
-			.insert(ConfiguredIpSource(IpSource::RightmostXForwardedFor));
-		parts
-			.extensions
-			.insert(trusted(&["172.18.0.0/16"]));
-
-		let ClientIp(ip) = extract_client_ip(&mut parts).await.unwrap();
-		assert_eq!(ip, socket_addr.ip());
-	}
-
-	#[tokio::test]
-	async fn trusted_subnet_peer_with_proxy_header_uses_insecure_fallback() {
-		let socket_addr = SocketAddr::from(([172, 18, 0, 5], 38000));
-		let mut parts = parts([("X-Forwarded-For", "9.9.9.9")]);
-		parts.extensions.insert(ConnectInfo(socket_addr));
-		parts
-			.extensions
-			.insert(ConfiguredIpSource(IpSource::RightmostXForwardedFor));
-		parts
-			.extensions
-			.insert(trusted(&["172.18.0.0/16"]));
-
-		let ClientIp(ip) = extract_client_ip(&mut parts).await.unwrap();
-		assert_eq!(ip.to_string(), "9.9.9.9");
-	}
-
-	#[tokio::test]
-	async fn non_trusted_peer_with_subnets_configured_still_rejects() {
-		let socket_addr = SocketAddr::from(([203, 0, 113, 9], 38000));
-		let mut parts = parts(iter::empty());
-		parts.extensions.insert(ConnectInfo(socket_addr));
-		parts
-			.extensions
-			.insert(ConfiguredIpSource(IpSource::RightmostXForwardedFor));
-		parts
-			.extensions
-			.insert(trusted(&["172.18.0.0/16"]));
-
-		let err = extract_client_ip(&mut parts).await.unwrap_err();
-		assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
-		assert_eq!(err.1, "Can't extract client IP from configured ip_source");
-	}
-
-	#[tokio::test]
-	async fn ipv6_trusted_subnet_peer_bypasses_configured_source() {
-		let socket_addr = SocketAddr::from(([0xFD00_u16, 0, 0, 0, 0, 0, 0, 1], 38000));
-		let mut parts = parts(iter::empty());
-		parts.extensions.insert(ConnectInfo(socket_addr));
-		parts
-			.extensions
-			.insert(ConfiguredIpSource(IpSource::RightmostXForwardedFor));
-		parts.extensions.insert(trusted(&["fd00::/8"]));
-
-		let ClientIp(ip) = extract_client_ip(&mut parts).await.unwrap();
-		assert_eq!(ip, socket_addr.ip());
-	}
-
-	#[tokio::test]
-	async fn trusted_single_host_cidr_matches_only_that_address() {
-		let configured = ConfiguredIpSource(IpSource::RightmostXForwardedFor);
-
-		let mut listed = parts(iter::empty());
-		listed
-			.extensions
-			.insert(ConnectInfo(SocketAddr::from(([10, 0, 0, 5], 38000))));
-		listed.extensions.insert(configured);
-		listed
-			.extensions
-			.insert(trusted(&["10.0.0.5/32"]));
-
-		let ClientIp(ip) = extract_client_ip(&mut listed).await.unwrap();
-		assert_eq!(ip.to_string(), "10.0.0.5");
-
-		let mut neighbour = parts(iter::empty());
-		neighbour
-			.extensions
-			.insert(ConnectInfo(SocketAddr::from(([10, 0, 0, 6], 38000))));
-		neighbour.extensions.insert(configured);
-		neighbour
-			.extensions
-			.insert(trusted(&["10.0.0.5/32"]));
-
-		let err = extract_client_ip(&mut neighbour)
-			.await
-			.unwrap_err();
-		assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
-	}
-
-	#[tokio::test]
-	async fn loopback_still_bypasses_when_trusted_subnets_extension_absent() {
-		let socket_addr = SocketAddr::from(([127, 0, 0, 1], 38000));
-		let mut parts = parts(iter::empty());
-		parts.extensions.insert(ConnectInfo(socket_addr));
-		parts
-			.extensions
-			.insert(ConfiguredIpSource(IpSource::RightmostXForwardedFor));
-
-		let ClientIp(ip) = extract_client_ip(&mut parts).await.unwrap();
-		assert_eq!(ip, socket_addr.ip());
 	}
 }
