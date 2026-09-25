@@ -93,7 +93,9 @@ PR #24 合併後對 main 重看一次，加上 `../external-review` 兩輪（202
 登入本體抽成 service 函式讓 HTTP 與 WS 共用；允許不帶 Bearer 升級但只接受 `Hello`／`Ping`／`Login`／`Refresh`，**未登入 30 秒就斷**（從升級起算，不是 idle）；
 Logout 後直接關線；同一條連線重複 Login 允許；**登入限速預設開**（每秒 1、突發 10），同一個 token bucket 管 HTTP `/login`／`/refresh` 與 WS。排在 `media/upload-lifecycle` 之前。
 
-### 2.8 ✅ wbf pack 處理管線第一部分：連線即佇列、每 device 4 條、發送 task、`Event/Batch` 串流（提案 #32，實作 PR #33，2026-09-08 合併）
+### 2.8 ✅ wbf pack 處理管線第一部分：連線即佇列、每 device 連線上限、發送 task、`Event/Batch` 串流（提案 #32，實作 PR #33，2026-09-08 合併）
+
+📎 **這一節寫的「每 device 4 條」已經是歷史**：預設在 §2.14（PR #85）改成 **8**，並加了第二道「每來源位址」的閘門。下面的敘述保留當時的定案原文。
 
 維護者 2026-09-07 的 checklist：protocol 講了封包與協議，沒講「設計」——一個 pack 從連線進到回應出的整條線，上傳、登入與未來每個 HTTP→WS 都走它。
 定案：client 多連線分工（server 不知道）；每個 (user, device) 最多 4 條 WS，超過踢新的，匿名不算、HTTP 不算；一條連線依序處理、落地才 Ack；
@@ -161,6 +163,21 @@ client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
 答案是兩個號碼：每個帳號一個**裝置版本號**（`序號-雜湊`，金鑰一動就前進），每個房間一個**房間版本號**（成員事件位置與成員裝置版本位置的最大值），`/members` 兩個都帶；有約定的 client 送加密訊息時帶房間版本號，**在房間鎖內比對，對不上回 `1506 RoomDevicesChanged`、訊息不寫入也不扇出**；裝置一變就推 `0x14 0x07 DeviceChanged` 給有約定的連線（加速，不是正確性的來源）。
 🚫 **沒有約定的 client 一切照舊**：HTTP 不檢查、沒宣告 `org.wbftw.device_versions` 的連線不檢查，Matrix 的 `/sync`、`/keys/*` 語意沒動。
 達成狀態逐條（含維護者改過的決定與接受的缺口）在問題書 §9；client 端要做的在 `amaid/wbf-matrix-client#45`。
+
+### 2.14 ✅ WebSocket 連線上限：每 device 4→8，每來源位址 40，以及位址怎麼解析（[wbf-pack-pipeline.md](wbf-pack-pipeline.md) §2.1／§2.2，提案 PR #84，實作 PR #85，2026-09-25 合併）
+
+起因是維護者 2026-09-24 要把每 device 的 4 調成 8，順手加一道「每個 IP 最多 40 條」。
+⭐ **後者補的是一個看不到的角落**：`(user, device)` 那道閘門**看不到匿名連線**（兩者皆無），所以沒有 token 的人要開幾條就開幾條，只受 30 秒未登入超時擋著。按位址算是唯一擋得到它的那道，因此它在**認證之前**檢查。
+四條決定（維護者同日）：新錯誤碼 **`1403 TooManyConnectionsFromAddress`**（不沿用 1402，因為 1402 的處置「關掉一條你自己的」對位址名額是錯的建議 —— 撞到的人可能一條都不是他開的）；IPv6 按 **`/64`** 聚合（家用本來就拿一整個 `/64`，按確切位址算等於沒有上限）；**沒有豁免**；沒設代理 header 時啟動留 warning、不擋啟動。
+
+🚨 **真正的重頭在位址怎麼解析，而那是審查逼出來的，改了兩輪。** 舊的 `ClientIp` 對**每一個** peer 都掃轉發 header、而且優先取 leftmost `X-Forwarded-For` —— 位址因此**預設就是 client 可控的**，這道新閘門對「故意的人」等於不存在（三位審查都指出）。
+第一輪改成「沒指名 header 就完全不碰 header」，結果 unix socket 部署塌成一個全站共用的桶（那裡沒有 peer 位址，合成 `127.0.0.1`）——而**登入限速、OIDC 限速、這道連線上限都以位址為 key**，限速又跑在憑證檢查之前，共用的桶誰都抽得乾。
+維護者 2026-09-25 的定案是**兩個開關**（`ip_source` → `reverse_proxy_ip_header`，`ip_source_trusted_subnets` 復活成 `localhost_ip`、預設 loopback）：
+
+> 有設 `reverse_proxy_ip_header` 就讀那個 header，**OR** peer 落在 `localhost_ip` 裡就讀 `X-Forwarded-For`（最右邊）；兩條都不成立就只信傳輸層 peer、完全不碰 header。
+
+⚠️ **行為改變，部署要看**：兩項設定**改名**，舊名字留在設定裡**拒絕啟動**（忽略對這兩個設定是 fail open）；`localhost_ip` 的語意跟舊名**相反**（舊的是「這個 peer 跳過安全解析」，新的是「這個 peer 可以指名 client」）。同機代理與 unix socket 因此零設定就是 per-client；⚠️ 但**分開的容器不算 loopback**，那種部署要指名 header。
+📎 這一支自己弄壞過一個測試：預設 4→8 之後 e2e13 `[2.7]` 靠預設值撞上限，期望被拒的 login 其實成功了，而那支從改預設之後沒重跑過 —— 現在數字寫死在該測試自己的 config 裡。
 
 ## 3. 候選（要不要做，由維護者決定）
 
