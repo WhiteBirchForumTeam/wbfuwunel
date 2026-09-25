@@ -202,23 +202,52 @@ Regardless of which reverse proxy you choose, you will need to:
 
 ### Client IP source
 
-Set `ip_source` when you want Tuwunel to use a spoofing-resistant client IP
-source for rate limiting, logging, and security tooling. Leave it unset to keep
-the legacy fallback behavior.
+Tuwunel takes the client address from the transport peer. A forwarding header
+is read in exactly two cases:
 
-Use `ip_source = "connect_info"` only when Tuwunel accepts direct TCP
-connections and should use the TCP peer address. Do not use `connect_info` for
-Unix-socket deployments; leave `ip_source` unset there.
+- `reverse_proxy_ip_header` names it — then it is believed for every request,
+  whoever the peer is;
+- the peer is in `localhost_ip` (by default the loopback ranges) — then
+  `X-Forwarded-For` is read, rightmost value.
 
-If Tuwunel is behind a trusted reverse proxy, set `ip_source` to match the
-header that proxy controls. Caddy, Nginx, and Traefik usually use
-`ip_source = "rightmost_x_forwarded_for"`. Cloudflare and cloudflared
-deployments can use `ip_source = "cf_connecting_ip"` when Cloudflare supplies
-that header.
+Nothing else can move the address. That address keys the login and refresh rate
+limiter, the OIDC ones, and `wbf_ws_max_connections_per_address`, so getting it
+wrong costs availability in both directions:
 
-Only use header-based values when clients cannot connect to Tuwunel directly.
-If clients can reach Tuwunel without going through the trusted proxy, they can
-send forged forwarding headers and choose the IP address Tuwunel sees.
+- **Direct TCP, no proxy:** leave `reverse_proxy_ip_header` unset. Do **not**
+  name a header — a client that can reach Tuwunel directly would then pick its
+  own address, and with it its own rate-limit bucket and connection quota. If
+  anything untrusted can connect from loopback on this host, set
+  `localhost_ip = []` as well.
+- **Reverse proxy reaching Tuwunel over loopback or a Unix socket:** nothing to
+  configure, as long as the proxy sends `X-Forwarded-For`. The peer is loopback
+  (a Unix socket has no peer address, so Tuwunel synthesises `127.0.0.1`),
+  which is in the default `localhost_ip`, so the forwarded address is used.
+- **Reverse proxy reaching Tuwunel any other way:** set
+  `reverse_proxy_ip_header` to the header that proxy controls — Caddy, Nginx
+  and Traefik usually `"rightmost_x_forwarded_for"`; Cloudflare and cloudflared
+  `"cf_connecting_ip"` — and make sure clients cannot reach Tuwunel around the
+  proxy, because the header is believed from any peer.
+  ⚠️ **Separate containers count as "any other way"**, even on one machine: in
+  a Compose deployment Tuwunel sees the proxy's container address, not
+  loopback. Naming the header is the better fix; adding that container subnet
+  to `localhost_ip` also works but is weaker, since a bridge network is shared
+  with whatever else sits on it.
+
+⚠️ If none of those apply — a proxy whose header Tuwunel does not read — every
+request arrives bearing the proxy's address, and the whole site shares **one**
+login bucket and **one** WebSocket connection quota. The rate limiter runs
+before credentials are checked, so at the default `login_rc_per_second = 1` any
+unauthenticated client can keep that shared bucket empty and leave login and
+refresh answering 429 site-wide. Tuwunel warns about this at startup.
+
+⚠️ Setting those limits to `0` is not a way out of it. The device user-code
+throttle (RFC 8628 §5.1) is keyed on the same address, is always on, and has no
+setting — so it collapses too, and turning the others off only removes the
+warning. Fix the address instead, or throttle in the layer in front.
+
+📎 These two settings were called `ip_source` and `ip_source_trusted_subnets`.
+Tuwunel refuses to start on the old names rather than ignoring them.
 
 See the following spec pages for more details on well-known files:
 - [`/.well-known/matrix/server`](https://spec.matrix.org/latest/client-server-api/#getwell-knownmatrixserver)

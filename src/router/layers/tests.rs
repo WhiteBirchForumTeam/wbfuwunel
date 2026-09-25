@@ -7,41 +7,41 @@ use http::{
 };
 use ipnet::IpNet;
 use tower::util::Either;
-use tuwunel_api::router::{ConfiguredIpSource, TrustedPeerSubnets};
-use tuwunel_core::config::IpSource;
+use tuwunel_api::router::{ConfiguredIpHeader, LocalPeerRanges};
+use tuwunel_core::config::ReverseProxyIpHeader;
 
-use super::{ip_source_layer, set_html_headers, trusted_peer_subnets_layer};
+use super::{local_peer_ranges_layer, reverse_proxy_ip_header_layer, set_html_headers};
 
 #[test]
-fn ip_source_layer_none_returns_identity_branch() {
-	let layer = ip_source_layer(None);
+fn reverse_proxy_ip_header_layer_none_returns_identity_branch() {
+	let layer = reverse_proxy_ip_header_layer(None);
 
 	assert!(matches!(layer, Either::Right(_)));
 }
 
 #[test]
-fn ip_source_layer_connect_info_returns_extension_branch() {
-	let layer = ip_source_layer(Some(IpSource::ConnectInfo));
+fn reverse_proxy_ip_header_layer_connect_info_returns_extension_branch() {
+	let layer = reverse_proxy_ip_header_layer(Some(ReverseProxyIpHeader::ConnectInfo));
 
-	assert!(matches!(layer, Either::Left(Extension(ConfiguredIpSource(_)))));
+	assert!(matches!(layer, Either::Left(Extension(ConfiguredIpHeader(_)))));
 }
 
 #[test]
-fn trusted_peer_subnets_layer_empty_returns_identity_branch() {
-	let layer = trusted_peer_subnets_layer(&[]);
+fn local_peer_ranges_layer_empty_returns_identity_branch() {
+	let layer = local_peer_ranges_layer(&[]);
 
 	assert!(matches!(layer, Either::Right(_)));
 }
 
 #[test]
-fn trusted_peer_subnets_layer_populated_returns_extension_branch() {
+fn local_peer_ranges_layer_populated_returns_extension_branch() {
 	let subnets: Vec<IpNet> =
 		vec!["172.18.0.0/16".parse().expect("CIDR"), "fd00::/8".parse().expect("CIDR")];
 
-	let layer = trusted_peer_subnets_layer(&subnets);
+	let layer = local_peer_ranges_layer(&subnets);
 
 	let nets = match layer {
-		| Either::Left(Extension(TrustedPeerSubnets(nets))) => nets,
+		| Either::Left(Extension(LocalPeerRanges(nets))) => nets,
 		| Either::Right(_) => panic!("expected extension branch"),
 	};
 

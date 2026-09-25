@@ -39,9 +39,10 @@ use tower_http::{
 	trace::{DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer},
 };
 use tracing::Level;
-use tuwunel_api::router::{ConfiguredIpSource, TrustedPeerSubnets, state::Guard};
+use tuwunel_api::router::{ConfiguredIpHeader, LocalPeerRanges, state::Guard};
 use tuwunel_core::{
-	Result, Server, config::IpSource, debug, error, utils::content_disposition::content_type_is,
+	Result, Server, config::ReverseProxyIpHeader, debug, error,
+	utils::content_disposition::content_type_is,
 };
 use tuwunel_service::Services;
 
@@ -101,8 +102,8 @@ pub(crate) fn build(services: &Arc<Services>) -> Result<(Router, Guard)> {
 			services: Arc::clone(services),
 			handler: request::handle,
 		})
-		.layer(trusted_peer_subnets_layer(&server.config.ip_source_trusted_subnets))
-		.layer(ip_source_layer(server.config.ip_source))
+		.layer(local_peer_ranges_layer(&server.config.localhost_ip))
+		.layer(reverse_proxy_ip_header_layer(server.config.reverse_proxy_ip_header))
 		.layer(ResponseBodyTimeoutLayer::new(Duration::from_secs(
 			server.config.client_response_timeout,
 		)))
@@ -250,14 +251,16 @@ fn body_limit_layer(server: &Server) -> DefaultBodyLimit {
 	DefaultBodyLimit::max(server.config.max_request_size)
 }
 
-fn trusted_peer_subnets_layer(
-	subnets: &[IpNet],
-) -> Either<Extension<TrustedPeerSubnets>, Identity> {
-	option_layer((!subnets.is_empty()).then(|| Extension(TrustedPeerSubnets(Arc::from(subnets)))))
+/// 📎 An empty `localhost_ip` installs no layer at all, which the extractor
+/// reads as "trust nobody" — the same answer, one fewer extension per request.
+fn local_peer_ranges_layer(ranges: &[IpNet]) -> Either<Extension<LocalPeerRanges>, Identity> {
+	option_layer((!ranges.is_empty()).then(|| Extension(LocalPeerRanges(Arc::from(ranges)))))
 }
 
-fn ip_source_layer(source: Option<IpSource>) -> Either<Extension<ConfiguredIpSource>, Identity> {
-	option_layer(source.map(|source| Extension(ConfiguredIpSource(source))))
+fn reverse_proxy_ip_header_layer(
+	header: Option<ReverseProxyIpHeader>,
+) -> Either<Extension<ConfiguredIpHeader>, Identity> {
+	option_layer(header.map(|header| Extension(ConfiguredIpHeader(header))))
 }
 
 fn html_layer<T>() -> MapResponseLayer<impl Fn(http::Response<T>) -> http::Response<T> + Clone> {

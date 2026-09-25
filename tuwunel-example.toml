@@ -664,23 +664,17 @@
 #
 #client_shutdown_timeout = 15
 
-# Source of the client IP address for rate limiting, logging, and
-# security tooling.
+# The header your reverse proxy writes the client's address into.
 #
-# When unset (the default), the `ClientIp` extractor scans common
-# proxy headers in leftmost-IP mode (`X-Forwarded-For`, RFC 7239
-# `Forwarded`, `X-Real-IP`, `Fly-Client-IP`, `True-Client-IP`,
-# `CF-Connecting-IP`, `CloudFront-Viewer-Address`) and falls back
-# to the TCP peer address; clients can spoof their address via
-# request headers in that mode.
-#
-# When set, `ClientIp` resolves exclusively from the selected
-# source. The rightmost value is used for multi-valued headers;
-# only the proxy can append to the right, so this is resistant to
-# client spoofing.
+# Setting this says "I am behind a reverse proxy, and it puts the
+# client's address in this header". The header is then read and
+# believed for every request. A request that did not come through
+# the proxy has no such header, and then the peer address is used.
+# The rightmost value is used for multi-valued headers; only the
+# proxy can append to the right.
 #
 # Supported values:
-# - "connect_info" - TCP peer address only (direct connections)
+# - "connect_info" - no header at all; the transport peer address
 # - "rightmost_x_forwarded_for" - nginx, Caddy
 # - "rightmost_forwarded" - RFC 7239 proxies
 # - "x_real_ip" - nginx `X-Real-IP`
@@ -689,43 +683,51 @@
 # - "fly_client_ip" - Fly.io
 # - "cloudfront_viewer_address" - AWS CloudFront
 #
-# On Unix-socket deployments, leave this unset rather than setting
-# "connect_info"; that source requires a TCP peer address.
+# When unset, a header is read only from a peer that is in
+# `localhost_ip`, and then it is `X-Forwarded-For` (rightmost).
+# Everyone else is their peer address and no header can move it.
+# That covers the two deployments where the peer is not the
+# client: a proxy on the same host, and a Unix socket.
 #
-# WARNING: A header-based value without a trusted reverse proxy in
-# front of tuwunel allows clients to forge their IP. Changing this
-# value requires a server restart.
+# ⚠️ A header-based value is believed no matter who the peer is,
+# so a client that can reach the server without going through the
+# proxy can then choose its own address — and with it its own rate
+# limit bucket and connection quota. Only set this when direct
+# access is impossible. Changing it requires a server restart.
 #
-#ip_source = "connect_info"
+#reverse_proxy_ip_header = "rightmost_x_forwarded_for"
 
-# Subnets whose TCP peers are treated as trusted and bypass the
-# `ip_source`-based extraction, falling through to the same
-# insecure header-scan + `ConnectInfo` fallback used when
-# `ip_source` is unset. Each entry is CIDR notation, including
-# the prefix length (use `/32` or `/128` to trust a single host).
+# Peers that are the local machine rather than a client: their
+# forwarding header is believed even with no
+# `reverse_proxy_ip_header` set (維護者 2026-09-25).
 #
-# Loopback (`127.0.0.0/8`, `::1/128`) is always bypassed and
-# need not be listed.
+# A peer in one of these ranges is something running beside the
+# server — a reverse proxy reaching it over loopback, or the Unix
+# socket, whose peer address is synthesised as `127.0.0.1` because a
+# Unix socket has none. Such a peer is not the client, so the
+# address that matters is the one it forwards.
 #
-# Use this when locally attached bridges or other server-side
-# clients connect from a private container or VPN subnet that
-# cannot carry the configured proxy header (e.g. a user-defined
-# Docker bridge network without `network_mode: host`).
+# ⚠️ What counts is the peer address, not whether the proxy runs on
+# the same machine: a proxy in its own container reaches this server
+# from a bridge address, which the default does not cover. Name its
+# header in `reverse_proxy_ip_header` rather than widening this.
 #
-# NOTE: If you configure an entire subnet here, be sure that it
-# does not include the address Tuwunel receives external traffic
-# from, i.e. that of your proxy. This would, for example, happen
-# if you deployed the proxy in a common bridge network with your
-# other components (e.g. in a Compose deployment) and specified
-# said network's subnet here. Traffic from the proxy would then
-# also have the bypass applied, rendering the `ip_source` option
-# effectively useless.
+# 🚨 Without this every one of those requests would carry the same
+# address, and every limit keyed on the address — the login and
+# OIDC rate limits, `wbf_ws_max_connections_per_address` — would
+# collapse into one bucket for the whole server.
 #
-# WARNING: Any peer in these subnets can forge the client IP via
-# request headers. Only include subnets you control end-to-end.
-# Changing this value requires a server restart.
+# Each entry is CIDR notation, including the prefix length (use
+# `/32` or `/128` for a single host). IPv4-mapped IPv6 peers are
+# matched by their IPv4 form. Set it to `[]` to trust no peer,
+# which is right when the server faces clients directly.
 #
-#ip_source_trusted_subnets = ["172.18.0.0/16", "fd00::/8"]
+# ⚠️ Any peer in these ranges can name any client address it
+# likes. Widen it only to hosts you control end-to-end, and never
+# to a range clients can connect from. Changing it requires a
+# server restart.
+#
+#localhost_ip = ["127.0.0.0/8", "::1/128", "172.18.0.0/16"]
 
 # Grace period for clean shutdown of federation requests (seconds).
 #
@@ -1660,11 +1662,19 @@
 # open a second, faster road for guessing passwords. `0` disables the
 # throttle. The key is the client IP: a rate low enough to bite a guesser
 # also throttles many users behind one NAT, which is what the burst is
-# for. The IP is only as trustworthy as `ip_source` makes it: without
-# it, forwarded-for headers are believed, and a client that rewrites
-# them gets a fresh bucket each time. Behind a reverse proxy set
-# `ip_source` (rightmost, with the proxy's subnet trusted) or make the
-# proxy overwrite the header.
+# for. The address is the peer's, unless the request came through a
+# proxy that names the client in a header — see
+# `reverse_proxy_ip_header` and `localhost_ip` for when that header
+# is believed. 🚨 A deployment where the header is *not* read, and
+# every request therefore carries the same peer address, shares one
+# bucket for the whole server: a proxy whose header is not named by
+# either setting, or a Unix socket with `localhost_ip` emptied. That
+# bucket is drainable by anyone — throttling runs before credentials
+# are checked — so at the default of one attempt per second an
+# unauthenticated client can keep login and refresh answering 429
+# site-wide. Make the proxy send a header the server reads, or, if
+# it cannot, throttle in the layer in front and set this to `0`
+# rather than leaving a shared bucket up.
 #
 # reloadable: yes
 #
@@ -3182,12 +3192,41 @@
 # once. A connection that would exceed it is refused (the new one, never
 # an existing one): a bearer upgrade answers 429, a `Login` over the
 # channel is refused and that connection closed. Connections that have
-# not logged in are not counted; they live at most
-# `wbf_ws_unauthenticated_timeout` seconds. HTTP requests are not counted.
+# not logged in are not counted here — they have no identity to count
+# yet, and what bounds them is `wbf_ws_max_connections_per_address`.
+# HTTP requests are not counted.
 # A client is expected to open a few (one for events, one for media);
 # this guards against a client that leaks them. 0 disables the limit.
 #
-#wbf_ws_max_connections_per_device = 4
+#wbf_ws_max_connections_per_device = 8
+
+# How many wbf WebSocket connections one source address may hold at
+# once, counting connections that have not logged in. A connection that
+# would exceed it is refused before the upgrade and before the token is
+# read: 429 with `TooManyConnectionsFromAddress`. The new one is turned
+# away; connections that are already open are left alone. HTTP requests
+# are not counted.
+#
+# This is the only limit that reaches a connection with no identity:
+# `wbf_ws_max_connections_per_device` counts per (user, device), so
+# until a connection logs in it is outside that limit entirely.
+#
+# IPv6 is counted per /64, not per address: one household is normally
+# given a whole /64, so counting exact addresses would let a client move
+# to a new one for free and the limit would mean nothing. IPv4 is
+# counted per address.
+#
+# ⚠️ This counts whatever address the request arrived with, so a
+# deployment where the proxy's header is not read counts the proxy:
+# every connection shares one address and this becomes a limit on the
+# whole server. `reverse_proxy_ip_header` names that header; a proxy
+# reaching this server over loopback, and a Unix socket, are covered
+# by `localhost_ip` without naming anything. The server warns at
+# startup when neither applies.
+#
+# 0 disables the limit.
+#
+#wbf_ws_max_connections_per_address = 40
 
 # How many outgoing packs one wbf WebSocket connection may have queued
 # for sending before the handler producing them waits. This is the count

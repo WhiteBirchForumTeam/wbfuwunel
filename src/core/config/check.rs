@@ -17,7 +17,10 @@ use itertools::Itertools;
 use regex::RegexSet;
 use url::Url;
 
-use super::{DEPRECATED_KEYS, IdentityProvider, IpSource, KNOWN_KEYS, S3_MIN_PART_SIZE, StorageProvider};
+use super::{
+	DEPRECATED_KEYS, IdentityProvider, KNOWN_KEYS, ReverseProxyIpHeader, S3_MIN_PART_SIZE,
+	StorageProvider,
+};
 use crate::{
 	Config, Err, Result, debug, debug_info, err, error,
 	wbf::pack::OVERHEAD as PACK_OVERHEAD,
@@ -42,10 +45,18 @@ pub fn reload(old: &Config, new: &Config) -> Result {
 		));
 	}
 
-	if new.ip_source != old.ip_source {
+	if new.reverse_proxy_ip_header != old.reverse_proxy_ip_header {
 		return Err!(Config(
-			"ip_source",
-			"ip_source cannot be changed at runtime; restart the server to apply this change."
+			"reverse_proxy_ip_header",
+			"reverse_proxy_ip_header cannot be changed at runtime; restart the server to apply \
+			 this change."
+		));
+	}
+
+	if new.localhost_ip != old.localhost_ip {
+		return Err!(Config(
+			"localhost_ip",
+			"localhost_ip cannot be changed at runtime; restart the server to apply this change."
 		));
 	}
 
@@ -62,6 +73,12 @@ pub fn check(config: &Config) -> Result {
 	warn!("Note: tuwunel was built without optimisations (i.e. debug build)");
 
 	warn_deprecated(config);
+	// 🚨 Before `warn_unknown_key`, which with `error_on_unknown_config_opts`
+	// would fail on the old names first and say only "unknown" — burying the one
+	// sentence that tells the operator what to rename, from exactly the people
+	// who turned that flag on because they care about settings being dropped
+	// (PR #85 review, salvia).
+	check_renamed_client_address_keys(config)?;
 	warn_unknown_key(config)?;
 
 	#[cfg(all(
@@ -76,6 +93,7 @@ pub fn check(config: &Config) -> Result {
 
 	check_observability(config)?;
 	check_wbf_device_window(config)?;
+	warn_address_keyed_limits_share_one_bucket(config);
 	check_wbf_send_queue_bytes(config)?;
 	check_wbf_window_max_bytes(config)?;
 	check_s3_part_size(config)?;
@@ -101,6 +119,112 @@ fn check_observability(config: &Config) -> Result {
 		return Err!(Config(
 			"sentry_endpoint",
 			"Sentry cannot be enabled without an endpoint set"
+		));
+	}
+
+	Ok(())
+}
+
+/// Several limits are keyed on the client address: the login/refresh token
+/// bucket, the OIDC ones, and the per-address WebSocket connection limit. A
+/// deployment where the client's real address never reaches the server makes
+/// every request carry the same one, and each of those limits collapses into a
+/// single bucket for the whole server.
+///
+/// Since `localhost_ip` came back that is no longer the default outcome: a
+/// proxy on the same host, and the Unix socket, are believed when they forward
+/// an address. What is left is a proxy that either sits on another host with no
+/// `reverse_proxy_ip_header` naming its header, or sends no forwarding header
+/// at all — neither of which the server can see from here, which is why this
+/// warns rather than decides.
+///
+/// 🚨 The failure is silent, and an outsider can hold it open: rate limiting
+/// runs before credentials are checked, so an unauthenticated client can keep
+/// a shared login bucket empty and leave the whole server answering 429.
+///
+/// ⚠️ Both messages name the always-on device user-code throttle
+/// (`service/oauth/mod.rs`, RFC 8628 §5.1) although it is not in `limits`:
+/// it has no setting, so it cannot turn this warning on or off, but it
+/// collapses with the rest — an operator who reads "set these to 0" and does
+/// it would otherwise be left with a shared bucket and no warning at all
+/// (PR #85 review, cirno and rumia). Putting it in `limits` instead would make
+/// the warning print for every deployment, which is why it is only in the
+/// prose.
+///
+/// It is
+/// a warning rather than a refusal to start, because facing clients directly
+/// is a legitimate deployment and a note is not worth taking the whole process
+/// down (CLAUDE.md P).
+fn warn_address_keyed_limits_share_one_bucket(config: &Config) {
+	let on = [
+		(config.wbf_ws_max_connections_per_address > 0)
+			.then_some("wbf_ws_max_connections_per_address"),
+		(config.login_rc_per_second > 0).then_some("login_rc_per_second"),
+		(config.oidc_rc_per_second > 0).then_some("oidc_rc_per_second"),
+	];
+	let limits: Vec<&str> = on.into_iter().flatten().collect();
+	if limits.is_empty() {
+		return;
+	}
+	let limits = limits.join(", ");
+
+	// The one shape that is certain rather than suspected: a Unix socket has
+	// no peer address, the synthesised one is loopback, and localhost_ip is
+	// what would have let it name the client.
+	if config.unix_socket_path.is_some() && config.localhost_ip.is_empty() {
+		warn!(
+			"unix_socket_path is set and localhost_ip is empty, so every request carries the \
+			 same synthesised loopback address and these address-keyed limits apply to the \
+			 whole server instead of to each client: {limits}. The device user-code throttle is \
+			 always on and collapses the same way. Rate limiting runs before credentials are \
+			 checked, so anyone can keep the shared bucket empty. Either leave localhost_ip at \
+			 its default and have the layer in front send X-Forwarded-For, or limit in that \
+			 layer and set these to 0 here.",
+		);
+		return;
+	}
+
+	if config.reverse_proxy_ip_header.is_none() {
+		warn!(
+			"reverse_proxy_ip_header is unset, so a forwarding header is read only from a peer \
+			 in localhost_ip, and then only X-Forwarded-For. If a reverse proxy in front of \
+			 this server is not covered by that, every request carries its address and these \
+			 address-keyed limits apply to the whole server instead of to each client: \
+			 {limits}. The device user-code throttle is always on and collapses the same way, \
+			 so setting those three to 0 does not undo this. Rate limiting runs before \
+			 credentials are checked, so anyone can keep the shared login bucket empty. Name \
+			 the proxy's header here, or make sure it sends X-Forwarded-For from an address \
+			 in localhost_ip; ignore this when clients connect directly.",
+		);
+	}
+}
+
+/// 🚨 Refuses to start on a config that still uses the old names for the two
+/// client-address settings (renamed 2026-09-25). They would otherwise land in
+/// the catchall and be ignored with a warning, and being ignored is the
+/// dangerous direction here: an operator who set `ip_source` for a proxy would
+/// silently get a server that reads no header at all, collapsing every
+/// address-keyed limit into one bucket. A rename is cheap to act on; a silently
+/// unapplied security setting is not (CLAUDE.md A5).
+fn check_renamed_client_address_keys(config: &Config) -> Result {
+	if config.catchall.contains_key("ip_source") {
+		return Err!(Config(
+			"ip_source",
+			"ip_source was renamed to reverse_proxy_ip_header. Rename it in your config: left \
+			 under the old name it would be ignored, and then no forwarding header would be \
+			 read at all."
+		));
+	}
+
+	if config
+		.catchall
+		.contains_key("ip_source_trusted_subnets")
+	{
+		return Err!(Config(
+			"ip_source_trusted_subnets",
+			"ip_source_trusted_subnets was renamed to localhost_ip, and it now does what its \
+			 name says: a peer in one of these ranges may name the client in a forwarding \
+			 header. Rename it in your config, and check the ranges are ones you control."
 		));
 	}
 
@@ -271,13 +395,14 @@ fn check_network(config: &Config) -> Result {
 		));
 	}
 
-	if let Some(source) = config.ip_source
-		&& !matches!(source, IpSource::ConnectInfo)
+	if let Some(header) = config.reverse_proxy_ip_header
+		&& !matches!(header, ReverseProxyIpHeader::ConnectInfo)
 	{
 		warn!(
-			"ip_source is set to {source:?}, a header-based source. Ensure a trusted reverse \
-			 proxy populates this header for every request; otherwise clients can spoof their \
-			 IP address."
+			"reverse_proxy_ip_header is set to {header:?}, a header-based source, which is \
+			 believed whoever the peer is. Ensure a trusted reverse proxy overwrites this \
+			 header on every request and that clients cannot reach this server around it; \
+			 otherwise they can choose their own IP address."
 		);
 	}
 

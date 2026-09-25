@@ -78,7 +78,7 @@ client 那邊「開幾條、哪條走什麼、pending → sending → sent」是
 **為什麼不是 per user**：維護者定 per device。同一個人手機加桌機各兩條就是 4，若算 user 第三台裝置會被擠掉；算 device 則上限幾乎不會撞到，
 它的意義是防**一個 client 失控**（重連風暴、忘了關），不是配額。
 
-### 2.2 每個來源位址最多 40 條（`wbf_ws_max_connections_per_address`，預設 40，0 = 不限）（📄 提案，維護者 2026-09-24 要求）
+### 2.2 每個來源位址最多 40 條（`wbf_ws_max_connections_per_address`，預設 40，0 = 不限）（✅ 維護者 2026-09-24 同意）
 
 §2.1 那道閘門按 `(user, device)` 算，所以它**只擋得到已經有身份的連線**。⭐ **匿名升級完全不佔它的名額** —— 一個沒有 token 的人要開幾條就開幾條，只受 `wbf_ws_unauthenticated_timeout`（30 秒）限制。
 30 秒對一台機器來說很長：只要持續重連，未登入的連線數就沒有上限，而每一條都要佔一個 socket、一個 task、一份讀寫緩衝。**這一節就是補那個洞**，而且它是唯一能補的那道 —— 匿名連線沒有身份，但它一定有一個來源位址。
@@ -95,26 +95,34 @@ client 那邊「開幾條、哪條走什麼、pending → sending → sent」是
 **實作跟 §2.1 同一個形狀**（A4：同一個問題只留一份機制）：`service/connections.rs` 多一張 `Mutex<HashMap<IpAddr, u32>>` 與一個 RAII 的 `AddressSlot`，drop 時減計數。
 名額在 `ws_route` 裡拿，**放進 `on_upgrade` 的 closure**，所以連線怎麼結束都會還；升級沒成（token 壞、§2.1 擋下、關機中）時它在 `ws_route` 結束就 drop，不會漏。
 
-**位址從哪來**：`ws_route` 已經收 `ClientIp(client)`，那是**傳輸層照 `ip_source` 解析好的 client IP**（`router/client_ip.rs`）。⭐ 這一節不自己解析任何 header —— 解析點只有一個，在那裡（A4）。
+**位址從哪來**：`ws_route` 已經收 `ClientIp(client)`，而 `ClientIp` 的規則是（維護者 2026-09-25）：**有設 `reverse_proxy_ip_header` 就讀那個 header，OR peer 落在 `localhost_ip` 裡就讀 `X-Forwarded-For`（最右邊那個）；兩條都不成立就只信傳輸層 peer、完全不碰 header。** header 有就信、沒有就退回 peer。⭐ 這一節不自己解析任何 header —— 解析點只有一個，在那裡（A4）。
 
-🚨 **部署上最容易踩的一個坑，要寫進設定說明**：如果 server 前面有反向代理，而 `ip_source` **沒有**設成讀轉發 header，那麼**每一條連線看起來都來自代理那一個位址** —— 40 就不是「每個使用者 40」，而是**整台 server 只能有 40 條**。
-所以這個功能跟 `ip_source` 是綁在一起的：有代理就一定要設。⚠️ 值得考慮在啟動時檢查「有設 `ip_source` 嗎」並在沒設時留一行 warning，但那是另一件事（下面的決定 4）。
+🚨 **這條規則是 PR #85 審查改出來的，不是本來就長這樣**：舊的 `ClientIp` 對**每一個** peer 都掃轉發 header，而且**優先**取 leftmost `X-Forwarded-For`，peer 只是最後手段 —— 位址因此預設就是 **client 可控**的，這道閘門對「故意的人」等於不存在（三位審查都指出）。
 
-#### 要維護者決定的
+**兩個條件各講一件事，缺一不可：**
 
-1. **錯誤碼用新的還是沿用 `TooManyConnections`（1402）？**
-   - (a) **新開一個 `TooManyConnectionsFromAddress`（1403）**。
-   - (b) 沿用 1402。
-   - 建議 **(a)**：詞表的規矩是「一個 code 對一種處置」（wire-format §3.4）。1402 現在的處置是**「關掉一條你自己的舊連線再連」** —— 那對位址名額是錯的建議：撞到上限的人**可能一條都不是他開的**（同一個 NAT 後面的鄰居、同一間辦公室、同一台代理）。他關不掉別人的連線，只能等或換網路。**處置不同就該是不同的 code**，否則 client 會照錯的建議做。
-2. **IPv6 要不要按前綴聚合？**
-   - (a) **按確切位址算**（跟「每個 IP」字面一致，實作最簡單）。
-   - (b) IPv6 按 `/64` 聚合（IPv4 仍按確切位址）。
-   - ⚠️ 這條有**實質差別**：一般家用 IPv6 會拿到一整個 `/64`（甚至 `/56`），client 端換一個位址是零成本的。所以 (a) 在 IPv6 下**等於沒有上限**。如果這個限制的用意是**防濫用**，就要 (b)；如果只是「防一台機器的 client 失控」（跟 §2.1 同一個用意），(a) 就夠。
-   - 🚫 我不自己選：這取決於你要擋的是「失控的 client」還是「故意的人」，那是你的判斷不是我的。
-3. **要不要有豁免？** 例如 loopback（同機的工具、健康檢查）或設定裡的信任網段不計入。
-   - 建議：**先不做**。多一條豁免就多一條要驗的路徑，而同機的工具通常走 HTTP（本來就不算）。要的話之後再加。
-4. **沒設 `ip_source` 卻開著這個限制，要不要在啟動時 warning？**
-   - 建議：**要**，但只是一行 log，不擋啟動（P 條：不為了一個設定把整支 app 收掉）。它防的是上面那個「整台 server 只有 40 條」的坑 —— 那種壞法是**安靜的**，不講一聲沒人會發現。
+| 設定 | 它說的是 | 誰的 header 被信 |
+|---|---|---|
+| `reverse_proxy_ip_header` | 「我前面有代理，它把 client 寫在**這個** header」 | 任何 peer —— 因為操作者保證沒人繞得過代理 |
+| `localhost_ip`（預設 loopback） | 「這個 peer 不是 client，是跟我跑在同一台的東西」 | 只有本機：同機代理、unix socket |
+
+⚠️ **剩下的信任邊界，說白一點**：設了 `reverse_proxy_ip_header` 之後，能**直連**到 server（不經過代理）的人還是可以自己送那個 header。那是操作者的部署承諾，文件講明了（`generic.md`）。`localhost_ip` 那一半沒有這個問題 —— 它只信本機。
+
+🚨 **為什麼 `localhost_ip` 非回來不可**（cirno 在 PR #85 二審點出的）：unix socket **根本沒有 peer 位址**，`router/serve/unix.rs` 給每個請求合成一個 `127.0.0.1`。少了這條規則，那種部署的**每一個請求位址都一樣** —— 登入／refresh 的限速桶、OIDC 的兩個限速桶、這道連線上限，全部塌成**一個全站共用的桶**。而限速跑在**憑證檢查之前**，共用的桶任何人都抽得乾：預設 `login_rc_per_second = 1`，一個未登入的人每秒一發就能讓全站 login／refresh 長期 429。
+📎 所以合成 `127.0.0.1` 不是隨便挑的 —— 它就是為了落進 `localhost_ip`。同機代理是同一個形狀。
+
+🚨 **剩下的那個坑**：代理在**另一台**、又**沒設** `reverse_proxy_ip_header`，那麼每一條連線還是算成代理那一個位址 —— 40 不是「每個使用者 40」，而是**整台 server 只能有 40 條**。這個 server 從設定看不出來，所以**啟動時留一行 warning**（`warn_address_keyed_limits_share_one_bucket`，列出所有開著的位址型限制）—— 🚫 不擋啟動，直面 client 的部署是合法的（P 條）。
+
+#### 維護者 2026-09-24 定的四條
+
+1. **錯誤碼新開 `TooManyConnectionsFromAddress`（1403）**，不沿用 1402。詞表的規矩是「一個 code 對一種處置」（wire-format §3.4），而 1402 的處置是**「關掉一條你自己的舊連線」** —— 那對位址名額是**錯的建議**：撞到上限的人可能一條都不是他開的（同一個 NAT、同一間辦公室、同一台代理），他關不掉別人的。訊息因此**刻意不說「關掉一條你的」**，只說等或換網路。
+2. **IPv6 按 `/64` 聚合**（IPv4 仍按確切位址）。理由：一般家用 IPv6 會拿到一整個 `/64`（甚至 `/56`），**換一個位址是零成本的** —— 按確切位址算等於在 IPv6 下沒有上限。實作是 `to_address_group`（`service/connections.rs`）。
+3. **沒有豁免**：loopback 與本機網段照樣**計入**。多一條豁免就多一條要驗的路徑。
+   ⚠️ 別跟 2026-09-25 加的 `localhost_ip` 搞混：那條管的是**位址怎麼解析出來的**（本機 peer 可以指名 client），不是**誰不用算**。解析完之後每個位址一視同仁。
+4. **位址可能塌成一個桶時啟動留 warning**，不擋啟動。
+
+📎 **撞到上限的處置**（維護者同日明訂）：**拒新的，舊的照常跑**。升級根本不發生 —— 429 帶一個 `Error` pack，沒有 WebSocket 被建立，所以也沒有「關掉哪一條」的問題。跟 §2.1 「踢的永遠是新的那條」同一個方向。
+
 
 #### 驗收
 
@@ -391,6 +399,13 @@ wire-format §3.3 已經把 kind 按 Matrix 章節占好號。搬一個端點 = 
 📎 之後加的：`wbf_ws_send_queue_bytes`（16 MiB，PR #50）；同一支把 `wbf_data_max_bytes` 從 16 MiB 降到 **2 MiB + 4096**、`media_chunk_size_max` 從 16 MiB 降到 **2 MiB**。
 既有 config 改預設一個：`wbf_recent_max_limit` 10000 → **500**（§0-11）。
 📎 PR #53：`wbf_window_max_bytes`（8 MiB，≥ `wbf_data_max_bytes`）；`Event/Batch` 與 `Device/Batch` 的 meta 多 `more`。⚠️ **這是 client 要跟的行為改變**：靠 `tc < limit` 判斷同步結束的 client，在窗被 bytes 截斷時會漏掉更舊的那段（§6.4）。
+📎 **PR #85**（三位審查連續五輪都點這一行沒補，補上）：
+- 既有 config 改預設：`wbf_ws_max_connections_per_device` **4 → 8**。
+  🚨 這一條咬過人：e2e13 `[2.7]` 開 3 條連線、靠預設是 4 去撞上限，改成 8 之後它**期望被拒的 login 其實成功了**，而那支從改預設之後沒重跑過。現在那個數字寫死在該測試自己的 config 裡。
+- 新 config 兩個：`wbf_ws_max_connections_per_address`（40）、`localhost_ip`（`["127.0.0.0/8", "::1/128"]`）。
+- 新錯碼一個：`TooManyConnectionsFromAddress`（1403）。
+- ⚠️ **兩項改名，會咬既有部署**：`ip_source` → `reverse_proxy_ip_header`、`ip_source_trusted_subnets` → `localhost_ip`。後者**語意也反過來了**（舊的是「這個 peer 跳過安全解析」，新的是「這個 peer 可以指名 client」）。舊名字留在設定裡**拒絕啟動**，不是忽略 —— 忽略對這兩個設定是 fail open。
+- ⚠️ **`ClientIp` 的規則本身換了**（不是設定改名而已）：以前對每個 peer 都掃轉發 header 並取 leftmost `X-Forwarded-For`，現在只在「有指名 header」或「peer 是本機」時讀。直面 client 的部署位址因此不再是 client 可控的。
 
 ## 10. 驗收（e2e7 加情境 5、e2e9 改）
 

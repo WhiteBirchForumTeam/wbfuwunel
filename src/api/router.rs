@@ -11,7 +11,7 @@ use axum::{
 	response::IntoResponse,
 	routing::{any, get, post},
 };
-pub use client_ip::{ConfiguredIpSource, TrustedPeerSubnets};
+pub use client_ip::{ConfiguredIpHeader, LocalPeerRanges};
 use http::{HeaderValue, header};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tuwunel_core::{Server, err};

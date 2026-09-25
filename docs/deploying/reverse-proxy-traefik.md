@@ -79,9 +79,24 @@ http:
 
 ### Client IP source
 
-If Traefik is the only way clients can reach Tuwunel, set
-`ip_source = "rightmost_x_forwarded_for"` in `tuwunel.toml` so Tuwunel uses the
-trusted `X-Forwarded-For` value.
+What decides this is the **peer address Tuwunel sees**, not whether Traefik runs
+on the same machine. The default `localhost_ip` covers loopback only, and the
+arrangement above puts Traefik and Tuwunel in a shared Docker network — so
+Tuwunel sees Traefik's **container address** (something like `172.x.x.x`), which
+is not loopback. ⚠️ Left alone, `X-Forwarded-For` is ignored there and every
+request counts as Traefik: one rate-limit bucket and one connection quota for
+the whole server. Tuwunel warns about this at startup.
+
+For the arrangement above, set
+`reverse_proxy_ip_header = "rightmost_x_forwarded_for"` in `tuwunel.toml`, and
+make sure clients cannot reach Tuwunel around Traefik — the header is believed
+from any peer once it is named.
+
+Only if Tuwunel shares Traefik's network namespace (`network_mode: host`, or
+both running natively and connecting over `127.0.0.1`) is there nothing to
+configure. Adding Traefik's container subnet to `localhost_ip` also works, but
+it is the weaker option: a Docker bridge network is shared with whatever else
+sits on it.
 
 ### Federation
 

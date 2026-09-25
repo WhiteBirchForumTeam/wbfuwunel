@@ -81,88 +81,157 @@ fn check_with_captured_logs(config: &Config) -> (Result, String) {
 }
 
 #[test]
-fn ip_source_absent_parses_as_none() {
+fn reverse_proxy_ip_header_absent_parses_as_none() {
 	let config = config_from_toml("[global]\n").unwrap();
 
-	assert_eq!(config.ip_source, None);
+	assert_eq!(config.reverse_proxy_ip_header, None);
 }
 
 #[test]
-fn ip_source_connect_info_parses() {
+fn reverse_proxy_ip_header_connect_info_parses() {
 	let config = config_from_toml(
 		r#"[global]
+reverse_proxy_ip_header = "connect_info"
+"#,
+	)
+	.unwrap();
+
+	assert_eq!(config.reverse_proxy_ip_header, Some(ReverseProxyIpHeader::ConnectInfo));
+}
+
+#[test]
+fn reverse_proxy_ip_header_rightmost_x_forwarded_for_parses() {
+	let config = config_from_toml(
+		r#"[global]
+reverse_proxy_ip_header = "rightmost_x_forwarded_for"
+"#,
+	)
+	.unwrap();
+
+	assert_eq!(config.reverse_proxy_ip_header, Some(ReverseProxyIpHeader::RightmostXForwardedFor));
+}
+
+#[test]
+fn reverse_proxy_ip_header_cf_connecting_ip_parses() {
+	let config = config_from_toml(
+		r#"[global]
+reverse_proxy_ip_header = "cf_connecting_ip"
+"#,
+	)
+	.unwrap();
+
+	assert_eq!(config.reverse_proxy_ip_header, Some(ReverseProxyIpHeader::CfConnectingIp));
+}
+
+#[test]
+fn reverse_proxy_ip_header_issue_427_values_parse() {
+	for (value, expected) in [
+		("connect_info", ReverseProxyIpHeader::ConnectInfo),
+		("rightmost_x_forwarded_for", ReverseProxyIpHeader::RightmostXForwardedFor),
+		("rightmost_forwarded", ReverseProxyIpHeader::RightmostForwarded),
+		("x_real_ip", ReverseProxyIpHeader::XRealIp),
+		("cf_connecting_ip", ReverseProxyIpHeader::CfConnectingIp),
+		("true_client_ip", ReverseProxyIpHeader::TrueClientIp),
+		("fly_client_ip", ReverseProxyIpHeader::FlyClientIp),
+		("cloudfront_viewer_address", ReverseProxyIpHeader::CloudFrontViewerAddress),
+	] {
+		let config = config_from_toml(&format!(
+			r#"[global]
+reverse_proxy_ip_header = "{value}"
+"#,
+		))
+		.unwrap();
+
+		assert_eq!(config.reverse_proxy_ip_header, Some(expected), "{value}");
+	}
+}
+
+#[test]
+fn reverse_proxy_ip_header_camel_case_and_bogus_fail_to_parse() {
+	for value in ["CamelCase", "bogus"] {
+		let result = config_from_toml(&format!(
+			r#"[global]
+reverse_proxy_ip_header = "{value}"
+"#,
+		));
+
+		let Err(err) = result else {
+			panic!("reverse_proxy_ip_header value {value:?} should fail to parse");
+		};
+
+		let err = err.to_string();
+		assert!(err.contains("reverse_proxy_ip_header"), "{err}");
+		assert!(err.contains(value), "{err}");
+	}
+}
+
+/// 🚨 The default is what makes a same-host proxy and the Unix socket work
+/// without any configuration at all. If it ever came back empty, every
+/// address-keyed limit would quietly become one bucket for the whole server on
+/// those deployments (PR #85 review, cirno).
+#[test]
+fn localhost_ip_defaults_to_loopback_only() {
+	let config = config_from_toml("[global]\n").unwrap();
+
+	let ranges: Vec<String> = config
+		.localhost_ip
+		.iter()
+		.map(ToString::to_string)
+		.collect();
+	assert_eq!(ranges, ["127.0.0.0/8", "::1/128"]);
+}
+
+#[test]
+fn localhost_ip_can_be_emptied_to_trust_no_peer() {
+	let config = config_from_toml(
+		r#"[global]
+localhost_ip = []
+"#,
+	)
+	.unwrap();
+
+	assert!(config.localhost_ip.is_empty());
+}
+
+/// 🚨 Refused rather than ignored: an operator who set `ip_source` for a proxy
+/// and got it silently dropped would be running a server that reads no header
+/// at all — fail open on the very setting they were configuring (CLAUDE.md A5).
+#[test]
+fn the_old_client_address_key_names_refuse_to_start() {
+	for (old, new) in [
+		("ip_source = \"connect_info\"", "reverse_proxy_ip_header"),
+		("ip_source_trusted_subnets = [\"127.0.0.0/8\"]", "localhost_ip"),
+	] {
+		let config = config_from_toml(&format!("[global]\n{old}\n")).unwrap();
+
+		let (result, _logs) = check_with_captured_logs(&config);
+		let err = result.expect_err("the old name must not be silently ignored");
+		let err = err.to_string();
+		assert!(err.contains("renamed"), "{err}");
+		assert!(err.contains(new), "{err}");
+	}
+}
+
+/// 🚨 The rename check has to run before `warn_unknown_key`, or an operator
+/// with `error_on_unknown_config_opts` — exactly the person who turned that on
+/// because they care about settings being dropped — is told only "unknown" and
+/// never sees what to rename it to (PR #85 review, salvia).
+#[test]
+fn the_rename_error_wins_over_the_generic_unknown_key_error() {
+	let config = config_from_toml(
+		r#"[global]
+error_on_unknown_config_opts = true
 ip_source = "connect_info"
 "#,
 	)
 	.unwrap();
 
-	assert_eq!(config.ip_source, Some(IpSource::ConnectInfo));
-}
-
-#[test]
-fn ip_source_rightmost_x_forwarded_for_parses() {
-	let config = config_from_toml(
-		r#"[global]
-ip_source = "rightmost_x_forwarded_for"
-"#,
-	)
-	.unwrap();
-
-	assert_eq!(config.ip_source, Some(IpSource::RightmostXForwardedFor));
-}
-
-#[test]
-fn ip_source_cf_connecting_ip_parses() {
-	let config = config_from_toml(
-		r#"[global]
-ip_source = "cf_connecting_ip"
-"#,
-	)
-	.unwrap();
-
-	assert_eq!(config.ip_source, Some(IpSource::CfConnectingIp));
-}
-
-#[test]
-fn ip_source_issue_427_values_parse() {
-	for (value, expected) in [
-		("connect_info", IpSource::ConnectInfo),
-		("rightmost_x_forwarded_for", IpSource::RightmostXForwardedFor),
-		("rightmost_forwarded", IpSource::RightmostForwarded),
-		("x_real_ip", IpSource::XRealIp),
-		("cf_connecting_ip", IpSource::CfConnectingIp),
-		("true_client_ip", IpSource::TrueClientIp),
-		("fly_client_ip", IpSource::FlyClientIp),
-		("cloudfront_viewer_address", IpSource::CloudFrontViewerAddress),
-	] {
-		let config = config_from_toml(&format!(
-			r#"[global]
-ip_source = "{value}"
-"#,
-		))
-		.unwrap();
-
-		assert_eq!(config.ip_source, Some(expected), "{value}");
-	}
-}
-
-#[test]
-fn ip_source_camel_case_and_bogus_fail_to_parse() {
-	for value in ["CamelCase", "bogus"] {
-		let result = config_from_toml(&format!(
-			r#"[global]
-ip_source = "{value}"
-"#,
-		));
-
-		let Err(err) = result else {
-			panic!("ip_source value {value:?} should fail to parse");
-		};
-
-		let err = err.to_string();
-		assert!(err.contains("ip_source"), "{err}");
-		assert!(err.contains(value), "{err}");
-	}
+	let (result, _logs) = check_with_captured_logs(&config);
+	let err = result
+		.expect_err("an unknown key is fatal here either way")
+		.to_string();
+	assert!(err.contains("renamed"), "{err}");
+	assert!(err.contains("reverse_proxy_ip_header"), "{err}");
 }
 
 #[test]
@@ -170,28 +239,28 @@ fn check_accepts_absent_connect_info_and_cf_connecting_ip() {
 	let absent = config_from_toml("[global]\n").unwrap();
 	let connect_info = config_from_toml(
 		r#"[global]
-ip_source = "connect_info"
+reverse_proxy_ip_header = "connect_info"
 "#,
 	)
 	.unwrap();
 	let cf_connecting_ip = config_from_toml(
 		r#"[global]
-ip_source = "cf_connecting_ip"
+reverse_proxy_ip_header = "cf_connecting_ip"
 "#,
 	)
 	.unwrap();
 
 	let (result, logs) = check_with_captured_logs(&absent);
-	result.expect("absent ip_source should pass config check");
-	assert!(!logs.contains("ip_source is set to"));
+	result.expect("absent reverse_proxy_ip_header should pass config check");
+	assert!(!logs.contains("reverse_proxy_ip_header is set to"));
 
 	let (result, logs) = check_with_captured_logs(&connect_info);
 	result.expect("connect_info should pass config check");
-	assert!(!logs.contains("ip_source is set to"));
+	assert!(!logs.contains("reverse_proxy_ip_header is set to"));
 
 	let (result, logs) = check_with_captured_logs(&cf_connecting_ip);
 	result.expect("cf_connecting_ip should pass config check");
-	assert!(logs.contains("ip_source is set to CfConnectingIp"));
+	assert!(logs.contains("reverse_proxy_ip_header is set to CfConnectingIp"));
 }
 
 #[test]
@@ -272,20 +341,20 @@ fn reload_rejects_none_to_some_and_some_to_none() {
 	let none = config_from_toml("[global]\n").unwrap();
 	let some = config_from_toml(
 		r#"[global]
-ip_source = "connect_info"
+reverse_proxy_ip_header = "connect_info"
 "#,
 	)
 	.unwrap();
 	let other_some = config_from_toml(
 		r#"[global]
-ip_source = "rightmost_x_forwarded_for"
+reverse_proxy_ip_header = "rightmost_x_forwarded_for"
 "#,
 	)
 	.unwrap();
 
 	let err = check::reload(&none, &some).unwrap_err();
 	assert!(
-		err.to_string().contains("'ip_source'")
+		err.to_string().contains("'reverse_proxy_ip_header'")
 			&& err
 				.to_string()
 				.contains("cannot be changed at runtime"),
@@ -294,7 +363,7 @@ ip_source = "rightmost_x_forwarded_for"
 
 	let err = check::reload(&some, &none).unwrap_err();
 	assert!(
-		err.to_string().contains("'ip_source'")
+		err.to_string().contains("'reverse_proxy_ip_header'")
 			&& err
 				.to_string()
 				.contains("cannot be changed at runtime"),
@@ -303,7 +372,7 @@ ip_source = "rightmost_x_forwarded_for"
 
 	let err = check::reload(&some, &other_some).unwrap_err();
 	assert!(
-		err.to_string().contains("'ip_source'")
+		err.to_string().contains("'reverse_proxy_ip_header'")
 			&& err
 				.to_string()
 				.contains("cannot be changed at runtime"),
@@ -341,7 +410,7 @@ fn reload_accepts_unchanged_none_and_unchanged_some() {
 	let none = config_from_toml("[global]\n").unwrap();
 	let some = config_from_toml(
 		r#"[global]
-ip_source = "rightmost_x_forwarded_for"
+reverse_proxy_ip_header = "rightmost_x_forwarded_for"
 "#,
 	)
 	.unwrap();

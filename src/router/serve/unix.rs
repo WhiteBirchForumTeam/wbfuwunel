@@ -20,7 +20,14 @@ pub(super) async fn serve<'a>(
 	path: Option<&Path>,
 	socket_perms: u32,
 ) -> Result<Vec<BoxFuture<'a, Result<(), std::io::Error>>>> {
-	// Loopback so a unix-socket peer bypasses a configured `ip_source`.
+	// A unix-socket peer has no IP address, but `ClientIp` must answer with
+	// something, so every request here is given a synthesised loopback one.
+	// 🚨 Loopback is not an arbitrary choice: it is what puts these requests
+	// inside the default `localhost_ip`, so the layer in front can name the
+	// real client in `X-Forwarded-For` and the address-keyed limits (login and
+	// OIDC rate limiting, `wbf_ws_max_connections_per_address`) stay per
+	// client. Empty `localhost_ip` here and they all share one bucket instead
+	// — `config::check` warns about exactly that pair.
 	let router = router
 		.clone()
 		.layer(Extension(ConnectInfo(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))))

@@ -642,7 +642,10 @@ mod tests {
 		BRIDGED_ENDPOINTS, EndpointShape, MAX_MESSAGE_BYTES, RELATIONS_QUERY, build_reply_pack, build_request,
 		list_path_variables, pick_path, shape_of, to_bounded_message,
 	};
-	use crate::{ClientIp, router::ConfiguredIpSource};
+	use crate::{
+		ClientIp,
+		router::{ConfiguredIpHeader, LocalPeerRanges},
+	};
 
 	const PEER: IpAddr = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
 
@@ -846,18 +849,24 @@ mod tests {
 		assert!(anonymous.headers().get(header::CONTENT_TYPE).is_none(), "no body, no content type");
 	}
 
-	/// `ip_source` reaches a request as an extension the outer router's layers
-	/// add; the bridge's requests never pass those layers. So an endpoint
-	/// behind the bridge reads the address the transport already resolved
-	/// under `ip_source` — whatever the operator configured, and whatever the
-	/// client put in its own headers, which the bridge never forwards.
+	/// Both settings that can move the client address reach a request as
+	/// extensions the outer router's layers add; the bridge's requests never
+	/// pass those layers. So an endpoint behind the bridge reads the address
+	/// the transport already resolved — whatever the operator configured, and
+	/// whatever the client put in its own headers, which the bridge never
+	/// forwards.
+	///
+	/// 🚨 Both markers are asserted absent, not just the header one: without
+	/// `LocalPeerRanges` no peer is local, so a bridged request cannot reach
+	/// the `localhost_ip` path either, however the address looks.
 	#[tokio::test]
 	async fn an_endpoint_behind_the_bridge_sees_the_address_the_transport_resolved() {
 		let variables = br#"{"room_id":"!abc:localhost","event_type":"m.room.topic","state_key":""}"#;
 		let request = build_request(&state_shape(), &[], variables, b"", Some("TOKEN"), PEER).expect("builds");
 		let (mut parts, _body) = request.into_parts();
 
-		assert!(parts.extensions.get::<ConfiguredIpSource>().is_none(), "no ip_source marker on a bridged request");
+		assert!(parts.extensions.get::<ConfiguredIpHeader>().is_none(), "no configured header marker on a bridged request");
+		assert!(parts.extensions.get::<LocalPeerRanges>().is_none(), "no local-peer ranges on a bridged request");
 		assert!(parts.headers.get("x-forwarded-for").is_none() && parts.headers.get("forwarded").is_none());
 		let ClientIp(seen) = ClientIp::from_request_parts(&mut parts, &()).await.expect("an address");
 		assert_eq!(seen, PEER);

@@ -187,7 +187,7 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 
 | kind | subtype | meta（JSON） | data |
 |---|---|---|---|
-| `0x01 Control` | `0x01 Hello` | `{ "protocol": 1, "client": "…", "features": [...] }`（client 的 `features` server **只讀一項**：`"org.wbftw.device_versions"`，記在這條連線上、下一個 `Hello` 覆蓋，見 [wbf-room-device-version.md](wbf-room-device-version.md) §6.2、§7.1；meta 不是 JSON 或沒有這個清單＝沒宣告）。回應 `{ "protocol", "server", "engine", "engine_version", "features", "connection_id", "recent_default_limit", "recent_max_limit", "recent_default_batch", "recent_max_batch", "max_connections_per_device", "chunk_size_default", "chunk_size_large", "data_max_bytes" }` —— `features` 目前是 `["upload","download","recent","batch","seq","attachments","login","push","org.wbftw.device_versions"]`；`connection_id` 只給除錯（HTTP 上是 0）；**`data_max_bytes` 是這台 server 的單包 data 上限，client 照它切包，🚫 不要寫死**（預設在 PR #50 從 16 MiB 降到 2 MiB） | 無 |
+| `0x01 Control` | `0x01 Hello` | `{ "protocol": 1, "client": "…", "features": [...] }`（client 的 `features` server **只讀一項**：`"org.wbftw.device_versions"`，記在這條連線上、下一個 `Hello` 覆蓋，見 [wbf-room-device-version.md](wbf-room-device-version.md) §6.2、§7.1；meta 不是 JSON 或沒有這個清單＝沒宣告）。回應 `{ "protocol", "server", "engine", "engine_version", "features", "connection_id", "recent_default_limit", "recent_max_limit", "recent_default_batch", "recent_max_batch", "max_connections_per_device", "max_connections_per_address", "chunk_size_default", "chunk_size_large", "data_max_bytes" }` —— `features` 目前是 `["upload","download","recent","batch","seq","attachments","login","push","stream","device","bridge","org.wbftw.device_versions"]`；兩個 `max_connections_*` 是**這一刻**的設定，它們可以熱改，🚫 **client 不要把它們當成不變量**；`connection_id` 只給除錯（HTTP 上是 0）；**`data_max_bytes` 是這台 server 的單包 data 上限，client 照它切包，🚫 不要寫死**（預設在 PR #50 從 16 MiB 降到 2 MiB） | 無 |
 | | `0x02 Ack` | 各 kind 定的回應內容；`IS_RESPONSE = 1`，`id`、`seq` 抄請求 | 視 kind（`Download/Read` 的回應 data 是讀出的 bytes） |
 | | `0x03 Error` | `{ "code_id": <序號>, "code": "…", "message": "…" }` ＋ 該 code 定義的欄位；程式比對 `code_id`，`code` 是它的名字；**完整清單在 §3.4**，那張表是唯一的來源 | 無 |
 | | `0x04 Ping` / `0x05 Pong` | `{ "nonce": … }` | 無 |
@@ -280,7 +280,7 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 | 1302 | `Forbidden` | 身分驗過了但**不准**：憑證錯、帳號停用、不支援的登入 `type` | 登入 | | 不要自動重試；看 `errcode` |
 | 1401 | `RateLimited` | 太快了 | 限速閘門 | `retry_after_ms` | 等那麼久再試，🚫 不要立刻重打 |
 | 1402 | `TooManyConnections` | 這個 device 的 WS 名額滿了（`wbf_ws_max_connections_per_device`） | `admit` 閘門 | `max_connections` | 關掉一條舊的再連；這條連線隨即被關 |
-| 1403 | `TooManyConnectionsFromAddress` | 📄 **提案中**：這個來源位址的 WS 名額滿了（`wbf_ws_max_connections_per_address`） | 升級前的位址閘門 | `max_connections` | ⚠️ **不要建議使用者「關掉一條舊的」** —— 撞到的連線可能一條都不是他開的（同一個 NAT／辦公室／代理後面的別人）。等一下再試，或換一條網路 |
+| 1403 | `TooManyConnectionsFromAddress` | 這個來源位址的 WS 名額滿了（`wbf_ws_max_connections_per_address`；IPv6 按 `/64` 算） | 升級前的位址閘門（**在讀 token 之前**） | `max_connections` | ⚠️ **不要建議使用者「關掉一條舊的」** —— 撞到的連線可能一條都不是他開的（同一個 NAT／辦公室／代理後面的別人）。等一下再試，或換一條網路 |
 | 1501 | `NotFound` | 指名的東西不存在（上傳 id、媒體） | 各 handler | | 重建那個東西，或放棄 |
 | 1502 | `Conflict` | 請求**合法**，但跟 server 目前的狀態衝突（例：這個上傳已經封存／已經完成） | 上傳等有狀態的 kind | | 先讀狀態（`Upload/Status`）再決定；重送同一個請求還是會衝突 |
 | 1503 | `OutOfOrder` | 有序類的 `seq` 不是接收端等的那個（§4） | 有序類 | `expected_seq` | 從 `expected_seq` 重送，🚫 不要自己重排 |
@@ -441,9 +441,10 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 - **每個 (user, device) 最多 `wbf_ws_max_connections_per_device` 條 WS**（預設 **8**，2026-09-24 從 4 調高；[pack-pipeline](wbf-pack-pipeline.md) §2.1，維護者 2026-09-07 定）：帶 Bearer 升級超過 → **不升級**，429 ＋ `Error(TooManyConnections)`；
   匿名連線不算，`Login`／`Refresh` 拿到身份那刻才算，超過 → `Error(TooManyConnections)` 然後 Close 1008，**而且不發任何 token**（名額在 users service 寫 token 之前的 `admit` 閘門檢查，被拒的登入不會換掉該裝置其他連線的 token）；
   同一連線同一裝置再登入不多佔一格；連線結束名額就回來（RAII，`Services.connections` 的 `ConnectionSlot`）。HTTP 不算。踢的永遠是新的那條。
-- 📄 **每個來源位址最多 `wbf_ws_max_connections_per_address` 條 WS**（提案，預設 40；[pack-pipeline](wbf-pack-pipeline.md) §2.2，維護者 2026-09-24 要求）：⭐ 跟上一條不同，**匿名連線也算**，而且在**認證之前**就檢查 ——
-  上一條按身份算，所以擋不到還沒有身份的連線；這一條按位址算，是唯一擋得到匿名連線的那道。超過 → **不升級**，429 ＋ `Error(TooManyConnectionsFromAddress)`。HTTP 不算。
-  ⚠️ 位址取自傳輸層照 `ip_source` 解析好的 client IP：**前面有反向代理卻沒設 `ip_source` 的話，全部連線會算成同一個位址**。
+- **每個來源位址最多 `wbf_ws_max_connections_per_address` 條 WS**（預設 40；[pack-pipeline](wbf-pack-pipeline.md) §2.2，維護者 2026-09-24 定）：⭐ 跟上一條不同，**匿名連線也算**，而且在**認證之前**就檢查 ——
+  上一條按身份算，所以擋不到還沒有身份的連線；這一條按位址算，是唯一擋得到匿名連線的那道。超過 → **不升級**（舊的照常跑），429 ＋ `Error(TooManyConnectionsFromAddress)`。HTTP 不算。
+  **IPv6 按 `/64` 算**，不按確切位址：家用 IPv6 本來就拿一整個 `/64`，換位址零成本，按確切位址算等於沒有上限。
+  ⚠️ 位址取自 `ClientIp`，而它的規則是（維護者 2026-09-25）：**有設 `reverse_proxy_ip_header` 就讀那個 header，OR peer 落在 `localhost_ip`（預設 loopback）就讀 `X-Forwarded-For`；兩條都不成立就只信傳輸層 peer、完全不碰 header**。所以**代理在另一台、又沒設 `reverse_proxy_ip_header` 的話，全部連線會算成代理那一個位址**（啟動時有 warning）；同機代理與 unix socket 不必設定，peer 就是 loopback。
 
 ### 6.2 HTTP（選用，測試與腳本用）
 
@@ -515,8 +516,14 @@ HTTP `/login` 現在**沒有**限速（只有 OIDC 端點有 `oidc_rc_per_second
   登入不同：一個人手打密碼打不到這個速度，NAT 後面十個人同時登入也剛好夠。
 - 超過回 `Error(RateLimited)`，meta 多 `retry_after_ms`；HTTP 側回 429 `M_LIMIT_EXCEEDED`（Matrix 既有）。
 - **限速先於憑證檢查**：洪水不該還花一次 DB 查找。所以 bucket 空時，鎖定帳號的 Login 也回 `RateLimited` 而不是 `M_USER_LOCKED`。
-- ⚠️ **限速的 key 是 client IP，它的效力前提是那個 IP 可信**（review，rumia／salvia）。沒設 `ip_source` 時 `ClientIp` 先讀 `X-Forwarded-For` 等 header 才退回 socket 位址，攻擊者每次換 header 就拿到一個新 bucket。
-  **部署須知**：直接向公網的伺服器要設 `ip_source`（`rightmost` 加受信代理 subnet），或者確定反向代理覆寫 XFF。這是 OIDC 限速既有的前提，登入限速預設開、所以要講明。
+- ⚠️ **限速的 key 是 client IP，而那個 IP 可不可信、會不會撞在一起，全看 `reverse_proxy_ip_header` 與 `localhost_ip`**（review，rumia／salvia／cirno；PR #85 改過兩次規則）。
+  **可不可信**：`ClientIp` 只在兩種情況讀 header —— 操作者用 `reverse_proxy_ip_header` 指名了它，或 peer 落在 `localhost_ip`（預設 loopback）。外面的 client 送什麼 header 都推不動自己的位址，「換一個 header 就拿一個新 bucket」這條路已經不存在（舊版本有）。
+  🚨 **會不會撞在一起**：bucket 只以位址為 key，所以**任何讓全部請求看起來都來自同一個位址的部署，就是全站共用一個登入限速桶**。
+  • **同機代理／unix socket** → peer 是 loopback，落在預設 `localhost_ip` 裡，所以只要前面那層送 `X-Forwarded-For` 就**不會**塌。📎 unix socket 沒有 peer 位址，`router/serve/unix.rs` 合成的 `127.0.0.1` 就是為了落進這裡。
+  • **代理在另一台、又沒設 `reverse_proxy_ip_header`** → 全部算代理那一個位址，塌。
+  • **`localhost_ip = []` 又走 unix socket** → 沒有東西救得了，塌。
+  ⚠️ 塌掉的後果是**可用性**，而且外人維持得住：預設 `login_rc_per_second = 1`，限速又在憑證檢查**之前**，所以一個未登入的人每秒一發 login 就能把補回來的 token 抽乾 → **全站 login／refresh 長期 429**。
+  **部署須知**：代理在另一台就**一定要設** `reverse_proxy_ip_header`（例 `rightmost_x_forwarded_for`）—— 不只為了限速準不準，是為了別讓全站共用一個桶。真的兩條都做不到（前面那層不送任何 header），就把 `login_rc_per_second` 設成 `0`、在前面那層限速，別留一個任何人都抽得乾的共用桶。
 - 🚫 不做「連錯 N 次鎖帳號」：那是讓攻擊者能鎖住別人帳號的 DoS 入口。
 
 #### 6.3.5 `Hello`
