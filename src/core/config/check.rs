@@ -73,6 +73,12 @@ pub fn check(config: &Config) -> Result {
 	warn!("Note: tuwunel was built without optimisations (i.e. debug build)");
 
 	warn_deprecated(config);
+	// 🚨 Before `warn_unknown_key`, which with `error_on_unknown_config_opts`
+	// would fail on the old names first and say only "unknown" — burying the one
+	// sentence that tells the operator what to rename, from exactly the people
+	// who turned that flag on because they care about settings being dropped
+	// (PR #85 review, salvia).
+	check_renamed_client_address_keys(config)?;
 	warn_unknown_key(config)?;
 
 	#[cfg(all(
@@ -87,7 +93,6 @@ pub fn check(config: &Config) -> Result {
 
 	check_observability(config)?;
 	check_wbf_device_window(config)?;
-	check_renamed_client_address_keys(config)?;
 	warn_address_keyed_limits_share_one_bucket(config);
 	check_wbf_send_queue_bytes(config)?;
 	check_wbf_window_max_bytes(config)?;
@@ -135,7 +140,18 @@ fn check_observability(config: &Config) -> Result {
 ///
 /// 🚨 The failure is silent, and an outsider can hold it open: rate limiting
 /// runs before credentials are checked, so an unauthenticated client can keep
-/// a shared login bucket empty and leave the whole server answering 429. It is
+/// a shared login bucket empty and leave the whole server answering 429.
+///
+/// ⚠️ Both messages name the always-on device user-code throttle
+/// (`service/oauth/mod.rs`, RFC 8628 §5.1) although it is not in `limits`:
+/// it has no setting, so it cannot turn this warning on or off, but it
+/// collapses with the rest — an operator who reads "set these to 0" and does
+/// it would otherwise be left with a shared bucket and no warning at all
+/// (PR #85 review, cirno and rumia). Putting it in `limits` instead would make
+/// the warning print for every deployment, which is why it is only in the
+/// prose.
+///
+/// It is
 /// a warning rather than a refusal to start, because facing clients directly
 /// is a legitimate deployment and a note is not worth taking the whole process
 /// down (CLAUDE.md P).
@@ -174,10 +190,11 @@ fn warn_address_keyed_limits_share_one_bucket(config: &Config) {
 			 in localhost_ip, and then only X-Forwarded-For. If a reverse proxy in front of \
 			 this server is not covered by that, every request carries its address and these \
 			 address-keyed limits apply to the whole server instead of to each client: \
-			 {limits}. Rate limiting runs before credentials are checked, so anyone can keep \
-			 the shared login bucket empty. Name the proxy's header here, or make sure it \
-			 sends X-Forwarded-For from an address in localhost_ip; ignore this when clients \
-			 connect directly.",
+			 {limits}. The device user-code throttle is always on and collapses the same way, \
+			 so setting those three to 0 does not undo this. Rate limiting runs before \
+			 credentials are checked, so anyone can keep the shared login bucket empty. Name \
+			 the proxy's header here, or make sure it sends X-Forwarded-For from an address \
+			 in localhost_ip; ignore this when clients connect directly.",
 		);
 	}
 }

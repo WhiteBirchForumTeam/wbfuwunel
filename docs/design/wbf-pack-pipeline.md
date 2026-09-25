@@ -399,6 +399,13 @@ wire-format §3.3 已經把 kind 按 Matrix 章節占好號。搬一個端點 = 
 📎 之後加的：`wbf_ws_send_queue_bytes`（16 MiB，PR #50）；同一支把 `wbf_data_max_bytes` 從 16 MiB 降到 **2 MiB + 4096**、`media_chunk_size_max` 從 16 MiB 降到 **2 MiB**。
 既有 config 改預設一個：`wbf_recent_max_limit` 10000 → **500**（§0-11）。
 📎 PR #53：`wbf_window_max_bytes`（8 MiB，≥ `wbf_data_max_bytes`）；`Event/Batch` 與 `Device/Batch` 的 meta 多 `more`。⚠️ **這是 client 要跟的行為改變**：靠 `tc < limit` 判斷同步結束的 client，在窗被 bytes 截斷時會漏掉更舊的那段（§6.4）。
+📎 **PR #85**（三位審查連續五輪都點這一行沒補，補上）：
+- 既有 config 改預設：`wbf_ws_max_connections_per_device` **4 → 8**。
+  🚨 這一條咬過人：e2e13 `[2.7]` 開 3 條連線、靠預設是 4 去撞上限，改成 8 之後它**期望被拒的 login 其實成功了**，而那支從改預設之後沒重跑過。現在那個數字寫死在該測試自己的 config 裡。
+- 新 config 兩個：`wbf_ws_max_connections_per_address`（40）、`localhost_ip`（`["127.0.0.0/8", "::1/128"]`）。
+- 新錯碼一個：`TooManyConnectionsFromAddress`（1403）。
+- ⚠️ **兩項改名，會咬既有部署**：`ip_source` → `reverse_proxy_ip_header`、`ip_source_trusted_subnets` → `localhost_ip`。後者**語意也反過來了**（舊的是「這個 peer 跳過安全解析」，新的是「這個 peer 可以指名 client」）。舊名字留在設定裡**拒絕啟動**，不是忽略 —— 忽略對這兩個設定是 fail open。
+- ⚠️ **`ClientIp` 的規則本身換了**（不是設定改名而已）：以前對每個 peer 都掃轉發 header 並取 leftmost `X-Forwarded-For`，現在只在「有指名 header」或「peer 是本機」時讀。直面 client 的部署位址因此不再是 client 可控的。
 
 ## 10. 驗收（e2e7 加情境 5、e2e9 改）
 

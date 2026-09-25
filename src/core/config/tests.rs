@@ -212,6 +212,28 @@ fn the_old_client_address_key_names_refuse_to_start() {
 	}
 }
 
+/// 🚨 The rename check has to run before `warn_unknown_key`, or an operator
+/// with `error_on_unknown_config_opts` — exactly the person who turned that on
+/// because they care about settings being dropped — is told only "unknown" and
+/// never sees what to rename it to (PR #85 review, salvia).
+#[test]
+fn the_rename_error_wins_over_the_generic_unknown_key_error() {
+	let config = config_from_toml(
+		r#"[global]
+error_on_unknown_config_opts = true
+ip_source = "connect_info"
+"#,
+	)
+	.unwrap();
+
+	let (result, _logs) = check_with_captured_logs(&config);
+	let err = result
+		.expect_err("an unknown key is fatal here either way")
+		.to_string();
+	assert!(err.contains("renamed"), "{err}");
+	assert!(err.contains("reverse_proxy_ip_header"), "{err}");
+}
+
 #[test]
 fn check_accepts_absent_connect_info_and_cf_connecting_ip() {
 	let absent = config_from_toml("[global]\n").unwrap();

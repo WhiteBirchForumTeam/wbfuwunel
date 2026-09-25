@@ -928,11 +928,15 @@ pub struct Config {
 	/// `reverse_proxy_ip_header` set (維護者 2026-09-25).
 	///
 	/// A peer in one of these ranges is something running beside the
-	/// server — a reverse proxy on the same host, or the Unix socket,
-	/// whose peer address is synthesised as `127.0.0.1` because a Unix
-	/// socket has none. Such a peer is not the client, so the address
-	/// that matters is the one it forwards, and the whole machine is
-	/// already inside the trust boundary.
+	/// server — a reverse proxy reaching it over loopback, or the Unix
+	/// socket, whose peer address is synthesised as `127.0.0.1` because a
+	/// Unix socket has none. Such a peer is not the client, so the
+	/// address that matters is the one it forwards.
+	///
+	/// ⚠️ What counts is the peer address, not whether the proxy runs on
+	/// the same machine: a proxy in its own container reaches this server
+	/// from a bridge address, which the default does not cover. Name its
+	/// header in `reverse_proxy_ip_header` rather than widening this.
 	///
 	/// 🚨 Without this every one of those requests would carry the same
 	/// address, and every limit keyed on the address — the login and
@@ -3690,9 +3694,9 @@ pub struct Config {
 	/// deployment where the proxy's header is not read counts the proxy:
 	/// every connection shares one address and this becomes a limit on the
 	/// whole server. `reverse_proxy_ip_header` names that header; a proxy
-	/// on the same host, or a Unix socket, is covered by `localhost_ip`
-	/// without naming anything. The server warns at startup when neither
-	/// applies.
+	/// reaching this server over loopback, and a Unix socket, are covered
+	/// by `localhost_ip` without naming anything. The server warns at
+	/// startup when neither applies.
 	///
 	/// 0 disables the limit.
 	///

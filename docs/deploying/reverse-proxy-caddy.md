@@ -33,18 +33,23 @@ your.server.name, your.server.name:8448 {
 
 ### Client IP source
 
-If Caddy runs on the same host as Tuwunel — including the Unix-socket
-`reverse_proxy` target — there is nothing to configure: Caddy's peer address
-is loopback, which is in the default `localhost_ip`, so Tuwunel reads the
-`X-Forwarded-For` header that the `reverse_proxy` directive already sets.
+What decides this is the **peer address Tuwunel sees**, not whether Caddy runs
+on the same machine. The default `localhost_ip` covers loopback only.
 
-If Caddy runs on a different host, Tuwunel treats it as the connecting peer,
-so registration logs, rate limiting, and security tooling all attribute
-requests to Caddy's address rather than the real client. Set
+Nothing to configure when Caddy reaches Tuwunel over a Unix socket, or over
+`127.0.0.1` on the same machine or in a shared network namespace: the peer is
+loopback, so Tuwunel reads the `X-Forwarded-For` header that the
+`reverse_proxy` directive already sets, and each client is counted separately.
+
+⚠️ **Separate containers are not loopback.** In the Docker Compose example
+Tuwunel sees Caddy's container address, so left alone `X-Forwarded-For` is
+ignored and every request counts as Caddy: registration logs, rate limiting and
+the connection limit all attribute the whole server to one address. Tuwunel
+warns about this at startup. Set
 `reverse_proxy_ip_header = "rightmost_x_forwarded_for"` in `tuwunel.toml` (or
-`TUWUNEL_REVERSE_PROXY_IP_HEADER=rightmost_x_forwarded_for` in Docker). ⚠️ The
-header is then believed from any peer, so only do this when clients cannot
-reach Tuwunel around Caddy.
+`TUWUNEL_REVERSE_PROXY_IP_HEADER=rightmost_x_forwarded_for` in Docker), the same
+as for a Caddy on a different host. ⚠️ The header is then believed from any
+peer, so only do this when clients cannot reach Tuwunel around Caddy.
 
 The setting only takes effect at startup, so restart Tuwunel after changing
 it.
