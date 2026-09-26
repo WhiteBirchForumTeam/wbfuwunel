@@ -246,16 +246,19 @@ function Fetch-Oldest($ws, [uint64]$id, $meta) {
   $packs = @()
   Ws-Send $ws (Json-Pack 0x16 1 (Conv $id) 0 $meta $null)
   do { $batch = Recv-Or-Null $ws 5000; if ($null -eq $batch) { break }; if ($batch.kind -eq 0x16 -and $batch.subtype -eq 2) { $packs += ,$batch } } while ($batch.meta.r -ne 0)
-  $packs
+  # ⚠️ `,$packs`, not `$packs`: PowerShell unrolls a returned array, so a one-pack window would
+  # come back as the pack itself and `[-1]` on it reads nothing. The windows here are one pack
+  # long on purpose (limit=1), which is exactly the case that breaks.
+  ,$packs
 }
 
-$both = Fetch-Oldest $ws3 51 @{}
+$both = @(Fetch-Oldest $ws3 51 @{})
 $bothBodies = @($both | ForEach-Object { Items ([byte[]]$_.data) } | ForEach-Object { $_.content.body })
 Check '[3.1] Fetch with no cd_seq at all returns the whole queue, oldest first' `
   ($bothBodies.Count -eq 2 -and $bothBodies[0] -eq 'oldest' -and $bothBodies[1] -eq 'newest') "bodies=$($bothBodies -join ',')"
 
 # limit=1 stops the window after the oldest; `more` says there is another behind it.
-$firstWindow = Fetch-Oldest $ws3 52 @{ limit = 1 }
+$firstWindow = @(Fetch-Oldest $ws3 52 @{ limit = 1 })
 $firstCounts = @($firstWindow | ForEach-Object { Counts $_ })
 $firstBodies = @($firstWindow | ForEach-Object { Items ([byte[]]$_.data) } | ForEach-Object { $_.content.body })
 Check '[3.2] limit=1 gives the oldest one and says more=true: the head is the waterline' `
@@ -266,15 +269,18 @@ Check '[3.2] limit=1 gives the oldest one and says more=true: the head is the wa
 # default waterline ever crept in, this second call would answer empty and the item would be
 # unreachable -- which is the failure this whole rule exists to make impossible.
 $destroyed3 = Destroy $ws3 53 $firstCounts
-$secondWindow = Fetch-Oldest $ws3 54 @{ limit = 1 }
+$secondWindow = @(Fetch-Oldest $ws3 54 @{ limit = 1 })
 $secondBodies = @($secondWindow | ForEach-Object { Items ([byte[]]$_.data) } | ForEach-Object { $_.content.body })
+# 📎 `more` is still true here, and that is correct: it means "this window stopped at the limit",
+# not "there is something behind it" (§3 of the spec). The window held one item and the limit was
+# one. [3.4] is what shows the queue really was empty behind it.
 Check '[3.3] after destroying that window, Fetch with no cd_seq gives the next one: destroying is the paging handle' `
-  ($null -ne $destroyed3.result -and $secondBodies.Count -eq 1 -and $secondBodies[0] -eq 'newest' -and $secondWindow[-1].meta.more -eq $false) `
+  ($null -ne $destroyed3.result -and $secondBodies.Count -eq 1 -and $secondBodies[0] -eq 'newest' -and $secondWindow[-1].meta.more -eq $true) `
   "destroyed=$($destroyed3.result.meta.bc) bodies=$($secondBodies -join ',') more=$($secondWindow[-1].meta.more)"
 
 # And a destroyed count never comes back, so the walk always terminates.
 $null = Destroy $ws3 55 (@($secondWindow | ForEach-Object { Counts $_ }))
-$emptied = Fetch-Oldest $ws3 56 @{}
+$emptied = @(Fetch-Oldest $ws3 56 @{})
 Check '[3.4] with everything destroyed the queue is empty: destroyed counts never come back' `
   ($emptied.Count -eq 1 -and $emptied[0].meta.tc -eq 0 -and $emptied[0].meta.r -eq 0) (Describe $emptied[0])
 $ws3.Dispose()
