@@ -218,6 +218,68 @@ Check '[2.1] catch-up limit of 0: the first live Push says gap=false' ($heldZ.su
 $wsZ.Dispose()
 Stop-Server $server
 
+# ================= Scenario 3: Fetch without cd_seq, paging by destroying =================
+# ⭐ The rule 維護者 2026-09-26 定的 (issue #87, wbf-to-device.md §3.1.2): the correct call carries no
+# cd_seq, and it means "from the oldest item that has not been destroyed". The queue head is the
+# waterline; the client stores no number. Paging is: destroy the window, then ask again.
+#
+# 🚨 This is already the behaviour -- the point of the scenario is that it becomes a promise. Nothing
+# else stops someone giving cd_seq a default waterline later, and that filter is exactly what made
+# three key-losing paths possible on the client side (client PR #60, three reviewers).
+Log '################ Scenario 3: Fetch without cd_seq ################'
+# 🚨 A fresh database on purpose: the queue has to hold exactly the two items this scenario sends.
+# Scenario 1 leaves items behind by design ([1.9] refuses to destroy `fourth` because tc lies) and
+# scenario 2 never destroys its own -- reusing $db here would make [3.1] count those too.
+$db3 = "$S\e2e12db3"; Remove-Item -Recurse -Force $db3 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db3 | Out-Null
+$cfg3 = Write-Config12 $db3 @()
+$server = Start-Server $cfg3 's3'
+$reg3A = Register 'alice'; $tok3A = $reg3A.access_token; $dev3A = $reg3A.device_id
+$reg3B = Register 'bob'; $tok3B = $reg3B.access_token
+$ws3 = Ws-Open $tok3A
+$null = Call $ws3 (Json-Pack 0x16 4 (Conv 50) 0 @{ device_id = $dev3A } $null)
+$null = Drain $ws3 1500
+$null = Send-ToDevice $tok3B $reg3A.user_id $dev3A 'oldest'
+$null = Send-ToDevice $tok3B $reg3A.user_id $dev3A 'newest'
+$null = Drain $ws3 2000
+
+function Fetch-Oldest($ws, [uint64]$id, $meta) {
+  $packs = @()
+  Ws-Send $ws (Json-Pack 0x16 1 (Conv $id) 0 $meta $null)
+  do { $batch = Recv-Or-Null $ws 5000; if ($null -eq $batch) { break }; if ($batch.kind -eq 0x16 -and $batch.subtype -eq 2) { $packs += ,$batch } } while ($batch.meta.r -ne 0)
+  $packs
+}
+
+$both = Fetch-Oldest $ws3 51 @{}
+$bothBodies = @($both | ForEach-Object { Items ([byte[]]$_.data) } | ForEach-Object { $_.content.body })
+Check '[3.1] Fetch with no cd_seq at all returns the whole queue, oldest first' `
+  ($bothBodies.Count -eq 2 -and $bothBodies[0] -eq 'oldest' -and $bothBodies[1] -eq 'newest') "bodies=$($bothBodies -join ',')"
+
+# limit=1 stops the window after the oldest; `more` says there is another behind it.
+$firstWindow = Fetch-Oldest $ws3 52 @{ limit = 1 }
+$firstCounts = @($firstWindow | ForEach-Object { Counts $_ })
+$firstBodies = @($firstWindow | ForEach-Object { Items ([byte[]]$_.data) } | ForEach-Object { $_.content.body })
+Check '[3.2] limit=1 gives the oldest one and says more=true: the head is the waterline' `
+  ($firstBodies.Count -eq 1 -and $firstBodies[0] -eq 'oldest' -and $firstWindow[-1].meta.more -eq $true) `
+  "bodies=$($firstBodies -join ',') more=$($firstWindow[-1].meta.more)"
+
+# 🚨 The paging promise: destroy that window, ask again with no cd_seq, get the NEXT one. If a
+# default waterline ever crept in, this second call would answer empty and the item would be
+# unreachable -- which is the failure this whole rule exists to make impossible.
+$destroyed3 = Destroy $ws3 53 $firstCounts
+$secondWindow = Fetch-Oldest $ws3 54 @{ limit = 1 }
+$secondBodies = @($secondWindow | ForEach-Object { Items ([byte[]]$_.data) } | ForEach-Object { $_.content.body })
+Check '[3.3] after destroying that window, Fetch with no cd_seq gives the next one: destroying is the paging handle' `
+  ($null -ne $destroyed3.result -and $secondBodies.Count -eq 1 -and $secondBodies[0] -eq 'newest' -and $secondWindow[-1].meta.more -eq $false) `
+  "destroyed=$($destroyed3.result.meta.bc) bodies=$($secondBodies -join ',') more=$($secondWindow[-1].meta.more)"
+
+# And a destroyed count never comes back, so the walk always terminates.
+$null = Destroy $ws3 55 (@($secondWindow | ForEach-Object { Counts $_ }))
+$emptied = Fetch-Oldest $ws3 56 @{}
+Check '[3.4] with everything destroyed the queue is empty: destroyed counts never come back' `
+  ($emptied.Count -eq 1 -and $emptied[0].meta.tc -eq 0 -and $emptied[0].meta.r -eq 0) (Describe $emptied[0])
+$ws3.Dispose()
+Stop-Server $server
+
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"
 
 # A pending ReceiveAsync or an undisposed socket can keep this process alive long after the

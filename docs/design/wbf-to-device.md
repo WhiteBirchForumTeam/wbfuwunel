@@ -40,10 +40,24 @@ client 得讓兩個資料庫原子性地一起 commit —— 兩個 db、兩套�
 `add_to_device_event`（`src/service/users/device.rs`）用的是 `globals.next_count()` ——
 **跟 PDU 的 count 同一支**，所以 to-device 的 count 與 `g_seq` 可以直接比大小。但它們是兩個水位，名字要分開：
 
-| | client 存的水位 | 語意 | 誰推進 |
+| | 水位在哪 | 語意 | 誰推進 |
 |---|---|---|---|
-| 房間事件 | `cg_seq` | 我快取到哪 | client 自己，可重讀 |
-| **to-device** | **`cd_seq`** | 我 **durable 收下並處理完**到哪 | client 自己；**銷毀是另一個獨立的動作**（§5） |
+| 房間事件 | client 存的 `cg_seq` | 我快取到哪 | client 自己，可重讀 |
+| **to-device** | **佇列頭**（server 這邊的第一則還沒銷毀的） | 我還沒處理完的從這裡開始 | **銷毀**（§5）—— client 不存號碼 |
+
+🚨 **to-device 的水位不是 client 存的號碼，而是佇列頭**（維護者 2026-09-26，issue #87）。
+每一則存到 client `ItemsDestroy` 才刪（§6 無窮 TTL），所以「還沒處理完的」在 server 這邊本來就是一段
+**從最舊開始、沒有洞**的區間 —— client 不必記到哪，問就從最舊的給。
+
+⚠️ **這一條是改過的，而且是被 client 端的三條漏金鑰的路逼出來的**（client `wbf-matrix-client` PR #60，三位審查各自抓到）。
+原本 client 自己記一個 `cd_seq`（「匯進 crypto store 到哪」）、`Fetch` 帶著它去要，而 `Fetch{cd_seq}` 只給比它大的 ——
+於是只要那個號碼跑到某一則**還沒進 store** 的前面，那則就再也問不到，**而水位不會退**。跑到前面的三條路：
+
+1. **early push**：`Subscribe`（不帶 `cd_seq`）的 `Ack` 之前推來的 `Push` 先被匯了 —— 它的 count 比佇列裡離線期的舊項新，水位一落地，舊項被跳過。
+2. **匯失敗**：一包匯失敗只記一聲，下一包更高 count 匯成功，水位越過失敗那則；而**這包不帶 `gap`**（server 有送到，是 client 匯壞的）。
+3. **`gap` 被吃掉**：`CryptoState` 跟 `Push` 共用訂閱的 `gap` 旗，server 給一次就清（`take_targets` 的 `swap(false)`）；client 那個 arm 只讀 OTK 數字，訊號吃掉不還。
+
+⭐ **三條的根源都是那個濾網，不是佇列**。佇列從來沒有洞；洞是 `cd_seq` 濾出來的。所以修法不是在 client 端補規則，是**不要那個濾網**。
 
 ⚠️ **`g_seq` 寫得進 PDU 的 `unsigned`，to-device 的 count 沒有地方放** —— 它不是 PDU，
 存起來的就是 `{ type, sender, content }`。所以每一則的 count 必須由 pack 的 meta 帶（§3 的 `counts`）。
@@ -56,7 +70,7 @@ client 得讓兩個資料庫原子性地一起 commit —— 兩個 db、兩套�
 
 | subtype | 方向 | meta | data | 順序類別 |
 |---|---|---|---|---|
-| `0x01 Fetch` | client → server | `{ "limit": 1000?, "cd_seq": <count>? }`；`id` 由 client 選 | 無 | 無序 |
+| `0x01 Fetch` | client → server | `{ "limit": 1000? }`；`id` 由 client 選。⭐ **不帶 `cd_seq` 就是正確的叫法**：從佇列**最舊的還沒銷毀的**一則開始、舊→新。`cd_seq` 仍然收（見 §3.1.2），🚫 client 不該送 | 無 | 無序 |
 | `0x02 Batch` | **server → client** | `{ "tc", "bc", "ot", "nt", "counts": [...], "r", "more" }`；`id` 抄 `Fetch`，`seq` 從 0 嚴格 +1；`more` = 這窗停在上限（`limit` 或 `wbf_window_max_bytes`）、後面可能還有（PR #53） | `bc` 則事件，u32 大端長度 ＋ JSON | 有序 |
 | `0x03 ItemsDestroy` | client → server | `{ "tc": <筆數> }`；`id` 由 client 選 | **`tc` × 8 byte**，每個是一個 u64 大端的 count（§5.1） | 無序 |
 | `0x04 Subscribe` | client → server | `{ "device_id": "…", "cd_seq": <count>? }`；`id` 由 client 選 | 無 | 無序 |
@@ -88,15 +102,39 @@ client 原提案有一個 `to`（只要比它舊的）。維護者 2026-09-11 �
 | | 底（只要比它新的） | 翻頁把手 |
 |---|---|---|
 | `Event/Recent`（新→舊） | `cg_seq` | **`before`**（下一窗帶上一窗的 `ls`） |
-| `Device/Fetch`（舊→新） | **`cd_seq`** —— **同時**是翻頁把手（下一窗帶上一窗的 `nt`） | 同左 |
+| `Device/Fetch`（舊→新） | 佇列頭，沒有參數 | **銷毀**（§3.1.2） |
 
-所以 `to` 對到的是 **`cg_seq` 的位置**（區間的另一端），不是 `before`；`before` 的角色這邊由 `cd_seq` 兼任。
+所以 `to` 對到的是 **`cg_seq` 的位置**（區間的另一端），不是 `before`。
+📎 這張表原本寫「`cd_seq` 同時是翻頁把手（下一窗帶上一窗的 `nt`）」—— 2026-09-26 起**那不再是正確的叫法**，見 §3.1.2。
 剩下的問題是「別給我比 X 新的」誰要用：唯一想得到的情境是「訂閱後一邊補洞一邊收推送，想把補的範圍卡在訂閱當下」，
 而那個情境**不需要它** —— 重複拿到同一則無害（匯進 crypto store 冪等、銷毀命令也冪等），`Event` 那邊同樣的縫是靠 client 自己去重，
 也沒有為它加參數。
 
 ⭐ **定案：不做**（維護者 2026-09-11：「`to` 看起來很多餘」）。加一個線上參數很便宜，**拿掉一個已經在線上的參數很貴**；
 之後真有呼叫點再加，那時它的語意也會被那個呼叫點定得更準。
+
+### 3.1.2 `Fetch` 不帶 `cd_seq`，翻頁靠銷毀（維護者 2026-09-26，issue #87）
+
+**規則：`Fetch` 的正確叫法是不帶 `cd_seq`。** 語意是「從這台裝置佇列**最舊的還沒銷毀的**一則開始、
+舊→新、受 `limit` 與 `wbf_window_max_bytes`，`more` 照舊」。
+
+**翻頁**：一窗收完（`r = 0`）之後 **`ItemsDestroy` 這窗，再不帶 `cd_seq` 叫下一次** ——
+銷掉的不會再回來（`destroy_to_device_items` 是真的 `del`），所以下一次的「最舊」自然就是下一窗。
+🚫 **不要拿上一窗的 `nt` 當 `cd_seq`**：那正是 §2 那三條漏金鑰的路。
+
+⚠️ **`cd_seq` 這個欄位保留、但 client 不該送**（維護者 2026-09-26 定，不做 breaking change）。
+留著的代價是那個把手還在，所以這裡把它寫成**明確的反面教材**而不是一個選項：
+送了它，server 就只給比它大的，而 client 自己記的那個號碼一旦跑到還沒處理完的那則前面，
+**那則就再也問不到，而且沒有任何東西會告訴你**。§2 列的三條路都是這樣發生的。
+
+📎 **這不是新行為，是把既有行為變成承諾**：`read_items(…, None, …)` →
+`get_to_device_events(since: None)` → `from = (user, device, 0)`，本來就是從最舊的給。
+⭐ 所以這一節配了測試 —— 沒有它，下一個人替 `cd_seq` 加一個「預設水位」不會有東西紅。
+
+🚨 **一則永遠匯不進去的 item 會卡住它後面的全部**（同一個決定）：client 不帶 `cd_seq`、又不能銷它（沒匯成不該銷），
+它每次都排在最前面。**server 端刻意不給逃生口** —— 沒有「跳過」語意、沒有 admin 手動銷單筆。
+理由是這件事只有 client 端知道怎麼處理，而「跳過」等於把「那則金鑰永遠解不開」的決定交給當下最不知情的那一層；
+**client 端本來就該主動銷毀**，卡住是它要處理的事，不是 server 要 care 的事。
 
 ### 3.2 跟 `Event` 一樣的部分（不重複定義）
 
@@ -321,15 +359,19 @@ byte 上限仍然要接（規則只有一份，[wbf-wire-format.md](wbf-wire-for
 ## 8. client 端會怎麼用（給讀 server 的人理解脈絡）
 
 ```
-daemon 啟動、Login → Subscribe{device_id, cd_seq: 上次存的}   ← 先登記，再補洞
-                  → Device/Fetch(cd_seq)                    ← 離線期間漏的，一窗 = 10 個 Batch
+daemon 啟動、Login → Subscribe{device_id}                    ← 先登記（🚫 不帶 cd_seq）
+                  → Device/Fetch{}                           ← 沒帶 cd_seq：從佇列最舊的給
 每收到一個 Batch／Push（100 則）
                   → 逐則匯進 crypto store（OlmMachine::receive_sync_changes）
                   → ItemsDestroy{ 這一包裡成功的那些 count }   ← 一包一個呼叫，不等整窗
                   → 收到 ItemsDestroyed：在清單裡的，本地是唯一真相
-一窗收完（r = 0）且 more = true → 帶上一窗的 nt 當 cd_seq 再叫一次（不要用「則數 < limit」判斷：窗被 bytes 截斷時則數少、後面還有）
-之後靠 Push；收到 gap 就再 Fetch 一次
+一窗收完（r = 0）且 more = true → 先銷毀這窗，再 Device/Fetch{}（🚫 不要拿 nt 當 cd_seq）
+之後靠 Push；任何異常訊號（gap、壞包、匯失敗、收件匣滿）就 Fetch{} 一次 —— 不必分辨是哪一種
 ```
+
+⭐ **client 的 task 因此是純的**（維護者 2026-09-26，issue #87）：沒有水位要維護、沒有「落後」旗標、
+沒有「先別匯、先追平」的例外規則。收到 `Push` 就匯銷那一包；出任何狀況就重新問一次最舊的。
+📎 §2 列的那三條漏金鑰的路在這個形狀下**不是被堵住，是不存在** —— 沒有濾網就沒有跳過。
 
 📎 **server 對 to-device 的內容本來就是瞎的**（`add_to_device_event` 只存 `type`／`sender`／`content`），
 這個提案不改變那件事。
@@ -345,6 +387,8 @@ daemon 啟動、Login → Subscribe{device_id, cd_seq: 上次存的}   ← 先�
 | `oldest` / `newest` | **`ot` / `nt`** | 維護者 2026-09-10；短名跟線上其他欄位（`bc`、`tc`、`fs`、`ls`、`r`）一致，而且仍然跟 `fs`／`ls` 長得不一樣 |
 | 保留期待定 | **無窮 TTL** ＋ 刪裝置清佇列 ＋ admin 可觀測 | §6 |
 | `Fetch { to }` | **拿掉** | §3.1.1：它對到的是 `cg_seq` 的位置不是 `before`，而唯一想得到的情境不需要它（維護者 2026-09-11） |
+| `Fetch { cd_seq }`：client 記水位、翻頁帶上一窗的 `nt` | **不帶 `cd_seq`，翻頁靠銷毀**；欄位保留但 client 不該送 | §3.1.2：那個濾網會讓還沒處理完的那則再也問不到（三條路，§2），而佇列本來就沒有洞。維護者 2026-09-26，issue #87 |
+| 一則匯不進去的 item 要有逃生口 | **沒有** | §3.1.2：卡住是 client 端要處理的事，「跳過」等於把「永遠解不開」交給最不知情的那一層（維護者 2026-09-26） |
 
 ## 10. 實作那支要確認或量的
 
