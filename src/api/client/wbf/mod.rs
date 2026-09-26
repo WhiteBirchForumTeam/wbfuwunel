@@ -319,8 +319,21 @@ impl PackContext<'_> {
 	///     the admission table already refused anonymous packs to them, and
 	///     this is the check that does not trust the table alone.
 	fn user(&self) -> Result<&UserId, Reject> {
+		self.get_session().map(|session| session.user.as_ref())
+	}
+
+	/// Return:
+	///     Result<&Session, Reject>  Unauthorized when the connection has no
+	///     session. What handlers that need the **device** as well as the user
+	///     call; `user()` is the shorthand for the rest.
+	///
+	/// 🚨 A handler that sends an event needs the device: the transaction-id
+	/// dedupe is keyed `(user, device, txn)`, so passing `None` for the device
+	/// makes it key on the account alone — a second device reusing a `txn_id`
+	/// then gets the first one's `event_id` back and its own event is never
+	/// written (issue #78).
+	fn get_session(&self) -> Result<&Session, Reject> {
 		self.session
-			.map(|session| session.user.as_ref())
 			.ok_or_else(|| Reject::code(RejectCode::Unauthorized, "log in first: this connection has no session"))
 	}
 }

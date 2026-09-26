@@ -120,7 +120,20 @@ Check '[1.5d] Event/Send declaring removed media -> Error InvalidRequest' ($rej.
 $sendMeta3 = @{ room_id = $rE; type = 'm.room.encrypted'; txn_id = 'dup-txn'; attachments = @() }
 $first = Ws-Call $ws (Json-Pack 0x14 2 0 4 $sendMeta3 $content)
 $second = Ws-Call $ws (Json-Pack 0x14 2 0 5 $sendMeta3 $content)
-Check '[1.5e] same txn_id twice -> same event_id' ($first.meta.event_id -and $first.meta.event_id -eq $second.meta.event_id) "first=$($first.meta.event_id) second=$($second.meta.event_id)"
+Check '[1.5e] same txn_id twice on one device -> same event_id' ($first.meta.event_id -and $first.meta.event_id -eq $second.meta.event_id) "first=$($first.meta.event_id) second=$($second.meta.event_id)"
+
+# 🚨 The other half of [1.5e], and the one that was broken (issue #78): the dedupe is keyed
+# (user, device, txn), so a *second device* reusing the same txn_id must still get its own event.
+# Before the fix `Event/Send` passed sender_device: None, which keyed it on the account alone --
+# this send was handed the event_id above and its event was never written to the other room.
+$loginA2 = Api Post '/_matrix/client/v3/login' '{"type":"m.login.password","identifier":{"type":"m.id.user","user":"alice"},"password":"correct-horse-battery"}' $null
+$wsA2 = Ws-Open $loginA2.access_token
+$otherDevice = Ws-Call $wsA2 (Json-Pack 0x14 2 0 1 @{ room_id = $rP; type = 'm.room.message'; txn_id = 'dup-txn'; attachments = @() } ([Text.Encoding]::UTF8.GetBytes('{"msgtype":"m.text","body":"from the second device"}')))
+$landed = @((Room-Messages $rP $tokA).chunk | Where-Object { $_.event_id -eq $otherDevice.meta.event_id })
+Check '[1.5f] the same txn_id from another device of the same account -> its own event, really in the other room' `
+  ($otherDevice.subtype -eq 2 -and $otherDevice.meta.event_id -and $otherDevice.meta.event_id -ne $first.meta.event_id -and $landed.Count -eq 1) `
+  "device2=$($otherDevice.meta.event_id) device1=$($first.meta.event_id) in_room=$($landed.Count)"
+try { $wsA2.Dispose() } catch {}
 
 # [1.6] a legacy client in an encrypted room: uploaded, sent encrypted without declaring -> one notice
 $upE = Upload-Legacy $tokB $payload 'e.bin'

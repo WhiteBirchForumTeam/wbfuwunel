@@ -133,9 +133,7 @@ async fn open_draft(
 	view: &PackView<'_>,
 	reply: &mut Reply,
 ) -> Result<(), Failure> {
-	let session = ctx
-		.session
-		.ok_or_else(|| Reject::code(RejectCode::Unauthorized, "log in first: this connection has no session"))?;
+	let session = ctx.get_session()?;
 
 	refuse_oversized_payload(view)?;
 	refuse_room_too_large(services, room_id).await?;
@@ -251,9 +249,7 @@ async fn relay_piece(
 	room_id: &RoomId,
 	view: &PackView<'_>,
 ) -> Result<(), Failure> {
-	let session = ctx
-		.session
-		.ok_or_else(|| Reject::code(RejectCode::Unauthorized, "log in first: this connection has no session"))?;
+	let session = ctx.get_session()?;
 
 	if view.data.len() > services.config.wbf_draft_max_piece_bytes {
 		return Err(Reject::code(
@@ -297,9 +293,7 @@ async fn relay_demand(
 	room_id: &RoomId,
 	view: &PackView<'_>,
 ) -> Result<(), Failure> {
-	let session = ctx
-		.session
-		.ok_or_else(|| Reject::code(RejectCode::Unauthorized, "log in first: this connection has no session"))?;
+	let session = ctx.get_session()?;
 
 	refuse_oversized_payload(view)?;
 	refuse_unless_member(services, &session.user, room_id).await?;
