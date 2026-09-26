@@ -96,9 +96,7 @@ pub(super) async fn handle_device_subscribe(
 	view: &PackView<'_>,
 	reply: &mut Reply,
 ) -> Result<(), Failure> {
-	let session = ctx
-		.session
-		.ok_or_else(|| Reject::code(RejectCode::Unauthorized, "log in first: this connection has no session"))?;
+	let session = ctx.get_session()?;
 	let queue = reply
 		.websocket_queue()
 		.ok_or_else(|| Reject::code(RejectCode::Unsupported, "the to-device queue needs the WebSocket channel"))?;
@@ -194,7 +192,7 @@ pub(super) async fn handle_device_unsubscribe(
 /// `Device/Fetch`: a window of the queue, oldest first, as `Batch` packs.
 ///
 /// Args:
-///     view: meta example: `{"limit":1000,"cd_seq":4711}` or `{}`
+///     view: meta example: `{}` or `{"limit":1000}`
 /// Return:
 ///     Result<(), Failure>  a `Batch` per pack, `r = 0` on the last one; one
 ///     empty `Batch` when there is nothing. `more: true` on every `Batch`
@@ -205,9 +203,7 @@ pub(super) async fn handle_device_fetch(
 	view: &PackView<'_>,
 	reply: &mut Reply,
 ) -> Result<(), Failure> {
-	let session = ctx
-		.session
-		.ok_or_else(|| Reject::code(RejectCode::Unauthorized, "log in first: this connection has no session"))?;
+	let session = ctx.get_session()?;
 	let meta: FetchMeta = parse_meta(view, "Device/Fetch")?;
 	// ⚠️ `limit: 0` means none, and answers with one empty `Batch` — the same
 	// as `Event/Recent`, which does not raise a zero either. Clamping it up to
@@ -246,9 +242,7 @@ pub(super) async fn handle_device_items_destroy(
 	view: &PackView<'_>,
 	reply: &mut Reply,
 ) -> Result<(), Failure> {
-	let session = ctx
-		.session
-		.ok_or_else(|| Reject::code(RejectCode::Unauthorized, "log in first: this connection has no session"))?;
+	let session = ctx.get_session()?;
 	let meta: DestroyMeta = parse_meta(view, "Device/ItemsDestroy")?;
 
 	// Destroying is what makes the subscription exclusive, so it is refused
@@ -333,8 +327,10 @@ async fn read_items(
 		};
 		let json = event.json().get().as_bytes();
 		if !budget.try_admit(json.len()) {
-			// Full by bytes: this item is the next window's first, found again
-			// by the client's `cd_seq` (the last `nt` it was sent).
+			// Full by bytes: this item is the next window's first, and the
+			// client reaches it by destroying this window and asking again
+			// with no `cd_seq` — the queue head is the waterline
+			// (docs/design/wbf-to-device.md §3.1.2).
 			break;
 		}
 		items.push(Item { count, json: json.to_vec() });

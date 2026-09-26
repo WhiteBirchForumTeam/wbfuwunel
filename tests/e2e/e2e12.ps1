@@ -257,6 +257,17 @@ $bothBodies = @($both | ForEach-Object { Items ([byte[]]$_.data) } | ForEach-Obj
 Check '[3.1] Fetch with no cd_seq at all returns the whole queue, oldest first' `
   ($bothBodies.Count -eq 2 -and $bothBodies[0] -eq 'oldest' -and $bothBodies[1] -eq 'newest') "bodies=$($bothBodies -join ',')"
 
+# 🚨 The retained field, and what makes the spec's warning about it testable rather than a claim.
+# 維護者 2026-09-26 kept `cd_seq` on the wire (no breaking change) and wrote it up as a worked
+# example of what not to do. This pins both halves: it still filters (so an old client is not
+# silently broken), AND filtering means an item nobody destroyed is skipped -- which is exactly how
+# a client that stores its own waterline loses keys for good.
+$oldestCount = @($both | ForEach-Object { Counts $_ })[0]
+$filtered = @(Fetch-Oldest $ws3 57 @{ cd_seq = $oldestCount })
+$filteredBodies = @($filtered | ForEach-Object { Items ([byte[]]$_.data) } | ForEach-Object { $_.content.body })
+Check '[3.1b] cd_seq is still honoured, and skips an item nobody destroyed: why the spec says do not send it' `
+  ($filteredBodies.Count -eq 1 -and $filteredBodies[0] -eq 'newest') "bodies=$($filteredBodies -join ',') cd_seq=$oldestCount"
+
 # limit=1 stops the window after the oldest; `more` says there is another behind it.
 $firstWindow = @(Fetch-Oldest $ws3 52 @{ limit = 1 })
 $firstCounts = @($firstWindow | ForEach-Object { Counts $_ })

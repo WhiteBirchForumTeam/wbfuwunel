@@ -73,7 +73,7 @@ client 得讓兩個資料庫原子性地一起 commit —— 兩個 db、兩套�
 | `0x01 Fetch` | client → server | `{ "limit": 1000? }`；`id` 由 client 選。⭐ **不帶 `cd_seq` 就是正確的叫法**：從佇列**最舊的還沒銷毀的**一則開始、舊→新。`cd_seq` 仍然收（見 §3.1.2），🚫 client 不該送 | 無 | 無序 |
 | `0x02 Batch` | **server → client** | `{ "tc", "bc", "ot", "nt", "counts": [...], "r", "more" }`；`id` 抄 `Fetch`，`seq` 從 0 嚴格 +1；`more` = 這窗停在上限（`limit` 或 `wbf_window_max_bytes`）、後面可能還有（PR #53） | `bc` 則事件，u32 大端長度 ＋ JSON | 有序 |
 | `0x03 ItemsDestroy` | client → server | `{ "tc": <筆數> }`；`id` 由 client 選 | **`tc` × 8 byte**，每個是一個 u64 大端的 count（§5.1） | 無序 |
-| `0x04 Subscribe` | client → server | `{ "device_id": "…", "cd_seq": <count>? }`；`id` 由 client 選 | 無 | 無序 |
+| `0x04 Subscribe` | client → server | `{ "device_id": "…" }`；`id` 由 client 選。`cd_seq` 仍然收（補窗用，見 §3.1.2），🚫 client 不該送 —— 訂閱完自己 `Fetch{}` 一次就好 | 無 | 無序 |
 | `0x05 Unsubscribe` | client → server | `{}` | 無 | 無序 |
 | `0x06 Push` | **server → client** | `{ "bc", "ot", "nt", "counts": [...], "gap": bool }`；`id` 抄 `Subscribe`，`seq` 每推一次 +1；`Subscribe{cd_seq}` 的補窗被上限截斷時，它的第一個 `Push` 帶 `gap: true`（PR #53） | 同 `Batch` 的切法 | 事件驅動 |
 | `0x07 ItemsDestroyed` | **server → client** | `{ "tc", "bc" }`；`id` 抄 `ItemsDestroy` | **`bc` × 8 byte**，銷毀掉的 count（§5.2） | 無序（一個命令一則） |
@@ -281,7 +281,7 @@ to-device 一則約 1 KB 又不需要逐則渲染，包大一點反而省來回�
 
 | 旋鈕 | 預設 | 說明 |
 |---|---|---|
-| `wbf_device_fetch_default_limit` | **1000** | **一次 `Fetch` 回幾則**（client 沒帶 `limit` 時）。積得比這多就多叫幾次，帶上一窗的 `nt` 當 `cd_seq` |
+| `wbf_device_fetch_default_limit` | **1000** | **一次 `Fetch` 回幾則**（client 沒帶 `limit` 時）。積得比這多就多叫幾次：先 `ItemsDestroy` 這窗、再不帶 `cd_seq` 叫下一次（§3.1.2） |
 | `wbf_device_fetch_max_limit` | **1000** | client 帶的 `limit` 夾到這裡。🔲 維護者 2026-09-11 只定了「一次一千則」這個數，所以兩者同值；要讓 client 能要更多再分開 |
 | `wbf_device_default_batch` | **100** | **一包幾則**（`Fetch` 的回應 `Batch`）。⚠️ **client 不能指定** —— `Fetch` 沒有 `batch` 參數（`Recent` 有），一包裝多少是 server 的事 |
 | `wbf_window_max_bytes` | 8 MiB（**與 `Event` 共用**，PR #53） | **一窗最多幾 bytes**，`Fetch` 與 `Subscribe{cd_seq}` 的補窗都受它；**先於 `limit`**。收滿 bytes 的窗則數少於 `limit` 而且 `more: true` |
