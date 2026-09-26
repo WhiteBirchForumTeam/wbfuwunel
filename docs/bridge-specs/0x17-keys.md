@@ -3,7 +3,10 @@
 > 號碼總表與共通規則在 [index.md](index.md)。這份只寫**每支端點帶什麼、回什麼、會怎麼被拒**。
 > 請求的前 4 bytes 一律是 `01 17 SS 10`；成功回覆 `01 01 02 14`、失敗 `01 01 03 14`。`id` 填 0。
 > 為什麼搬、搬哪些：[wbf-e2ee.md](../design/wbf-e2ee.md) §2（E2EE 的 (A)）。**發** to-device 不在這個 kind，在 `0x16` 的 `0x25`（[0x16-device.md](0x16-device.md)）。
-> 這個 kind 裝的是裝置金鑰（`0x20`–`0x25`）與 server 端金鑰備份（`0x30`–`0x3D`），目前沒有原生的 pack。自己的 OTK 剩幾把、同房的人誰的裝置清單變了，之後由 `0x16` 的原生 `CryptoState` 推（wbf-e2ee.md §3），不靠這裡的端點輪詢。
+> 這個 kind 裝的是裝置金鑰（`0x20`–`0x25`）與 server 端金鑰備份（`0x30`–`0x3D`），目前沒有原生的 pack。自己的 OTK 剩幾把由 `0x16` 的原生 `CryptoState` 推（wbf-e2ee.md §3），不靠這裡的端點輪詢。
+> ⚠️ **`CryptoState` 只講自己的金鑰存量，不講別人的裝置清單**（維護者 2026-09-17：Matrix 原本的金鑰分發已經能用，不動它）——
+> `device_lists` 那半整個拿掉了，e2e15 還斷言它必須**不存在**。「同房的人誰的裝置變了」改由
+> [wbf-room-device-version.md](../design/wbf-room-device-version.md) 那套負責（送出時比對房間版本號，對不上回 `1506`）。
 > 下面的範例都是 e2e13 實跑的回覆（裝置金鑰是情境 3、備份是情境 4）。金鑰是假的（server 存金鑰時不驗簽章，驗簽章的只有 `0x25`）。
 
 ## `0x20` KeysUpload —— 上傳自己裝置的金鑰、補 OTK、換 fallback key

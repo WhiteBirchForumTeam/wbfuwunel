@@ -181,7 +181,8 @@ offset  bytes              意思
 
 ### `0x17 Keys`（端對端加密的金鑰）
 
-📎 這個 kind 目前沒有原生的 pack。OTK 數量與裝置清單變動是 `0x16` 的原生 `CryptoState`（[wbf-e2ee.md](../design/wbf-e2ee.md) §3），不在這裡。
+📎 這個 kind 目前沒有原生的 pack。OTK 數量是 `0x16` 的原生 `CryptoState`（[wbf-e2ee.md](../design/wbf-e2ee.md) §3），不在這裡。
+⚠️ **裝置清單變動不在 `CryptoState` 裡**（維護者 2026-09-17 決定不動 Matrix 原本的金鑰分發）：那件事由 [wbf-room-device-version.md](../design/wbf-room-device-version.md) 的送出時比對負責。
 
 | subtype | 前 4 bytes | 名稱 | 做什麼 | 端點 | 變數（path ／ query） | data |
 |---|---|---|---|---|---|---|
