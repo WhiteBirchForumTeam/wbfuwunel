@@ -122,6 +122,7 @@ client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
 
 **to-device 已合併（PR #43）**：`0x16 Device` 的訂閱、推送、`Fetch` 補洞與銷毀的閉環（[wbf-to-device.md](wbf-to-device.md)）。
 ⚠️ 裝置綁定是「**後來的接手**」（維護者 2026-09-12 推翻提案原本的拒絕規則），被接手的那條收到 `Superseded`(1505)。
+📎 **取法後來改過（PR #88，2026-09-28）**：`Fetch` **不帶 `cd_seq`**，從佇列最舊的還沒銷毀的一則開始；翻頁是「銷毀這一窗、再叫一次」。client 自己記水位那條路會**永久漏金鑰**，理由與三條路的成因在 [wbf-to-device.md](wbf-to-device.md) §2／§3.1.2。
 
 **工作 3 Draft Message ✅ PR #45（2026-09-13 合併）**：照 [streaming-messages.md](streaming-messages.md) §3–§8（`Stream` kind、server 零狀態、每片從佔位事件點讀驗作者、`wbf_draft_max_room_members`）。審查期間維護者加了片的 `prev` 指標（每片指向它接在哪一片之後），外部審查另外抓到七條「開著的草稿是一張不會過期的許可證」型的漏洞，全部修掉。
 ✅ **發送佇列的記憶體界已修（PR #50）**（起於維護者 2026-09-13 問「4 個 client 的記憶體高峰」）：原本 `wbf_ws_send_queue_len` 數的是**包數**（32），而一個 pack 最大 16.07 MiB → **每條連線 514 MiB**、4 裝置 × 4 條 ≈ 9 GiB。現在多一個 **`wbf_ws_send_queue_bytes`（預設 16 MiB）**，額度跟著 pack 排隊、寫完才還；同時把 `wbf_data_max_bytes` 從 16 MiB 降到 **2 MiB**（維護者定），所以一個滿包（meta 64 KiB ＋ data ＋ 32 byte 外框 ＝ 2,166,816 bytes）在預算裡放得下 **7** 個。每條連線的最壞值 ≈ **20 MiB**，4 裝置 × 4 條 ≈ 0.3 GiB。
