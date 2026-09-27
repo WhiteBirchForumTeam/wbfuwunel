@@ -82,7 +82,10 @@ struct ItemWindow {
 ///     ctx: the connection and its session — the session's device is the
 ///         only identity; the meta's `device_id` is the client saying which
 ///         one it thinks it is
-///     view: meta example: `{"device_id":"PHONE","cd_seq":4711}`
+///     view: meta example: `{"device_id":"PHONE"}`. `cd_seq` is still read
+///         here (the catch-up window), but a client should not send it — it
+///         subscribes and then calls `Fetch{}` once
+///         (docs/design/wbf-to-device.md §3.1.2)
 /// Return:
 ///     Result<(), Failure>  Ack meta `{latest_cd_seq}`, then the to-device
 ///     catch-up as `Push` packs (with `cd_seq`), then one `CryptoState`;
