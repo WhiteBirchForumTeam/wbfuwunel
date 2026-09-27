@@ -50,7 +50,7 @@ pub(super) async fn handle_event_send(
 	ctx: &PackContext<'_>,
 	view: &PackView<'_>,
 ) -> Result<Vec<u8>, Reject> {
-	let user = ctx.user()?;
+	let session = ctx.get_session()?;
 	let meta: SendMeta = serde_json::from_slice(view.meta)
 		.map_err(|error| Reject::code(RejectCode::InvalidRequest, format!("Event/Send meta: {error}")))?;
 
@@ -67,8 +67,12 @@ pub(super) async fn handle_event_send(
 	)?;
 
 	let outcome = send_message_event(services, SendMessageEvent {
-		sender_user: user,
-		sender_device: None,
+		sender_user: &session.user,
+		// 🚨 The device, not `None`: the txn dedupe is keyed (user, device, txn),
+		// so `None` keys it on the account and a second device reusing a
+		// `txn_id` is handed the first one's `event_id` while its own event is
+		// never written — and HTTP has always passed the device (issue #78).
+		sender_device: Some(&session.device),
 		appservice_info: None,
 		room_id: &meta.room_id,
 		event_type: &meta.event_type,

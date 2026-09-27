@@ -54,7 +54,7 @@ client 用 `matrix-sdk-crypto` 的 `OlmMachine`（沒有網路 IO 的狀態機�
 
 `0x16` 的 `0x08`，server → client，**不帶 bit4**（原生）。
 
-⭐ **共用 to-device 的訂閱，沒有新的訂閱**（維護者 2026-09-16 同意）：client 照舊送 `Device/Subscribe{device_id, cd_seq?}`，server 對這個訂閱送兩種 pack：佇列裡的事件是 `Push`，存量變了是 `CryptoState`。兩者的 `id` 都抄 `Subscribe`、**共用同一個 `seq` 序列與 `gap` 旗標**，收的是同一條連線（這個裝置佇列的持有者，wbf-to-device §4）。`Unsubscribe` 或被接手（`Superseded`）時兩種一起停。
+⭐ **共用 to-device 的訂閱，沒有新的訂閱**（維護者 2026-09-16 同意）：client 照舊送 `Device/Subscribe{device_id}`（🚫 不帶 `cd_seq`，[wbf-to-device.md](wbf-to-device.md) §3.1.2），server 對這個訂閱送兩種 pack：佇列裡的事件是 `Push`，存量變了是 `CryptoState`。兩者的 `id` 都抄 `Subscribe`、**共用同一個 `seq` 序列與 `gap` 旗標**，收的是同一條連線（這個裝置佇列的持有者，wbf-to-device §4）。`Unsubscribe` 或被接手（`Superseded`）時兩種一起停。
 
 ```json
 { "otk_counts": { "signed_curve25519": 42 }, "unused_fallback_key_types": ["signed_curve25519"], "gap": false }
@@ -64,7 +64,7 @@ client 用 `matrix-sdk-crypto` 的 `OlmMachine`（沒有網路 IO 的狀態機�
 |---|---|---|
 | `otk_counts` | **一定有** | 這個裝置目前每種演算法剩幾把 OTK，跟 `/sync` 的 `device_one_time_keys_count` 同一個數字（`users::count_one_time_keys`） |
 | `unused_fallback_key_types` | **一定有**，可以是 `[]` | 還沒被用掉的 fallback key 演算法。⚠️ **`[]` 與不出現意思不同**：`OlmMachine` 把「沒給」當成 server 不支援、把 `[]` 當成「都用掉了，該換」 |
-| `gap` | **一定有**，bool | `true`：**這個訂閱**上一個推送之後有 pack 因為發送佇列滿被丟掉（可能是 `Push` 也可能是 `CryptoState`，旗標由下一個送得出去的帶走）。client 在任一種 pack 看到 `gap: true`，就帶 `cd_seq` 重新 `Subscribe`：to-device 補窗，並拿到一個當下的 `CryptoState` |
+| `gap` | **一定有**，bool | `true`：**這個訂閱**上一個推送之後有 pack 因為發送佇列滿被丟掉（可能是 `Push` 也可能是 `CryptoState`，旗標由下一個送得出去的帶走）。client 在任一種 pack 看到 `gap: true`，就 **`Device/Fetch{}` 一次**（不帶 `cd_seq`）。🚨 **🚫 不要拿 `gap` 去重新 `Subscribe`**：這個旗標是 `Push` 與 `CryptoState` **共用**的，server 給一次就清（`take_targets` 的 `swap(false)`）—— 只讀 OTK 數字的那個 arm 把訊號吃掉不還，正是 issue #87 三條漏金鑰的路之一。現在的規則是：**任何異常訊號都只是「去 `Fetch{}` 一次」**，不必分辨是哪一種（[wbf-to-device.md](wbf-to-device.md) §8） |
 
 欄位名照 `/sync` 的語意取短名 → 決定 2。
 
