@@ -418,8 +418,24 @@ pub async fn release_room(&self, txn: &mut Txn, room: &RoomId) -> usize {
 /// release. Read from the index, the next update finds and releases it.
 /// Idempotent. The caller holds `new_mxc` (`hold_media`) until `txn` has
 /// committed.
+/// 🚨 **A remote user is not a holder at all, and asking here is the guard.**
+/// `Holder::Avatar` is keyed by localpart alone — deliberately, so a change of
+/// `server_name` does not orphan every local avatar — which means
+/// `@alice:other.org` and the local `@alice` are *the same holder*. Without
+/// this check, one lookup of a remote profile (`fetch_remote_profile` writes
+/// `avatar_url` like any other profile key) releases the local user's avatar
+/// and hands it to the collector, which deletes it for good.
+///
+/// The invariant is the one `Holder::Avatar` already states — "avatars of
+/// other servers' users are never counted" — and it had nobody enforcing it
+/// (external review 2026-09-29). Asked at the consumer rather than trusting
+/// every caller to remember (CLAUDE.md A6).
 #[implement(Service)]
 pub async fn set_avatar_ref(&self, txn: &mut Txn, user_id: &UserId, new_mxc: Option<&str>) {
+	if !self.services.globals.user_is_local(user_id) {
+		return;
+	}
+
 	let holder = Holder::avatar(user_id);
 	let held = self.list_mxcs_of(&holder).await;
 
