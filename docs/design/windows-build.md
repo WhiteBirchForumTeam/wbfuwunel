@@ -57,6 +57,33 @@ release 慢在 thin LTO：連結時把整支程式跨 crate 重新最佳化，�
 實測（2026-09-06，同一台機器）：第一次全建 **34 分**（所有第三方套件在新 profile 下編一次，只付一次）；之後動 `tuwunel_api` 一個檔
 重建 **8 分 47 秒**（api → router → main 三個 crate，沒有 LTO 那一步）。release 同樣的改動是 20 分以上，而且大半在連結。
 
+### 整合測試（`src/main/tests`）—— 跟單元測試是兩回事
+
+⚠️ **`cargo test --workspace --exclude tuwunel` 不含它們。** 那條指令是為了避開 `tuwunel` 這個 crate 的預設 feature（jemalloc、io_uring、systemd，Windows 上都建不起來），
+代價是**整個 `src/main/tests` 被排除在外** —— 那裡有 47 個 target。用 e2e 那組 feature 就跑得起來：
+
+```powershell
+# vcvars64 之後，PATH 照上面那段設好
+$env:RUSTFLAGS = '-Cdebuginfo=0'
+$features = 'brotli_compression,element_hacks,gzip_compression,media_thumbnail,release_max_log_level,url_preview,zstd_compression'
+cargo test -p tuwunel --no-default-features --features $features --no-fail-fast
+```
+
+三個參數都有理由，少一個就會卡住：
+
+| 參數 | 為什麼 |
+|---|---|
+| `--no-default-features --features …` | 同 e2e build：拿掉 jemalloc／io_uring／systemd |
+| **`-Cdebuginfo=0`** | 不加會撞 **`LNK1318: 未預期的 PDB 錯誤`** —— MSVC 的 `mspdbsrv` 在多個 test binary 並行連結時撞 PDB，**不是程式的問題**。⭐ `debug_assertions` 是**另一個**旗標，不受影響，所以 debug-only 的檢查照樣活著（那正是要驗的） |
+| `--no-fail-fast` | cargo 預設在第一個失敗的 target 就停，看不到全貌 |
+
+🚨 **為什麼這件事重要**：`put_seq_bounds` 那個 bug（PR #91）**只在 debug build 發作**，release 寫出的 bytes 一樣 ——
+所以 e2e（跑 release profile）永遠看不到它，而唯一看得到的那組測試被 `--exclude tuwunel` 排除了。
+⭐ **兩個盲點剛好互相遮蔽**：測試沒跑所以沒抓到 bug，bug 又只在沒跑的那個 profile 才發作。報「全套綠」之前要想清楚全套是哪些。
+
+📎 **還沒解決的**：至少 6 個 fixture 寫死 `/tmp/tuwunel-test-…`（`appservice_txn.rs`、`media_delete_range_empty.rs`、`native_auth*.rs`、`uiaa_ldap_origin.rs` 等），
+在 Windows 上是 POSIX 路徑。目前那些 target 仍然過（`/tmp` 在這裡被當相對路徑建出來），但那是巧合不是設計。要不要讓它們真的可攜是獨立的決定。
+
 ## 實測結果
 
 編譯成功不等於跑得動 —— RocksDB 能不能在 Windows 開起來才是這題真正要問的。實跑：
