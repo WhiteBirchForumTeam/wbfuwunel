@@ -117,8 +117,12 @@ pub async fn get_device_version(&self, user_id: &UserId) -> Result<DeviceVersion
 		return Ok(version);
 	}
 
-	// ⚠️ Not the current position: that would move every room the account is
-	// in, and refuse their senders once for a change that never happened.
+	// Not the current position: the last change this account actually made is
+	// what `pos` means, and recording something else would be a lie.
+	// ⚠️ The reason this *used* to matter is gone: `pos` once fed the room
+	// version, so taking "now" refused every room's senders once for a change
+	// that never happened. Since §4.2 became a hash over `seq-hash`, `pos`
+	// does not reach the room version at all.
 	let version = DeviceVersion {
 		seq: 1,
 		hash: self.get_hash_or_unhashable(user_id).await,
