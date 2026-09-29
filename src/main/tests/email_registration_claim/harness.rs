@@ -113,7 +113,8 @@ fn server_args(
 	let mut args = Args::default_test(test_modes);
 
 	args.option.extend([
-		format!("database_path=\"{}\"", db_path.display()),
+		// See admin_backup_database.rs: Debug-escape the path for TOML.
+		format!("database_path={:?}", db_path.display().to_string()),
 		"address=[\"127.0.0.1\"]".to_owned(),
 		format!("port={port}"),
 		"listening=true".to_owned(),

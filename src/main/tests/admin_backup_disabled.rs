@@ -23,8 +23,9 @@ fn admin_backup_disabled() -> Result {
 	let mut args = Args::default_test(&["smoke", "fresh", "cleanup"]);
 
 	args.option.extend([
-		format!("database_path=\"{}\"", db.display()),
-		format!("database_backup_path=\"{}\"", backup.display()),
+		// See admin_backup_database.rs: Debug-escape the path for TOML.
+		format!("database_path={:?}", db.display().to_string()),
+		format!("database_backup_path={:?}", backup.display().to_string()),
 		"database_backups_to_keep=0".to_owned(),
 	]);
 

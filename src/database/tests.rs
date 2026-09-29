@@ -27,10 +27,11 @@ use crate::{
 };
 
 #[test]
-#[cfg_attr(
-	debug_assertions,
-	should_panic(expected = "serializing string at the top-level")
-)]
+// 📎 The `#[cfg_attr(debug_assertions, should_panic(…))]` is gone: serializing
+// at the top level is a logged hint now, not a panic (`ser.rs`, 維護者
+// 2026-09-29). ⭐ The test is strictly stronger for it — the byte-equality
+// assertion below used to run in release only, because debug never got past
+// the panic.
 fn ser_str() {
 	let user_id: &UserId = "@user:example.com".try_into().unwrap();
 	let s = serialize_to_vec(&user_id).expect("failed to serialize user_id");
@@ -178,10 +179,11 @@ fn ser_json_macro() {
 }
 
 #[test]
-#[cfg_attr(
-	debug_assertions,
-	should_panic(expected = "serializing string at the top-level")
-)]
+// 📎 The `#[cfg_attr(debug_assertions, should_panic(…))]` is gone: serializing
+// at the top level is a logged hint now, not a panic (`ser.rs`, 維護者
+// 2026-09-29). ⭐ The test is strictly stronger for it — the byte-equality
+// assertion below used to run in release only, because debug never got past
+// the panic.
 fn ser_json_raw() {
 	use tuwunel_core::ruma::api::client::filter::FilterDefinition;
 
@@ -198,6 +200,11 @@ fn ser_json_raw() {
 }
 
 #[test]
+// ⚠️ This one keeps its `should_panic`: it trips a *different* check
+// (`ser.rs`'s `Json(RawValue)` one), not the top-level-bytes hint that was
+// softened. The two share the words "you can skip serialization instead",
+// which is exactly why they are easy to lump together — they are not the
+// same rule and only one of them changed.
 #[cfg_attr(
 	debug_assertions,
 	should_panic(expected = "you can skip serialization instead")

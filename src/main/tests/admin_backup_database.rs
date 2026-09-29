@@ -23,8 +23,10 @@ fn admin_backup_database() -> Result {
 	let mut args = Args::default_test(&["smoke", "fresh", "cleanup"]);
 
 	args.option.extend([
-		format!("database_path=\"{}\"", db.display()),
-		format!("database_backup_path=\"{}\"", backup.display()),
+		// `{:?}`, not `"{}"`: Debug escapes the separators, and a Windows path
+		// inside a bare TOML string is invalid escapes (external review follow-up).
+		format!("database_path={:?}", db.display().to_string()),
+		format!("database_backup_path={:?}", backup.display().to_string()),
 	]);
 
 	args.execute.extend([

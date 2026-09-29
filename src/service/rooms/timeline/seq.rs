@@ -32,7 +32,15 @@ pub async fn get_seq_bounds(&self, room_id: &RoomId) -> Result<SeqBounds> {
 /// Queues the counters into `txn`, alongside the event they number.
 #[implement(super::Service)]
 pub fn put_seq_bounds(&self, txn: &mut Txn, room_id: &RoomId, bounds: SeqBounds) {
-	txn.put_raw(&self.db.roomid_seqbounds, room_id, bounds.encode());
+	// 🚨 `insert_raw`, not `put_raw`: the latter runs the key through the
+	// database codec, and a bare `&RoomId` there is a string serialized at the
+	// top level — which `ser.rs` refuses with a `debug_assert`. Release builds
+	// compile that assert out and write the same bytes, so this only ever
+	// showed up as "debug builds panic on a fresh database", and the
+	// integration tests that would have caught it are the ones it stopped
+	// (external review 2026-09-29). The repo's rule: tuple keys go through
+	// `put_raw`, a single already-bytes key through `insert_raw`.
+	txn.insert_raw(&self.db.roomid_seqbounds, room_id, bounds.encode());
 }
 
 /// Writes the counters outside any transaction; for the migration only, which

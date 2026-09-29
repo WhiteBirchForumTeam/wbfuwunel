@@ -8,7 +8,7 @@
 use std::{io::Write, mem::replace};
 
 use serde::{Deserialize, Serialize, ser};
-use tuwunel_core::{Error, Result, debug::type_name, err, result::DebugInspect, unhandled};
+use tuwunel_core::{Error, Result, debug::type_name, debug_warn, err, result::DebugInspect, unhandled};
 
 /// Serializes a value into an owned byte vector.
 ///
@@ -323,20 +323,41 @@ impl<W: Write> ser::Serializer for &mut Serializer<'_, W> {
 		self.serialize_str(v.encode_utf8(&mut buf))
 	}
 
-	fn serialize_str(self, v: &str) -> Result<Self::Ok> {
-		debug_assert!(
-			self.depth > 0,
-			"serializing string at the top-level; you can skip serialization instead"
-		);
-
-		self.serialize_bytes(v.as_bytes())
-	}
+	/// 📎 The top-level check lives in [`Self::serialize_bytes`], which this
+	/// delegates to: one place to warn, so a string does not report it twice.
+	fn serialize_str(self, v: &str) -> Result<Self::Ok> { self.serialize_bytes(v.as_bytes()) }
 
 	fn serialize_bytes(self, v: &[u8]) -> Result<Self::Ok> {
-		debug_assert!(
-			self.depth > 0,
-			"serializing byte array at the top-level; you can skip serialization instead"
-		);
+		// 🚨 A warning, not a `debug_assert`. What this catches is a *missed
+		// optimisation*: bytes at the top level encode to exactly themselves,
+		// so the caller could have passed them raw. The record written is
+		// identical either way — which is why release builds have always been
+		// correct here.
+		//
+		// It used to panic, and that made every debug build unusable: the
+		// integration suite could not run at all, and a debug server died on a
+		// path that was writing the right bytes (external review 2026-09-29;
+		// 維護者 2026-09-29 chose to soften it). Killing the process over a
+		// performance hint is exactly what CLAUDE.md P forbids — and upstream's
+		// own call sites do trip it, on ordinary scalar keys.
+		//
+		// ⚠️ Kept as a warning rather than deleted, because the other thing it
+		// can mean is a real mistake — a key meant to be a tuple passed as one
+		// value — and that deserves a line in the log.
+		//
+		// 🚨 `cfg!(debug_assertions)` is load-bearing, and leaving it out was a
+		// real regression (PR #92 review, cirno). `depth` is only maintained
+		// under that cfg (`sequence_start`/`sequence_end`), so in a release
+		// build it is *always* 0 — the condition would hold for every string
+		// and every byte slice, including the elements inside a tuple key,
+		// where the message is simply false. And `debug_warn!` is not compiled
+		// away by release alone: `debug::logging()` is true whenever
+		// `release_max_log_level` is off, which is exactly what this repo's own
+		// `none` and `logging` feature sets build (`docker/bake.hcl`). The
+		// result would be one WARN per record on the database write path.
+		if cfg!(debug_assertions) && self.depth == 0 {
+			debug_warn!("serializing at the top level; the bytes can be passed raw instead");
+		}
 
 		self.write(v).inspect(|()| self.sep = true)
 	}
