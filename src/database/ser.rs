@@ -339,12 +339,23 @@ impl<W: Write> ser::Serializer for &mut Serializer<'_, W> {
 		// path that was writing the right bytes (external review 2026-09-29;
 		// 維護者 2026-09-29 chose to soften it). Killing the process over a
 		// performance hint is exactly what CLAUDE.md P forbids — and upstream's
-		// own call sites trip it, in `appservice` and `threepid` among others.
+		// own call sites do trip it, on ordinary scalar keys.
 		//
 		// ⚠️ Kept as a warning rather than deleted, because the other thing it
 		// can mean is a real mistake — a key meant to be a tuple passed as one
 		// value — and that deserves a line in the log.
-		if self.depth == 0 {
+		//
+		// 🚨 `cfg!(debug_assertions)` is load-bearing, and leaving it out was a
+		// real regression (PR #92 review, cirno). `depth` is only maintained
+		// under that cfg (`sequence_start`/`sequence_end`), so in a release
+		// build it is *always* 0 — the condition would hold for every string
+		// and every byte slice, including the elements inside a tuple key,
+		// where the message is simply false. And `debug_warn!` is not compiled
+		// away by release alone: `debug::logging()` is true whenever
+		// `release_max_log_level` is off, which is exactly what this repo's own
+		// `none` and `logging` feature sets build (`docker/bake.hcl`). The
+		// result would be one WARN per record on the database write path.
+		if cfg!(debug_assertions) && self.depth == 0 {
 			debug_warn!("serializing at the top level; the bytes can be passed raw instead");
 		}
 

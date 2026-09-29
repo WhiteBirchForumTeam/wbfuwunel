@@ -60,7 +60,7 @@ release 慢在 thin LTO：連結時把整支程式跨 crate 重新最佳化，�
 ### 整合測試（`src/main/tests`）—— 跟單元測試是兩回事
 
 ⚠️ **`cargo test --workspace --exclude tuwunel` 不含它們。** 那條指令是為了避開 `tuwunel` 這個 crate 的預設 feature（jemalloc、io_uring、systemd，Windows 上都建不起來），
-代價是**整個 `src/main/tests` 被排除在外** —— 那裡有 47 個 target。用 e2e 那組 feature 就跑得起來：
+代價是**整個 `src/main/tests` 被排除在外** —— `src/main/tests/*.rs` 數下來是 **42 個整合測試入口**（子目錄裡的是模組檔，由同名入口 `mod` 進來）。用 e2e 那組 feature 就跑得起來：
 
 ```powershell
 # vcvars64 之後，PATH 照上面那段設好
@@ -77,7 +77,7 @@ cargo test -p tuwunel --no-default-features --features $features --no-fail-fast
 | **`-Cdebuginfo=0`** | 不加會撞 **`LNK1318: 未預期的 PDB 錯誤`** —— MSVC 的 `mspdbsrv` 在多個 test binary 並行連結時撞 PDB，**不是程式的問題**。⭐ `debug_assertions` 是**另一個**旗標，不受影響，所以 debug-only 的檢查照樣活著（那正是要驗的） |
 | `--no-fail-fast` | cargo 預設在第一個失敗的 target 就停，看不到全貌 |
 
-🚨 **為什麼這件事重要**：`put_seq_bounds` 那個 bug（PR #91）**只在 debug build 發作**，release 寫出的 bytes 一樣 ——
+🚨 **為什麼這件事重要**：`put_seq_bounds` 那個 bug（來自 **PR #22**，2026-09-29 的外部審查抓到，修在 **PR #92**）**只在 debug build 發作**，release 寫出的 bytes 一樣 ——
 所以 e2e（跑 release profile）永遠看不到它，而唯一看得到的那組測試被 `--exclude tuwunel` 排除了。
 ⭐ **兩個盲點剛好互相遮蔽**：測試沒跑所以沒抓到 bug，bug 又只在沒跑的那個 profile 才發作。報「全套綠」之前要想清楚全套是哪些。
 
