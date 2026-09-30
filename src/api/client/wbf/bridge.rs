@@ -368,8 +368,9 @@ pub(super) async fn handle(
 /// Return:
 ///     Result<Request<Body>, Reject>  `InvalidRequest` when meta is not an
 ///     object, names a variable the endpoint does not take, or leaves a path
-///     variable missing or not a string, or gives a query variable a value
-///     that is not a string, number, boolean or array of those.
+///     variable missing or not a string, or gives a path variable a value that
+///     would not survive as one segment (see `fill_path`), or gives a query
+///     variable a value that is not a string, number, boolean or array of those.
 fn build_request(
 	shape: &EndpointShape,
 	query_names: &[&str],
@@ -476,8 +477,12 @@ fn refuse_undeclared_variables(
 /// Return:
 ///     Result<String, Reject>  the percent-encoded path, example:
 ///     `/_matrix/client/v3/directory/room/%23lobby:localhost`. An empty string
-///     is a value (a `state_key` of `""` leaves a trailing `/`); a variable
-///     that is missing or not a string is `InvalidRequest`.
+///     is a value (a `state_key` of `""` leaves a trailing `/`). `InvalidRequest`
+///     when a variable is missing or not a string, when a value is `.` or `..`,
+///     when it holds a tab, newline or carriage return (a URL drops those rather
+///     than encoding them), or when the filled path ends up with a different
+///     number of segments than the template —— that last one is the invariant the
+///     other two protect, and it is checked whatever the reason.
 fn fill_path(path_template: &str, variables: &Map<String, Value>) -> Result<String, Reject> {
 	// One count for both sides of the comparison below: a template is written with
 	// a leading `/` and so is a built path, so both are trimmed the same way.
