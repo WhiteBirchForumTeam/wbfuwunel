@@ -160,7 +160,7 @@ client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
 ### 2.13 ✅ 加密訊息送出時把關（[wbf-room-device-version.md](wbf-room-device-version.md)，提案 PR #72；F1＋F2＋F4 PR #73、F3 PR #74、補件 PR #75）
 
 題目與達標條件在問題書 [e2ee-send-guard-problem.md](e2ee-send-guard-problem.md)（維護者 2026-09-16 要的）：原本「Bob 的新裝置解不解得開」靠一條推播鏈，掉一環就**靜默**送出別人解不開的訊息，而且沒有人知道。
-答案是兩個號碼：每個帳號一個**裝置版本號**（`序號-雜湊`，金鑰一動就前進），每個房間一個**房間版本號**（成員事件位置與成員裝置版本位置的最大值），`/members` 兩個都帶；有約定的 client 送加密訊息時帶房間版本號，**在房間鎖內比對，對不上回 `1506 RoomDevicesChanged`、訊息不寫入也不扇出**；裝置一變就推 `0x14 0x07 DeviceChanged` 給有約定的連線（加速，不是正確性的來源）。
+答案是兩個號碼：每個帳號一個**裝置版本號**（`序號-雜湊`，金鑰一動就前進），每個房間一個**房間版本號**（房間目前狀態裡算得數的成員集合的**雜湊**），`/members` 兩個都帶；有約定的 client 送加密訊息時帶房間版本號，**在房間鎖內比對，對不上回 `1506 RoomDevicesChanged`、訊息不寫入也不扇出**；裝置一變就推 `0x14 0x07 DeviceChanged` 給有約定的連線（加速，不是正確性的來源）。
 🚫 **沒有約定的 client 一切照舊**：HTTP 不檢查、沒宣告 `org.wbftw.device_versions` 的連線不檢查，Matrix 的 `/sync`、`/keys/*` 語意沒動。
 達成狀態逐條（含維護者改過的決定與接受的缺口）在問題書 §9；client 端要做的在 `amaid/wbf-matrix-client#45`。
 
