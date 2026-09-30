@@ -27,9 +27,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tuwunel_core::{
 	Result, debug_warn, err, error, implement,
-	matrix::{Event, PduCount},
+	matrix::Event,
 	utils::{
 		MutexMap,
+		hash::sha256,
 		stream::{ReadyExt, TryIgnore},
 	},
 };
@@ -52,7 +53,7 @@ pub struct Service {
 	/// cache: every entry can be computed again, so a restart loses nothing.
 	room_versions: StdRwLock<HashMap<OwnedRoomId, (ShortStateHash, u64)>>,
 	/// Moves on every device-version change; an entry computed while it moved
-	/// may have read a member's old position and is not kept.
+	/// may have read a member's old device version and is not kept.
 	device_changes: AtomicU64,
 }
 
@@ -70,7 +71,10 @@ pub struct DeviceVersion {
 	/// `device_keys_hash` of the keys as they are now.
 	pub hash: String,
 	/// The server-wide position of the last change: the same counter as
-	/// `g_seq`, so a room's version can take the larger of the two.
+	/// `g_seq`. ⚠️ A room's version does not use this any more —— §4.2 made it a
+	/// hash of the member set, so nothing takes the larger of two positions.
+	/// The one use left is standing in as the seq when a stored row cannot be
+	/// read (§3.3).
 	pub pos: u64,
 }
 
@@ -116,8 +120,12 @@ pub async fn get_device_version(&self, user_id: &UserId) -> Result<DeviceVersion
 		return Ok(version);
 	}
 
-	// ⚠️ Not the current position: that would move every room the account is
-	// in, and refuse their senders once for a change that never happened.
+	// Not the current position: the last change this account actually made is
+	// what `pos` means, and recording something else would be a lie.
+	// ⚠️ The reason this *used* to matter is gone: `pos` once fed the room
+	// version, so taking "now" refused every room's senders once for a change
+	// that never happened. Since §4.2 became a hash over `seq-hash`, `pos`
+	// does not reach the room version at all.
 	let version = DeviceVersion {
 		seq: 1,
 		hash: self.get_hash_or_unhashable(user_id).await,
@@ -224,8 +232,8 @@ async fn announce_device_change(&self, user_id: &UserId, version: &DeviceVersion
 /// Args:
 ///     room_id: example: "!r:localhost"
 /// Return:
-///     Result<u64>  example: 81234; Err when the room has no state or a member
-///     event cannot be placed.
+///     Result<u64>  the hash of §4.1, example: 81234; Err when the room has no
+///     state, or a counted member event's state_key is not a user id.
 #[implement(Service)]
 pub async fn get_room_device_version(&self, room_id: &RoomId) -> Result<u64> {
 	let shortstatehash = self
@@ -268,58 +276,108 @@ pub async fn get_room_device_version(&self, room_id: &RoomId) -> Result<u64> {
 	Ok(version)
 }
 
-/// §4.1: the largest of the positions of the `join`, `leave` and `ban` member
-/// events, and of the joined members' device-version positions. 🚨 From the
-/// room **state**, never from `state_cache`'s membership rows: `forget` deletes
-/// a leave there and the version would fall back (§4.2).
+/// §4.1: a hash over who currently holds this room's keys — every `join`,
+/// `leave` and `ban` member of the room **state**, and the joined members'
+/// device versions.
+///
+/// 🚨 **A hash, not the largest position, and that is the whole point.** The
+/// only comparison anywhere is `expected != room_device_version`
+/// (`api/client/send.rs`): nothing ever orders these numbers. A maximum was
+/// only ever an *indirect* way of saying "the set changed", and it had a hole
+/// — take the largest of a set and the largest can fall when a member leaves
+/// the set. `leave` → re-`invite` did exactly that: the leave is replaced in
+/// the room state by an invite, which is not counted, so the contribution that
+/// was holding the maximum up vanished and the version fell back to a value a
+/// client may still be holding. It would then pass the gate with a stale
+/// member list and send the room key to someone who had left — the very leak
+/// §4.2 reasoned about, through a door that reasoning missed (external review
+/// 2026-09-29). A hash cannot fall back: a different set is a different value.
+///
+/// 📎 This is what the per-account device version has always done, and the
+/// input here is the same string clients are given in `/members`
+/// (`DeviceVersion::to_wire`), so the value is a fingerprint of exactly what
+/// the client saw.
+///
+/// The framing follows `device_keys_hash`: sort, then length-prefix every item
+/// so that no two different sets can concatenate to the same bytes.
 ///
 /// Args:
 ///     member_events: every `m.room.member` event of one room state, the one
 ///       the caller also answers from (`/members` reads it once for both)
 /// Return:
-///     Result<u64>  example: 81234; Err for a member event without a
-///     position or readable content, rather than a version that skipped it.
+///     Result<u64>  example: 9843172550163464192; Err for a member event
+///     without readable content, rather than a version that skipped it.
 #[implement(Service)]
 pub async fn compute_room_device_version<E: Event>(&self, member_events: &[E]) -> Result<u64> {
-	let mut version = 0_u64;
+	let mut items: Vec<(String, Vec<u8>)> = Vec::new();
+
 	for event in member_events {
 		let content: RoomMemberEventContent = event.get_content()?;
 		if !is_membership_counted(&content.membership) {
 			continue;
 		}
 
-		let position = self
-			.services
-			.timeline
-			.get_pdu_count(event.event_id())
-			.await
-			.map_err(|e| err!(Database("member event {} has no position: {e}", event.event_id())))?;
-		version = version.max(to_room_position(position));
+		let member = event
+			.state_key()
+			.and_then(|key| UserId::parse(key).ok())
+			.ok_or_else(|| err!(Database("member event {} has no user", event.event_id())))?;
 
+		// The membership itself is in the item, so a user moving between two
+		// counted states (`join` → `leave`, `leave` → `ban`) changes the hash
+		// even though the same user is still in the set.
+		let mut item = content.membership.to_string().into_bytes();
 		if content.membership == MembershipState::Join {
-			let member = event
-				.state_key()
-				.and_then(|key| UserId::parse(key).ok())
-				.ok_or_else(|| err!(Database("member event {} has no user", event.event_id())))?;
-			version = version.max(self.get_device_version(&member).await?.pos);
+			item.push(0xFF);
+			item.extend_from_slice(
+				self.get_device_version(&member)
+					.await?
+					.to_wire()
+					.as_bytes(),
+			);
+		}
+		items.push((member.as_str().to_owned(), item));
+	}
+
+	to_room_version_hash(items)
+}
+
+/// The set-to-number half of [`Service::compute_room_device_version`], kept
+/// separate so it can be tested without `Services` — and the property worth
+/// testing is exactly here: **a different set is a different number**.
+///
+/// Args:
+///     items: one `(user_id, membership ‖ device version)` pair per counted
+///         member, in any order, example: `[("@a:l", b"join\xFF3-abc")]`
+/// Return:
+///     Result<u64>  the first eight bytes of the SHA-256, big-endian; Err only
+///     for an item too large to length-prefix.
+fn to_room_version_hash(mut items: Vec<(String, Vec<u8>)>) -> Result<u64> {
+	items.sort_by(|left, right| left.0.cmp(&right.0));
+
+	// Length-prefixed like `device_keys_hash`: without it `("ab", "c")` and
+	// `("a", "bc")` would frame to the same bytes.
+	let mut framed: Vec<u8> = Vec::new();
+	for (user, item) in items {
+		for part in [user.as_bytes(), item.as_slice()] {
+			let len = u32::try_from(part.len()).map_err(|_| err!("a member item too large to hash"))?;
+			framed.extend_from_slice(&len.to_be_bytes());
+			framed.extend_from_slice(part);
 		}
 	}
 
-	Ok(version)
+	let digest = sha256::hash(&framed);
+	let head: [u8; 8] = digest
+		.get(..8)
+		.and_then(|bytes| bytes.try_into().ok())
+		.ok_or_else(|| err!("sha256 is shorter than eight bytes"))?;
+
+	Ok(u64::from_be_bytes(head))
 }
 
 /// `invite` and `knock` do not change who holds the room key; the `join`
 /// that may follow does (§4.1).
 fn is_membership_counted(membership: &MembershipState) -> bool {
 	matches!(membership, MembershipState::Join | MembershipState::Leave | MembershipState::Ban)
-}
-
-/// A backfilled event is older than every live one: 0.
-fn to_room_position(count: PduCount) -> u64 {
-	match count {
-		| PduCount::Normal(position) => position,
-		| PduCount::Backfilled(_) => 0,
-	}
 }
 
 #[implement(Service)]
@@ -427,11 +485,10 @@ async fn get_hash_or_unhashable(&self, user_id: &UserId) -> String {
 #[cfg(test)]
 mod tests {
 	use ruma::events::room::member::MembershipState;
-	use tuwunel_core::matrix::PduCount;
 
 	use tuwunel_core::err;
 
-	use super::{DeviceVersion, is_membership_counted, to_found_or_none, to_room_position};
+	use super::{DeviceVersion, is_membership_counted, to_found_or_none, to_room_version_hash};
 
 	/// 🚨 PR #73 review: only a key that is not there may be left out of the
 	/// hash. A read that failed any other way must not look like "no key",
@@ -454,10 +511,53 @@ mod tests {
 		assert!(!is_membership_counted(&MembershipState::Knock));
 	}
 
+	/// 🚨 The regression the hash exists for (external review 2026-09-29).
+	/// Bob joins, leaves, is re-invited — and a re-invite drops him out of the
+	/// counted set entirely, because `invite` is not counted. Under the old
+	/// "largest position" rule that made the number **fall back** to what it
+	/// had been before he left, so a client still holding that number passed
+	/// the gate with a member list that still had Bob in it, and sent him the
+	/// room key after he had left.
+	///
+	/// ⭐ The assertion is not "it goes up" — nothing orders these numbers
+	/// (`send.rs` only ever asks `!=`). It is that **no two of the three sets
+	/// share a value**, which is the property a maximum could not give.
 	#[test]
-	fn a_backfilled_member_event_is_older_than_any_live_one() {
-		assert_eq!(to_room_position(PduCount::Normal(81234)), 81234);
-		assert_eq!(to_room_position(PduCount::Backfilled(-5)), 0);
+	fn a_re_invite_cannot_bring_back_an_earlier_room_version() {
+		let others = || ("@alice:l".to_owned(), b"join\xFF7-aaaaaaaaaa".to_vec());
+
+		let bob_joined = to_room_version_hash(vec![others(), ("@bob:l".to_owned(), b"join\xFF3-bbbbbbbbbb".to_vec())]).expect("hashes");
+		let bob_left = to_room_version_hash(vec![others(), ("@bob:l".to_owned(), b"leave".to_vec())]).expect("hashes");
+		// Re-invited: `invite` is not counted, so Bob is simply absent.
+		let bob_reinvited = to_room_version_hash(vec![others()]).expect("hashes");
+
+		assert_ne!(bob_joined, bob_left, "leaving must change the room version");
+		assert_ne!(bob_left, bob_reinvited, "a re-invite must change it again");
+		assert_ne!(
+			bob_joined, bob_reinvited,
+			"a re-invite must not land back on the value from before Bob left"
+		);
+	}
+
+	#[test]
+	fn the_order_members_arrive_in_does_not_change_the_room_version() {
+		let a = ("@alice:l".to_owned(), b"join\xFF1-aaaaaaaaaa".to_vec());
+		let b = ("@bob:l".to_owned(), b"join\xFF2-bbbbbbbbbb".to_vec());
+
+		assert_eq!(
+			to_room_version_hash(vec![a.clone(), b.clone()]).expect("hashes"),
+			to_room_version_hash(vec![b, a]).expect("hashes")
+		);
+	}
+
+	/// 📎 Why every part is length-prefixed: without it these two different
+	/// sets would frame to the same bytes.
+	#[test]
+	fn a_user_and_their_item_cannot_run_together() {
+		assert_ne!(
+			to_room_version_hash(vec![("@ab:l".to_owned(), b"join".to_vec())]).expect("hashes"),
+			to_room_version_hash(vec![("@a".to_owned(), b"b:ljoin".to_vec())]).expect("hashes")
+		);
 	}
 
 	#[test]

@@ -3,6 +3,12 @@
 # version on /members (F2), the account version that moves with its keys (F1), and the encrypted Event/Send that is
 # refused with 1506 once the room's version has moved (F4); scenario 2 is the DeviceChanged push to connections that
 # declared device versions (F3).
+#
+# ⚠️ The room version is a **hash** of the member set, not a position, so these checks ask `-ne`
+# ("it changed"), never `-gt` ("it grew"). That is what the server itself asks -- `send.rs` only ever
+# compares `expected != room_device_version`. The old `-gt` encoded a property nothing relied on, and
+# relying on it is what let the version fall back on a re-invite (external review 2026-09-29,
+# wbf-room-device-version.md §4.2).
 $OUT = "$S\e2e16-out"; New-Item -ItemType Directory -Force $OUT | Out-Null
 $RESULT = "$OUT\results.txt"; '' | Out-File $RESULT -Encoding utf8
 $script:Pass = 0; $script:Fail = 0; $script:Skipped = 0
@@ -140,7 +146,7 @@ $rv1 = Room-Version $m1
 $bobV1 = Device-Version $m1 $bob
 $joinedCarry = @($m1.json.chunk | Where-Object { $_.content.membership -eq 'join' } | Where-Object { "$($_.unsigned.'org.wbftw.device_version')" -match '^\d+-[0-9a-f]{10}$' }).Count
 Check '[1.2] /members: the room version at the top, a seq-hash device version on every joined member' `
-  ($m1.status -eq 200 -and [uint64]$rv1 -gt 0 -and $joinedCarry -eq 2 -and $bobV1 -match '^\d+-[0-9a-f]{10}$') "room_version=$rv1 bob=$bobV1 alice=$(Device-Version $m1 $alice)"
+  ($m1.status -eq 200 -and $null -ne $rv1 -and $joinedCarry -eq 2 -and $bobV1 -match '^\d+-[0-9a-f]{10}$') "room_version=$rv1 bob=$bobV1 alice=$(Device-Version $m1 $alice)"
 
 $bridged = Call $wsA (New-Pack 0x13 0x29 $IS_BRIDGED 0 2 ([Text.Encoding]::UTF8.GetBytes((@{ room_id = $room } | ConvertTo-Json -Compress))) @())
 $bridgedBody = if ($bridged.data.Length -gt 0) { [Text.Encoding]::UTF8.GetString([byte[]]$bridged.data) | ConvertFrom-Json } else { $null }
@@ -160,7 +166,7 @@ $m2 = Members $tokA $room; $rv2 = Room-Version $m2; $bobV2 = Device-Version $m2 
 $stale = Send-Event $wsA $room 'm.room.encrypted' $rv1 't-2'
 $fresh = Send-Event $wsA $room 'm.room.encrypted' $rv2 't-3'
 Check '[1.5] Bob adds a device: his seq moves and his hash changes, the old room version gets 1506 with the new one, and the new one is sent' `
-  ((Seq-Of $bobV2) -gt (Seq-Of $bobV1) -and $bobV2.Split('-')[1] -ne $bobV1.Split('-')[1] -and [uint64]$rv2 -gt [uint64]$rv1 -and (Is-1506 $stale $rv2) -and (Is-SendAck $fresh)) `
+  ((Seq-Of $bobV2) -gt (Seq-Of $bobV1) -and $bobV2.Split('-')[1] -ne $bobV1.Split('-')[1] -and [uint64]$rv2 -ne [uint64]$rv1 -and (Is-1506 $stale $rv2) -and (Is-SendAck $fresh)) `
   "bob=$bobV1 -> $bobV2 rv=$rv1 -> $rv2 stale=$($stale.metaText) fresh=$($fresh.metaText)"
 
 $retry = Send-Event $wsA $room 'm.room.encrypted' $rv1 't-3'
@@ -192,7 +198,7 @@ $del2 = Http DELETE "/_matrix/client/v3/devices/$(Enc $bobDevice2)" @{ auth = @{
 $m4 = Members $tokA $room; $bobV4 = Device-Version $m4 $bob; $rv4 = Room-Version $m4
 $query4 = (Http POST '/_matrix/client/v3/keys/query' @{ device_keys = @{ $bob = @() } } $tokC).json
 Check '[1.8] a master key upload and a device deletion each move the seq; the hash still recomputes after both' `
-  ((Seq-Of $bobV3) -gt (Seq-Of $bobV2) -and $del2.status -eq 200 -and (Seq-Of $bobV4) -gt (Seq-Of $bobV3) -and (Recompute-Hash $query4 $bob) -eq $bobV4.Split('-')[1] -and [uint64]$rv4 -gt [uint64]$rv2) `
+  ((Seq-Of $bobV3) -gt (Seq-Of $bobV2) -and $del2.status -eq 200 -and (Seq-Of $bobV4) -gt (Seq-Of $bobV3) -and (Recompute-Hash $query4 $bob) -eq $bobV4.Split('-')[1] -and [uint64]$rv4 -ne [uint64]$rv2) `
   "bob=$bobV2 -> $bobV3 -> $bobV4 delete=$($del1.status)/$($del2.status) rv=$rv4"
 
 # A signature by someone else: the server verifies it for real (ed25519), so this one needs Python. A machine
@@ -247,7 +253,7 @@ $null = Http POST "/_matrix/client/v3/rooms/$(Enc $room)/ban" @{ user_id = $dave
 $rvBan = Room-Version (Members $tokA $room)
 $afterBan = Send-Event $wsA $room 'm.room.encrypted' $rvLeave 't-7'
 Check '[1.10] a join, a leave and a ban each move the room version, and the one before is refused' `
-  ([uint64]$rvJoin -gt [uint64]$rvBeforeInvite -and (Is-1506 $afterJoin $rvJoin) -and [uint64]$rvLeave -gt [uint64]$rvJoin -and (Is-1506 $afterLeave $rvLeave) -and [uint64]$rvBan -gt [uint64]$rvLeave -and (Is-1506 $afterBan $rvBan)) `
+  ([uint64]$rvJoin -ne [uint64]$rvBeforeInvite -and (Is-1506 $afterJoin $rvJoin) -and [uint64]$rvLeave -ne [uint64]$rvJoin -and (Is-1506 $afterLeave $rvLeave) -and [uint64]$rvBan -ne [uint64]$rvLeave -and (Is-1506 $afterBan $rvBan)) `
   "rv=$rvBeforeInvite join=$rvJoin leave=$rvLeave ban=$rvBan"
 
 $null = Http POST "/_matrix/client/v3/rooms/$(Enc $room)/invite" @{ user_id = $carol } $tokA
@@ -260,8 +266,28 @@ $forget = Http POST "/_matrix/client/v3/rooms/$(Enc $room)/forget" @{} $tokC
 $rvForget = Room-Version (Members $tokA $room)
 $afterForget = Send-Event $wsA $room 'm.room.encrypted' $rvRejoin 't-9'
 Check '[1.11] a kick moves the room version, and the kicked member forgetting the room does not move it back' `
-  ([uint64]$rvKick -gt [uint64]$rvRejoin -and (Is-1506 $afterKick $rvKick) -and $forget.status -eq 200 -and [uint64]$rvForget -eq [uint64]$rvKick -and (Is-1506 $afterForget $rvKick)) `
+  ([uint64]$rvKick -ne [uint64]$rvRejoin -and (Is-1506 $afterKick $rvKick) -and $forget.status -eq 200 -and [uint64]$rvForget -eq [uint64]$rvKick -and (Is-1506 $afterForget $rvKick)) `
   "rejoin=$rvRejoin kick=$rvKick forget=$($forget.status) after_forget=$rvForget"
+
+# 🚨 The regression the hash exists for (external review 2026-09-29, §4.2). Carol is sitting at
+# `leave` after the kick; re-inviting her **replaces** that leave in the room state with an invite,
+# and an invite is not counted -- so she drops out of the counted set entirely. Under the old
+# "largest position wins" rule the number then fell back to what the room had before Carol was ever
+# involved, and a client still holding that number would pass the gate with a member list that still
+# had her in it. ⭐ The assertion that bites is `-ne $rvBan`: under the old rule the largest position
+# left in the counted set at this point was Dave's ban, so the old code returned exactly $rvBan here.
+# `-ne $rvBeforeInvite` and `-ne $rvKick` were both already true under the old rule (Dave's ban is
+# newer than anything $rvBeforeInvite saw, and older than Carol's kick), so neither of those two can
+# tell the rules apart on its own -- they are kept for the shape of the scenario, not as the guard.
+# 📌 Under the hash $rvKick and $rvBan are the same value: both were computed over
+# {Alice:join, Bob:join, Carol:leave, Dave:ban}. That is correct -- the same key holders are the same
+# version -- and it is why `-ne $rvBan` is the one that moves when the set really loses Carol.
+$null = Http POST "/_matrix/client/v3/rooms/$(Enc $room)/invite" @{ user_id = $carol } $tokA
+$rvReinvite = Room-Version (Members $tokA $room)
+$afterReinvite = Send-Event $wsA $room 'm.room.encrypted' $rvKick 't-10b'
+Check '[1.11b] re-inviting a member who left does not bring back a room version the room already had' `
+  ([uint64]$rvReinvite -ne [uint64]$rvBan -and [uint64]$rvReinvite -ne [uint64]$rvBeforeInvite -and [uint64]$rvReinvite -ne [uint64]$rvKick -and (Is-1506 $afterReinvite $rvReinvite)) `
+  "before_invite=$rvBeforeInvite ban=$rvBan kick=$rvKick reinvite=$rvReinvite"
 
 # Conditions 7 and 8 of §10: no agreement, no check; an agreement cannot be skipped.
 $httpSend = Http PUT "/_matrix/client/v3/rooms/$(Enc $room)/send/m.room.encrypted/t-http" ($MEGOLM | ConvertFrom-Json) $tokA
