@@ -1,8 +1,14 @@
-"""Verify the docs reorganisation: every markdown link resolves, no stale names remain.
+"""Verify the design docs' paths and citations.
 
-Run from the repo root. Exit code 1 and a list of problems, or "ALL CLEAR".
-CLAUDE.md D says a rename is only done when a script has confirmed every reference
-still resolves -- this is that script.
+🚨 **A failure here means a reference is lying**, not that this script is wrong:
+  - DEAD LINK    a markdown link points at a file that is not there.
+  - STALE NAME   a document's pre-2026-09-30 file name is still written somewhere.
+  - STALE PATH   a path from before the reorganisation (no category folder).
+  - NOT IN INDEX a design doc no one can find from /docs/design/index.md.
+
+Run from the repo root: `python tests/docs/verify-design-docs.py`. Exit code 1 lists
+every problem. CLAUDE.md D asks for a script that walks the whole repo after a rename,
+because a stale name in a link or a comment never fails the build -- this is it.
 """
 
 import io
@@ -11,6 +17,7 @@ import re
 import sys
 
 SKIP_DIRS = {".git", "target", "node_modules", "scratchpad"}
+SELF = os.path.normpath(__file__)
 OLD_NAMES = [
     "wbf-wire-format.md", "wbf-pack-pipeline.md", "wbf-api-bridge.md", "wbf-e2ee.md",
     "wbf-to-device.md", "wbf-room-device-version.md", "wbf-event-push.md",
@@ -35,8 +42,9 @@ def walk_files(exts):
     for root, dirs, files in os.walk("."):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         for name in files:
-            if os.path.splitext(name)[1] in exts:
-                yield os.path.normpath(os.path.join(root, name))
+            path = os.path.normpath(os.path.join(root, name))
+            if os.path.splitext(name)[1] in exts and os.path.abspath(path) != os.path.abspath(SELF):
+                yield path
 
 
 def read(path):
