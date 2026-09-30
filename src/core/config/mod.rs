@@ -2376,8 +2376,7 @@ pub struct Config {
 	/// - Disabling repair mode and restarting the server is recommended after
 	///   running the repair.
 	///
-	/// See https://tuwunel.chat/troubleshooting.html#database-corruption for more details on
-	/// recovering a corrupt database.
+	/// See https://tuwunel.chat/troubleshooting.html#database-corruption for more details on recovering a corrupt database.
 	#[serde(default)]
 	pub rocksdb_repair: bool,
 
