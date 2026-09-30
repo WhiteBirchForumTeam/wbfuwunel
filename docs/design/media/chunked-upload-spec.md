@@ -4,7 +4,8 @@
 > [/docs/design/media/chunked-upload.md](chunked-upload.md)，pack 通用格式在 [/docs/design/wire/wire-format.md](../wire/wire-format.md)。
 > 兩份有出入時，以本文為準；本文與 server 程式有出入時，那是 bug，請開 issue。
 >
-> 狀態：2026-09-03，對應 `media/chunked-upload-a` 分支（PR #16）。
+> 狀態：✅ **現行契約**。A 支（HTTP 路徑）PR #16、B 支（WebSocket 通道、中間層、黃金向量）PR #18，兩支都已合併。
+> ⚠️ 原本這行寫「2026-09-03，對應 `media/chunked-upload-a` 分支（PR #16）」，停在 A 支 —— 而本文描述的訊息在 B 支之後同樣走 WebSocket，日期讀起來像它只講 HTTP。
 
 ## 0. 一句話
 
