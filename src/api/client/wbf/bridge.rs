@@ -368,8 +368,9 @@ pub(super) async fn handle(
 /// Return:
 ///     Result<Request<Body>, Reject>  `InvalidRequest` when meta is not an
 ///     object, names a variable the endpoint does not take, or leaves a path
-///     variable missing or not a string, or gives a query variable a value
-///     that is not a string, number, boolean or array of those.
+///     variable missing or not a string, or gives a path variable a value that
+///     would not survive as one segment (see `fill_path`), or gives a query
+///     variable a value that is not a string, number, boolean or array of those.
 fn build_request(
 	shape: &EndpointShape,
 	query_names: &[&str],
@@ -476,9 +477,19 @@ fn refuse_undeclared_variables(
 /// Return:
 ///     Result<String, Reject>  the percent-encoded path, example:
 ///     `/_matrix/client/v3/directory/room/%23lobby:localhost`. An empty string
-///     is a value (a `state_key` of `""` leaves a trailing `/`); a variable
-///     that is missing or not a string is `InvalidRequest`.
+///     is a value (a `state_key` of `""` leaves a trailing `/`). `InvalidRequest`
+///     when a variable is missing or not a string, when a value is `.` or `..`,
+///     when it holds a tab, newline or carriage return (a URL drops those rather
+///     than encoding them), or when the filled path ends up with a different
+///     number of segments than the template —— that last one is the invariant the
+///     other two protect, and it is checked whatever the reason.
 fn fill_path(path_template: &str, variables: &Map<String, Value>) -> Result<String, Reject> {
+	// One count for both sides of the comparison below: a template is written with
+	// a leading `/` and so is a built path, so both are trimmed the same way.
+	fn count_path_segments(path: &str) -> usize {
+		path.trim_start_matches('/').split('/').count()
+	}
+
 	let mut url = Url::parse("http://bridge.invalid/").expect("a constant URL parses");
 	{
 		let mut segments = url
@@ -492,6 +503,50 @@ fn fill_path(path_template: &str, variables: &Map<String, Value>) -> Result<Stri
 			};
 			match variables.get(name) {
 				| Some(Value::String(value)) => {
+					// 🚨 `.` and `..` do not survive as path segments: they are
+					// resolved away, so the segment vanishes and the request lands
+					// on a *different* endpoint — a `session_id` of "." turns
+					// `DELETE /room_keys/keys/{session_id}` into
+					// `DELETE /room_keys/keys`, which deletes the whole backup
+					// instead of one session (external review 2026-09-29).
+					// Refused rather than encoded: no variable in the table has a
+					// legitimate "." value, and the bridge's rule is that it
+					// refuses only where HTTP would — but HTTP never offered a way
+					// to write this path in the first place.
+					// ⚠️ An empty value is NOT refused: a `state_key` of "" is
+					// legitimate and leaves a trailing `/`, which is still the same
+					// number of segments.
+					if matches!(value.as_str(), "." | "..") {
+						return Err(Reject::code(
+							RejectCode::InvalidRequest,
+							format!("`{name}` cannot be `{value}`: that is not a path segment"),
+						));
+					}
+
+					// 🚨 A tab, newline or carriage return is **dropped** rather than
+					// encoded, and that defeats the check above: `".\n"` is not equal to
+					// `"."`, but the URL throws the newline away and *then* resolves the
+					// `.` — the segment empties out. `"..\n"` eats the segment before it.
+					// It also silently corrupts ordinary values: `"a\tb"` arrives as
+					// `"ab"`, so a session_id or state_key would not match the one the
+					// client meant (cirno, PR #100).
+					// ⚠️ This is narrower than HTTP, where the same character survives as
+					// `%0A` — the difference is written up in
+					// /docs/design/wire/api-bridge.md §2.2, because refusing is the only
+					// option that is not "silently send something else".
+					if let Some(dropped) = value
+						.chars()
+						.find(|character| matches!(character, '\t' | '\n' | '\r'))
+					{
+						return Err(Reject::code(
+							RejectCode::InvalidRequest,
+							format!(
+								"`{name}` cannot contain {dropped:?}: a URL drops it instead of \
+								 encoding it, which would change the path"
+							),
+						));
+					}
+
 					segments.push(value);
 				},
 				| Some(_) => {
@@ -504,7 +559,28 @@ fn fill_path(path_template: &str, variables: &Map<String, Value>) -> Result<Stri
 		}
 	}
 
-	Ok(url.path().to_owned())
+	let filled = url.path().to_owned();
+
+	// 🚨 The invariant, enforced rather than only tested: **a filled path has the
+	// same number of segments as its template**. Anything that changes the count
+	// has moved the request to a different endpoint, and whether that endpoint is
+	// another real route depends on the template — so this cannot be audited row by
+	// row, it has to be checked here. The two rules above name the values we know
+	// about; this one holds even when a future version of `url` normalizes
+	// something new.
+	let template_segments = count_path_segments(path_template);
+	let filled_segments = count_path_segments(&filled);
+	if filled_segments != template_segments {
+		return Err(Reject::code(
+			RejectCode::InvalidRequest,
+			format!(
+				"a path variable changed the shape of the path: {template_segments} segments \
+				 were asked for and {filled_segments} came out"
+			),
+		));
+	}
+
+	Ok(filled)
 }
 
 /// Args:
@@ -1055,5 +1131,113 @@ mod tests {
 				assert!(!path_names.contains(query_name), "{}: `{query_name}` is both a path and a query variable", endpoint.name);
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod path_segment_tests {
+	use serde_json::{Map, json};
+
+	use super::fill_path;
+
+	fn fill_one(template: &str, value: &str) -> Result<String, super::Reject> {
+		let mut variables = Map::new();
+		variables.insert("v".to_owned(), json!(value));
+		fill_path(template, &variables)
+	}
+
+	/// 🚨 **The invariant this guards, stated as itself**: a filled path has the
+	/// same number of segments as its template. A value that changes the count has
+	/// moved the request to a different endpoint, which is the whole bug — `.` and
+	/// `..` are resolved away rather than carried, so the segment disappears.
+	///
+	/// Refusing counts as keeping the promise; silently producing a shorter path
+	/// does not. Pinning the count rather than the two known strings means a value
+	/// that is normalized away in some future version of `url` fails here too.
+	#[test]
+	fn an_accepted_path_variable_never_changes_the_number_of_segments() {
+		let template = "/x/{v}/y";
+		let expected = template.split('/').count();
+
+		// 🚨 `\t`, `\n` and `\r` are here because a URL **drops** them instead of
+		// encoding them, so they get resolved *after* the `.`/`..` check and empty
+		// the segment out or eat the one before it (cirno, PR #100).
+		for value in [
+			".", "..", "", "a/b", "%2F", "%2E", ".hidden", "a.b", "...", "x", ".\n", "\t.", "..\n",
+			"\n.", "a\tb", "\r",
+		] {
+			match fill_one(template, value) {
+				| Ok(path) => assert_eq!(
+					path.split('/').count(),
+					expected,
+					"a value of {value:?} filled to {path:?}, which is not the template's shape",
+				),
+				| Err(_) => (),
+			}
+		}
+	}
+
+	/// ⚠️ The other half of the one above, which on its own counts **any** refusal
+	/// as keeping the promise: a guard written too widely — `contains('.')`, say —
+	/// would refuse most of these and still leave that test green. So the values
+	/// that must go through are asserted to go through.
+	#[test]
+	fn a_value_that_is_only_unusual_is_not_refused() {
+		for value in ["", "a/b", "%2F", "%2E", ".hidden", "a.b", "...", "x", "a b", "!r:l", "@u:l"]
+		{
+			let filled = fill_one("/x/{v}/y", value);
+
+			assert!(filled.is_ok(), "a value of {value:?} was refused: {filled:?}");
+		}
+	}
+
+	/// The three characters a URL drops rather than encodes. Refusing them is
+	/// narrower than HTTP (where the client sends `%0A` and it survives), and that
+	/// is the trade: the alternative is sending a value the client did not write.
+	#[test]
+	fn a_value_holding_a_character_the_url_would_drop_is_refused() {
+		for value in [".\n", "\t.", "..\n", "\n.", "a\tb", "\r", "x\n"] {
+			let filled = fill_one("/_matrix/client/v3/room_keys/keys/{v}", value);
+
+			assert!(
+				filled.is_err(),
+				"a value of {value:?} was accepted and gave {filled:?}; the tab or newline is \
+				 dropped, so that is not the path the client asked for",
+			);
+		}
+	}
+
+	/// The case from the external review, named so the reason is legible: one
+	/// session's key, not the whole backup.
+	#[test]
+	fn a_dot_session_id_cannot_turn_deleting_one_session_into_deleting_the_backup() {
+		let template = "/_matrix/client/v3/room_keys/keys/{v}";
+
+		for value in [".", ".."] {
+			let filled = fill_one(template, value);
+
+			assert!(
+				filled.is_err(),
+				"a session_id of {value:?} was accepted and gave {filled:?}, which is the backup",
+			);
+		}
+	}
+
+	/// ⚠️ And the other direction: the guard must not tighten past the two dots.
+	/// An empty `state_key` is legitimate Matrix and most state events have one.
+	#[test]
+	fn an_empty_state_key_is_still_accepted() {
+		let filled = fill_one("/_matrix/client/v3/rooms/!r:l/state/m.room.name/{v}", "");
+
+		assert_eq!(filled.expect("an empty state_key is a value"), "/_matrix/client/v3/rooms/!r:l/state/m.room.name/");
+	}
+
+	/// A slash inside a value is carried percent-encoded, not split into two
+	/// segments — megolm session ids are base64 and really do contain `/`.
+	#[test]
+	fn a_slash_inside_a_value_stays_one_segment() {
+		let filled = fill_one("/x/{v}/y", "a/b").expect("a slash is encoded, not refused");
+
+		assert_eq!(filled, "/x/a%2Fb/y");
 	}
 }

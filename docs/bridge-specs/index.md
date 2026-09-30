@@ -38,6 +38,10 @@ offset  bytes              意思
 ### 1.3 meta 的變數
 
 - **變數名＝ ruma 路徑模板裡的名字**（`room_id`、`user_id`、`event_type`…），不另取一套（/docs/design/wire/api-bridge.md §2.2）。下表「變數」欄照抄。
+- 🚨 **路徑變數的值不能是 `.` 或 `..`** —— 橋回 `InvalidRequest`（1201）。那兩個不會被當字面字串搬，URL 會把它們解掉、**那一段整個消失**，請求就落到另一個端點上（`session_id` 是 `.` 會把「刪一個 session」變成「刪整個備份」）。
+- 🚨 **值裡也不能有 tab、換行、歸位（`\t` `\n` `\r`）** —— 同樣回 `InvalidRequest`（1201）。那三個**不是被編碼，是被丟掉**，所以 `".\n"` 繞過上面那條檢查（URL 先丟掉換行、再解那個 `.`），而 `"a\tb"` 會**靜默變成 `"ab"`**，你的 session_id／state_key 就對不上了。⚠️ 這比 HTTP 嚴（走 HTTP 時 `%0A` 活得下來），取捨的理由在 /docs/design/wire/api-bridge.md §2.2。
+- 📎 另外還有一道：填完之後 server 會比對**段數**跟模板一不一樣，不一樣就拒。正常的值碰不到它。
+  📎 其餘的值照搬：`/` 會被編碼成 `%2F`（不會變兩段，megolm 的 session id 是 base64），**空字串是合法值**（`state_key` 的 `""`），`%`／`?`／`#`／空白都會編碼（空白是 `%20`）。詳見 /docs/design/wire/api-bridge.md §2.2。
 - **path 變數**：必須是字串；server 會 percent-encode。缺了、或不是字串 → `InvalidRequest`。
   ⚠️ **空字串是合法的值**，不是「缺了」：`state_key` 最常是 `""`（`m.room.topic`、`m.room.name` 都是）。`{"state_key": ""}` 會組成 `/state/m.room.topic/`，server 本來就註冊了這個結尾有斜線的路徑。**沒給 `state_key` 才是缺**。
 - **query 變數**：可以是字串、數字、布林，或它們的陣列（陣列會變成重複的參數，例如 `via`）。**沒給就整個省掉**，不送空值。
