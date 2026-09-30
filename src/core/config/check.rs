@@ -232,7 +232,7 @@ fn check_renamed_client_address_keys(config: &Config) -> Result {
 }
 
 /// The to-device window must fit in the send queue, which
-/// `docs/design/wbf-to-device.md` §7 promised to assert at startup and did
+/// `/docs/design/keys/to-device.md` §7 promised to assert at startup and did
 /// not: the three numbers have two degrees of freedom, so the pack count is
 /// derived rather than configured, and a configuration where it does not fit
 /// is a configuration error rather than something to discover at runtime

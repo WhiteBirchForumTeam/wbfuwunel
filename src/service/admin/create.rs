@@ -22,7 +22,7 @@ use crate::{Services, profile::Propagation};
 
 /// The `global` key naming the server user this server created itself. An
 /// account under the server user's name without it was made by someone else
-/// (`docs/design/server-user.md` §4).
+/// (`/docs/design/accounts/server-user.md` §4).
 const SERVER_USER_MARKER: &[u8] = b"server_user";
 
 /// Creates the server user: the marker, the account, its displayname. The
@@ -84,7 +84,7 @@ pub async fn ensure_server_user(services: &Services) -> Result {
 	if !is_created_by_this_server {
 		return Err!(
 			"{server_user} is an account this server did not create, and the server user would make its \
-			 owner an admin. Refusing to start. See docs/design/server-user.md"
+			 owner an admin. Refusing to start. See /docs/design/accounts/server-user.md"
 		);
 	}
 

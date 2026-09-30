@@ -1,11 +1,11 @@
 # E2EE 下的媒體引用：送訊息時宣告 attachments、計數 0 由後台掃描清
 
 > **這份文件回答：server 讀不到訊息內容時，媒體的引用計數從哪裡來；沒人來指的媒體怎麼辦。**
-> 狀態：✅ 已實作（提案 PR #23 維護者 2026-09-06 同意，實作分支 `media/attachments` PR #24 合併；2026-09-14 補標，原本停在 🔧）。**§4 的計數表與列（`eventid_mxcs`、後台掃 0）已被 [media-holders.md](media-holders.md) 的持有者集合取代**；
+> 狀態：✅ 已實作（提案 PR #23 維護者 2026-09-06 同意，實作分支 `media/attachments` PR #24 合併；2026-09-14 補標，原本停在 🔧）。**§4 的計數表與列（`eventid_mxcs`、後台掃 0）已被 [/docs/design/media/media-holders.md](media-holders.md) 的持有者集合取代**；
 > 這份文件仍是宣告（§3、§5）、驗證（§4.2）、警告（§6）的權威。
-> 上位文件：[media-gc.md](media-gc.md)（計數、收集器、墓碑、哨兵都不變）；
-> 核心設計 [why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md) §5.4。
-> client 條款同步寫在 [chunked-upload-spec.md](chunked-upload-spec.md) §12。
+> 上位文件：[/docs/design/media/media-gc.md](media-gc.md)（計數、收集器、墓碑、哨兵都不變）；
+> 核心設計 [/docs/design/overview/why-not-matrix-and-core-design.md](../overview/why-not-matrix-and-core-design.md) §5.4。
+> client 條款同步寫在 [/docs/design/media/chunked-upload-spec.md](chunked-upload-spec.md) §12。
 
 ## 0. 一句話
 
@@ -92,7 +92,7 @@ server 收到 `attachments` 逐一驗：是 `mxc://`、本站的、`search_file_
 既存媒體維持哨兵；計數 0 的由 §4.3 的掃描清；`TombstoneReason::Migrated` 保留給舊墓碑解碼。
 `media_gc_migrate_skip_recent_seconds` 是 unknown config key 之後只會 warn（`error_on_unknown_config_opts` 預設 false）。
 
-## 5. client 條款（也寫在 spec §12）
+## 5. client 條款（也寫在 /docs/design/media/chunked-upload-spec.md §12）
 
 - **凡是 server 讀不到 content 的訊息（E2EE），送出時必須宣告 `attachments`**，否則附件會被後台掃描清掉（保護期 7 天後）。
 - 上傳 → 拿到 mxc → 把 mxc 放進加密內容 → **同一個送訊息請求**帶 `attachments`。不要分兩個請求。
@@ -140,7 +140,7 @@ server 認得出的訊號：事件是 `m.room.encrypted`、從舊 HTTP `send` �
   - 明文房間 `m.image` 不宣告照舊計數與釋放。
   - `Event/Send` pack：Ack 帶 event_id、事件進房間、redact 後媒體 410；宣告已刪媒體 → `Error(Conflict)`；同 `txn_id` 兩次回同一 event_id。
   - 警告：bob 舊端點上傳後不宣告送加密事件 → 收到 server user 的 `is_direct` 邀請、房裡一則英文警告；第二次不再邀請。
-  - 掃描：新上傳與被指著的都不會被掃（保護期）；過期刪除的驗證在 media-holders.md §9（用 `WBFUWUNEL_MEDIA_GRACE_SECONDS`）。
+  - 掃描：新上傳與被指著的都不會被掃（保護期）；過期刪除的驗證在 /docs/design/media/media-holders.md §9（用 `WBFUWUNEL_MEDIA_GRACE_SECONDS`）。
   - redact 保留備份後 purge：兩則共用一媒體，purge 掉 redact 過的那則 → 媒體仍在；再撤另一則並 purge → 410；無錯誤 log。
 - 回歸：e2e8（`r_seq`／`g_seq`／`Event/Recent`）37 個檢查點在同一個 binary 上重跑。
 

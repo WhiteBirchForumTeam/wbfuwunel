@@ -1,9 +1,9 @@
 # WS 訂閱與推送：連線訂閱自己的帳號，server 把新事件推過來
 
 **狀態**：✅ 已實作（提案 PR #35 2026-09-08 核可，PR #36 合併；registry 在 PR #42 抽成所有 WS 串流共用的核心，落點見 §8）。這是維護者 2026-09-08 說的「工作 2」：WS 訂閱自己帳號的 event，在的任何房間的新事件自然推過來。
-[streaming-messages.md](streaming-messages.md)（工作 3）坐在這份之上；工作 1（一般訊息走 WS）已經是 `Event/Send`（PR #24）。
+[/docs/design/events/streaming-messages.md](streaming-messages.md)（工作 3）坐在這份之上；工作 1（一般訊息走 WS）已經是 `Event/Send`（PR #24）。
 
-**這份改的是什麼**：到 PR #33 為止，WS 只有 client 問、server 答；[wbf-pack-pipeline.md](wbf-pack-pipeline.md) §1 留了發送 task 與有界佇列，就是給這裡用的：
+**這份改的是什麼**：到 PR #33 為止，WS 只有 client 問、server 答；[/docs/design/wire/pack-pipeline.md](../wire/pack-pipeline.md) §1 留了發送 task 與有界佇列，就是給這裡用的：
 推送是**第二個往 client 送東西的來源**，跟 handler 的回應排同一個佇列。
 
 ## 0. 一句話
@@ -36,13 +36,13 @@
 
 kind `0x14 Event`（§3.3 的 Event 章），三個新 subtype：
 
-⚠️ **「`id` 由 client 選」講的是選那七個 byte 的值，第一個 byte 是型別 `0x01`**（client 的會話號，[wbf-wire-format.md](wbf-wire-format.md) §2.2，PR #47）：裸值（型別 `0x00`）在 handler 之前就被回 `InvalidRequest`。
+⚠️ **「`id` 由 client 選」講的是選那七個 byte 的值，第一個 byte 是型別 `0x01`**（client 的會話號，[/docs/design/wire/wire-format.md](../wire/wire-format.md) §2.2，PR #47）：裸值（型別 `0x00`）在 handler 之前就被回 `InvalidRequest`。
 
 | subtype | 誰發 | header | meta | data |
 |---|---|---|---|---|
 | `0x04 Subscribe` | client | `id` 由 client 選（之後每個 `Push` 抄它） | `{ "rooms"?: ["!…"], "cg_seq"?: <g_seq> }`；沒帶 `rooms` = 帳號層（所有加入的房，含之後加入的） | 無。回 `Ack`，meta `{ "latest_g_seq": <g_seq>, "joined": n, "skipped": ["!…"] }`（`skipped` = 不是成員的房：點名時就不是的，加上登記後重讀才發現已經離開的） |
 | `0x05 Unsubscribe` | client | 同上 | `{ "rooms"?: ["!…"] }`；沒帶 = 全退 | 無。回 `Ack`；退不存在的是 no-op |
-| `0x06 Push` | **server → client** | `IS_RESPONSE=1`；`id` 抄 `Subscribe`；`seq` 從 0 起每推一次 +1 | `{ "bc": n, "fs", "ls", "gap": bool }` | `bc` 則事件，**u32 大端長度 ＋ 事件 JSON**，跟 `Batch` 同一個切法（room-seq-and-recent §2.1），新到舊 |
+| `0x06 Push` | **server → client** | `IS_RESPONSE=1`；`id` 抄 `Subscribe`；`seq` 從 0 起每推一次 +1 | `{ "bc": n, "fs", "ls", "gap": bool }` | `bc` 則事件，**u32 大端長度 ＋ 事件 JSON**，跟 `Batch` 同一個切法（/docs/design/events/room-seq-and-recent.md §2.1），新到舊 |
 
 - **只走 WS**（准入表 `logged_in_websocket_only`）；HTTP 回 `Unsupported`。
 - **一條連線一個訂閱者身分**（一個 `id`、一條 `seq`），它可以在多個 channel 裡；再送 `Subscribe` 是加進更多 channel（去重），不是換掉。`Logout`／關線全退。
@@ -51,9 +51,9 @@ kind `0x14 Event`（§3.3 的 Event 章），三個新 subtype：
   🚨 **補窗被這兩個上限截斷時，它的第一個 `Push` 帶 `gap: true`**（PR #53）：截斷的補窗是「漏掉的那段裡**最新的一部分**」，而 client 每收到一個 `Push` 就推進水位（§2.1），不說的話它會直接跨過剩下的。PR #53 之前被 `wbf_recent_max_limit` 截斷也一樣不說 —— 這條漏洞比 bytes 上限早，是加 bytes 上限時一起看到的。
   不帶 `cg_seq` = 只要新的。
 - **`gap: true`**：這條連線在上一個 `Push` 之後**有事件沒推到**（§4），或這是一個被截斷的補窗的第一個 `Push`。client 看到就用 `Recent(cg_seq)` 補一窗；補完之後的推送接得上。
-- `Push` 是**事件驅動類**（wire-format §4）：不 Ack、不重送、client 不守順序。`fs`／`ls` 是這一包的最新／最舊 g_seq，只給 client 推水位用。
+- `Push` 是**事件驅動類**（/docs/design/wire/wire-format.md §4）：不 Ack、不重送、client 不守順序。`fs`／`ls` 是這一包的最新／最舊 g_seq，只給 client 推水位用。
 - **`seq` 只是這條連線的推送序號，不是計數保證**：丟掉的包（佇列滿、編碼失敗）也佔掉一個號，所以 client 🚫 不要拿 `seq` 的跳號算「少了幾則」。**水位只認 `fs`／`ls`**，少了什麼由 `gap` ＋ `Recent` 補；`seq` 留給除錯與排序。
-- **`Unsubscribe` 退的是當下的 channel，不是黑名單**：帳號層訂閱者點名退掉某房之後再加入那個房，`follow` 會把它加回來（wire-format §3.2 同一句）。要真的不收，就別用帳號層訂閱。
+- **`Unsubscribe` 退的是當下的 channel，不是黑名單**：帳號層訂閱者點名退掉某房之後再加入那個房，`follow` 會把它加回來（/docs/design/wire/wire-format.md §3.2 同一句）。要真的不收，就別用帳號層訂閱。
 
 ### 2.1 client 的責任（推送給的是提示，不是保證）
 
@@ -94,7 +94,7 @@ registry（純記憶體，`Services.streams`）                          ← 所
 📎 房間的 topic 裝**多少條連線都行**（同一個人開幾條就訂幾條，集合去重）—— 這是建構這個串流時宣告的
 `Occupancy::Many`。
 ✅ to-device 佇列相反，宣告的是 `Occupancy::OneTheLatest`：一個裝置同時只有一條連線在收，而且**後來的接手**，
-被接手的那條收到 `Superseded`(1505)（[wbf-to-device.md](wbf-to-device.md) §4）。
+被接手的那條收到 `Superseded`(1505)（[/docs/design/keys/to-device.md](../keys/to-device.md) §4）。
 ⭐ 兩邊的規則都**寫在建構的地方、由註冊表在同一把寫鎖內強制**，不是在呼叫點用 `if` 擋 ——
 呼叫點擋不住兩條同時進來的連線。
 
@@ -120,14 +120,14 @@ registry（純記憶體，`Services.streams`）                          ← 所
 - **真相在哪**：誰能收的真相是 DB 的成員表；channel 是它的記憶體投影，靠接點 2 保持一致。漂移只可能來自漏接 hook 的新 join／leave 路徑，而那只有 `state_cache` 一組；重啟就清空，安全方向是「少推」，`Recent` 補得回來。
 - **接點 1 只有 `append_pdu` 提交後**：backfill 進來的舊事件不推（不是「新的」，`Recent` 拿得到）；redaction 是一則新事件，照推。
 - **可見性**：新事件對「現在是成員的人」永遠可見（`history_visibility` 管的是加入前的歷史），而能在 channel 裡的一定是成員，所以只做 ignore 過濾。
-  📎 **帳號抹除（MSC4025）同理不必在 live 路徑檢查**：它只對「事件發生時不在房間」的讀者剪，而收得到 live 推送的人當時就在。⚠️ **補窗路徑不一樣**：`Subscribe{cg_seq}` 推的是舊事件，讀的人可能是之後才加入的，所以補窗走 `collect_window`，那裡送出前經過 `bundle_aggregations`（PR #54；之前沒有，抹除之後才加入的人在補窗裡拿得到原文，見 [room-seq-and-recent.md](room-seq-and-recent.md) §2）。
+  📎 **帳號抹除（MSC4025）同理不必在 live 路徑檢查**：它只對「事件發生時不在房間」的讀者剪，而收得到 live 推送的人當時就在。⚠️ **補窗路徑不一樣**：`Subscribe{cg_seq}` 推的是舊事件，讀的人可能是之後才加入的，所以補窗走 `collect_window`，那裡送出前經過 `bundle_aggregations`（PR #54；之前沒有，抹除之後才加入的人在補窗裡拿得到原文，見 [/docs/design/events/room-seq-and-recent.md](room-seq-and-recent.md) §2）。
 - **自己的事件也推**（含發送它的那條連線）：多裝置同步靠這個，發送者的其他裝置要收到；發送那條連線同時有 `Ack`（`event_id`）和 `Push`，client 用 `event_id` 去重。
   不做「排除發送連線」的特例：多一條規則，省一個幾百 byte 的包。
 
 ## 4. 掉包、背壓、上限
 
 - **推送絕不阻塞 append**：`try_send`，佇列滿就丟並把 `gap` 記起來，下一次推得進去的 `Push` 帶 `gap: true`。append 是所有訊息的路徑，不能被一條讀得慢的連線拖住。
-- **掉了的不重送**：持久化的事件 `Recent` 拿得到；推送的責任是「盡快」不是「一定」。這跟 pipeline §1 的背壓（handler 等佇列）**故意不同**：handler 的回應是 client 問的，等得起；推送是 server 塞的，塞不進就算。
+- **掉了的不重送**：持久化的事件 `Recent` 拿得到；推送的責任是「盡快」不是「一定」。這跟 /docs/design/wire/pack-pipeline.md §1 的背壓（handler 等佇列）**故意不同**：handler 的回應是 client 問的，等得起；推送是 server 塞的，塞不進就算。
 - **每連線的成本**：訂閱者一筆 ＋ 它在的 channel 數個 HashSet 項；佇列是 pipeline 的那個。**每則事件的成本**：一次 `topics[Room(room)]` 查詢＋訂閱者數次 `try_send`；跟房間人數無關。
 - **比 `wbf_data_max_bytes` 還寬的單則事件不推**（跟 `Event/Recent` 的 `collect_window` 同一道過濾，記一行 `debug_warn`）：`Recent` 既然跳過它，推了就是給 client 一個它永遠補不回來的東西，而那一幀本身也已經超過連線的 `max_message_size`。
 - **推之前在鎖內重驗房間成員**：`listeners()` 的快照到 `push` 之間隔著一次 ignore 的 DB 讀，這中間發生的 `evict`（離房／踢／ban）必須算數，所以 live 路徑走 `push_to_room`，在讀鎖內確認連線還在那個 channel 裡。補窗路徑（`push_window`）不帶房 —— 它推的是**這個訂閱點名的那些房**的視窗（PR #51 之前是該帳號的全域視窗），房間的選擇在 `collect_window` 收窗時就做完了。
@@ -143,7 +143,7 @@ registry（純記憶體，`Services.streams`）                          ← 所
 | typing、receipts、presence | **這版不推**（§6）。 |
 | E2EE | 事件本來就是密文，推的是 `pduid_pdu` 裡的 JSON，server 不多讀任何東西。 |
 | 聯邦 | 不相干：聯邦進來的事件走同一個 `append_pdu`，一樣推。 |
-| [streaming-messages.md](streaming-messages.md) | 草稿走同一個 channel、同一條佇列，`Services.streams.relay(room, except_connection, pack)`。 |
+| [/docs/design/events/streaming-messages.md](streaming-messages.md) | 草稿走同一個 channel、同一條佇列，`Services.streams.relay(room, except_connection, pack)`。 |
 
 ## 6. 不做的
 
@@ -172,7 +172,7 @@ registry（純記憶體，`Services.streams`）                          ← 所
 | 接點 2 | `src/service/rooms/state_cache/update.rs`，`mark_as_joined`／left 那一組 |
 | `Subscribe`／`Unsubscribe` handler、`Push` 編碼（共用 `recent.rs` 的長度前綴） | `src/api/client/wbf/subscribe.rs`（新）、`mod.rs` 准入表三列 |
 | 推送 task 怎麼餵佇列 | 不需要新 task：`publish` 直接對訂閱者的 `mpsc::Sender` `try_send`，發送 task 已經在 |
-| kind 表 | `wbf-wire-format.md` §3.2 三列 |
+| kind 表 | `/docs/design/wire/wire-format.md` §3.2 三列 |
 | 向量 | `subscribe`、`push_one`、`push_gap` |
 
 ## 9. 我不滿意或想再談的

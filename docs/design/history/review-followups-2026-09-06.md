@@ -2,7 +2,7 @@
 
 > **這份文件回答：main `389152df6`（PR #24 合併後）還有哪些已確認的缺陷、各自的證據在哪一行、建議怎麼修、怎麼驗。**
 > 狀態：維護者 2026-09-06 同意三支都修（§4）。✅ `media/managed-origin`（§2.1、§2.6、§2.7、§2.9）PR #26 已合併；✅ `wbf/auth-and-ws-lifetime`（§2.3、§2.4）PR #28 已合併；✅ `media/upload-lifecycle`（§2.2、§2.5）PR #48 已合併（分支實際叫 `wbf/upload-lifecycle`），🚫 §2.8 不做（維護者 2026-09-13：這個 fork 從未上線）。📎 當時的排序是「它排最後、之前先寫 WS `Login`／`Refresh`／`Logout` 的提案」，兩者都已完成；各節的狀態標在節內（PR #52）。
-> 來源兩個：(1) 持有者集合是實作到一半重做的（[media-holders.md](media-holders.md)），合併後對 main 重看一次；
+> 來源兩個：(1) 持有者集合是實作到一半重做的（[/docs/design/media/media-holders.md](../media/media-holders.md)），合併後對 main 重看一次；
 > (2) `../external-review/wbfuwunel-2026-09-05.md` 與 `-v2.md`，一位外部審查者對 `0c964d522`／`3091c7ce3` 做的靜態審查，共 9＋5 條。
 > 外部審查的每一條都**對現在的程式碼重新讀過**再下結論，不沿用它的判定；它看的版本沒有 #22 與 #24。
 
@@ -175,11 +175,11 @@ span、staging）。不做格式轉換 —— 那批上傳續不了也沒關係�
 `find_upload` 現在回 `None` 就會被當「沒有宣告」→ 走原本的「進度沒宣告」分支，但那條只 `del_upload`，要確認它也刪 staging。
 **維護者先答**：你的伺服器有沒有跑過 #16～#18 之間的版本？沒有的話這條只是防禦，優先度最低。
 
-### 2.9 🟡 文件講反話：墓碑的「365 天 TTL」不會刪 key（✅ `media/managed-origin`，PR #26；media-gc.md §6 與 `maps.rs` 註解已改成「永久保留」）
+### 2.9 🟡 文件講反話：墓碑的「365 天 TTL」不會刪 key（✅ `media/managed-origin`，PR #26；/docs/design/media/media-gc.md §6 與 `maps.rs` 註解已改成「永久保留」）
 
 `mxc_tombstone`（`maps.rs:277-283`）設 `ttl: 365 天`，但 `RANDOM_SMALL` 是 Universal compaction（`descriptor.rs:167-168`）；RocksDB 的
 `Options::ttl` 在 Leveled／Universal 下只是「超過 ttl 的檔案排進 compaction」，**不刪 key**；只有 FIFO 會把整個過期檔刪掉（`RANDOM_SMALL_CACHE`
-就是那樣用的）。`find_tombstone` 也不看 `deleted_at_secs`。所以墓碑是永久的，media-gc.md §6（第 190 行）說「365 天 TTL」是假的。`mediaid_upload_progress`
+就是那樣用的）。`find_tombstone` 也不看 `deleted_at_secs`。所以墓碑是永久的，/docs/design/media/media-gc.md §6（第 190 行）說「365 天 TTL」是假的。`mediaid_upload_progress`
 的 ttl 同理，但它有 sweeper 真的刪列，只是註解不準。
 
 **修法**：文件改成「墓碑永久保留，一筆約 80 byte；一百萬次刪除約 80 MB」—— 那是可接受的、而且 410 永遠成立比一年後變 404 更好懂。

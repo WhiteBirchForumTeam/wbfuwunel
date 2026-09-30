@@ -9,10 +9,11 @@
 //! start while shutdown is already under way is refused instead.
 //!
 //! This is also where connections are counted, twice over: a `ConnectionSlot`
-//! is one connection's place in its device's count (§2.1) and an `AddressSlot`
+//! is one connection's place in its device's count (/docs/design/wire/pack-pipeline.md §2.1) and
+//! an `AddressSlot`
 //! is its place in its source address's count (§2.2). Both are taken before
 //! the connection is accepted and given back when the slot is dropped,
-//! whichever way the connection ended (`docs/design/wbf-pack-pipeline.md`).
+//! whichever way the connection ended (`/docs/design/wire/pack-pipeline.md`).
 //!
 //! ⭐ The two answer different questions and neither replaces the other: the
 //! device count needs an identity, so it cannot see a connection that has not
@@ -188,7 +189,7 @@ impl Connections {
 	///
 	/// ⭐ Unlike `take_slot` this is asked **before** the token is read, so it
 	/// also bounds connections that never log in — the per-device count
-	/// cannot see those at all (§2.2).
+	/// cannot see those at all (/docs/design/wire/pack-pipeline.md §2.2).
 	///
 	/// Args:
 	///     address: the peer as the transport resolved it, example:

@@ -199,7 +199,7 @@ pub async fn upload_create(&self, user: &UserId, request: UploadRequest) -> Uplo
 	}
 
 	// One unique value, two spellings: the 56-bit id goes in pack headers
-	// under its type byte (wire-format §2.2), and its hex is the mxc's media
+	// under its type byte (/docs/design/wire/wire-format.md §2.2), and its hex is the mxc's media
 	// id. No table maps one to the other.
 	//
 	// 📎 The media id is therefore **fourteen** hex digits for anything
@@ -804,7 +804,7 @@ fn crosses_upload_limit(max_len: u64, chunk_size: u32, total_len: u64, received_
 /// is free is `is_upload_id_free`'s business.
 ///
 /// ⚠️ **Fourteen hex digits, not sixteen**: on the wire the header's `id`
-/// spends its first byte on the type (wire-format §2.2), so an upload id has
+/// spends its first byte on the type (/docs/design/wire/wire-format.md §2.2), so an upload id has
 /// seven bytes to live in — and those seven bytes are also, in hex, the mxc's
 /// media id. 56 random bits still make a collision a curiosity rather than a
 /// risk, and the caller re-draws when one happens.

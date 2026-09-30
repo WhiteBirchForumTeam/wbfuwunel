@@ -3,13 +3,13 @@
 **狀態**：§1–§6 ✅ 已實作（PR #33，2026-09-08 合併；之後發送佇列的 bytes 預算 PR #50、窗的 bytes 上限 PR #53）；§8 第二部分 ✅ PR #48（原本停在「🔲 未開」，2026-09-14 補標）。維護者定的決定列在 §0；其餘是照那些決定推出來的做法。
 實作跟提案不同的地方標 📎，理由就地寫。client 端要跟的東西開在 wbf-matrix-client #15。
 
-[wbf-wire-format.md](wbf-wire-format.md) 講的是**封包的版面與協議**（header、kind、順序類別、兩種送法）；
-[chunked-upload.md](chunked-upload.md)、[room-seq-and-recent.md](room-seq-and-recent.md)、wire-format §6.3 講的是**各個 kind 的語意**。
+[/docs/design/wire/wire-format.md](wire-format.md) 講的是**封包的版面與協議**（header、kind、順序類別、兩種送法）；
+[/docs/design/media/chunked-upload.md](../media/chunked-upload.md)、[/docs/design/events/room-seq-and-recent.md](../events/room-seq-and-recent.md)、/docs/design/wire/wire-format.md §6.3 講的是**各個 kind 的語意**。
 兩者之間少一層：一個 pack 從連線進來到回應出去，經過哪些關卡、handler 拿到什麼、能送出什麼、連線本身有什麼規則。
 現在那層散在 `ws.rs` 與 `mod.rs` 的程式碼裡，沒有文件。維護者 2026-09-07 的話：「發明了 protocol 講清楚了封包規格，講清楚架構協議，但沒講設計」。
 這份補的就是那層，而且它是**之後每個 HTTP 端點搬到 WS 時要照的模子**（§7）——上傳、登入、`Recent` 只是先走過這條線的三個例子。
 
-同一支分支的第二部分（§8）是 [review-followups-2026-09-06.md](review-followups-2026-09-06.md) 剩下的三條上傳生命週期問題（§2.2、§2.5、§2.8）。
+同一支分支的第二部分（§8）是 [/docs/design/history/review-followups-2026-09-06.md](../history/review-followups-2026-09-06.md) 剩下的三條上傳生命週期問題（§2.2、§2.5、§2.8）。
 它們碰的檔案跟管線不重疊，放同支是維護者的決定，分開 commit 審。
 
 ## 0. 維護者 2026-09-07 定的
@@ -28,7 +28,7 @@
 | 10 | client 約定：送出 `Recent` 後若一段時間沒收到回應就自己斷線重連（第一窗可以等長一點，例 60 秒，之後例 10 秒）。**server 不做事**，但這給 first byte 立了門檻（§6.3）。 |
 | 11 | `wbf_recent_max_limit` 從 10000 **壓到 500**：一窗要多大是 client 決定的，不夠就帶 `before` 再要一段，本質是「拿固定區間的一段」；一萬太龐大。 |
 | 12 | **HTTP `/_wbf/v1/pack` 之後是 debug／fallback 用，WS 才是主力。** 准入表裡「HTTP 不可」的 kind 只會變多。 |
-| 13 | 這套 server／client binary **從未上線**，只在本機 debug 過：沒有 #16～#18 之間的庫存在，review-followups §2.8 是純防禦，排最後。 |
+| 13 | 這套 server／client binary **從未上線**，只在本機 debug 過：沒有 #16～#18 之間的庫存在，/docs/design/history/review-followups-2026-09-06.md §2.8 是純防禦，排最後。 |
 
 ## 1. 模型：一條連線就是一個佇列
 
@@ -40,13 +40,13 @@ client ◀─── WebSocket ◀──── 發送 task ◀──── 有界
 
 - **接收 loop** 一條連線一個（現在的 `serve`）：讀一個 message、走完關卡、交給 handler、**等 handler 結束**才讀下一個。
   依序處理不是效能取捨，是語意：有序類（`Chunk`）的 `OutOfOrder` 判定、`Login` 換身份後「下一個 pack 就是新身份」，都靠它。
-- **發送 task** 一條連線一個（**新**，wire-format §5 早寫了、`ws.rs` 一直沒做，因為到 §6 之前沒有 handler 需要送第二個 pack）：
+- **發送 task** 一條連線一個（**新**，/docs/design/wire/wire-format.md §5 早寫了、`ws.rs` 一直沒做，因為到 §6 之前沒有 handler 需要送第二個 pack）：
   從有界 `mpsc` 讀 pack、寫進 WebSocket sink。誰要往 client 送東西都經這裡：handler 的回應、關卡的 `Error`、`Close` frame、
   以後 server 主動推的東西。**只有一個寫 sink 的地方**，順序就不會亂（A4：一個路徑起點）。
 - **背壓**：佇列有**兩個**界（`PackQueue`，PR #50）：包數 `wbf_ws_send_queue_len`（預設 32）與 bytes `wbf_ws_send_queue_bytes`（預設 16 MiB），誰先用完誰擋。client 收得慢 → 佇列滿 → handler 的 `send().await` 停住 →
   接收 loop 不讀下一個 → TCP 視窗關上。全鏈路靜止，記憶體有上界：**一條連線最多 `wbf_ws_send_queue_bytes`**，加上正在寫出與正在收的那兩個 pack（§5）。
   📎 這裡原本寫「佇列長度 × 一個 pack 上限」—— 那是數包數時代的界，32 × 16 MiB ≈ 512 MiB。
-- **一條連線不保存任何業務狀態**（wire-format §6.1 已定）：上傳進度在 DB、session 在 `Session` 一個 struct。連線死了什麼都不會丟。
+- **一條連線不保存任何業務狀態**（/docs/design/wire/wire-format.md §6.1 已定）：上傳進度在 DB、session 在 `Session` 一個 struct。連線死了什麼都不會丟。
 
 client 那邊「開幾條、哪條走什麼、pending → sending → sent」是 client 的設計，這份不寫。
 
@@ -115,7 +115,7 @@ client 那邊「開幾條、哪條走什麼、pending → sending → sent」是
 
 #### 維護者 2026-09-24 定的四條
 
-1. **錯誤碼新開 `TooManyConnectionsFromAddress`（1403）**，不沿用 1402。詞表的規矩是「一個 code 對一種處置」（wire-format §3.4），而 1402 的處置是**「關掉一條你自己的舊連線」** —— 那對位址名額是**錯的建議**：撞到上限的人可能一條都不是他開的（同一個 NAT、同一間辦公室、同一台代理），他關不掉別人的。訊息因此**刻意不說「關掉一條你的」**，只說等或換網路。
+1. **錯誤碼新開 `TooManyConnectionsFromAddress`（1403）**，不沿用 1402。詞表的規矩是「一個 code 對一種處置」（/docs/design/wire/wire-format.md §3.4），而 1402 的處置是**「關掉一條你自己的舊連線」** —— 那對位址名額是**錯的建議**：撞到上限的人可能一條都不是他開的（同一個 NAT、同一間辦公室、同一台代理），他關不掉別人的。訊息因此**刻意不說「關掉一條你的」**，只說等或換網路。
 2. **IPv6 按 `/64` 聚合**（IPv4 仍按確切位址）。理由：一般家用 IPv6 會拿到一整個 `/64`（甚至 `/56`），**換一個位址是零成本的** —— 按確切位址算等於在 IPv6 下沒有上限。實作是 `to_address_group`（`service/connections.rs`）。
 3. **沒有豁免**：loopback 與本機網段照樣**計入**。多一條豁免就多一條要驗的路徑。
    ⚠️ 別跟 2026-09-25 加的 `localhost_ip` 搞混：那條管的是**位址怎麼解析出來的**（本機 peer 可以指名 client），不是**誰不用算**。解析完之後每個位址一視同仁。
@@ -142,7 +142,7 @@ client 那邊「開幾條、哪條走什麼、pending → sending → sent」是
             名額不足（1008）、server 關機（1001）、發送佇列的對端死了。
 ```
 
-沿用 wire-format §6.3.3 的狀態機，只多「名額不足」一個出口。
+沿用 /docs/design/wire/wire-format.md §6.3.3 的狀態機，只多「名額不足」一個出口。
 
 ## 3. 一個 pack 的路：關卡順序
 
@@ -156,7 +156,7 @@ client 那邊「開幾條、哪條走什麼、pending → sending → sent」是
 | 4 | decode（版本、旗標、長度、兩個 CRC） | `Error(<PackError 對應碼>)`，`id`/`seq` 只在 DataCrc 錯時從 header 抄 | 到這裡才碰 bytes 內容 |
 | 5 | meta／data 不超過設定上限 | `Error(TooLarge)` | decode 之後才知道長度是真的 |
 | 6 | **這個 kind 在這個狀態、這個傳輸上准不准** | 匿名連線送非白名單 → `Error(Unauthorized)`；HTTP 送只准 WS 的 kind → `Error(Unsupported)`；沒人認得的 kind → `Error(UnknownKind)` | 一張表回答，不散在 handler 裡 |
-| 6.5 | **`id` 的型別是這個 `(kind, subtype)` 要的嗎**（[wbf-wire-format.md](wbf-wire-format.md) §2.2，PR #47） | 型別不符、表沒定義的 byte、以及「沒有會話卻帶值」→ `Error(InvalidRequest)` | 跟第 6 關同一張表的同一列（多一欄 `id_type`）：⭐ 兩張以同一個 key 索引的表遲早漂 |
+| 6.5 | **`id` 的型別是這個 `(kind, subtype)` 要的嗎**（[/docs/design/wire/wire-format.md](wire-format.md) §2.2，PR #47） | 型別不符、表沒定義的 byte、以及「沒有會話卻帶值」→ `Error(InvalidRequest)` | 跟第 6 關同一張表的同一列（多一欄 `id_type`）：⭐ 兩張以同一個 key 索引的表遲早漂 |
 | 7 | 派發到 handler（§4） | handler 的 `Reject` → `Error(code)` 同 `id`/`seq` | |
 | 8 | 回應進發送佇列；套用 handler 回的 `SessionChange` | `Close` → 送 Close 1000 結束 | 回應**先於** Close 入隊，client 一定先收到 Ack 再收到關線 |
 
@@ -226,7 +226,7 @@ impl Reply {
 1. **落地才 Ack**（§0-3）。`Chunk` 的 Ack 在 txn 執行後；`Send` 在事件 append 後；`Login` 在 token 寫入後。handler 裡先 `send` 再寫 DB 是 bug。
 2. **handler 不持連線狀態**。要記的東西進 DB 或進 service 層跨連線共用的記憶體（上傳的 `hot_upload`）；「這條連線上一個 pack 是什麼」不存在。
 3. **handler 不知道傳輸**。只有准入表（第 6 關）與 `Reply` 知道。一個 handler 若非得問 `transport`，先問是不是該改准入表。
-4. **meta 只在需要時 parse，data 不複製**（wire-format §5 的禁令）。`Batch` 的 data 用長度前綴而不是 JSON 陣列，就是為了 client 端這條。
+4. **meta 只在需要時 parse，data 不複製**（/docs/design/wire/wire-format.md §5 的禁令）。`Batch` 的 data 用長度前綴而不是 JSON 陣列，就是為了 client 端這條。
 5. **一條連線一次一個 handler**。不 spawn、不並行。慢的 handler（Seal、`Recent` 一萬條）就是會佔住那條連線；那正是 client 分連線的理由（§0-1）。
    將來若要讓 `Ping` 插隊，是改這條規則，不是某個 handler 偷 spawn。
 
@@ -272,7 +272,7 @@ client 送 `Recent { rooms?, limit, cg_seq, before?, batch? }`：
 
 server 在 `(cg_seq, before)` 之間從最新往舊，**只收這一窗**：收到 `wbf_window_max_bytes` 或 `limit` 條，**哪個先到停在哪**（bytes 先問，§6.3），然後每 `batch` 條送一個 `Batch`。
 📎 點名一個房間是**最便宜**的情況：`collect_window` 對每個房開一條倒序串流、用 heap 合併，所以一個房是 k 路合併退化成單路掃描（跟 `/messages` 同一個迭代器）。
-⚠️ **一窗結束講的是「本站這份副本沒有更舊的了」，不是「這個房間沒有更舊的了」** —— `Recent` 不會像 `/messages` 那樣去聯邦 backfill（[room-seq-and-recent.md](room-seq-and-recent.md) §2.1）。
+⚠️ **一窗結束講的是「本站這份副本沒有更舊的了」，不是「這個房間沒有更舊的了」** —— `Recent` 不會像 `/messages` 那樣去聯邦 backfill（[/docs/design/events/room-seq-and-recent.md](../events/room-seq-and-recent.md) §2.1）。
 下一窗由 client 帶 `before = 這窗最後一個 Batch 的 ls` 再叫一次 `Recent`；server 不記任何跨請求的狀態，`id` 由 client 決定要不要沿用。
 兩窗之間那條連線是空的，`Ping` 或別的請求可以插進去 —— 這是拉式視窗換來的，也是 §4.3-5「一次一個 handler」不會餓死別人的原因。
 
@@ -296,7 +296,7 @@ server 在 `(cg_seq, before)` 之間從最新往舊，**只收這一窗**：收�
 | `more` | **這一窗是被上限截斷的**（收滿 `limit` 條，或收滿 `wbf_window_max_bytes`），所以更舊的可能還有。`false` = 這窗是因為**沒有事件了**才停的（到了 `cg_seq` 或本站副本的最舊）。同一窗每個 Batch 都一樣。⚠️ client **沒看到這個欄位要當 `true`**（多問一次是一個來回，少問一次是漏事件）。📎 **`limit: 0` 是 `false`**：什麼都沒要，就沒有被截斷（PR #53 審查，rumia；原本回 `true`，會把 client 叫回來再要一次「什麼都不要」） |
 
 不變量：每個 Batch `tc = 已送 + bc + r`；最後一個 `r = 0`；**空窗**（`tc = 0`）送一個 `bc = 0, r = 0, fs = ls = 0` 的 Batch。
-事件 JSON 跟現在一樣（含 `room_id`，`unsigned` 帶 `org.wbftw.wbfuwunel.r_seq`／`g_seq`），見 room-seq-and-recent.md §2。
+事件 JSON 跟現在一樣（含 `room_id`，`unsigned` 帶 `org.wbftw.wbfuwunel.r_seq`／`g_seq`），見 /docs/design/events/room-seq-and-recent.md §2。
 一個 Batch 的 data 另受 `wbf_data_max_bytes` 限：放不下第 n 條就提早結束這個 Batch（`bc < batch`），那條進下一個；**單一事件比 pack 還大**照現在跳過並 `debug_warn!`，
 數的那趟也跳過它，`tc` 才對得上。
 
@@ -356,22 +356,22 @@ e2e 腳本要看 `Recent` 的結果就開 WS 收 Batch（e2e9 現在用 HTTP 打
 
 ## 7. HTTP → WS 的模子：搬一個端點的步驟
 
-> ⭐ **一般的 Matrix 端點不照這張表手搬了**：走橋（[wbf-api-bridge.md](wbf-api-bridge.md)），搬一個端點＝[bridge-specs/index.md](../bridge-specs/index.md) 加一列、`bridge.rs` 的表加一列、`KIND.md` 補範例、e2e 跟 HTTP 比一次；關卡（第 7 步）是 HTTP 那一道本身，不用另外寫。下面這張表留給**橋做不到的**：原生的 pack（串流、訂閱、推送、上傳）與改變連線身份的（`Login` 那一類）。
-wire-format §3.3 已經把 kind 按 Matrix 章節占好號。搬一個端點 = 填一次這張清單，**順序不變**：
+> ⭐ **一般的 Matrix 端點不照這張表手搬了**：走橋（[/docs/design/wire/api-bridge.md](api-bridge.md)），搬一個端點＝[/docs/bridge-specs/index.md](../../bridge-specs/index.md) 加一列、`bridge.rs` 的表加一列、`KIND.md` 補範例、e2e 跟 HTTP 比一次；關卡（第 7 步）是 HTTP 那一道本身，不用另外寫。下面這張表留給**橋做不到的**：原生的 pack（串流、訂閱、推送、上傳）與改變連線身份的（`Login` 那一類）。
+/docs/design/wire/wire-format.md §3.3 已經把 kind 按 Matrix 章節占好號。搬一個端點 = 填一次這張清單，**順序不變**：
 
 | 步 | 做什麼 | 落點 |
 |---|---|---|
-| 1 | 決定 subtype 號、回應形狀（一問一答／有序輸入／串流輸出）、HTTP 准不准、匿名准不准 | wire-format §3.2 加一列；本文 §3 的准入表加一列 |
+| 1 | 決定 subtype 號、回應形狀（一問一答／有序輸入／串流輸出）、HTTP 准不准、匿名准不准 | /docs/design/wire/wire-format.md §3.2 加一列；本文 §3 的准入表加一列 |
 | 2 | meta = 那個端點 ruma 的 request 型別 serde 成 JSON；回應 = ruma 的 response 型別；有 bytes 本體的（媒體）放 data | 不另造欄位。`Login` 就是這樣做的：`IncomingRequest::try_from_http_request` 重用 ruma 的解析 |
 | 3 | 把業務邏輯抽到 `service/`，HTTP route 與 pack handler **都呼叫它** | `users::login::issue_session` 是範本：HTTP `/login` 與 `Session/Login` 共用一份 |
 | 4 | handler 照 §4.1 簽名寫；`Reject` 對應 Matrix 錯碼（`M_LIMIT_EXCEEDED` → `RateLimited` 之類，`Reject::from(Error)` 那張表補齊） | `src/api/client/wbf/<kind>.rs`，一個 kind 一個檔 |
-| 5 | 向量：請求與回應各至少一個進 `wbf-vectors.json` | `core/wbf/vectors.rs` |
+| 5 | 向量：請求與回應各至少一個進 `/docs/design/wire/wbf-vectors.json` | `core/wbf/vectors.rs` |
 | 6 | e2e：HTTP 與 WS 各打一次同一個操作，結果一致；HTTP 不准的驗 `Unsupported` | `tests/e2e/` |
 | 7 | 限速、鎖定、暫停：HTTP 那邊有的關卡 WS **一條都不少**，寫在 service 層（`check_login_rate` 的位置）而不是 route 層，兩個入口才會一起有 | |
 
 **不搬的**：`/sync`（long-poll 的語意在 WS 上是 server 推，另一個提案）、媒體 `GET` 下載（已有 `Download`）。
 
-## 8. 第二部分：上傳生命週期（review-followups §2.2、§2.5、§2.8）
+## 8. 第二部分：上傳生命週期（/docs/design/history/review-followups-2026-09-06.md §2.2、§2.5、§2.8）
 
 同支、分開 commit。做法照 review-followups 那三節，這裡只記順序與跟管線的關係：
 
@@ -382,7 +382,7 @@ wire-format §3.3 已經把 kind 按 Matrix 章節占好號。搬一個端點 = 
 | 3 | §2.8 | sweeper 多掃「宣告在、進度不在、超過 TTL」的舊上傳 | 無。維護者已答（§0-13）：從未上線，這條是純防禦，做最小的那版、排最後 |
 
 ✅ **結果（PR #48，2026-09-13 合併）**：1、2 照做；📎 2 的實作跟這張表不同 —— 不是「本地夾 8 MiB」一條規則，而是 provider 回 `Option`（S3 給自己的 part 大小、至少 5 MiB；本地沒有意見、由上傳那側用 8 MiB），另加啟動檢查 `check_s3_part_size`。
-🚫 3 **不做**：維護者 2026-09-13 確認這個 fork 從未上線，§0-13 那個「純防禦」要防的資料狀態不存在（review-followups §2.8）。
+🚫 3 **不做**：維護者 2026-09-13 確認這個 fork 從未上線，§0-13 那個「純防禦」要防的資料狀態不存在（/docs/design/history/review-followups-2026-09-06.md §2.8）。
 
 ## 9. 版本與相容
 
@@ -394,7 +394,7 @@ wire-format §3.3 已經把 kind 按 Matrix 章節占好號。搬一個端點 = 
 | `Recent` 走 HTTP 由「回一頁」變 `Error(Unsupported)` | 只影響測試腳本 |
 | `Session/*` 走 HTTP 的錯碼由 `Conflict` 改 `Unsupported` | 錯碼改變；`Unsupported` 是新碼，語意「這個 kind 不走這個傳輸」 |
 
-新錯碼兩個：`Unsupported`、`TooManyConnections`（wire-format §3.2 Error 那列補）。
+新錯碼兩個：`Unsupported`、`TooManyConnections`（/docs/design/wire/wire-format.md §3.2 Error 那列補）。
 新 config 五個：`wbf_ws_max_connections_per_device`（4）、`wbf_ws_send_queue_len`（32）、`wbf_recent_default_limit`（320）、`wbf_recent_default_batch`（10）、`wbf_recent_max_batch`（100）。
 📎 之後加的：`wbf_ws_send_queue_bytes`（16 MiB，PR #50）；同一支把 `wbf_data_max_bytes` 從 16 MiB 降到 **2 MiB + 4096**、`media_chunk_size_max` 從 16 MiB 降到 **2 MiB**。
 既有 config 改預設一個：`wbf_recent_max_limit` 10000 → **500**（§0-11）。
@@ -420,7 +420,7 @@ wire-format §3.3 已經把 kind 按 Matrix 章節占好號。搬一個端點 = 
 - **順序**：同一連線送 `Recent` 緊接 `Ping`，Pong 在這窗最後一個 Batch **之後**（一次一個 handler）；兩窗之間送 `Ping` 立刻有 Pong。
 - **HTTP**：`Recent`、`Login` 打 `/pack` 都回 `Unsupported`。
 - **關機**：一條連線在收 Batch 中途 `!admin server shutdown`，client 收到的最後一個 frame 是 Close 1001，程序乾淨退出。
-- 第二部分照 review-followups §2.2／2.5／2.8 各自的驗收。
+- 第二部分照 /docs/design/history/review-followups-2026-09-06.md §2.2／2.5／2.8 各自的驗收。
 
 ## 11. 落點
 
@@ -431,9 +431,9 @@ wire-format §3.3 已經把 kind 按 Matrix 章節占好號。搬一個端點 = 
 | `PackContext`、`Reply`、`ReplySink`、准入表 `admission`、`Unsupported`／`TooManyConnections` | `src/api/client/wbf/mod.rs` |
 | `Batch` 編碼（`build_batches`，純函數）、`collect_window`、`batch` 欄 | `src/api/client/wbf/recent.rs` |
 | `admit` 閘門（`AdmitSession`、`admit_any`），`issue_session`／`refresh_session` 在寫 token 前問它 | `src/service/users/login.rs`；HTTP 呼叫點 `api/client/session/{mod,refresh}.rs` 傳 `admit_any` |
-| kind 表、Error 列、§5 改成「已實作」、§6.1 補名額 | `docs/design/wbf-wire-format.md` |
-| `Batch` 事件格式、水位規則 | `docs/design/room-seq-and-recent.md` §2 |
-| 向量 `recent_batch`、`batch_first`、`batch_last`、`error_unsupported`、`error_too_many_connections` | `src/core/wbf/vectors.rs`、`docs/design/wbf-vectors.json` |
+| kind 表、Error 列、§5 改成「已實作」、§6.1 補名額 | `/docs/design/wire/wire-format.md` |
+| `Batch` 事件格式、水位規則 | `/docs/design/events/room-seq-and-recent.md` §2 |
+| 向量 `recent_batch`、`batch_first`、`batch_last`、`error_unsupported`、`error_too_many_connections` | `src/core/wbf/vectors.rs`、`/docs/design/wire/wbf-vectors.json` |
 | 四個 config | `src/core/config/mod.rs`、`tuwunel-example.toml` |
 
 ## 12. 我不滿意或想再談的

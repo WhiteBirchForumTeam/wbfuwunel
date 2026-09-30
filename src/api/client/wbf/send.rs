@@ -5,11 +5,11 @@
 //! function serves both); the difference is where the declaration travels:
 //! here it is the `attachments` field of the meta, next to the room, type
 //! and transaction id, and the event content is the pack's data. See
-//! `docs/design/media-attachments.md` §3.
+//! `/docs/design/media/media-attachments.md` §3.
 //!
 //! An encrypted send may also carry the room device version the sender
 //! handed its room key out by, and is refused with `RoomDevicesChanged` when
-//! the room's has moved since (`docs/design/wbf-room-device-version.md` §7).
+//! the room's has moved since (`/docs/design/keys/room-device-version.md` §7).
 
 use ruma::{OwnedRoomId, OwnedTransactionId, events::MessageLikeEventType, serde::Raw};
 use serde::Deserialize;
@@ -102,7 +102,8 @@ fn room_devices_changed(room_device_version: u64) -> Reject {
 	)
 }
 
-/// §7.1: only an encrypted send is checked, and it is checked whenever it
+/// /docs/design/keys/room-device-version.md §7.1: only an encrypted send is checked, and it is
+/// checked whenever it
 /// carries a version; a connection that declared device versions must carry
 /// one, so leaving it out cannot skip the check.
 ///
@@ -138,7 +139,7 @@ mod tests {
 	/// vector must be the bytes this server sends.
 	#[test]
 	fn the_room_devices_changed_vector_is_what_the_server_builds() {
-		const VECTORS: &str = include_str!("../../../../docs/design/wbf-vectors.json");
+		const VECTORS: &str = include_str!("../../../../docs/design/wire/wbf-vectors.json");
 		let vectors: serde_json::Value = serde_json::from_str(VECTORS).expect("the vectors file is JSON");
 		let hex = vectors["packs"]
 			.as_array()

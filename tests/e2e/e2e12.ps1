@@ -43,7 +43,7 @@ function Call($ws, [byte[]]$pack) {
     if ($null -eq $p) { throw 'no reply within 10 s' }
     if ($p.closed) { throw "server closed the connection: $($p.code)" }
     # A Device/Push or Device/CryptoState may arrive first (a Subscribe is always followed by a CryptoState,
-    # wbf-e2ee.md 3.4); the caller wants the reply to its request.
+    # /docs/design/keys/e2ee-over-channel.md 3.4); the caller wants the reply to its request.
     if (-not ($p.kind -eq 0x16 -and ($p.subtype -eq 6 -or $p.subtype -eq 8))) { return $p }
   }
   throw 'only pushes, no reply'
@@ -107,7 +107,7 @@ Check '[1.2] Subscribe with the session device -> Ack latest_cd_seq' ($ok.subtyp
 
 # [1.3] a later connection of the same device takes the queue over, and the one it displaced is told.
 # Refusing the later one instead would mean a device whose last connection died silently cannot
-# subscribe until the idle timeout — and if that connection is wedged, not ever (wbf-to-device.md 4).
+# subscribe until the idle timeout — and if that connection is wedged, not ever (/docs/design/keys/to-device.md 4).
 $ws2 = Ws-Open $tokA
 $took = Call $ws2 (Json-Pack 0x16 4 (Conv 11) 0 @{ device_id = $devA } $null)
 Check '[1.3a] a later connection of the same device -> Ack, it takes the queue over' ($took.subtype -eq 2 -and $took.meta.latest_cd_seq -gt 0) (Describe $took)
@@ -219,7 +219,7 @@ $wsZ.Dispose()
 Stop-Server $server
 
 # ================= Scenario 3: Fetch without cd_seq, paging by destroying =================
-# ⭐ The rule 維護者 2026-09-26 定的 (issue #87, wbf-to-device.md §3.1.2): the correct call carries no
+# ⭐ The rule 維護者 2026-09-26 定的 (issue #87, /docs/design/keys/to-device.md §3.1.2): the correct call carries no
 # cd_seq, and it means "from the oldest item that has not been destroyed". The queue head is the
 # waterline; the client stores no number. Paging is: destroy the window, then ask again.
 #

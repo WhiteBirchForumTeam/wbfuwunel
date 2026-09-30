@@ -1,5 +1,5 @@
 . (Join-Path $PSScriptRoot 'wbf-helpers.ps1')
-# The two WebSocket connection limits (docs/design/wbf-pack-pipeline.md §2.1 and §2.2): the per-device one, which
+# The two WebSocket connection limits (/docs/design/wire/pack-pipeline.md §2.1 and §2.2): the per-device one, which
 # needs an identity and therefore cannot see a connection that has not logged in, and the per-address one, which is
 # checked before the token is read and is the only gate an anonymous connection ever meets.
 #

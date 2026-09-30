@@ -1,5 +1,5 @@
 # Chunked upload and download over HTTP (POST /_wbf/v1/pack): create, ordered chunks, resume, seal, truncation,
-# streaming mode, reads by chunk and by plaintext position, abort and sweeper. Design: docs/design/chunked-upload-spec.md.
+# streaming mode, reads by chunk and by plaintext position, abort and sweeper. Design: /docs/design/media/chunked-upload-spec.md.
 # Older style: every line is logged with its expectation in parentheses; read results.txt, there is no pass/fail summary.
 $ErrorActionPreference = 'Continue'
 # Everything a run writes goes under target/, never next to the scripts.

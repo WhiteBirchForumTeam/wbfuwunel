@@ -7,7 +7,7 @@
 //! watermark a client keeps to ask "everything newer than this" across all
 //! its rooms. Neither is contiguous for a reader (other rooms, invisible
 //! events); `r_seq` is contiguous within a room. See
-//! `docs/design/room-seq-and-recent.md`.
+//! `/docs/design/events/room-seq-and-recent.md`.
 //!
 //! Both live in the stored JSON, so every path that serves the stored event
 //! carries them without knowing about them. The things that rewrite that

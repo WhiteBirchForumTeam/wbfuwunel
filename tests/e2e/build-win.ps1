@@ -1,4 +1,4 @@
-# Windows e2e-profile build: MSVC environment, then cargo with the Windows feature set (docs/design/windows-build.md).
+# Windows e2e-profile build: MSVC environment, then cargo with the Windows feature set (/docs/design/build/windows-build.md).
 $ErrorActionPreference = 'Continue'
 $vcvars = 'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat'
 cmd /c "call ""$vcvars"" >nul && set" | ForEach-Object {

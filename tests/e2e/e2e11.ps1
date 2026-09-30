@@ -8,7 +8,7 @@ function Check([string]$name, [bool]$ok, [string]$detail) {
 }
 function Write-Config11([string]$db, [int]$queueLen = 32, [int]$draftMaxMembers = 0) {
   $cfg = "$S\e2e11.toml"
-  # ⚠️ A to-device window must fit in the send queue (wbf-to-device.md 7, asserted at startup), so
+  # ⚠️ A to-device window must fit in the send queue (/docs/design/keys/to-device.md 7, asserted at startup), so
   # shrinking the queue for the backpressure scenario shrinks the window with it: a queue of four
   # packs takes four packs of a hundred. Without this the server refuses to start, correctly.
   $deviceLimit = $queueLen * 100
@@ -123,7 +123,7 @@ function Stream-Pack([byte]$subtype, [string]$room, [uint64]$draftId, [uint32]$s
 }
 function Draft-Pack([string]$room, [uint32]$seq) { Stream-Pack 0x01 $room 0 $seq $null }
 # A piece (Keypoint/Delta/Append): its data starts with the seq it follows, big-endian
-# (streaming-messages.md 3.0). Keypoint's prev is 0 — it replaces the whole buffer.
+# (/docs/design/events/streaming-messages.md 3.0). Keypoint's prev is 0 — it replaces the whole buffer.
 function Piece-Pack([byte]$subtype, [string]$room, [uint64]$draftId, [uint32]$seq, [uint32]$prev, [byte[]]$payload) {
   if ($null -eq $payload) { $payload = @() }
   Stream-Pack $subtype $room $draftId $seq ([byte[]]((BE32 $prev) + $payload))
@@ -343,7 +343,7 @@ Check '[3.3] eight frames that do not decode -> Corrupt each, then the server cl
 $wsH.Dispose()
 Stop-Server $server
 
-# ================= Scenario 4: drafts (streaming-messages.md, 0x02 Stream) =================
+# ================= Scenario 4: drafts (/docs/design/events/streaming-messages.md, 0x02 Stream) =================
 Log '################ Scenario 4: drafts over the channel ################'
 $db4 = "$S\e2e11db-4"; Remove-Item -Recurse -Force $db4 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db4 | Out-Null
 # The member cap is set to 2 rather than filling a room with eleven accounts: the rule is

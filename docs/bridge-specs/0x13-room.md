@@ -103,7 +103,7 @@ data  {"errcode":"M_FORBIDDEN","error":"Auth check failed: sender does not have 
 | 請求 data | 空 |
 | 回覆 data | `{"chunk":[{"type":"m.room.member","state_key":"@alice:localhost","content":{"membership":"join","displayname":"Alice"},"unsigned":{"org.wbftw.device_version":"3-810b7c3be4",…},…},…],"org.wbftw.room_version":81234}` |
 
-- **兩個 Matrix 沒有的欄位**（[wbf-room-device-version.md](../design/wbf-room-device-version.md) §5）：已加入的成員（`membership` 是 `join`）的 `unsigned["org.wbftw.device_version"]` 是他的裝置版本號；最外層的 `org.wbftw.room_version` 是房間版本號，跟清單是同一次讀到的房間狀態算的。不認得的 client 照 Matrix 的規則略過它們；HTTP 的回應一樣帶。
+- **兩個 Matrix 沒有的欄位**（[/docs/design/keys/room-device-version.md](../design/keys/room-device-version.md) §5）：已加入的成員（`membership` 是 `join`）的 `unsigned["org.wbftw.device_version"]` 是他的裝置版本號；最外層的 `org.wbftw.room_version` 是房間版本號，跟清單是同一次讀到的房間狀態算的。不認得的 client 照 Matrix 的規則略過它們；HTTP 的回應一樣帶。
 - 🚫 **沒有 `at`**：上游忽略它（`// TODO`），帶了也拿不到「某個時間點的名單」，所以橋的表不收；帶了是橋自己的 `InvalidRequest`，不會默默忽略。
 
 **會怎麼被拒**：不在房裡、也看不到歷史 → `Forbidden`（403）；帶 `at` → `InvalidRequest`（1201，橋自己擋的，不會呼叫端點）。
@@ -181,7 +181,7 @@ data  {"errcode":"M_FORBIDDEN","error":"Auth check failed: sender does not have 
 | 回覆 data | `{"joined":{"@alice:localhost":{"display_name":"Alice","avatar_url":"mxc://…"}}}` |
 
 📎 跟 `0x29` Members 的差別：Members 回的是**成員事件**（含離開、被邀請的），這支只回**已加入的人**與他們的顯示名、頭像，輕很多。
-⚠️ 這支**沒有**房間版本號（那是 `0x29` Members 專有的，見 [wbf-room-device-version.md](../design/wbf-room-device-version.md) §5.2）。要送加密訊息前比對的 client 要打 Members，不是這支。
+⚠️ 這支**沒有**房間版本號（那是 `0x29` Members 專有的，見 [/docs/design/keys/room-device-version.md](../design/keys/room-device-version.md) §5.2）。要送加密訊息前比對的 client 要打 Members，不是這支。
 **會怎麼被拒**：自己不在房裡 → `Forbidden`（403）。
 
 ## `0x30` GetVisibility / `0x31` SetVisibility —— 房間在不在公開目錄上（批 3）
@@ -211,7 +211,7 @@ data  {"errcode":"M_FORBIDDEN","error":"Auth check failed: sender does not have 
 📎 `membership` 只有帶 token 問的時候才有，匿名問就沒有這個欄位。
 
 📎 **沒加入也看得到**（端點是 `AccessTokenOptional`）：這支就是給「點到一個連結，要不要進去」那一步用的。
-⚠️ 橋上**只有這條穩定路徑**。MSC 還沒定案時的舊 URL（`/_matrix/client/unstable/im.nheko.summary/…`）在 HTTP 上照舊在，但不另給 subtype 號（橋的設計 §3 批 3-B 第 2 點，維護者 2026-09-20 定）。
+⚠️ 橋上**只有這條穩定路徑**。MSC 還沒定案時的舊 URL（`/_matrix/client/unstable/im.nheko.summary/…`）在 HTTP 上照舊在，但不另給 subtype 號（/docs/design/wire/api-bridge.md §3 批 3-B 第 2 點，維護者 2026-09-20 定）。
 
 ## `0x33` Hierarchy —— space 底下的房間樹（批 3）
 

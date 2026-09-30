@@ -15,7 +15,7 @@
 | 請求 data | `{"search_categories":{"room_events":{"search_term":"下週","keys":["content.body"],"order_by":"recent","filter":{"limit":20}}}}` |
 | 回覆 data | `{"search_categories":{"room_events":{"count":3,"results":[{"rank":0.8,"result":{…事件…}}],"highlights":["下週"],"next_batch":"…"}}}` |
 
-🚨 **加密房間搜不到內容**：server 看到的是密文，`content.body` 不存在。這不是 bug，是 E2EE 的定義（核心設計 §5.5「明確不做 server 端內容過濾」是同一件事）。**搜尋只在明文房間有用**，client 的 UI 要講清楚，不要讓使用者以為「搜不到 = 沒有」。
+🚨 **加密房間搜不到內容**：server 看到的是密文，`content.body` 不存在。這不是 bug，是 E2EE 的定義（/docs/design/overview/why-not-matrix-and-core-design.md §5.5「明確不做 server 端內容過濾」是同一件事）。**搜尋只在明文房間有用**，client 的 UI 要講清楚，不要讓使用者以為「搜不到 = 沒有」。
 📎 `next_batch` 在**請求是 query 變數、在回覆是 body 的欄位** —— 同一個名字兩個位置，翻頁時要從回覆的 body 拿出來、放進下一次請求的 meta。
 
 ## `0x21` SearchUsers —— 找人（使用者目錄）

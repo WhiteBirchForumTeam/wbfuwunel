@@ -115,3 +115,6 @@ tests/playwright/output.log
 # Editor crashfiles
 *.save
 *.swp
+
+# Claude 的暫存腳本，不進 repo
+/scratchpad/

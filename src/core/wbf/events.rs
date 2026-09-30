@@ -1,6 +1,6 @@
 //! The data layout shared by every pack that carries events: `Event/Batch`
 //! (a `Recent` window) and `Event/Push` (a subscription), see
-//! `docs/design/room-seq-and-recent.md` §2.1 and `docs/design/wbf-event-push.md`
+//! `/docs/design/events/room-seq-and-recent.md` §2.1 and `/docs/design/events/event-push.md`
 //! §2. Each event is a big-endian u32 length followed by its JSON bytes, so a
 //! receiver slices by length and never scans for separators.
 

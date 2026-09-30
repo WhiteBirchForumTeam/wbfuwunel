@@ -226,7 +226,7 @@ pub(super) static MAPS: &[Descriptor] = &[
 		name: "mediaid_user",
 		..descriptor::RANDOM_SMALL
 	},
-	// Media holders (docs/design/media-holders.md): `mxc ‖ kind ‖ id -> ()`,
+	// Media holders (/docs/design/media/media-holders.md): `mxc ‖ kind ‖ id -> ()`,
 	// one row per thing that keeps the media alive. An empty prefix is media
 	// nothing holds. Set semantics, so adding or removing twice is a no-op.
 	Descriptor {
@@ -764,7 +764,7 @@ pub(super) static MAPS: &[Descriptor] = &[
 		..descriptor::RANDOM_SMALL
 	},
 	// Not the one above (federation's device-list stream id): the wbf device
-	// version, `user → {seq, hash, pos}` (docs/design/wbf-room-device-version.md §3).
+	// version, `user → {seq, hash, pos}` (/docs/design/keys/room-device-version.md §3).
 	Descriptor {
 		name: "userid_wbfdeviceversion",
 		..descriptor::RANDOM_SMALL

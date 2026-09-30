@@ -1,6 +1,6 @@
 //! Streams: what a wbf WebSocket connection is subscribed to, and the push
-//! of new things to it (`docs/design/wbf-event-push.md`,
-//! `docs/design/wbf-to-device.md`).
+//! of new things to it (`/docs/design/events/event-push.md`,
+//! `/docs/design/keys/to-device.md`).
 //!
 //! A connection carries **several subscriptions at once** — the room channels
 //! today, its to-device queue next, more later — and the client is not
@@ -239,7 +239,7 @@ pub struct Streams {
 	/// The to-device queues (`0x16 Device`), at most one connection each.
 	devices: Subscribers<DeviceTopic>,
 	/// The connections whose last `Hello` declared `DEVICE_VERSIONS_FEATURE`
-	/// (docs/design/wbf-room-device-version.md §6.2, §7.1).
+	/// (/docs/design/keys/room-device-version.md §6.2, §7.1).
 	device_versions_declared: StdRwLock<HashSet<ConnectionId>>,
 }
 

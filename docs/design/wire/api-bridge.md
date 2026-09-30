@@ -2,7 +2,7 @@
 
 > **這份文件回答：怎麼把大部分常用的 Matrix client API 改成 WebSocket pack，搬的順序是什麼，每一支要花多少。**
 > 狀態：✅ 維護者同意（PR #55）；橋的層與批 1 的 37 支 PR #56、批 2（註冊＋UIAA，8 支）PR #62＋#63、批 3（20 支＋新 kind `0x1D Report` ＋ `features`）PR #76＋#77，**都已合併**（總表 86 列）。**批 4（21 支＋四個新 kind）2026-09-21 提案中**（§3 批 4，一條待決定在 §5）。維護者 2026-09-14：「把大部分常用的 api 接口改成 web socket pack 的模式 —— account 註冊、登入、登出、session 相關、room 相關、device，看能做多少、多快；行數少就多做一點，難度高就少做一點，慢慢移植。」
-> 上位文件：[wbf-pack-pipeline.md](wbf-pack-pipeline.md) §7（搬一個端點的七步）、[wbf-wire-format.md](wbf-wire-format.md) §3.3（kind 分配表）。
+> 上位文件：[/docs/design/wire/pack-pipeline.md](pack-pipeline.md) §7（搬一個端點的七步）、[/docs/design/wire/wire-format.md](wire-format.md) §3.3（kind 分配表）。
 
 ## 0. 一句話
 
@@ -11,7 +11,7 @@
 
 ## 1. 為什麼不照 `Login` 那樣手搬
 
-pipeline §7 的第 3 步是「把業務邏輯抽到 `service/`，HTTP 與 pack handler 都呼叫它」，`Login` 就是這樣做的（`issue_session`）。這一輪盤點下來，**大部分常用端點不需要這一步**，而且照這樣手搬反而會出事：
+/docs/design/wire/pack-pipeline.md §7 的第 3 步是「把業務邏輯抽到 `service/`，HTTP 與 pack handler 都呼叫它」，`Login` 就是這樣做的（`issue_session`）。這一輪盤點下來，**大部分常用端點不需要這一步**，而且照這樣手搬反而會出事：
 
 ### 1.1 route 函式本來就很薄
 
@@ -38,7 +38,7 @@ HTTP 請求進 route 之前，`router/auth.rs` 會依 **route 的型別**（`Typ
 | 可選認證 | `require_auth_for_profile_requests`、公開房間目錄 |
 | UIAA | 註冊、停用帳號、改密碼、刪裝置要走互動式認證 |
 
-手搬一支，就要記得把這幾條**再寫一次**；搬三十幾支就是三十幾份。漏掉的那一支不會 fail closed —— 例如被暫停的帳號在 WS 上照樣能 `createRoom`。這正是 [room-seq-and-recent.md](room-seq-and-recent.md) §2 剛修掉的那種洞：`Event/Recent` 只抄了 `/messages` 三道關卡裡的兩道（PR #54）。
+手搬一支，就要記得把這幾條**再寫一次**；搬三十幾支就是三十幾份。漏掉的那一支不會 fail closed —— 例如被暫停的帳號在 WS 上照樣能 `createRoom`。這正是 [/docs/design/events/room-seq-and-recent.md](../events/room-seq-and-recent.md) §2 剛修掉的那種洞：`Event/Recent` 只抄了 `/messages` 三道關卡裡的兩道（PR #54）。
 
 ⭐ 橋的做法是**不抄關卡，走同一條路**：請求經過的就是 HTTP 進來時的那個 Router 與 `Args::from_request`，上游之後在 `auth.rs` 加的政策，WS 自動有。
 
@@ -57,7 +57,7 @@ HTTP 請求進 route 之前，`router/auth.rs` 會依 **route 的型別**（`Typ
 ```
 
 - **兩張表，各自一份**：橋的分配表（kind／subtype → Matrix 端點）、原生的准入表（`wbf/mod.rs` 的 `admission`，已經存在）。📌 一個 (kind, subtype) 只會出現在其中一張（§2.3），這條要有一個單元測試守著：兩張表的鍵沒有交集。
-- **原路返回不用新寫**：現在的 `Reply` 本來就分兩種出口（WebSocket 的佇列、HTTP 的單一回應），handler 只管 `reply.send(pack)`，不知道自己在哪條路上（pipeline §4.2）。橋照這個契約寫就自動原路返回。
+- **原路返回不用新寫**：現在的 `Reply` 本來就分兩種出口（WebSocket 的佇列、HTTP 的單一回應），handler 只管 `reply.send(pack)`，不知道自己在哪條路上（/docs/design/wire/pack-pipeline.md §4.2）。橋照這個契約寫就自動原路返回。
 - **HTTP pack 的認證在傳輸層**：`pack_route` 先用 HTTP 的 `Authorization: Bearer` 認出 session 才解 pack，所以 HTTP pack 上沒有匿名；WebSocket 則是連線的 session（可能還沒登入）。橋拿到的就是這一個 session 的 token，兩條路一樣。
 
 ### 2.1 一個 pack 的路：組成一個內部的 HTTP request，丟進 Router，不走網路
@@ -98,7 +98,7 @@ pack（kind＝領域、subtype＝操作；meta＝變數；data＝body 的 bytes�
 
 ### 2.2 pack 的三段對到 HTTP 的哪三段（維護者 2026-09-14 定）
 
-[wbf-wire-format.md](wbf-wire-format.md) §2 已經定死一個 pack 長什麼樣：header、meta、data。橋要定的只是**這三段對到 HTTP 的哪裡**：
+[/docs/design/wire/wire-format.md](wire-format.md) §2 已經定死一個 pack 長什麼樣：header、meta、data。橋要定的只是**這三段對到 HTTP 的哪裡**：
 
 | pack | HTTP | 誰決定 |
 |---|---|---|
@@ -135,7 +135,7 @@ data = {"topic":"大家好"} 的 bytes
 
 - 表比較短，而且 method 與 URL 模板**直接取自 ruma 的型別**（`Req::METHOD`、`Req::PATH_BUILDER`）—— 上游改路徑或改名字，建置就會壞。
 - 更窄的別名（「設 topic」這種）以後真的常用再加，不要一開始就讓同一個端點有兩個入口。
-- 📎 **變數的名字就用 ruma 模板裡的名字**（`room_id`、`event_type`、`state_key`），不另取一套 —— 另取一套就是第二份會漂移的對照表。每一列的變數名寫進 wire-format §3.2。
+- 📎 **變數的名字就用 ruma 模板裡的名字**（`room_id`、`event_type`、`state_key`），不另取一套 —— 另取一套就是第二份會漂移的對照表。每一列的變數名寫進 /docs/design/wire/wire-format.md §3.2。
 
 ### 2.3 旗標 bit4 `IS_BRIDGED`：這個 pack 是不是走橋（維護者 2026-09-14 定）
 
@@ -171,11 +171,11 @@ bit4 分流之後：
 
 為什麼兩邊都要擋：這個旗標是 **client 說它在跟哪一個東西講話**。寬容地「猜它的意思」會讓同一個號碼在不同版本的 server 上跑到不同的地方，而那種錯誤不會報錯，只會做錯事。
 
-⭐ **副作用是免費的向下相容保護**：`Flags::KNOWN` 從 `0b0000_1111` 擴成 `0b0001_1111`，而舊規則是「**保留位元非 0 就拒收**」（wire-format §2）—— 所以一個會說橋的 client 碰到**舊版 server** 時，拿到的是 `Corrupt`（1002）而不是一個被當成別的意思執行的請求。這正是 fail closed 要的形狀。
+⭐ **副作用是免費的向下相容保護**：`Flags::KNOWN` 從 `0b0000_1111` 擴成 `0b0001_1111`，而舊規則是「**保留位元非 0 就拒收**」（/docs/design/wire/wire-format.md §2）—— 所以一個會說橋的 client 碰到**舊版 server** 時，拿到的是 `Corrupt`（1002）而不是一個被當成別的意思執行的請求。這正是 fail closed 要的形狀。
 
 📌 **回應也帶 bit4**：橋的 `Ack` 跟一般的 `Ack` **形狀不同**（meta 是狀態碼與 header、data 是 body 的 bytes，§2.2），所以回應把 bit4 抄回去，client 不必靠「我記得我剛才發的是橋請求」來解讀。
 
-⚠️ 要改的地方：`core/wbf/pack.rs` 的 `Flags`（新常數、`KNOWN`、`is_bridged()`）、wire-format §2 那張欄位表與「其餘保留」那句、§3.4 的 `Unsupported` 那列要講到這兩種情形，以及向量（一個橋請求、一個橋回應）。
+⚠️ 要改的地方：`core/wbf/pack.rs` 的 `Flags`（新常數、`KNOWN`、`is_bridged()`）、/docs/design/wire/wire-format.md §2 那張欄位表與「其餘保留」那句、§3.4 的 `Unsupported` 那列要講到這兩種情形，以及向量（一個橋請求、一個橋回應）。
 
 ### 2.4 錯誤：現在的對應表會把大部分 Matrix 錯誤變成 `Internal`
 
@@ -183,16 +183,16 @@ bit4 分流之後：
 
 要補的：
 1. 狀態碼對應補齊：401 → `Unauthorized`、403 → `Forbidden`、429 → `RateLimited`（帶 `retry_after_ms`）。
-2. ✅ `Error` 的 meta **多帶 Matrix 的 `errcode`**（維護者 2026-09-14 同意，放在 meta；例如 `M_ROOM_IN_USE`、`M_USER_SUSPENDED`）。wire 的 `code` 是這條通道的詞表、分類得很粗；client 要顯示「房間別名已被使用」這種訊息，需要 Matrix 的那一個。📎 這是 wire-format §3.4 的增補，要寫進那張表。
+2. ✅ `Error` 的 meta **多帶 Matrix 的 `errcode`**（維護者 2026-09-14 同意，放在 meta；例如 `M_ROOM_IN_USE`、`M_USER_SUSPENDED`）。wire 的 `code` 是這條通道的詞表、分類得很粗；client 要顯示「房間別名已被使用」這種訊息，需要 Matrix 的那一個。📎 這是 /docs/design/wire/wire-format.md §3.4 的增補，要寫進那張表。
 3. UIAA 的 401 帶 `flows`／`session`／`completed`：那是批 3 的事（§3）。
 
 ### 2.5 走 WS 還是走 HTTP pack：橋不管（維護者 2026-09-14 定）
 
 pack 可以從兩條路進來：WebSocket，或 `POST /_wbf/v1/pack`。**兩條路傳的都是 pack，而 pack 走不走橋只看 bit4**（§2.3）—— 橋本身不看傳輸層，也不為任何一邊開例外。
 
-📎 HTTP pack 包一個 Matrix 端點看起來多此一舉（直接打那個 HTTP 端點就好），實際上兩者差不多；它的價值是 debug 與 fallback（pipeline §0-12），不必為了它擋掉什麼。
+📎 HTTP pack 包一個 Matrix 端點看起來多此一舉（直接打那個 HTTP 端點就好），實際上兩者差不多；它的價值是 debug 與 fallback（/docs/design/wire/pack-pipeline.md §0-12），不必為了它擋掉什麼。
 
-⚠️ 那「HTTP 不可」的規則還在不在：**在，但它屬於原生 handler，不屬於橋**。准入表（pipeline §3）本來就依 kind 決定哪些 HTTP 不准 —— `Recent` 串流、`Stream` 草稿、會改變連線身份的 `Login`／`Refresh`／`Logout`，以及之後手寫的 `Register`（批 2）。這些都不在分配表裡，所以 bit4 帶不進去，照舊由准入表擋。
+⚠️ 那「HTTP 不可」的規則還在不在：**在，但它屬於原生 handler，不屬於橋**。准入表（/docs/design/wire/pack-pipeline.md §3）本來就依 kind 決定哪些 HTTP 不准 —— `Recent` 串流、`Stream` 草稿、會改變連線身份的 `Login`／`Refresh`／`Logout`，以及之後手寫的 `Register`（批 2）。這些都不在分配表裡，所以 bit4 帶不進去，照舊由准入表擋。
 
 ## 3. 分批
 
@@ -226,7 +226,7 @@ pack 可以從兩條路進來：WebSocket，或 `POST /_wbf/v1/pack`。**兩條�
 
 約 35 支。估計：橋本身（Router、分配表、錯誤對應、回應轉換）加測試幾百行；之後每支幾行加一個向量、一個 e2e 檢查。
 
-⚠️ **批 1 的 e2e 規矩**：每支都要**原本的 Matrix HTTP 端點打一次、橋打一次、結果一致**（pipeline §7 第 6 步）。另外**關卡要有反向檢查**，不能只驗正常路徑：被暫停的帳號在 WS 上 `createRoom` 被拒、被鎖的帳號被拒 —— 這幾條就是這座橋存在的理由，沒有測到等於沒有。
+⚠️ **批 1 的 e2e 規矩**：每支都要**原本的 Matrix HTTP 端點打一次、橋打一次、結果一致**（/docs/design/wire/pack-pipeline.md §7 第 6 步）。另外**關卡要有反向檢查**，不能只驗正常路徑：被暫停的帳號在 WS 上 `createRoom` 被拒、被鎖的帳號被拒 —— 這幾條就是這座橋存在的理由，沒有測到等於沒有。
 
 ### 批 2：註冊 ＋ 要 UIAA 的（✅ 維護者 2026-09-15 同意，五條決定都照建議）
 
@@ -312,7 +312,7 @@ client                                          server
 ### 批 3：房間其餘、關聯與討論串、在線狀態／filter／capabilities、檢舉（20 支，✅ PR #77，2026-09-21 合併）
 
 維護者 2026-09-20 從候選清單裡挑的範圍：**C（房間其餘）＋ D（關聯與討論串）＋ E（在線狀態／filter／capabilities）**，共 20 支，並指定順便補齊 `Hello` 的 `features`（3-C）。
-17 支落在**分配表（[wbf-wire-format.md](wbf-wire-format.md) §3.3）已經給過號的 kind** 裡，**唯一的新 kind 是 `0x1D Report`**（維護者 2026-09-20 決定：三支檢舉放一起，決定 1）—— 除此之外不需要新的 wire 格式，每一支就是總表一列、`BRIDGED_ENDPOINTS` 一列、範例檔一段、e2e 跟 HTTP 比一次。
+17 支落在**分配表（[/docs/design/wire/wire-format.md](wire-format.md) §3.3）已經給過號的 kind** 裡，**唯一的新 kind 是 `0x1D Report`**（維護者 2026-09-20 決定：三支檢舉放一起，決定 1）—— 除此之外不需要新的 wire 格式，每一支就是總表一列、`BRIDGED_ENDPOINTS` 一列、範例檔一段、e2e 跟 HTTP 比一次。
 ⚠️ **每一支的 kind 照 §3.3 的分配表走，不是挑一個看起來像的**：presence 在 `0x15 Receipt`、filter 在 `0x12 Sync`、capabilities 在 `0x1C Misc`（這三支提案初稿曾經整堆塞進 `0x11 Account`，跟分配表不合，已改）。`0x12` 與 `0x1C` 這一批是**第一次被用到**，號碼本來就在表上。
 🔲 **不在這一批**：推播與通知 12 支（要開新 kind `0x18`）、目錄與搜尋 4 支（要先決定算哪個 kind）—— 留在下面的候選清單等維護者再挑。
 
@@ -340,14 +340,14 @@ client                                          server
 | `0x28` | RelationsByRelTypeAndEventType | `GET /_matrix/client/v1/rooms/{room_id}/relations/{event_id}/{rel_type}/{event_type}` | 再加 `event_type` | 同上 |
 | `0x29` | Threads | `GET /_matrix/client/v1/rooms/{room_id}/threads` | `room_id` | `from`、`include`、`limit` |
 
-`0x15 Receipt` 從 `0x22 Receipt` 之後續號（分配表 §3.3：presence 屬這一類）：
+`0x15 Receipt` 從 `0x22 Receipt` 之後續號（/docs/design/wire/wire-format.md §3.3：presence 屬這一類）：
 
 | subtype | 名稱 | 端點 | path 變數 | query 變數 |
 |---|---|---|---|---|
 | `0x23` | GetPresence | `GET /presence/{user_id}/status` | `user_id` | — |
 | `0x24` | SetPresence | `PUT /presence/{user_id}/status` | `user_id` | — |
 
-**`0x12 Sync`（這一批第一次用到）** —— 分配表 §3.3 把 filter 歸在這裡（跟 `/sync` 同一章）；`/sync` 本身不搬（見「不搬」那張表），但 filter 是獨立的端點：
+**`0x12 Sync`（這一批第一次用到）** —— /docs/design/wire/wire-format.md §3.3 把 filter 歸在這裡（跟 `/sync` 同一章）；`/sync` 本身不搬（見「不搬」那張表），但 filter 是獨立的端點：
 
 | subtype | 名稱 | 端點 | path 變數 | query 變數 |
 |---|---|---|---|---|
@@ -368,10 +368,10 @@ client                                          server
 | `0x21` | ReportRoom | `POST /rooms/{room_id}/report` | `room_id` | — |
 | `0x22` | ReportUser | `POST /users/{user_id}/report` | `user_id` | — |
 
-📌 **號碼取 `0x1D` 的理由**：分配表（[wbf-wire-format.md](wbf-wire-format.md) §3.3）本來把 `report` 塞在 `0x1C Misc`，那是**只有一支**（檢舉事件）的年代；`0x1D`–`0x1F` 保留給「Matrix 尚未引進的章節」，而檢舉正好就是後來才長成獨立主題的 —— 檢舉房間 MSC4151 進規格 1.13、檢舉使用者 MSC4260 進 1.14。所以這一批要同時：
+📌 **號碼取 `0x1D` 的理由**：分配表（[/docs/design/wire/wire-format.md](wire-format.md) §3.3）本來把 `report` 塞在 `0x1C Misc`，那是**只有一支**（檢舉事件）的年代；`0x1D`–`0x1F` 保留給「Matrix 尚未引進的章節」，而檢舉正好就是後來才長成獨立主題的 —— 檢舉房間 MSC4151 進規格 1.13、檢舉使用者 MSC4260 進 1.14。所以這一批要同時：
 - 在 §3.3 加一列 `0x1D Report`，並把 `report` 從 `0x1C Misc` 那列拿掉（**同一件事只留一份**，兩份表遲早漂移）。這兩改已經在這份提案裡做了。
 - `src/core/wbf/pack.rs` 的 `Kind` 枚舉加 `Report = 0x1D`，並把 `Misc` 那一行注解裡的 `reports` 拿掉。
-- 新增三個範例檔：[../bridge-specs/0x1D-report.md](../bridge-specs/0x1D-report.md)、`0x12-sync.md`、`0x1C-misc.md`（後兩個 kind 這一批第一次被用到），總表 `index.md` 的目錄也要指過去。
+- 新增三個範例檔：[/docs/bridge-specs/0x1D-report.md](../../bridge-specs/0x1D-report.md)、`0x12-sync.md`、`0x1C-misc.md`（後兩個 kind 這一批第一次被用到），總表 `index.md` 的目錄也要指過去。
 📎 subtype 照規格裡出現的順序排：事件（1.0 就有）、房間（1.13）、使用者（1.14）。
 
 #### 3-B. 三件先查清楚的事（都已對著 pin 住的 ruma 查過）
@@ -406,12 +406,12 @@ client                                          server
 
 維護者 2026-09-21：**🔴 與 🟡 都做**。起因是清點「常用的基礎還缺什麼」—— 拿 `src/api/router.rs` 註冊的 **177 個 client 端點**逐一對橋的 86 列，剩下的裡面只有兩塊是使用者會直接感覺到的（推播設定、找人找房找訊息），其餘是既有領域裡的小洞與明確不搬的那些。
 
-⭐ **這一批沒有要維護者決定的 kind 歸屬**：每一支的 kind 都直接來自分配表（[wbf-wire-format.md](wbf-wire-format.md) §3.3），號碼早就留好了。批 3 的教訓是「挑一個看起來像的」會挑錯，所以這裡一律照表。
+⭐ **這一批沒有要維護者決定的 kind 歸屬**：每一支的 kind 都直接來自分配表（[/docs/design/wire/wire-format.md](wire-format.md) §3.3），號碼早就留好了。批 3 的教訓是「挑一個看起來像的」會挑錯，所以這裡一律照表。
 開四個新 kind：`0x18 Push`、`0x19 Media`、`0x1A Search`、`0x1B Voip`。四個都**沒有原生 subtype**，所以不帶 bit4 一律 `UnknownKind`，跟 `0x1D Report` 同一條路，不是新規則。
 
 #### 4-A. 推播與通知：新 kind `0x18 Push`（12 支）
 
-分配表 §3.3：`0x18 Push` ＝ pushers、push rules、notifications（`push/`）。
+/docs/design/wire/wire-format.md §3.3：`0x18 Push` ＝ pushers、push rules、notifications（`push/`）。
 
 | subtype | 名稱 | 端點 | path 變數 | query 變數 |
 |---|---|---|---|---|
@@ -433,7 +433,7 @@ client                                          server
 
 #### 4-B. 目錄與搜尋：`0x13 Room` 續號 ＋ 新 kind `0x1A Search`（4 支）
 
-分配表 §3.3 已經回答了批 3 留下的那個問題：**Room 那一列本來就含 `directory`**，而 **`0x1A Search` ＝ search、user directory**。所以不必另開 `0x19 Directory`（`0x19` 是 Media，早就分配掉了）。
+/docs/design/wire/wire-format.md §3.3 已經回答了批 3 留下的那個問題：**Room 那一列本來就含 `directory`**，而 **`0x1A Search` ＝ search、user directory**。所以不必另開 `0x19 Directory`（`0x19` 是 Media，早就分配掉了）。
 
 | kind | subtype | 名稱 | 端點 | 變數 |
 |---|---|---|---|---|
@@ -485,11 +485,11 @@ client                                          server
 | admin 端點（鎖定、暫停、admin 註冊） | 管理者用，不是 client 的日常路徑；`0x20 Admin` 還沒開 |
 | `/rooms/{id}/initialSync`、`/events` | 規格已棄用，`Recent`／`Subscribe` 已經取代 |
 
-📎 keys、backup、cross-signing（`0x17`）本來也在這一列，2026-09-17 起已經搬完（[wbf-e2ee.md](wbf-e2ee.md)）。
+📎 keys、backup、cross-signing（`0x17`）本來也在這一列，2026-09-17 起已經搬完（[/docs/design/keys/e2ee-over-channel.md](../keys/e2ee-over-channel.md)）。
 
 ## 4. 會不會跟正在進行的 PR 撞
 
-`wbf/recent-erasure`（#54）改的是 `wbf/recent.rs` 的 `collect_window`、兩份設計文件、e2e8、CHANGELOG。這個提案要動的是 `wbf/mod.rs` 的派發、新檔 `wbf/bridge.rs`、`router/router.rs` 一行、wire-format §3.2／§3.3／§3.4、pipeline §7 —— **沒有同一個檔案的同一段**。CHANGELOG 照慣例合併後才寫，不會同時改。實作分支等這份文件同意之後才開，從當時的 main 開。
+`wbf/recent-erasure`（#54）改的是 `wbf/recent.rs` 的 `collect_window`、兩份設計文件、e2e8、CHANGELOG。這個提案要動的是 `wbf/mod.rs` 的派發、新檔 `wbf/bridge.rs`、`router/router.rs` 一行、/docs/design/wire/wire-format.md §3.2／§3.3／§3.4、/docs/design/wire/pack-pipeline.md §7 —— **沒有同一個檔案的同一段**。CHANGELOG 照慣例合併後才寫，不會同時改。實作分支等這份文件同意之後才開，從當時的 main 開。
 
 ## 5. 要維護者決定的
 
@@ -499,9 +499,9 @@ client                                          server
 4. ~~**橋上的操作准走 HTTP pack？**~~ ✅ **橋不看傳輸層**（維護者 2026-09-14，§2.5）：WS 與 HTTP 傳的都是 pack，走不走橋只看 bit4。「HTTP 不可」留在原生 handler 的准入表。
 5. ~~**批 1 的清單要增要減？**~~ ✅ **這批就夠**（維護者 2026-09-14）。方向是**之後幾乎全部搬過去**，不必一個 commit 全上，一批一批來、常用的先上。
 6. ~~**subtype 號什麼時候給？**~~ ✅ **開始寫程式時才補進文件**（維護者 2026-09-14）。照 Matrix 規格章節裡端點出現的順序排；分配了就不改（§3.3）。粒度（一個 subtype 對一個端點）已定。
-   📌 維護者 2026-09-14 開工時指定落點：**號碼寫在 [../bridge-specs/index.md](../bridge-specs/index.md) 的總表**（不是 wire-format §3.2），每一批的詳細範例寫在同目錄的 kind 檔。wire-format §3.3 指過去。
+   📌 維護者 2026-09-14 開工時指定落點：**號碼寫在 [/docs/bridge-specs/index.md](../../bridge-specs/index.md) 的總表**（不是 /docs/design/wire/wire-format.md §3.2），每一批的詳細範例寫在同目錄的 kind 檔。/docs/design/wire/wire-format.md §3.3 指過去。
 
-✅ **維護者 2026-09-14 給了開工訊號**：分支 `wbf/api-bridge`。順序是先寫 [../bridge-specs/index.md](../bridge-specs/index.md) 的總表 → 寫橋的那一層 → 才真的搬。
+✅ **維護者 2026-09-14 給了開工訊號**：分支 `wbf/api-bridge`。順序是先寫 [/docs/bridge-specs/index.md](../../bridge-specs/index.md) 的總表 → 寫橋的那一層 → 才真的搬。
 
 ### 批 2 要維護者決定的（2026-09-15 提案）
 
@@ -529,7 +529,7 @@ client                                          server
 1. **`ReportUser` 放哪個 kind？**（§3 批 3-A）
    - (a) `0x11 Account`（回報的對象是一個使用者，帳號那一類最接近）。
    - (b) 新開一個「檢舉」kind，三支回報放一起。
-   - ✅ **維護者選 (b)**（提案原本建議 (a)）。→ 新 kind **`0x1D Report`**，三支 `0x20`–`0x22`；分配表 §3.3 加一列，`0x1C Misc` 那列的 `report` 拿掉。
+   - ✅ **維護者選 (b)**（提案原本建議 (a)）。→ 新 kind **`0x1D Report`**，三支 `0x20`–`0x22`；/docs/design/wire/wire-format.md §3.3 加一列，`0x1C Misc` 那列的 `report` 拿掉。
 2. **`features` 補哪幾個字串？**（§3 批 3-C）
    - (a) `"stream"`、`"device"`、`"bridge"` —— 一個能力一個字串。
    - (b) 再加一個「批號」字串（例 `"bridge3"`），client 可以問到搬了幾批。
@@ -558,7 +558,7 @@ client                                          server
 | 橋自己的 Router（`tuwunel_api::router::build` 組一份，不掛 middleware）、分配表、meta ↔ request／ response 轉換 | `src/api/client/wbf/bridge.rs`（新） |
 | 建橋的 Router 並用 `Extension` 掛在對外的 Router 上（`State` 是那邊建的） | `src/api/router.rs` 的 `BridgeRouter`、`build_bridge_router`；`src/router/router.rs` 掛上；`wbf/mod.rs` 與 `ws.rs` 取出來放進 `PackContext` |
 | 上游的 `router/args.rs`、`auth.rs` | **不動** |
-| 錯誤對應補齊、`errcode` | `src/api/client/wbf/mod.rs` 的 `Reject::from(Error)`；wire-format §3.4 |
+| 錯誤對應補齊、`errcode` | `src/api/client/wbf/mod.rs` 的 `Reject::from(Error)`；/docs/design/wire/wire-format.md §3.4 |
 | 派發 | `wbf/mod.rs` 的 `dispatch`：看 bit4 分兩條路（§2.3），不看 kind |
-| 契約 | [bridge-specs/index.md](../bridge-specs/index.md) 每支一列（wire-format §3.2 只列原生的），每個 kind 一份 `KIND.md` 寫範例；pipeline §7 標明一般端點走橋 |
+| 契約 | [/docs/bridge-specs/index.md](../../bridge-specs/index.md) 每支一列（/docs/design/wire/wire-format.md §3.2 只列原生的），每個 kind 一份 `KIND.md` 寫範例；/docs/design/wire/pack-pipeline.md §7 標明一般端點走橋 |
 | 向量、e2e | `core/wbf/vectors.rs`；新腳本 `tests/e2e/e2e13.ps1` |

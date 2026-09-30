@@ -2,7 +2,7 @@
 //! comes after the credentials have been checked. `POST /login`,
 //! `POST /refresh`, `POST /logout` and the wbf channel's `Session` packs all
 //! call these, so there is one place that decides how a device gets its
-//! tokens (`docs/design/wbf-wire-format.md` §6.3).
+//! tokens (`/docs/design/wire/wire-format.md` §6.3).
 
 use std::{net::IpAddr, time::Duration};
 
@@ -79,7 +79,8 @@ pub fn admit_any(_user_id: &UserId, _device_id: &DeviceId) -> Result { Ok(()) }
 ///
 /// Args:
 ///     user_id: example: @alice:localhost
-///     device_id: the device the client wants to keep using, example: Some("RJYKSTBOIE"); None or unknown creates one
+///     device_id: the device the client wants to keep using, example: Some("RJYKSTBOIE"); None
+/// or unknown creates one
 ///     initial_device_display_name: example: Some("wbf desktop")
 ///     want_refresh_token: the request's `refresh_token: true`
 ///     client_ip: recorded as the new device's last seen address

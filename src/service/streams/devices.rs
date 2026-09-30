@@ -1,6 +1,6 @@
 //! The to-device queue (`0x16 Device`): one topic per device, the rule that
 //! one connection at a time holds it, and the `Push` pack's shape
-//! (`docs/design/wbf-to-device.md`).
+//! (`/docs/design/keys/to-device.md`).
 //!
 //! What makes this different from the room channels is that the client
 //! **destroys** what it has taken: the queue is the only copy, and the server
@@ -31,7 +31,7 @@ use super::{ConnectionId, Outgoing, PackQueue, Streams};
 /// `Device/Push`, server to client only.
 pub const DEVICE_PUSH_SUBTYPE: u8 = 0x06;
 
-/// `Device/CryptoState`, server to client only (docs/design/wbf-e2ee.md §3).
+/// `Device/CryptoState`, server to client only (/docs/design/keys/e2ee-over-channel.md §3).
 pub const DEVICE_CRYPTO_STATE_SUBTYPE: u8 = 0x08;
 
 /// A device's own key supply: what `/sync` carries as
@@ -262,7 +262,7 @@ impl Streams {
 /// The last pack of a subscription that was taken over: an `Error` carrying
 /// the **displaced connection's own** `id` and the next `seq` of its
 /// conversation, with `IS_LAST` — "that subscription of yours ends here", not
-/// "your request failed" (wire-format §3.4).
+/// "your request failed" (/docs/design/wire/wire-format.md §3.4).
 fn superseded_pack(id: u64, seq: u32) -> Result<Vec<u8>, PackError> {
 	let code = RejectCode::Superseded;
 	Ok(
@@ -502,7 +502,7 @@ mod tests {
 	/// two `CryptoState` vectors must be the bytes this server builds.
 	#[test]
 	fn the_crypto_state_vectors_are_what_the_server_builds() {
-		const VECTORS: &str = include_str!("../../../docs/design/wbf-vectors.json");
+		const VECTORS: &str = include_str!("../../../docs/design/wire/wbf-vectors.json");
 		let vectors: serde_json::Value = serde_json::from_str(VECTORS).expect("the vectors file is JSON");
 		let bytes_of = |name: &str| -> Vec<u8> {
 			let hex = vectors["packs"]

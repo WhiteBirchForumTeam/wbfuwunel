@@ -3,7 +3,7 @@
 > 號碼總表與共通規則在 [index.md](index.md)。這份只寫**每支端點帶什麼、回什麼、會怎麼被拒**。
 > 請求的前 4 bytes 一律是 `01 12 SS 10`；成功回覆 `01 01 02 14`、失敗 `01 01 03 14`。`id` 填 0。
 
-📎 **`/sync` 本身不走橋**：long-poll 在通道上的形狀是 server 推送（`Event/Subscribe`＋`Push`），那是另一件事（橋的設計 §3「不搬」）。
+📎 **`/sync` 本身不走橋**：long-poll 在通道上的形狀是 server 推送（`Event/Subscribe`＋`Push`），那是另一件事（/docs/design/wire/api-bridge.md §3「不搬」）。
 這個 kind 這一批只用來放**過濾器**——它們是獨立的端點，`/messages`、`/context` 這些也吃 `filter` 參數。
 📎 這個 kind **沒有原生的 subtype**，所以 `0x12` 不帶 `IS_BRIDGED`（bit4）一律是 `UnknownKind`。
 

@@ -1,8 +1,8 @@
 # 問題書：加密訊息送出時，server 能不能保證「每台該解得開的裝置都拿得到金鑰」
 
 > **這份文件回答：E2EE 的裝置清單這一塊，要優化的到底是什麼問題、目標是什麼、做到哪些條件才算達標。**
-> ⚠️ **這是問題書，不是提案**：它定題目與驗收條件，不定做法。§4 的格式只是**候選**，用來說明「答案至少要回答哪些形狀上的問題」。真正的做法要另寫提案，經維護者同意才動手（[fork-overview.md](fork-overview.md) 的四步）。
-> 狀態：✅ **答案已實作並全部合併**：提案 [wbf-room-device-version.md](wbf-room-device-version.md)（PR #72）、F1＋F2＋F4（PR #73）、F3（PR #74）、補件（PR #75）。**§6 每一條的達成狀態在 §9**，包含維護者改過的決定與接受的缺口。原本的題目文字一字未改。
+> ⚠️ **這是問題書，不是提案**：它定題目與驗收條件，不定做法。§4 的格式只是**候選**，用來說明「答案至少要回答哪些形狀上的問題」。真正的做法要另寫提案，經維護者同意才動手（[/docs/design/overview/fork-overview.md](../overview/fork-overview.md) 的四步）。
+> 狀態：✅ **答案已實作並全部合併**：提案 [/docs/design/keys/room-device-version.md](room-device-version.md)（PR #72）、F1＋F2＋F4（PR #73）、F3（PR #74）、補件（PR #75）。**§6 每一條的達成狀態在 §9**，包含維護者改過的決定與接受的缺口。原本的題目文字一字未改。
 > 📎 2026-09-20 在合併後的 `main` 上重跑過：e2e16 21/21（skipped 0）、e2e15 8/8、e2e13 70/70。
 > 起點：維護者 2026-09-16 問「我們要做的事只是判斷裝置變了沒、是否有共同房間，還需要追蹤嗎？」
 
@@ -43,8 +43,8 @@ Bob 在 B2 上傳金鑰 → mark_device_key_update 寫 keychangeid 索引（Bob 
 |---|---|---|---|
 | P1 | **鏈上任一環掉了**：推播佇列滿被丟（有 `gap`，但要 client 處理對）、client 的 bug、重連補窗漏算 | Alice 一直只發給 Bob 的舊裝置 | **沒有人**。B2 解不開，Alice 那邊一切正常 |
 | P2 | **競態**：Bob 加 B2 的時間落在 Alice `/keys/query` 之後、送出之前 | 那一則 B2 解不開（之後的訊息會補發金鑰） | 沒有人 |
-| P3 | **server 替每個 client 算同房關係**：`share_encrypted_room` 是兩人房間清單取交集再逐房問加不加密；補窗要掃成員索引；`/sync` 與通道兩份材料要靠 e2e 比對防漂移（wbf-e2ee.md §3.4.1、決定 6） | 複雜、成本跟房間數成正比 | — |
-| P4 | **`left` 不準**：被 forget 的離開查不到（wbf-e2ee.md §3.4.1） | client 多追蹤一個人（安全側的誤差） | — |
+| P3 | **server 替每個 client 算同房關係**：`share_encrypted_room` 是兩人房間清單取交集再逐房問加不加密；補窗要掃成員索引；`/sync` 與通道兩份材料要靠 e2e 比對防漂移（📕 那是 **(B) 第一版**的做法，維護者 2026-09-17 整個重作掉了 —— 現在的 `CryptoState` 只帶這個裝置自己的金鑰存量，不算同房關係；見 /docs/design/keys/e2ee-over-channel.md §3 的 🔁 與 §6 決定 6） | 複雜、成本跟房間數成正比 | — |
+| P4 | **`left` 不準**：被 forget 的離開查不到（/docs/design/keys/e2ee-over-channel.md §2 —— 那裡寫著 `/keys/changes` 的 `left` 至今仍是空的） | client 多追蹤一個人（安全側的誤差） | — |
 | P5 | **HTTP 送訊息那條路**跟通道各走各的 | 任何只在通道做的檢查，HTTP 都繞得過 | — |
 
 ⭐ **P1、P2 是這份文件的主題**：它們是**正確性**問題，而且是**靜默**的。P3–P5 是成本與邊界，答案要一併交代，但不能為了它們放掉 P1、P2。
@@ -68,7 +68,7 @@ Bob 在 B2 上傳金鑰 → mark_device_key_update 寫 keychangeid 索引（Bob 
 |---|---|---|
 | **「R 的裝置清單」怎麼命名一個版本** | 每個加密房一個 **`dv`**（device version），u64，取 `globals.next_count()`，跟 `g_seq`、`cd_seq`、`dl_seq` 同一個號碼空間 | 哪些寫入要讓它前進（§6 條件 6 列了全部候選路徑） |
 | **client 怎麼告訴 server「我依據哪個版本」** | `Event/Send`（`0x14 0x02`）在加密房時 meta 多一個 `dv` | 加密房**沒帶** `dv` 怎麼辦（fail closed 是拒絕；要不要過渡期） |
-| **拒絕長什麼樣** | 一個新的 `RejectCode`（候選名 `DeviceSetChanged`，屬 1500 狀態家族，號碼照 wire-format §3.4 由維護者給），額外欄位：目前的 `dv`，以及從 client 的 `dv` 到現在**哪些使用者**的裝置清單變了 | 名單太長時截斷怎麼表示（沿用 `more`？） |
+| **拒絕長什麼樣** | 一個新的 `RejectCode`（候選名 `DeviceSetChanged`，屬 1500 狀態家族，號碼照 /docs/design/wire/wire-format.md §3.4 由維護者給），額外欄位：目前的 `dv`，以及從 client 的 `dv` 到現在**哪些使用者**的裝置清單變了 | 名單太長時截斷怎麼表示（沿用 `more`？） |
 | **client 平常怎麼拿到最新的 `dv`** | `CryptoState` 多帶 `{room_id: dv}`；或只靠被拒時拿 | 要不要推（推是加速，不是正確性，G3） |
 | **「server 當下知道的」是哪一刻** | 在 `build_and_append_pdu` 持有的房間 `state_lock` 之下讀 `dv` | ⚠️ 本地的成員變動在同一把鎖下，**金鑰變動（`mark_device_key_update`）不在**：兩者的先後怎麼定義，提案要說清楚 |
 
@@ -76,7 +76,7 @@ Bob 在 B2 上傳金鑰 → mark_device_key_update 寫 keychangeid 索引（Bob 
 
 1. **紅燈先行**：提案的第一個產出是一支 e2e，**在現在的做法下重現 P1**：Bob 登入 B2、讓 Alice 的 client 不重查（模擬推播掉包），Alice 送一則加密訊息 → 現在會**被接受**。這支測試就是基準線；做完之後它要變成「被拒」。
 2. **§6 的條件就是 checklist**：開一個 Forgejo issue，內容照抄 §6，每條達成就勾、附上 commit 或 e2e 編號。
-3. **路線圖**：[roadmap.md](roadmap.md) §3 候選表有一列指到這份文件，狀態從 💭 → 📄（有提案）→ 🔧 → ✅。
+3. **路線圖**：[/docs/design/overview/roadmap.md](../overview/roadmap.md) §3 候選表有一列指到這份文件，狀態從 💭 → 📄（有提案）→ 🔧 → ✅。
 4. **上線後看得到頻率**：被拒一次記一條 info log（房間、使用者、兩個 `dv`），知道現實中 P1、P2 多常發生。
 
 ## 6. 達標條件（全部成立才算做完）
@@ -93,13 +93,13 @@ Bob 在 B2 上傳金鑰 → mark_device_key_update 寫 keychangeid 索引（Bob 
 | 8 | **成本**：送出路徑多的讀取次數寫在提案裡並量過；`/sync` 的延遲不變 | 量測 |
 | 9 | **HTTP 與聯邦的邊界**（G6）寫進提案，而且有一條測試證明文件講的是真的（例：HTTP 送出不檢查，或同樣檢查） | e2e |
 | 10 | **client 那邊確認做得到**：`OlmMachine` 的「重查 → 發金鑰 → 帶 `dv` 送出」流程在 client repo 走通，開 issue 對齊 | client repo issue |
-| 11 | **文件與向量**：wire-format §3.4 加 code 那一列、`Event/Send` 的 meta 規格、拒絕的向量 | 單元（向量比對） |
+| 11 | **文件與向量**：/docs/design/wire/wire-format.md §3.4 加 code 那一列、`Event/Send` 的 meta 規格、拒絕的向量 | 單元（向量比對） |
 
 ## 7. 不在題目裡的
 
 - 🚫 **換掉 Megolm／Olm**：這份只管「金鑰有沒有發到該發的裝置」。
 - 🚫 **裝置可不可信**（交叉簽章驗證、黑名單）：那是 client 的信任決策，跟「發到了沒」是兩件事。
-- 🚫 **讓新裝置讀得到加入之前的舊訊息**：那是金鑰備份與金鑰轉發（wbf-e2ee.md (C)）的事。
+- 🚫 **讓新裝置讀得到加入之前的舊訊息**：那是金鑰備份與金鑰轉發（/docs/design/keys/e2ee-over-channel.md (C)）的事。
 - 🚫 **改 Matrix HTTP 端點與聯邦的語意**：`/sync`、`/keys/*` 維持 Matrix 的行為（能相容就相容；要破壞相容，提案裡點名等維護者同意）。
 
 ## 8. 已知的難處（提案要面對的）
@@ -108,11 +108,11 @@ Bob 在 B2 上傳金鑰 → mark_device_key_update 寫 keychangeid 索引（Bob 
 2. **聯邦的延遲**：遠端使用者換裝置，server 要等對方的 `m.device_list_update` 到了才知道。server 只能保證到「它知道的」，這條要寫明，不能說成絕對。
 3. **大房間**：Bob 在 1000 人的房間換裝置，`dv` 前進讓那 999 人下一則訊息都被拒一次。要評估「被拒後重查」的總成本，以及要不要靠推播（`CryptoState` 帶 `dv`）先讓大部分人不被拒。
 4. **HTTP 送訊息**：只在通道檢查，等於留一條繞過的路（P5）。要嘛兩條都檢查（HTTP 的 client 不會帶 `dv`，等於 HTTP 不能送加密訊息），要嘛明講 HTTP 不保證。
-5. **跟 (B) 的關係**：做完之後 `CryptoState` 的 `device_lists` 是否還需要照 `/sync` 算完整的 `changed`／`left`（G4），還是縮成「誰的金鑰變了」加上 `dv`。這會回頭改 wbf-e2ee.md。
+5. **跟 (B) 的關係**：做完之後 `CryptoState` 的 `device_lists` 是否還需要照 `/sync` 算完整的 `changed`／`left`（G4），還是縮成「誰的金鑰變了」加上 `dv`。這會回頭改 /docs/design/keys/e2ee-over-channel.md。
 
 ## 9. 達成狀態（2026-09-20）
 
-答案是 [wbf-room-device-version.md](wbf-room-device-version.md)：每個帳號一個**裝置版本號**（`序號-雜湊`），每個房間一個**房間版本號**（房間目前狀態裡算得數的成員集合的**雜湊**），成員清單把兩者交給 client，加密訊息送出時比對房間版本號，對不上回 **`1506 RoomDevicesChanged`**。
+答案是 [/docs/design/keys/room-device-version.md](room-device-version.md)：每個帳號一個**裝置版本號**（`序號-雜湊`），每個房間一個**房間版本號**（房間目前狀態裡算得數的成員集合的**雜湊**），成員清單把兩者交給 client，加密訊息送出時比對房間版本號，對不上回 **`1506 RoomDevicesChanged`**。
 
 📎 名稱對照：§4 候選裡的 `dv` ＝ 現在的**房間版本號**（`org.wbftw.room_version`）；候選的拒絕碼名 `DeviceSetChanged` ＝ 現在的 `RoomDevicesChanged`（1506）。
 
@@ -123,7 +123,7 @@ Bob 在 B2 上傳金鑰 → mark_device_key_update 寫 keychangeid 索引（Bob 
 | G1 送出時把關 | ✅ `Event/Send` 在房間鎖內比對，不成立就不寫入、不扇出 |
 | G2 拒絕帶得出「怎麼修」 | ⚠️ 帶**目前的房間版本號**；🔁 **不列「要重查誰」**：改成 client 重拿 `/members`、比對每個人的裝置版本號自己算出來（提案 §7.2） |
 | G3 推播掉包不影響正確性 | ✅ 比對只看資料庫算出來的房間版本號，跟推播無關；F3 只是加速 |
-| G4 server 不替 client 算同房關係 | ✅ (B) 重做時整段拿掉（wbf-e2ee.md §3 的 🔁），現在沒有任何地方算兩人的共同房間 |
+| G4 server 不替 client 算同房關係 | ✅ (B) 重做時整段拿掉（/docs/design/keys/e2ee-over-channel.md §3 的 🔁），現在沒有任何地方算兩人的共同房間 |
 | G5 成本有界 | ⚠️ 送出路徑：快取命中多一次「房間目前狀態」的讀取，沒命中是 O(成員數)；**沒有實測數字**（維護者 2026-09-20：不用量） |
 | G6 邊界講清楚 | ✅ 提案 §7.3（HTTP 不檢查）、§4.4（聯邦與換裝置的競態） |
 
@@ -141,7 +141,7 @@ Bob 在 B2 上傳金鑰 → mark_device_key_update 寫 keychangeid 索引（Bob 
 | 8 | 成本量過 | ❌ 維護者 2026-09-20：不用量 |
 | 9 | HTTP 與聯邦的邊界有測試 | ⚠️ HTTP 不檢查有 e2e（[1.12]）；聯邦只有文件 |
 | 10 | client 那邊確認做得到 | 🔧 已開 client repo issue [`amaid/wbf-matrix-client#45`](http://ai.zooy.cc:30008/amaid/wbf-matrix-client/issues/45)（含宣告、拿號碼、被 1506 之後怎麼修、雜湊怎麼自己重算與黃金向量）；等 client 走通回報 |
-| 11 | 文件與向量 | ✅ wire-format §3.4 的 1506 一列、§3.2 的 `Event/Send.room_version` 與 `0x14 0x07`、向量 `error_room_devices_changed`／`send_encrypted_with_room_version`／`event_device_changed`，三條都有測試比對 server 實際建出的 bytes |
+| 11 | 文件與向量 | ✅ /docs/design/wire/wire-format.md §3.4 的 1506 一列、§3.2 的 `Event/Send.room_version` 與 `0x14 0x07`、向量 `error_room_devices_changed`／`send_encrypted_with_room_version`／`event_device_changed`，三條都有測試比對 server 實際建出的 bytes |
 
 ### 9.3 補驗時抓到的 bug
 
@@ -155,4 +155,4 @@ Bob 在 B2 上傳金鑰 → mark_device_key_update 寫 keychangeid 索引（Bob 
 2. **聯邦的延遲** → 寫明只保證到「這台 server 知道的」。
 3. **大房間** → F3（PR #74）讓在線的人先拿到新號碼，被拒的只剩沒連著的。
 4. **HTTP 繞過** → 維護者決定不擋（條件 5），寫在提案 §7.3。
-5. **跟 (B) 的關係** → (B) 重做，`CryptoState` 只剩自己的金鑰存量，裝置清單那半全部由這份的答案接手（wbf-e2ee.md §3）。
+5. **跟 (B) 的關係** → (B) 重做，`CryptoState` 只剩自己的金鑰存量，裝置清單那半全部由這份的答案接手（/docs/design/keys/e2ee-over-channel.md §3）。

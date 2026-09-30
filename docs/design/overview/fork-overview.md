@@ -1,8 +1,8 @@
 # 這個 fork 是什麼
 
 > 這份文件回答一個問題：**這個 repo 跟上游 tuwunel 是什麼關係，改動要怎麼進來。**
-> 程式碼結構看 [repo-structure.md](repo-structure.md)，設計方向看
-> [why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md)。
+> 程式碼結構看 [/docs/design/overview/repo-structure.md](repo-structure.md)，設計方向看
+> [/docs/design/overview/why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md)。
 
 ## 來源與去處
 
@@ -12,7 +12,7 @@
 | 這個專案 | **wbfuwunel** |
 | 開發用 | `amaid/wbfuwunel`，維護者自架的 Forgejo。PR 在這裡開 |
 | 對外 | [`WhiteBirchForumTeam/wbfuwunel`](https://github.com/WhiteBirchForumTeam/wbfuwunel)（GitHub，**公開**） |
-| 目的 | 一套由維護者完全掌控的即時通訊服務，見 [why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md)。分岔會很大：媒體層、訊息模型、管理介面都會照自己的需求改，與 Matrix 規格相容不是目標。第一步是媒體層（引用計數與真正的刪除） |
+| 目的 | 一套由維護者完全掌控的即時通訊服務，見 [/docs/design/overview/why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md)。分岔會很大：媒體層、訊息模型、管理介面都會照自己的需求改，與 Matrix 規格相容不是目標。第一步是媒體層（引用計數與真正的刪除） |
 
 ### 授權：這是公開重新發佈，有義務要盡
 
@@ -91,7 +91,7 @@ git merge upstream/main        # 在 main 上
 ```
 
 **順序不能顛倒。** ①「先寫」指的是把要做什麼、為什麼這樣做、有哪些取捨寫成文件放進這個
-`docs/design/` 目錄，不是寫在聊天記錄裡 —— 下一個讀的人手上只有 repo。
+`/docs/design/` 目錄，不是寫在聊天記錄裡 —— 下一個讀的人手上只有 repo。
 
 ②之前不要動 `src/`。方案被推翻的成本，在文件階段是改幾段字，在程式碼階段是整支分支重來。
 

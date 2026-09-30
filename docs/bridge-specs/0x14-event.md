@@ -2,7 +2,7 @@
 
 > 號碼總表與共通規則在 [index.md](index.md)。這份只寫**每支端點帶什麼、回什麼、會怎麼被拒**。
 > 請求的前 4 bytes 一律是 `01 14 SS 10`；成功回覆 `01 01 02 14`、失敗 `01 01 03 14`。`id` 填 0。
-> ⚠️ 這個 kind 同時有**原生**的 pack：`Recent`（`0x01`）、`Send`（`0x02`）、`Batch`（`0x03`）、`Subscribe`（`0x04`）、`Unsubscribe`（`0x05`）、`Push`（`0x06`）。那些**不帶** bit4，規格在 [wbf-wire-format.md](../design/wbf-wire-format.md) §3.2。帶了 bit4 送原生的號碼會回 `UnknownKind`。
+> ⚠️ 這個 kind 同時有**原生**的 pack：`Recent`（`0x01`）、`Send`（`0x02`）、`Batch`（`0x03`）、`Subscribe`（`0x04`）、`Unsubscribe`（`0x05`）、`Push`（`0x06`）。那些**不帶** bit4，規格在 [/docs/design/wire/wire-format.md](../design/wire/wire-format.md) §3.2。帶了 bit4 送原生的號碼會回 `UnknownKind`。
 
 ## `0x20` GetEvent —— 用 event id 拿單一則
 
@@ -53,7 +53,7 @@
 | 請求 data | 那一項的 content：`{"topic":"大家好"}`；改名是 `m.room.name` ＋ `{"name":"週末聚餐"}` |
 | 回覆 data | `{"event_id":"$t0p1c"}` |
 
-完整的 bytes 範例在向量檔 `bridge_set_state_event` 與 `bridge_ack`（[wbf-vectors.json](../design/wbf-vectors.json)，由 server 的程式碼產生）。
+完整的 bytes 範例在向量檔 `bridge_set_state_event` 與 `bridge_ack`（[/docs/design/wire/wbf-vectors.json](../design/wire/wbf-vectors.json)，由 server 的程式碼產生）。
 **會怎麼被拒**：權限不夠 → `Forbidden`（403，`M_FORBIDDEN`）：
 ```
 meta  {"code":"Forbidden","code_id":1302,"errcode":"M_FORBIDDEN","message":"You don't have permission to post that to the room.","status":403}

@@ -52,7 +52,7 @@ function Restart-Server([string]$cfg, [string]$tag) { Stop-Server $script:p; $sc
 function Login-Alice() { (Api Post '/_matrix/client/v3/login' '{"type":"m.login.password","identifier":{"type":"m.id.user","user":"alice"},"password":"correct-horse-battery"}' $null).access_token }
 $payload = [byte[]](1..700 | ForEach-Object { $_ % 251 })
 
-# ================= Scenario 1: the maintainer's example (media-holders.md §2.3) =================
+# ================= Scenario 1: the maintainer's example (/docs/design/media/media-holders.md §2.3) =================
 Log '################ Scenario 1: holders come and go; media lives while any remains ################'
 $db1 = "$S\e2e10db-1"; Remove-Item -Recurse -Force $db1 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db1 | Out-Null
 $cfg = Write-Config10 $db1

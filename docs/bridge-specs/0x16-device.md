@@ -2,9 +2,9 @@
 
 > 號碼總表與共通規則在 [index.md](index.md)。這份只寫**每支端點帶什麼、回什麼、會怎麼被拒**。
 > 請求的前 4 bytes 一律是 `01 16 SS 10`；成功回覆 `01 01 02 14`、失敗 `01 01 03 14`。`id` 填 0。
-> ⚠️ 這個 kind 同時有**原生**的 pack（to-device 佇列）：`Fetch`（`0x01`）、`Batch`（`0x02`）、`ItemsDestroy`（`0x03`）、`Subscribe`（`0x04`）、`Unsubscribe`（`0x05`）、`Push`（`0x06`）、`ItemsDestroyed`（`0x07`）、`CryptoState`（`0x08`）。那些**不帶** bit4，規格在 [wbf-to-device.md](../design/wbf-to-device.md)（`CryptoState` 在 [wbf-e2ee.md](../design/wbf-e2ee.md) §3）。
-> 刪裝置（`0x23`、`0x24`，批 2）要互動式認證（UIAA），兩輪怎麼走見 index §1.5。
-> **發** to-device（`0x25`）是 E2EE 的 (A)（[wbf-e2ee.md](../design/wbf-e2ee.md) §2）；**收**是上面那組原生的 `Subscribe`／`Push`。
+> ⚠️ 這個 kind 同時有**原生**的 pack（to-device 佇列）：`Fetch`（`0x01`）、`Batch`（`0x02`）、`ItemsDestroy`（`0x03`）、`Subscribe`（`0x04`）、`Unsubscribe`（`0x05`）、`Push`（`0x06`）、`ItemsDestroyed`（`0x07`）、`CryptoState`（`0x08`）。那些**不帶** bit4，規格在 [/docs/design/keys/to-device.md](../design/keys/to-device.md)（`CryptoState` 在 [/docs/design/keys/e2ee-over-channel.md](../design/keys/e2ee-over-channel.md) §3）。
+> 刪裝置（`0x23`、`0x24`，批 2）要互動式認證（UIAA），兩輪怎麼走見 /docs/bridge-specs/index.md §1.5。
+> **發** to-device（`0x25`）是 E2EE 的 (A)（[/docs/design/keys/e2ee-over-channel.md](../design/keys/e2ee-over-channel.md) §2）；**收**是上面那組原生的 `Subscribe`／`Push`。
 
 ## `0x20` ListDevices —— 登入過的裝置清單
 
@@ -78,7 +78,7 @@
 | 請求 data | `{"messages":{"@leo:localhost":{"<device_id 或 *>":{…事件的 content…}}}}` —— 加密房的金鑰通常是 `m.room.encrypted`，content 是 Olm 密文 |
 | 回覆 data | `{}` |
 
-- **對方怎麼收到**：寫進對方裝置的 to-device 佇列，那個裝置的持有連線（`Device/Subscribe` 的那條）立刻收到原生的 `Push`。e2e13 [3.7] 實跑：`Push` 的 meta `{"bc":1,"counts":[88],"gap":false,"nt":88,"ot":88}`，data 裡那一則是 `{"content":{"algorithm":"m.megolm.v1.aes-sha2","body":"via bridge"},"sender":"@kate:localhost","type":"m.room_key.e2e13"}`。對方沒連線就留在佇列，下次 `Subscribe`／`Fetch` 補（[wbf-to-device.md](../design/wbf-to-device.md)）。
+- **對方怎麼收到**：寫進對方裝置的 to-device 佇列，那個裝置的持有連線（`Device/Subscribe` 的那條）立刻收到原生的 `Push`。e2e13 [3.7] 實跑：`Push` 的 meta `{"bc":1,"counts":[88],"gap":false,"nt":88,"ot":88}`，data 裡那一則是 `{"content":{"algorithm":"m.megolm.v1.aes-sha2","body":"via bridge"},"sender":"@kate:localhost","type":"m.room_key.e2e13"}`。對方沒連線就留在佇列，下次 `Subscribe`／`Fetch` 補（[/docs/design/keys/to-device.md](../design/keys/to-device.md)）。
 - ⚠️ **`txn_id` 是冪等鍵**：同一個裝置用同一個 `txn_id` 再送一次，回 `Ack` `{}`、**什麼都不送**（e2e13 [3.8]）。所以重試要用同一個 `txn_id`，新的一則要換一個。
 - 走橋與走 HTTP 送進的是同一個佇列（e2e13 [3.8]）。
 

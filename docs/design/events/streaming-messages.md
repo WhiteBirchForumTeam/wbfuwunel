@@ -2,7 +2,7 @@
 
 > **狀態：✅ 已實作**（PR #45，2026-09-12 合併；header `id` 的型別 byte 見 PR #47）。第四版依維護者 2026-09-08 的設計重寫：**草稿一開始就是一則真的、持久化的佔位訊息**，草稿的名字就是它的 `g_seq`；
 > 之後的內容變化（`Keypoint`／`Delta`／`Append`）只廣播、不進庫；中途進來的人用 `Demand` 向作者要全文；`Abandon` 就是 redact 佔位訊息；
-> 收尾是 client 的事：自己 `Abandon`、再自己送一則正常訊息，server 不做多餘的事。走 [wbf-event-push.md](wbf-event-push.md) 的 channel（工作 2），這份是工作 3。
+> 收尾是 client 的事：自己 `Abandon`、再自己送一則正常訊息，server 不做多餘的事。走 [/docs/design/events/event-push.md](event-push.md) 的 channel（工作 2），這份是工作 3。
 > 第三版（暫時 id、server 零狀態、沒有錨）作廢：它的問題是中途進來的人對不回草稿，而且 `draft_id` 的作用域要靠 `(sender, device)` 拼。第四版用一則真事件當錨，全部解掉。
 
 ## 1. 這是什麼、不是什麼
@@ -26,7 +26,7 @@
 kind `0x02 Stream`。**所有 subtype 的 meta 都是明文的 `room_id` 字串本身**（UTF-8，不是 JSON；維護者 2026-09-08：`g_seq` 已經有 header `id` 那格，meta 只剩房間）；
 data 是密文（E2EE 房）或明文，server 不讀。server 轉發時 **pack 原樣送**，不加 `sender`／`device`：接收者用 `g_seq` 找到佔位事件，作者就在它的 `sender` 裡；哪台裝置在寫，接收者不需要知道。
 
-header：`id`（8 byte）＝ **`0x02 ‖ g_seq`** —— 型別 byte `0x02`（事件位置）加上七個 byte 的 `g_seq` 大端（[wbf-wire-format.md](wbf-wire-format.md) §2.2）。它就是「這個 pack 屬於哪則草稿」。
+header：`id`（8 byte）＝ **`0x02 ‖ g_seq`** —— 型別 byte `0x02`（事件位置）加上七個 byte 的 `g_seq` 大端（[/docs/design/wire/wire-format.md](../wire/wire-format.md) §2.2）。它就是「這個 pack 屬於哪則草稿」。
 ⚠️ **`Draft` 自己的 `id` 是整整 0**（型別 `0x00`）：它還在請求那個 `g_seq`，此時還沒有草稿可指。組好的 `id` 由 server 在 `Ack` 裡給（§3.1）—— 🚫 client 不要自己把 `0x02` 疊上去，那條規則的存在就是為了讓「誰鑄的」看得出來。
 **`seq`（4 byte）= 作者對這則草稿遞增的片計數**（`Keypoint`／`Delta`／`Append`；同一個 `g_seq` 下永遠遞增，維護者 2026-09-08）。
 順序本身由 TCP 保，`seq` 不是拿來排序的，是拿來**發現洞**的：片會掉的地方不是 TCP，是 server 對某一個接收者的發送佇列滿了 `try_send` 丟掉（作者與其他人都不知道），
@@ -47,7 +47,7 @@ Append    seq=2  prev=1    " world"
 Append    seq=3  prev=2    "!"
 ```
 
-- **`seq` 從 1 起算**，`0` 永遠保留給 `prev` 的「沒有基底」。🚫 兩者不能共用 `0` —— 那樣「接在第 0 片之後」跟「沒有基底」在線上長得一樣，正是 [wbf-wire-format.md](wbf-wire-format.md) §3.4 那條「佔位值不能跟真值撞」的同一個坑。
+- **`seq` 從 1 起算**，`0` 永遠保留給 `prev` 的「沒有基底」。🚫 兩者不能共用 `0` —— 那樣「接在第 0 片之後」跟「沒有基底」在線上長得一樣，正是 [/docs/design/wire/wire-format.md](../wire/wire-format.md) §3.4 那條「佔位值不能跟真值撞」的同一個坑。
   ⚠️ 這跟 §4.1 講的「新會話 `seq` 歸零」不衝突：那條講的是 **server 自己的推送計數**（`Push`／`Batch`），這裡的片計數是**作者填的**。
 - **`Keypoint` 的 `prev` 必須是 0**：它把 buffer 整個換掉，指向誰都沒有意義。
 - 中途加入的人手上沒有狀態，所以收到 `Delta`／`Append` 時不論 `prev` 是什麼都對不上 → `Demand`。
@@ -189,8 +189,8 @@ server 讀 123 → 驗 D 是房間成員 → 跟其他片一樣**廣播給全房
 
 | 共用 | 在哪 |
 |---|---|
-| 訂閱 registry、`try_send`、掉了就掉、全房廣播 | `Services.streams`（[wbf-event-push.md](wbf-event-push.md) §3）：`relay(room, None, pack)`，六個 subtype 都只用這一個 |
-| 發送佇列與發送 task | pipeline §1 |
+| 訂閱 registry、`try_send`、掉了就掉、全房廣播 | `Services.streams`（[/docs/design/events/event-push.md](event-push.md) §3）：`relay(room, None, pack)`，六個 subtype 都只用這一個 |
+| 發送佇列與發送 task | /docs/design/wire/pack-pipeline.md §1 |
 | 佔位事件的寫入、redact、`Push` | 既有的 `send_message_event`／`redact` 路徑，什麼都不加 |
 
 ## 7. 上限（config）
@@ -254,6 +254,6 @@ server 讀 123 → 驗 D 是房間成員 → 跟其他片一樣**廣播給全房
 ## 10. 這份文件的查證範圍
 
 - `src/api/client/wbf/{mod,ws,send}.rs`（PR #33）：發送佇列、准入表、`Event/Send` 的 meta 解析與 `send_message_event`。
-- `src/database/maps.rs`、`src/service/rooms/timeline/`：`pduid_pdu` 的 key 是 `(shortroomid, count)`，`count` 就是 `g_seq`，所以 `(room_id, g_seq)` 是點讀；沒有全站 `g_seq` 索引（room-seq-and-recent §2.2）。
+- `src/database/maps.rs`、`src/service/rooms/timeline/`：`pduid_pdu` 的 key 是 `(shortroomid, count)`，`count` 就是 `g_seq`，所以 `(room_id, g_seq)` 是點讀；沒有全站 `g_seq` 索引（/docs/design/events/room-seq-and-recent.md §2.2）。
 - `src/api/client/redact.rs`：redact 自己的事件的既有路徑。
 - 沒實測：每片一次點讀在 30 片／秒下的成本（預期可忽略，RocksDB 點讀微秒級）；大房間廣播的成本（跟 `Push` 同一題）。

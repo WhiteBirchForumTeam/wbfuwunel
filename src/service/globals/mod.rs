@@ -11,7 +11,7 @@ use tuwunel_core::{
 
 use crate::service;
 
-/// The localpart of the server's own account (`docs/design/server-user.md`).
+/// The localpart of the server's own account (`/docs/design/accounts/server-user.md`).
 const SERVER_USER_LOCALPART: &str = "system";
 
 pub struct Service {

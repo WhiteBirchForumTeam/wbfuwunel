@@ -1,17 +1,17 @@
 # 媒體的真正刪除：精確計數、哨兵、立即清理、migrate
 
 > **狀態：✅ 已實作，其中計數與哨兵已退場**（2026-09-14 補標：精確計數 PR #7、收集器與墓碑 PR #10、每 mxc 一鎖 PR #12；
-> 計數器與哨兵在 PR #24 被 [media-holders.md](media-holders.md) 的持有者集合取代，`migrate-references` 同一支拔掉）。
-> 收集器、墓碑 410、每 mxc 一鎖仍是現行設計；計數的那幾節留作歷史，讀的時候對照 media-holders.md。
+> 計數器與哨兵在 PR #24 被 [/docs/design/media/media-holders.md](media-holders.md) 的持有者集合取代，`migrate-references` 同一支拔掉）。
+> 收集器、墓碑 410、每 mxc 一鎖仍是現行設計；計數的那幾節留作歷史，讀的時候對照 /docs/design/media/media-holders.md。
 > ⚠️ 這行原本一直寫著「提案，尚未實作」，從 PR #7 合併起就不對了。
 >
 > 撰寫日期：2026-09-02（第三版：第一版「候選表」被推翻；第二版改成精確計數；第三版依維護者指示
 > 把哨兵改成**懶惰植入**、migrate 定為離線作業）。
-> 上位文件：[media-refcount.md](media-refcount.md)（PR #5 的列式索引）；
-> 更上位：[why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md) §5.4。
+> 上位文件：[/docs/design/media/media-refcount.md](media-refcount.md)（PR #5 的列式索引）；
+> 更上位：[/docs/design/overview/why-not-matrix-and-core-design.md](../overview/why-not-matrix-and-core-design.md) §5.4。
 >
-> ⚠️ **2026-09-06：計數器整個被取代。** E2EE 房間讀不到 content（[media-attachments.md](media-attachments.md)），而計數的「恰好一次」在三個 PR 後仍被抓到雙扣，
-> 維護者改用**持有者集合**：[media-holders.md](media-holders.md)。這份文件的 §2（merge operator）、§4（哨兵）、§5（migrate）已成歷史；
+> ⚠️ **2026-09-06：計數器整個被取代。** E2EE 房間讀不到 content（[/docs/design/media/media-attachments.md](media-attachments.md)），而計數的「恰好一次」在三個 PR 後仍被抓到雙扣，
+> 維護者改用**持有者集合**：[/docs/design/media/media-holders.md](media-holders.md)。這份文件的 §2（merge operator）、§4（哨兵）、§5（migrate）已成歷史；
 > 仍有效的是 §3.3 的每 mxc 一鎖與 §6 的墓碑／410。
 >
 > ⚠️ **這一版改變了計數的形狀**：PR #5 的「列就是計數」被**精確的有號整數**取代，理由在 §2。
@@ -178,7 +178,7 @@ None 或 i64::MIN  → skip（沒被算過 / 哨兵）
 ## 5. ~~`migrate`：重算 ＋ 清理~~（已移除，2026-09-06）
 
 `!admin media migrate-references` 與 `media_refs/migrate.rs` 在 E2EE 破口定案時被維護者移除：靠 content 重算對 E2EE 房間是死路
-（server 讀不到密文裡的 mxc），重算出來的計數會把活著的附件當孤兒刪。取代它的兩件事在 [media-attachments.md](media-attachments.md)：
+（server 讀不到密文裡的 mxc），重算出來的計數會把活著的附件當孤兒刪。取代它的兩件事在 [/docs/design/media/media-attachments.md](media-attachments.md)：
 引用由送訊息的請求宣告（`eventid_mxcs`），計數 0 的媒體由**週期掃描**在保護期（≥ 7 天）後清。既存媒體維持哨兵、不計不刪，沒有遷移。
 `TombstoneReason::Migrated` 保留給舊墓碑解碼。
 
@@ -207,7 +207,7 @@ None 或 i64::MIN  → skip（沒被算過 / 哨兵）
 | 設定 | 預設 | 意義 |
 |---|---|---|
 | `media_gc_enabled` | **`true`** | 主開關；`false` 時 worker 只 `info!` 會刪什麼，不刪 |
-| `media_unreferenced_grace_seconds` | `604800` | 計數 0 的新上傳受保護多久，低於 7 天夾成 7 天（[media-attachments.md](media-attachments.md) §4.3） |
+| `media_unreferenced_grace_seconds` | `604800` | 計數 0 的新上傳受保護多久，低於 7 天夾成 7 天（[/docs/design/media/media-attachments.md](media-attachments.md) §4.3） |
 | `media_gc_sweep_interval` | `3600` | 掃計數 0 媒體的週期 |
 | `attachments_max_per_event` | `32` | 一則事件最多宣告幾個附件 |
 

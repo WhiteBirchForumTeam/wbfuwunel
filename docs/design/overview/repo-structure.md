@@ -69,7 +69,7 @@ args::parse()  →  config::run()（--generate-config 這類「做完就結束�
 
 ## 對設計文件的意義
 
-[why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md) 規劃的媒體層改造
+[/docs/design/overview/why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md) 規劃的媒體層改造
 （分塊 + Merkle + 引用計數）會落在三個地方，而它們彼此有清楚的接縫：
 
 1. **`src/api/client/media.rs`** —— 新的分塊上傳／range 下載端點。
@@ -83,4 +83,4 @@ args::parse()  →  config::run()（--generate-config 這類「做完就結束�
 ## 平台
 
 上游主力是 Linux。Windows 能編、能跑，但少掉一部分功能 ——
-見 [windows-build.md](windows-build.md)。
+見 [/docs/design/build/windows-build.md](../build/windows-build.md)。

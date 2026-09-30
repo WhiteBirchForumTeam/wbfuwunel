@@ -90,7 +90,7 @@ app 自己存在 server 上的東西（通知偏好、置頂清單…），`even
 | 請求 data | 任意 JSON 物件，例 `{"answer":42}` |
 | 回覆 data | `{}` |
 
-📎 內容**鍵叫什麼都可以**（包括 `room_id`），因為它在 data、不在 meta —— 這正是 body 不跟變數共用命名空間的原因（[設計 §2.2](../design/wbf-api-bridge.md)）。
+📎 內容**鍵叫什麼都可以**（包括 `room_id`），因為它在 data、不在 meta —— 這正是 body 不跟變數共用命名空間的原因（[設計 §2.2](../design/wire/api-bridge.md)）。
 
 ## `0x27` GetRoomAccountData —— 讀某個房間的設定
 
@@ -152,7 +152,7 @@ app 自己存在 server 上的東西（通知偏好、置頂清單…），`even
 |---|---|
 | 請求 meta | 空 |
 | 請求 data | 第一輪 `{"new_password":"…","logout_devices":true}`；第二輪加 `"auth":{"type":"m.login.password","session":"…","identifier":{"type":"m.id.user","user":"erin"},"password":"<舊密碼>"}` |
-| 第一輪回覆 | `Error`，`status` 401；data `{"flows":[{"stages":["m.login.password"]}],"params":{},"session":"…"}`（index §1.5） |
+| 第一輪回覆 | `Error`，`status` 401；data `{"flows":[{"stages":["m.login.password"]}],"params":{},"session":"…"}`（/docs/bridge-specs/index.md §1.5） |
 | 成功回覆 data | `{}` |
 
 - `logout_devices: true`：**其他**裝置被登出，發請求的這個裝置保留 —— 所以這條連線照常可用（e2e13 [2.12]）。

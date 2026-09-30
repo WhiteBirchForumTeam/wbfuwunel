@@ -1,4 +1,4 @@
-//! What the header's `id` is (`docs/design/wbf-wire-format.md` §2.2): its
+//! What the header's `id` is (`/docs/design/wire/wire-format.md` §2.2): its
 //! first byte says which kind of identifier the other seven carry.
 //!
 //! ⭐ Before this, one field held three unrelated things — a conversation
@@ -10,7 +10,7 @@
 //! an upload id, in the field for a subscription".
 //!
 //! Adding a type is two edits in this order, the same rule the error
-//! vocabulary has: the row in §2.2 first, then the variant here.
+//! vocabulary has: the row in /docs/design/wire/wire-format.md §2.2 first, then the variant here.
 
 use std::fmt;
 
@@ -26,7 +26,7 @@ pub enum IdType {
 	/// ⚠️ The server checks the type and **not** whether the number is free:
 	/// it cannot see the client's table. Collisions across types are the
 	/// protocol's problem, collisions within this one belong to whoever
-	/// minted them (§2.2).
+	/// minted them (/docs/design/wire/wire-format.md §2.2).
 	ClientConversation,
 	/// 0x02: an event's position in its room (`g_seq`), which is how a draft
 	/// names its anchor.
@@ -51,7 +51,8 @@ pub enum IdValueRefused {
 	/// ⚠️ Returned rather than truncated: a silently shortened id names a
 	/// different thing, and the caller would not know which.
 	TooLargeForSevenBytes(u64),
-	/// A value under the `None` type, whose whole id must be 0 (§2.2).
+	/// A value under the `None` type, whose whole id must be 0 (/docs/design/wire/wire-format.md
+	/// §2.2).
 	///
 	/// ⚠️ The dispatcher refuses such an id on arrival, so composing one
 	/// could only ever produce a pack the next server rejects. It fails here

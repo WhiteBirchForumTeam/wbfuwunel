@@ -1,6 +1,6 @@
 # 在 Windows 上建置與執行
 
-> 這份文件回答 [why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md)
+> 這份文件回答 [/docs/design/overview/why-not-matrix-and-core-design.md](../overview/why-not-matrix-and-core-design.md)
 > §7 的待驗第 2 題：**「Conduit 家族在 Windows 上編不編得出來？」**
 >
 > **答案：編得出來，而且跑得動。** 下面是驗證方法與實測結果，以及 Windows 上少掉什麼。

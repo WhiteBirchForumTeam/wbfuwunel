@@ -5,9 +5,9 @@
 >
 > 撰寫日期：2026-09-01。2026-09-01 更新：§7 待驗 2 已驗完，待驗 6 修正一句錯誤說法。
 
-**同一個目錄裡的其他文件**：[fork-overview.md](fork-overview.md)（這個 fork 跟上游的關係、
-改動的流程）、[repo-structure.md](repo-structure.md)（程式碼結構導覽）、
-[windows-build.md](windows-build.md)（Windows 建置與實跑驗證）。
+**同一個目錄裡的其他文件**：[/docs/design/overview/fork-overview.md](fork-overview.md)（這個 fork 跟上游的關係、
+改動的流程）、[/docs/design/overview/repo-structure.md](repo-structure.md)（程式碼結構導覽）、
+[/docs/design/build/windows-build.md](../build/windows-build.md)（Windows 建置與實跑驗證）。
 
 ---
 
@@ -232,7 +232,7 @@ E2EE 房間裡 server 只看得到密文，連縮圖都產不出來。
    需要的只是既有工具鏈（MSVC ＋ LLVM ＋ NASM ＋ VS 自帶的 CMake），以及關掉三個 Linux-only
    的 feature（`io_uring` / `jemalloc` / `systemd`）。
    👉 **結論：RocksDB 這條路成立，「純 Rust 儲存後端」的備案可以收起來，不必為了跨平台而換掉儲存層。**
-   完整的前置需求、指令、實測輸出與 Windows 上少掉的功能，見 [windows-build.md](windows-build.md)。
+   完整的前置需求、指令、實測輸出與 Windows 上少掉的功能，見 [/docs/design/build/windows-build.md](../build/windows-build.md)。
 
 3. **塊大小。** 10 GB 檔案下：1 MiB → 10240 塊、樹深約 14、證明約 448 bytes；4 MiB → 2560 塊、樹深約 12。兩者都可行，要拿實際的網路狀況與記憶體佔用去量。
 
@@ -258,9 +258,9 @@ E2EE 房間裡 server 只看得到密文，連縮圖都產不出來。
 
 **實際跑過（2026-09-01，這個 repo）**
 
-- Windows 建置與啟動 —— 見 §7 待驗 2 與 [windows-build.md](windows-build.md)。不是只看編譯綠燈：
+- Windows 建置與啟動 —— 見 §7 待驗 2 與 [/docs/design/build/windows-build.md](../build/windows-build.md)。不是只看編譯綠燈：
   RocksDB 實際開起來、HTTP 端點實際回應過。
-- 這份文件對程式碼結構的假設，整理在 [repo-structure.md](repo-structure.md)。
+- 這份文件對程式碼結構的假設，整理在 [/docs/design/overview/repo-structure.md](repo-structure.md)。
 
 **規格 / 生態系知識，未在本次逐條查證**
 
