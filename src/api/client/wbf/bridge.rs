@@ -492,6 +492,26 @@ fn fill_path(path_template: &str, variables: &Map<String, Value>) -> Result<Stri
 			};
 			match variables.get(name) {
 				| Some(Value::String(value)) => {
+					// 🚨 `.` and `..` do not survive as path segments: they are
+					// resolved away, so the segment vanishes and the request lands
+					// on a *different* endpoint — a `session_id` of "." turns
+					// `DELETE /room_keys/keys/{session_id}` into
+					// `DELETE /room_keys/keys`, which deletes the whole backup
+					// instead of one session (external review 2026-09-29).
+					// Refused rather than encoded: no variable in the table has a
+					// legitimate "." value, and the bridge's rule is that it
+					// refuses only where HTTP would — but HTTP never offered a way
+					// to write this path in the first place.
+					// ⚠️ An empty value is NOT refused: a `state_key` of "" is
+					// legitimate and leaves a trailing `/`, which is still the same
+					// number of segments.
+					if matches!(value.as_str(), "." | "..") {
+						return Err(Reject::code(
+							RejectCode::InvalidRequest,
+							format!("`{name}` cannot be `{value}`: that is not a path segment"),
+						));
+					}
+
 					segments.push(value);
 				},
 				| Some(_) => {
@@ -1055,5 +1075,77 @@ mod tests {
 				assert!(!path_names.contains(query_name), "{}: `{query_name}` is both a path and a query variable", endpoint.name);
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod path_segment_tests {
+	use serde_json::{Map, json};
+
+	use super::fill_path;
+
+	fn fill_one(template: &str, value: &str) -> Result<String, super::Reject> {
+		let mut variables = Map::new();
+		variables.insert("v".to_owned(), json!(value));
+		fill_path(template, &variables)
+	}
+
+	/// 🚨 **The invariant this guards, stated as itself**: a filled path has the
+	/// same number of segments as its template. A value that changes the count has
+	/// moved the request to a different endpoint, which is the whole bug — `.` and
+	/// `..` are resolved away rather than carried, so the segment disappears.
+	///
+	/// Refusing counts as keeping the promise; silently producing a shorter path
+	/// does not. Pinning the count rather than the two known strings means a value
+	/// that is normalized away in some future version of `url` fails here too.
+	#[test]
+	fn an_accepted_path_variable_never_changes_the_number_of_segments() {
+		let template = "/x/{v}/y";
+		let expected = template.split('/').count();
+
+		for value in [".", "..", "", "a/b", "%2F", "%2E", ".hidden", "a.b", "...", "x"] {
+			match fill_one(template, value) {
+				| Ok(path) => assert_eq!(
+					path.split('/').count(),
+					expected,
+					"a value of {value:?} filled to {path:?}, which is not the template's shape",
+				),
+				| Err(_) => (),
+			}
+		}
+	}
+
+	/// The case from the external review, named so the reason is legible: one
+	/// session's key, not the whole backup.
+	#[test]
+	fn a_dot_session_id_cannot_turn_deleting_one_session_into_deleting_the_backup() {
+		let template = "/_matrix/client/v3/room_keys/keys/{v}";
+
+		for value in [".", ".."] {
+			let filled = fill_one(template, value);
+
+			assert!(
+				filled.is_err(),
+				"a session_id of {value:?} was accepted and gave {filled:?}, which is the backup",
+			);
+		}
+	}
+
+	/// ⚠️ And the other direction: the guard must not tighten past the two dots.
+	/// An empty `state_key` is legitimate Matrix and most state events have one.
+	#[test]
+	fn an_empty_state_key_is_still_accepted() {
+		let filled = fill_one("/_matrix/client/v3/rooms/!r:l/state/m.room.name/{v}", "");
+
+		assert_eq!(filled.expect("an empty state_key is a value"), "/_matrix/client/v3/rooms/!r:l/state/m.room.name/");
+	}
+
+	/// A slash inside a value is carried percent-encoded, not split into two
+	/// segments — megolm session ids are base64 and really do contain `/`.
+	#[test]
+	fn a_slash_inside_a_value_stays_one_segment() {
+		let filled = fill_one("/x/{v}/y", "a/b").expect("a slash is encoded, not refused");
+
+		assert_eq!(filled, "/x/a%2Fb/y");
 	}
 }
