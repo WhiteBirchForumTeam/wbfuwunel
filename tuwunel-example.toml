@@ -3171,6 +3171,15 @@
 # before the server sees it, and `wbf_ws_send_queue_bytes` decides how
 # many outgoing ones it can hold — so raising this raises both.
 #
+# ⚠️ It also decides the largest **single to-device message** the server
+# accepts: that limit is this value less four bytes (the length prefix each
+# event carries inside a pack), and going over it is refused with 413.
+# Lowering this for memory or for a smaller `media_chunk_size_max`
+# therefore lowers what a client may send to another device, quietly.
+# The two are tied on purpose — a message the channel cannot carry would
+# jam the target device's queue for good
+# (/docs/design/keys/to-device.md §3.1.2).
+#
 #wbf_data_max_bytes = 2101248
 
 # How long a wbf WebSocket connection may stay silent before the server

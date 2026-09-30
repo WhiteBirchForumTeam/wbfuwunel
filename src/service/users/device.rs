@@ -11,7 +11,7 @@ use ruma::{
 };
 use serde_json::json;
 use tuwunel_core::{
-	Err, Result, at, implement, trace,
+	Err, Result, at, err, implement, trace,
 	utils::{
 		self, BoolExt, ReadyExt, random_string,
 		stream::{IterStream, TryIgnore},
@@ -20,6 +20,7 @@ use tuwunel_core::{
 			duration_since_epoch, timepoint_from_epoch, timepoint_from_now, timepoint_has_passed,
 		},
 	},
+	wbf::events::EVENT_LEN_PREFIX,
 };
 use tuwunel_database::{Cbor, Deserialized, Ignore, Interfix, Json, Map, Txn};
 
@@ -560,6 +561,88 @@ pub async fn classify_refresh_token(&self, presented: &str) -> RefreshToken {
 #[must_use]
 pub fn generate_refresh_token() -> String { format!("refresh_{}", random_string(TOKEN_LENGTH)) }
 
+/// One queue item exactly as it is stored, which is also exactly what a
+/// `Device/Batch` pack has to carry it in.
+///
+/// Args:
+///     sender: example: "@alice:localhost"
+///     event_type: example: "m.room_key"
+///     content: the to-device event's content
+/// Return:
+///     serde_json::Value  the `{type, sender, content}` object
+fn to_stored_item(sender: &UserId, event_type: &str, content: &serde_json::Value) -> serde_json::Value {
+	json!({
+		"type": event_type,
+		"sender": sender,
+		"content": content,
+	})
+}
+
+/// Return:
+///     usize  the largest a stored item may be, from the running config.
+#[implement(super::Service)]
+#[must_use]
+pub fn get_to_device_item_max_len(&self) -> usize {
+	to_item_max_len(self.services.config.wbf_data_max_bytes)
+}
+
+/// A pack's whole data section less the four byte length prefix every event
+/// carries inside it. Derived from `wbf_data_max_bytes` on purpose —— **the
+/// limit going in has to be the limit coming out**, or the two drift and the gap
+/// is a jammed queue (/docs/design/keys/to-device.md §3.1.2).
+///
+/// Args:
+///     data_max: `wbf_data_max_bytes`, example: 2101248
+/// Return:
+///     usize  the largest a stored item may be, 0 when the section cannot even
+///     hold the prefix.
+const fn to_item_max_len(data_max: usize) -> usize { data_max.saturating_sub(EVENT_LEN_PREFIX) }
+
+/// 🚨 The gate an oversized item has to pass, and the reason it is here rather
+/// than on the way out: a single item too large for one pack cannot be handed
+/// to the device at all — the window admits its first item whatever the size
+/// (otherwise a window could never advance), so the pack is built, the frame
+/// exceeds what the connection negotiated, and the connection dies. The client
+/// then reconnects, the queue head is the same item, and it dies again. It
+/// cannot destroy what it never received, and there is deliberately no skip
+/// (/docs/design/keys/to-device.md §3.1.2), so the device never receives
+/// another room key. Refusing the sender is the only place the failure has
+/// somewhere to go.
+///
+/// ⚠️ Call this before writing to several devices at once: the message is the
+/// same for every one of them, so checking once up front is what stops a refusal
+/// from landing after some of them were already written to.
+///
+/// Args:
+///     sender: example: "@alice:localhost"
+///     event_type: example: "m.room_key"
+///     content: the to-device event's content
+/// Return:
+///     Result<(serde_json::Value, usize)>  the stored item and its length, so a
+///     caller that goes on to write it does not build or measure it again;
+///     Err(Request(TooLarge)) when it does not fit in one pack, which the client
+///     API answers with 413; Err(Request(BadJson)) when it cannot be serialized.
+#[implement(super::Service)]
+pub fn check_to_device_event_size(
+	&self,
+	sender: &UserId,
+	event_type: &str,
+	content: &serde_json::Value,
+) -> Result<(serde_json::Value, usize)> {
+	let item = to_stored_item(sender, event_type, content);
+	let item_len = serde_json::to_vec(&item)
+		.map(|bytes| bytes.len())
+		.map_err(|e| err!(Request(BadJson("this to-device message cannot be stored: {e}"))))?;
+	let max_len = self.get_to_device_item_max_len();
+	if item_len > max_len {
+		return Err!(Request(TooLarge(
+			"this to-device message is {item_len} bytes, and one message may be at most {max_len}"
+		)));
+	}
+
+	Ok((item, item_len))
+}
+
 #[implement(super::Service)]
 pub fn add_to_device_event(
 	&self,
@@ -568,15 +651,14 @@ pub fn add_to_device_event(
 	target_device_id: &DeviceId,
 	event_type: &str,
 	content: &serde_json::Value,
-) -> u64 {
-	let count = self.services.globals.next_count();
+) -> Result<u64> {
+	// Checked before a count is taken, so a refused message leaves nothing
+	// behind. It hands back the item it measured, so this path builds and
+	// serializes it once, not twice.
+	let (item, item_len) = self.check_to_device_event_size(sender, event_type, content)?;
 
+	let count = self.services.globals.next_count();
 	let key = (target_user_id, target_device_id, *count);
-	let item = json!({
-		"type": event_type,
-		"sender": sender,
-		"content": content,
-	});
 	self.db
 		.todeviceid_events
 		.put(key, Json(&item));
@@ -593,10 +675,11 @@ pub fn add_to_device_event(
 		count = *count,
 		%event_type,
 		%sender,
+		item_len,
 		"to_device write",
 	);
 
-	*count
+	Ok(*count)
 }
 
 #[implement(super::Service)]
@@ -901,4 +984,54 @@ mod tests {
 
 		assert_eq!(device_id.as_str(), "HELLOWORLD");
 	}
+
+	/// 🚨 The gate's whole promise: **whatever it admits fits in one pack.**
+	/// A pack carries each event behind a four byte length prefix, so the limit
+	/// has to be the data section less that prefix — one byte more and the
+	/// admitted item builds a pack the connection cannot carry, which is the
+	/// jam this gate exists to stop (/docs/design/keys/to-device.md §3.1.2).
+	#[test]
+	fn what_the_size_gate_admits_always_fits_in_one_pack() {
+		use tuwunel_core::wbf::events::framed_len;
+
+		for data_max in [
+			EVENT_LEN_PREFIX,
+			EVENT_LEN_PREFIX + 1,
+			1024,
+			default_wbf_data_max_bytes_for_test(),
+			usize::MAX,
+		] {
+			let max_len = to_item_max_len(data_max);
+
+			assert!(
+				framed_len(max_len) <= data_max,
+				"an item of {max_len} bytes does not fit a data section of {data_max}",
+			);
+		}
+	}
+
+	/// The other half: it must not be needlessly strict, or a message one byte
+	/// under the wire limit is refused for nothing.
+	#[test]
+	fn the_size_gate_admits_the_largest_item_that_does_fit() {
+		use tuwunel_core::wbf::events::framed_len;
+
+		let data_max = default_wbf_data_max_bytes_for_test();
+		let max_len = to_item_max_len(data_max);
+
+		assert!(
+			framed_len(max_len.saturating_add(1)) > data_max,
+			"one byte more than {max_len} still fits {data_max}, so the limit is too low",
+		);
+	}
+
+	/// A section that cannot even hold the prefix admits nothing, rather than
+	/// wrapping around to a huge limit.
+	#[test]
+	fn a_data_section_too_small_for_the_prefix_admits_nothing() {
+		assert_eq!(to_item_max_len(0), 0);
+		assert_eq!(to_item_max_len(EVENT_LEN_PREFIX - 1), 0);
+	}
+
+	const fn default_wbf_data_max_bytes_for_test() -> usize { 2 * 1024 * 1024 + 4096 }
 }
