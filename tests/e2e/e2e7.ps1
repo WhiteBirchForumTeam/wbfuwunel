@@ -1,5 +1,5 @@
 # The wbf WebSocket channel (GET /_wbf/v1/ws): Hello, Ping, one pack per binary message, uploads resumed across HTTP
-# and WS, idle timeout. Design: docs/design/wbf-wire-format.md §6.1. Same logging style as e2e6.
+# and WS, idle timeout. Design: /docs/design/wire/wire-format.md §6.1. Same logging style as e2e6.
 $ErrorActionPreference = 'Continue'
 # Everything a run writes goes under target/, never next to the scripts.
 $REPO = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path.TrimEnd('\')

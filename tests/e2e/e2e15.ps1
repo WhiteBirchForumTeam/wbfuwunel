@@ -1,5 +1,5 @@
 . (Join-Path $PSScriptRoot 'wbf-helpers.ps1')
-# E2EE (B): Device/CryptoState (docs/design/wbf-e2ee.md §3) — a device's own key supply, pushed to the connection
+# E2EE (B): Device/CryptoState (/docs/design/keys/e2ee-over-channel.md §3) — a device's own key supply, pushed to the connection
 # holding its to-device queue: once after Subscribe, and whenever one-time or fallback keys are added or taken.
 $OUT = "$S\e2e15-out"; New-Item -ItemType Directory -Force $OUT | Out-Null
 $RESULT = "$OUT\results.txt"; '' | Out-File $RESULT -Encoding utf8

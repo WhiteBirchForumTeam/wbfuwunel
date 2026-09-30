@@ -352,7 +352,7 @@ pub async fn take_one_time_key(
 
 /// Pushes the device's current key supply as a `CryptoState` to the
 /// connection holding its to-device queue, if one does
-/// (docs/design/wbf-e2ee.md §3). Nobody holding it costs one lookup and no
+/// (/docs/design/keys/e2ee-over-channel.md §3). Nobody holding it costs one lookup and no
 /// reads.
 #[implement(super::Service)]
 pub async fn push_crypto_state(&self, user_id: &UserId, device_id: &DeviceId) {
@@ -982,7 +982,7 @@ pub async fn mark_device_key_update(&self, user_id: &UserId) {
 		.put_raw(user_key, user_id);
 
 	// Every path that changes an account's keys ends here, so the wbf device
-	// version moves here and nowhere else (wbf-room-device-version.md §3.2).
+	// version moves here and nowhere else (/docs/design/keys/room-device-version.md §3.2).
 	self.services
 		.device_versions
 		.bump_device_version(user_id, *count)

@@ -2,14 +2,14 @@
 
 > **狀態**：✅ 已實作（提案 2026-09-11 PR #41 核可，實作 PR #43 2026-09-12 合併；討論過程在本 repo 的 issue #39 與 PR #41）。
 > 起點是 client 端（`amaid/wbf-matrix-client`）的需求，原文在 client repo 的
-> `docs/design/to-device-push-proposal.md`；它列的四個待決事項維護者 2026-09-10／2026-09-11 都拍板了，
+> `/docs/design/to-device-push-proposal.md`；它列的四個待決事項維護者 2026-09-10／2026-09-11 都拍板了，
 > 連同討論中改掉的形狀（銷毀的閉環、`to`、`ot`／`nt`、上限）一起寫在下面各節。
 > 🔁 **合併前後改掉的一條**：§4 的裝置綁定從「拒絕後來的」翻成「**後來的接手**」（維護者 2026-09-12）——
 > 理由與被接手那條收到的 `Superseded`(1505) 都寫在 §4。§10 的三件事實作時查過，結論記在那節。
 >
-> 相關：[wbf-wire-format.md](wbf-wire-format.md)（§3.3 的 `0x16` 這一格、§3.4 錯誤詞表）、
-> [wbf-event-push.md](wbf-event-push.md)（訂閱與推送，PR #36 已實作）、
-> [room-seq-and-recent.md](room-seq-and-recent.md)（`Recent` 的拉窗）。
+> 相關：[/docs/design/wire/wire-format.md](../wire/wire-format.md)（§3.3 的 `0x16` 這一格、§3.4 錯誤詞表）、
+> [/docs/design/events/event-push.md](../events/event-push.md)（訂閱與推送，PR #36 已實作）、
+> [/docs/design/events/room-seq-and-recent.md](../events/room-seq-and-recent.md)（`Recent` 的拉窗）。
 
 ## 0. 一句話
 
@@ -66,7 +66,7 @@ client 得讓兩個資料庫原子性地一起 commit —— 兩個 db、兩套�
 
 編號刻意跟 `0x14 Event` 對齊（同號同位置，好對照）：
 
-⚠️ **「`id` 由 client 選」講的是選那七個 byte 的值，第一個 byte 是型別 `0x01`**（client 的會話號，[wbf-wire-format.md](wbf-wire-format.md) §2.2，PR #47）：這個 kind 的每個 subtype 都吃 `0x01`，裸值（型別 `0x00`）在 handler 之前就被回 `InvalidRequest`。
+⚠️ **「`id` 由 client 選」講的是選那七個 byte 的值，第一個 byte 是型別 `0x01`**（client 的會話號，[/docs/design/wire/wire-format.md](../wire/wire-format.md) §2.2，PR #47）：這個 kind 的每個 subtype 都吃 `0x01`，裸值（型別 `0x00`）在 handler 之前就被回 `InvalidRequest`。
 
 | subtype | 方向 | meta | data | 順序類別 |
 |---|---|---|---|---|
@@ -77,7 +77,7 @@ client 得讓兩個資料庫原子性地一起 commit —— 兩個 db、兩套�
 | `0x05 Unsubscribe` | client → server | `{}` | 無 | 無序 |
 | `0x06 Push` | **server → client** | `{ "bc", "ot", "nt", "counts": [...], "gap": bool }`；`id` 抄 `Subscribe`，`seq` 每推一次 +1；`Subscribe{cd_seq}` 的補窗被上限截斷時，它的第一個 `Push` 帶 `gap: true`（PR #53） | 同 `Batch` 的切法 | 事件驅動 |
 | `0x07 ItemsDestroyed` | **server → client** | `{ "tc", "bc" }`；`id` 抄 `ItemsDestroy` | **`bc` × 8 byte**，銷毀掉的 count（§5.2） | 無序（一個命令一則） |
-| `0x08 CryptoState` | **server → client** | `{ "otk_counts", "unused_fallback_key_types", "gap" }`；`id` 抄 `Subscribe`，**跟 `Push` 共用 `seq` 與 `gap`**。E2EE 的 (B) 加的，規格在 [wbf-e2ee.md](wbf-e2ee.md) §3 | 無 | 事件驅動 |
+| `0x08 CryptoState` | **server → client** | `{ "otk_counts", "unused_fallback_key_types", "gap" }`；`id` 抄 `Subscribe`，**跟 `Push` 共用 `seq` 與 `gap`**。E2EE 的 (B) 加的，規格在 [/docs/design/keys/e2ee-over-channel.md](e2ee-over-channel.md) §3 | 無 | 事件驅動 |
 
 ### 3.1 跟 `Event` 那一套刻意不同的三處
 
@@ -141,12 +141,12 @@ client 原提案有一個 `to`（只要比它舊的）。維護者 2026-09-11 �
 
 - **只走 WS**（准入表），HTTP 回 `Unsupported`。
 - **一個 pack 同時受兩個上限切**：則數與 `wbf_data_max_bytes`，共用 `core::wbf::events::list_pack_ranges`
-  （[wbf-wire-format.md](wbf-wire-format.md) §2.1 那條教訓：一個規則兩份實作一定會漂）。
-- **`gap`**、**`seq` 只是推送序號**、**水位只認 `nt`／`ot` 不認 `seq`**：`wbf-event-push.md` §2／§4 原封適用。
+  （[/docs/design/wire/wire-format.md](../wire/wire-format.md) §2.1 那條教訓：一個規則兩份實作一定會漂）。
+- **`gap`**、**`seq` 只是推送序號**、**水位只認 `nt`／`ot` 不認 `seq`**：`/docs/design/events/event-push.md` §2／§4 原封適用。
 
 ## 4. 訂閱：一個裝置同時只有一條連線在收，**後來的接手**
 
-⚠️ 協議層的訂閱者仍然是**連線**（`connection_id`），`wbf-event-push.md` §1 那條**不動**。
+⚠️ 協議層的訂閱者仍然是**連線**（`connection_id`），`/docs/design/events/event-push.md` §1 那條**不動**。
 這裡多的是**登記時的鍵**：`Device/Subscribe` 的 meta 帶 `device_id`，server 把那條連線綁到該裝置。
 
 理由是**銷毀是破壞性的**：同一裝置兩條連線都在收，A 收到 count=500 匯入成功後叫 server 銷毀，
@@ -171,7 +171,7 @@ B 那邊還在處理就沒得救了。所以同時只有一條 —— 但「哪�
   seq  = 接在它那段會話後面
   ```
   ⭐ 用**它自己的 id**，所以 client 不必為這件事準備第二套解析：對回自己的訂閱就知道死的是哪一個
-  （wire-format §3.4）。⚠️ **連線本身不關**：它的房間訂閱照常，只有 to-device 這一路被接手。
+  （/docs/design/wire/wire-format.md §3.4）。⚠️ **連線本身不關**：它的房間訂閱照常，只有 to-device 這一路被接手。
 - ⚠️ **這條規則屬於註冊表，不屬於 handler**：建構這個串流時就宣告「一個 topic 一條連線」，
   進 topic 的**同一把寫鎖內**執行。🚫 不要在 handler 裡「先查有沒有人佔著、再登記」——
   那是兩次取鎖，兩條同時來的連線會雙雙看到空的、雙雙進去，綁定等於沒有（PR #42 的 join hook 同型錯誤）。
@@ -237,7 +237,7 @@ client：在清單裡的 → 本地是唯一真相；不在清單裡的 → 遠�
 
 | | 意思 | client 怎麼辦 |
 |---|---|---|
-| **`Error`** | **命令沒被受理**：不是綁定的那條連線（`Forbidden`）、`tc` 與 data 對不上（`InvalidRequest`）、server 自己爆了（`Internal`） | 照 [wbf-wire-format.md](wbf-wire-format.md) §3.4 那張表 |
+| **`Error`** | **命令沒被受理**：不是綁定的那條連線（`Forbidden`）、`tc` 與 data 對不上（`InvalidRequest`）、server 自己爆了（`Internal`） | 照 [/docs/design/wire/wire-format.md](../wire/wire-format.md) §3.4 那張表 |
 | **`ItemsDestroyed` 沒列到的 count** | **命令受理了，但這幾把沒刪掉** | do nothing，遠端仍有；下次開機再清 |
 
 ⭐ 所以**不需要 NACK**：NACK 想講的「還在、再試一次」就是「不在 `ItemsDestroyed` 清單裡」，
@@ -325,7 +325,7 @@ to-device 一則約 1 KB 又不需要逐則渲染，包大一點反而省來回�
 維護者 2026-09-11 問過要不要加一個「一次最多幾包」的上限（例如 50）——**不加**，理由兩條：
 (1) 一窗則數、一包則數、包數三個數字只有**兩個自由度**，三個都能調就要回答「衝突時誰讓步」；
 (2) 不需要擋 —— client 送 `limit=500, batch=1`（500 包）時，佇列滿了 handler 就卡在 `Reply::send` 等它讀，
-那正是 [wbf-pack-pipeline.md](wbf-pack-pipeline.md) §1 設計好的背壓。
+那正是 [/docs/design/wire/pack-pipeline.md](../wire/pack-pipeline.md) §1 設計好的背壓。
 
 **討論過但不改的**（維護者 2026-09-11 定）：
 
@@ -337,7 +337,7 @@ to-device 一則約 1 KB 又不需要逐則渲染，包大一點反而省來回�
 ⚠️ 所以 `batch` 這個字在這份協議裡固定是「**一包幾則**」，不是包數。🚫 之後新增旋鈕沿用這個用法，
 不要在同一個 repo 裡出現第二種讀法。
 
-📎 **一則有多大**（照 [wbf-pack-pipeline.md](wbf-pack-pipeline.md) §1 的規矩，把記憶體算出來）：
+📎 **一則有多大**（照 [/docs/design/wire/pack-pipeline.md](../wire/pack-pipeline.md) §1 的規矩，把記憶體算出來）：
 to-device 的一則**不是訊息事件**，是一小段 olm 密文 ——
 `{ algorithm, sender_key, ciphertext: { <收件端 key>: { type, body } } }`，
 裡面最大的東西是 Megolm 的 session key（ratchet 四段 32 byte ＋ 簽章公鑰，raw 約 240 byte），
@@ -351,10 +351,10 @@ olm 封裝再 base64 之後**一則大約 1 KB**；SAS 驗證與 `m.secret.send`
 
 ⚠️ **這是估算，不是量測** —— 實作那支要量一次真實數據再回來改這裡。
 📎 一包 ~100 KB **遠低於 `wbf_data_max_bytes`（2 MiB）**，所以實際切包的是 100 這個則數；
-byte 上限仍然要接（規則只有一份，[wbf-wire-format.md](wbf-wire-format.md) §2.1 那條教訓），只是幾乎不會觸發。
-理論上界是每條連線 **`wbf_ws_send_queue_bytes`**（預設 16 MiB）加上正在寫出與正在收的那兩個 pack，跟其他 kind 同一條，不是這裡新增的風險（[wbf-pack-pipeline.md](wbf-pack-pipeline.md) §5）。
+byte 上限仍然要接（規則只有一份，[/docs/design/wire/wire-format.md](../wire/wire-format.md) §2.1 那條教訓），只是幾乎不會觸發。
+理論上界是每條連線 **`wbf_ws_send_queue_bytes`**（預設 16 MiB）加上正在寫出與正在收的那兩個 pack，跟其他 kind 同一條，不是這裡新增的風險（[/docs/design/wire/pack-pipeline.md](../wire/pack-pipeline.md) §5）。
 ⚠️ 這裡原本寫的是 `wbf_ws_send_queue_len` × `wbf_data_max_bytes` —— 那是 PR #50 之前**數包數**的界（32 × 16 MiB ＝ 512 MiB），而佇列現在數的是 bytes；包數仍在，但它已經不是決定記憶體的那個（審查者 rumia，PR #50）。
-✅ **一窗在收的時候佔多少記憶體**，原本只有則數的界（1000 則 × 每則只要求放得進一個 pack），而且整窗的 pack 是先造好再送、等於兩份。PR #53 起是 `wbf_window_max_bytes`（8 MiB），而且 pack 送一個造一個（[wbf-pack-pipeline.md](wbf-pack-pipeline.md) §6.3）。估算的一窗 ~1 MB 遠在它之內。
+✅ **一窗在收的時候佔多少記憶體**，原本只有則數的界（1000 則 × 每則只要求放得進一個 pack），而且整窗的 pack 是先造好再送、等於兩份。PR #53 起是 `wbf_window_max_bytes`（8 MiB），而且 pack 送一個造一個（[/docs/design/wire/pack-pipeline.md](../wire/pack-pipeline.md) §6.3）。估算的一窗 ~1 MB 遠在它之內。
 🔲 這幾個數字**先這樣定**（維護者 2026-09-11），量過再調。
 
 ## 8. client 端會怎麼用（給讀 server 的人理解脈絡）

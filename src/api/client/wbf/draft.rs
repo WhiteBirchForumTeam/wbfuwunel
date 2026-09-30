@@ -1,5 +1,5 @@
 //! `0x02 Stream`: a message that is still being written
-//! (`docs/design/streaming-messages.md`).
+//! (`/docs/design/events/streaming-messages.md`).
 //!
 //! A draft is anchored by one real, persisted event — `Draft` writes it, and
 //! its `g_seq` is the draft's id — and everything after that is momentary:
@@ -89,7 +89,7 @@ pub(super) async fn handle(
 /// Return:
 ///     Result<OwnedRoomId, Reject>  `InvalidRequest` when the meta is not a
 ///     room id. ⚠️ The design document says `Conflict` here; it predates the
-///     error vocabulary (wire-format §3.4), where a field that is not what
+///     error vocabulary (/docs/design/wire/wire-format.md §3.4), where a field that is not what
 ///     the subtype takes is `InvalidRequest` and `Conflict` is for state.
 fn parse_room_id(view: &PackView<'_>) -> Result<OwnedRoomId, Reject> {
 	let text = std::str::from_utf8(view.meta)
@@ -190,7 +190,7 @@ async fn open_draft(
 	// ⭐ The draft's id, already composed with its type: `g_seq` stays in the
 	// meta as the plain number it is everywhere else, and `id` is what the
 	// following packs put in the header — so no client has to work out that
-	// the two differ by a byte (wire-format §2.2).
+	// the two differ by a byte (/docs/design/wire/wire-format.md §2.2).
 	let id = compose_anchor_id(g_seq)?;
 
 	reply
@@ -387,7 +387,7 @@ fn refuse_unless_author(anchor: &DraftAnchor, user: &UserId) -> Result<(), Rejec
 
 /// The chain a receiver reads before applying a piece: its `data` starts with
 /// a big-endian u32 naming the piece it follows, and its `seq` is its own
-/// number (`docs/design/streaming-messages.md` §3.0).
+/// number (`/docs/design/events/streaming-messages.md` §3.0).
 ///
 /// ⭐ Why the server enforces a field it never reads the meaning of: without
 /// these three checks the chain is a convention, and a convention that
@@ -513,7 +513,8 @@ async fn refuse_unless_member(services: &Services, user: &UserId, room_id: &Room
 	Ok(())
 }
 
-/// Refuses a draft in a room too large to fan out to (§7). A draft is for
+/// Refuses a draft in a room too large to fan out to (/docs/design/events/streaming-messages.md
+/// §7). A draft is for
 /// bots and small rooms; the cost of one in a large room is a server problem
 /// rather than a design problem, and this is the fallback that says so.
 async fn refuse_room_too_large(services: &Services, room_id: &RoomId) -> Result<(), Reject> {
@@ -632,7 +633,8 @@ async fn broadcast(
 	services.streams.relay_to(room_id, &recipients, &pack);
 }
 
-/// The throttles' refusal, in the shape §3.4 gives `RateLimited`: the client
+/// The throttles' refusal, in the shape /docs/design/wire/wire-format.md §3.4 gives
+/// `RateLimited`: the client
 /// is told how long to wait rather than left to guess.
 fn retry_later(message: &'static str, retry_after: std::time::Duration) -> Reject {
 	let retry_after_ms = u64::try_from(retry_after.as_millis()).unwrap_or(u64::MAX);

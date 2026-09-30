@@ -2376,7 +2376,8 @@ pub struct Config {
 	/// - Disabling repair mode and restarting the server is recommended after
 	///   running the repair.
 	///
-	/// See https://tuwunel.chat/troubleshooting.html#database-corruption for more details on recovering a corrupt database.
+	/// See https://tuwunel.chat/troubleshooting.html#database-corruption for more details on
+	/// recovering a corrupt database.
 	#[serde(default)]
 	pub rocksdb_repair: bool,
 
@@ -3739,7 +3740,7 @@ pub struct Config {
 	/// whose packs decode speaks the protocol. A run this long means the
 	/// other end is not speaking wbf at all, or an encoder has a bug, and a
 	/// working client never reaches it. Volume is the rate limiter's job,
-	/// not this one's (`docs/design/wbf-wire-format.md` 2.1).
+	/// not this one's (`/docs/design/wire/wire-format.md` 2.1).
 	///
 	/// default: 8
 	#[serde(default = "default_wbf_ws_corrupt_budget")]

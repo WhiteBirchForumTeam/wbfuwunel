@@ -4,7 +4,7 @@
 > 不是設計文件 —— 每一項的「為什麼」與「怎麼做」在它指向的那份文件裡，這裡只講順序、狀態、前提。
 >
 > 狀態標記：✅ 已合併 · 🔧 進行中 · 📄 有提案待同意 · 🔲 下一步 · 💭 候選（還沒決定要不要做）· 🚫 明確不做。
-> 每一項改狀態時順手改這裡；這裡的狀態如果跟 [`CHANGELOG-fork.md`](../../CHANGELOG-fork.md) 對不上，以 CHANGELOG 為準。
+> 每一項改狀態時順手改這裡；這裡的狀態如果跟 [`CHANGELOG-fork.md`](../../../CHANGELOG-fork.md) 對不上，以 CHANGELOG 為準。
 >
 > 最後更新：2026-09-30（PR #94 合併後）。⚙️ 等維護者決定的：§2.9 末尾那件（連線死掉後名額 ~5 秒才回來）；§3 的候選；分支 `docs/room-version-prev` 上的提案（每次告知房間版本號時同時帶「變動前的那一個」，讓 client 只查變動的那一個人）。🔲 手上的工作在 §2.15。
 
@@ -12,7 +12,7 @@
 
 一套**由維護者完全掌控**的即時通訊服務：資料存在哪、留多久、誰讀得到，由維護者決定；
 容量有界、算得出來；大檔案與串流是一等公民。完整的理由與非目標在
-[why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md)（下稱「核心設計」）。
+[/docs/design/overview/why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md)（下稱「核心設計」）。
 
 **分岔會很大，而且會持續變大。** 與 Matrix 規格相容不是目標；上游持續合併進來，方向由這裡決定。
 
@@ -20,16 +20,16 @@
 
 | 項目 | 狀態 | 去哪看 |
 |---|---|---|
-| fork 定位、分支模型、改動流程、Windows 建置 | ✅ | [fork-overview.md](fork-overview.md)、[windows-build.md](windows-build.md) |
-| 媒體引用計數（精確計數、merge operator、哨兵）—— **已被 #24 的持有者集合取代** | ✅ PR #7 → 退場 | [media-gc.md](media-gc.md) §2、§4（歷史） |
-| 媒體的真正刪除：收集器、墓碑 410、`migrate-references`（migrate 已在 #24 拔掉） | ✅ PR #10 | [media-gc.md](media-gc.md) §3、§6 |
-| 每個 mxc 一鎖，關掉收集器與同時加持有者的窗口 | ✅ PR #12 | [media-gc.md](media-gc.md) §3.3 |
-| 分塊上傳／下載 B 支：WebSocket 通道、上傳中間層（進度列＋記憶體＋每上傳一鎖）、規格黃金向量 | ✅ PR #18 | [wbf-wire-format.md](wbf-wire-format.md) §6.1、[chunked-upload.md](chunked-upload.md) §3.1、[wbf-vectors.json](wbf-vectors.json) |
-| 分塊上傳／下載 A 支：wbf pack、`EncryptedFileInfo`、有序上傳與續傳、串流模式、按塊下載、sweeper、`POST /_wbf/v1/pack` | ✅ PR #16 | [chunked-upload.md](chunked-upload.md)、[chunked-upload-spec.md](chunked-upload-spec.md)、[wbf-wire-format.md](wbf-wire-format.md) |
-| 每房 `r_seq`、全域 `g_seq`、`Event/Recent` | ✅ PR #22 | [room-seq-and-recent.md](room-seq-and-recent.md) |
-| **媒體持有者集合**取代計數；附件隨送訊息宣告（header／`Event/Send`）；7 天掃描；舊 client 一次性警告；fork 自報引擎名 | ✅ PR #24 | [media-holders.md](media-holders.md)、[media-attachments.md](media-attachments.md) |
+| fork 定位、分支模型、改動流程、Windows 建置 | ✅ | [/docs/design/overview/fork-overview.md](fork-overview.md)、[/docs/design/build/windows-build.md](../build/windows-build.md) |
+| 媒體引用計數（精確計數、merge operator、哨兵）—— **已被 #24 的持有者集合取代** | ✅ PR #7 → 退場 | [/docs/design/media/media-gc.md](../media/media-gc.md) §2、§4（歷史） |
+| 媒體的真正刪除：收集器、墓碑 410、`migrate-references`（migrate 已在 #24 拔掉） | ✅ PR #10 | [/docs/design/media/media-gc.md](../media/media-gc.md) §3、§6 |
+| 每個 mxc 一鎖，關掉收集器與同時加持有者的窗口 | ✅ PR #12 | [/docs/design/media/media-gc.md](../media/media-gc.md) §3.3 |
+| 分塊上傳／下載 B 支：WebSocket 通道、上傳中間層（進度列＋記憶體＋每上傳一鎖）、規格黃金向量 | ✅ PR #18 | [/docs/design/wire/wire-format.md](../wire/wire-format.md) §6.1、[/docs/design/media/chunked-upload.md](../media/chunked-upload.md) §3.1、[/docs/design/wire/wbf-vectors.json](../wire/wbf-vectors.json) |
+| 分塊上傳／下載 A 支：wbf pack、`EncryptedFileInfo`、有序上傳與續傳、串流模式、按塊下載、sweeper、`POST /_wbf/v1/pack` | ✅ PR #16 | [/docs/design/media/chunked-upload.md](../media/chunked-upload.md)、[/docs/design/media/chunked-upload-spec.md](../media/chunked-upload-spec.md)、[/docs/design/wire/wire-format.md](../wire/wire-format.md) |
+| 每房 `r_seq`、全域 `g_seq`、`Event/Recent` | ✅ PR #22 | [/docs/design/events/room-seq-and-recent.md](../events/room-seq-and-recent.md) |
+| **媒體持有者集合**取代計數；附件隨送訊息宣告（header／`Event/Send`）；7 天掃描；舊 client 一次性警告；fork 自報引擎名 | ✅ PR #24 | [/docs/design/media/media-holders.md](../media/media-holders.md)、[/docs/design/media/media-attachments.md](../media/media-attachments.md) |
 
-媒體這幾支合起來是核心設計 §5.4「刪除語意」的 server 端，**沒有寬限期**（訊息消失媒體立刻消失）；
+媒體這幾支合起來是/docs/design/overview/why-not-matrix-and-core-design.md §5.4「刪除語意」的 server 端，**沒有寬限期**（訊息消失媒體立刻消失）；
 「不確定就持有」現在的形狀是：**沒有 `mxc_managed` 列的既存媒體永不自動刪**，沒有重算工具。
 
 **現在成立的性質**：這個模型上線後上傳的媒體，壽命等於持有它的東西（事件、原文備份、頭像）的壽命；
@@ -39,13 +39,13 @@
 
 ### 2.1 ✅ 媒體層：分塊上傳、續傳、按塊下載（A 支 #16、B 支 #18 都已合併）
 
-核心設計 §5.2 的主體，也是 fork 的第一個「使用者看得到」的功能。提案 [chunked-upload.md](chunked-upload.md) 維護者 2026-09-03
-同意（PR #15）；**A 支（pack、上傳、下載、sweeper、HTTP 一包一請求）已合併（PR #16，2026-09-03）；B 支（WebSocket 通道 `/_wbf/v1/ws`、上傳中間層、規格黃金向量 `wbf-vectors.json`）已合併（PR #18，2026-09-04）**。server 端到這裡就算能用；下一步是 client（§4），server 側留的是主動推送（邊上傳邊下載）、發送拆 mpsc task、benchmark。
-pack 格式與 kind 分配在 [wbf-wire-format.md](wbf-wire-format.md)，**未來所有 HTTP 請求都會遷到這條通道**。
+/docs/design/overview/why-not-matrix-and-core-design.md §5.2 的主體，也是 fork 的第一個「使用者看得到」的功能。提案 [/docs/design/media/chunked-upload.md](../media/chunked-upload.md) 維護者 2026-09-03
+同意（PR #15）；**A 支（pack、上傳、下載、sweeper、HTTP 一包一請求）已合併（PR #16，2026-09-03）；B 支（WebSocket 通道 `/_wbf/v1/ws`、上傳中間層、規格黃金向量 `/docs/design/wire/wbf-vectors.json`）已合併（PR #18，2026-09-04）**。server 端到這裡就算能用；下一步是 client（§4），server 側留的是主動推送（邊上傳邊下載）、發送拆 mpsc task、benchmark。
+pack 格式與 kind 分配在 [/docs/design/wire/wire-format.md](../wire/wire-format.md)，**未來所有 HTTP 請求都會遷到這條通道**。
 
-- **範圍**（最終模型，見 [chunked-upload-spec.md](chunked-upload-spec.md)）：`Create` 一次宣告（16 byte `EncryptedFileInfo` ＋ client 加密的檔案描述）；塊嚴格有序、`seq` 即塊索引、server 不判斷密文長度只記位置；串流模式；單檔上限與截斷；下載按塊或明文位置一次整塊交回。完整性是 client 的 AEAD 標籤加 pack 的 CRC-32C，**沒有 Merkle**（早期草案的殘留，維護者 2026-09-03 改用 CRC）。
-- **前提**：核心設計 §7 待驗 3（塊大小）要先量；§7 待驗 1（要不要 DAG）**不擋這一步** —— 媒體層不依賴事件層的形狀。
-- **接縫**（見 [repo-structure.md](repo-structure.md)）：`src/api/client/media.rs` 新端點、`src/service/media/` 分塊與樹的邏輯、
+- **範圍**（最終模型，見 [/docs/design/media/chunked-upload-spec.md](../media/chunked-upload-spec.md)）：`Create` 一次宣告（16 byte `EncryptedFileInfo` ＋ client 加密的檔案描述）；塊嚴格有序、`seq` 即塊索引、server 不判斷密文長度只記位置；串流模式；單檔上限與截斷；下載按塊或明文位置一次整塊交回。完整性是 client 的 AEAD 標籤加 pack 的 CRC-32C，**沒有 Merkle**（早期草案的殘留，維護者 2026-09-03 改用 CRC）。
+- **前提**：/docs/design/overview/why-not-matrix-and-core-design.md §7 待驗 3（塊大小）要先量；§7 待驗 1（要不要 DAG）**不擋這一步** —— 媒體層不依賴事件層的形狀。
+- **接縫**（見 [/docs/design/overview/repo-structure.md](repo-structure.md)）：`src/api/client/media.rs` 新端點、`src/service/media/` 分塊與樹的邏輯、
   `src/database/maps.rs` 塊索引、`src/service/storage/` 既有的 object_store 抽象放 bytes。
 - **與引用計數的關係**：一個分塊媒體仍是一個 mxc、一個計數；塊是 mxc 底下的東西，`media.delete()` 的前綴刪除順手連塊一起刪。
   這是為什麼刪除要先做：分塊上去之後，孤兒的體積會是現在的十倍百倍。
@@ -60,24 +60,24 @@ pack 格式與 kind 分配在 [wbf-wire-format.md](wbf-wire-format.md)，**未�
 
 ### 2.3 ✅ 流式訊息（文字 token 串流）→ Draft Message（PR #45）
 
-核心設計 §5.3 的這一項已經以 **Draft Message** 的形狀實作並合併（[streaming-messages.md](streaming-messages.md) 第四版，進度記在 §2.9 的工作 3）：
+/docs/design/overview/why-not-matrix-and-core-design.md §5.3 的這一項已經以 **Draft Message** 的形狀實作並合併（[/docs/design/events/streaming-messages.md](../events/streaming-messages.md) 第四版，進度記在 §2.9 的工作 3）：
 一則真的佔位事件當錨、草稿用它的 `g_seq` 命名、內容變化只廣播不進庫。
 ⚠️ 這一節原本寫的是「走短暫訊息旁路、對照 `rooms/typing/` 與 sync 喚醒、等維護者同意」—— 那是**已作廢的第二／三版**草案。它在 #45 合併後沒有被改，#52 的文件同步也漏了（那輪掃的是 #50／#51 改了哪些事實，沒有把狀態標記本身當成要掃的事實）。
 
 ### 2.4 ✅ 每房 `r_seq`、全域 `g_seq` 與 `Event/Recent`（issue #20，PR #22 已合併 2026-09-06）
 
-client（wbf-matrix-client）的聊天模型要 server 配合的兩件事。設計 [room-seq-and-recent.md](room-seq-and-recent.md)：
+client（wbf-matrix-client）的聊天模型要 server 配合的兩件事。設計 [/docs/design/events/room-seq-and-recent.md](../events/room-seq-and-recent.md)：
 兩個位置寫進存起來的 PDU 的 `unsigned`（一個寫入點、所有讀路徑自動帶）、startup migration 回填既有 room；
-`Event/Recent` 依 client 快取的 `cg_seq` 只回差異，k 路合併不加索引。順手加了 `[profile.e2e]`（windows-build.md）。
+`Event/Recent` 依 client 快取的 `cg_seq` 只回差異，k 路合併不加索引。順手加了 `[profile.e2e]`（/docs/design/build/windows-build.md）。
 
 
 ### 2.5 ✅ E2EE 下的媒體引用 → 持有者集合（提案 PR #23，實作 PR #24，2026-09-06 合併）
 
 破口：計數的 +1 來自 server 讀 content，E2EE 房間讀不到。定案分兩層：**來源**換成送訊息時宣告 `attachments`
-（[media-attachments.md](media-attachments.md)），**形狀**換成外鍵集合（[media-holders.md](media-holders.md)），
-`migrate-references` 拔掉，既存媒體永不自動刪。**client 端必須同步**（spec §12），否則 E2EE 房間的附件 7 天後被掃掉。
+（[/docs/design/media/media-attachments.md](../media/media-attachments.md)），**形狀**換成外鍵集合（[/docs/design/media/media-holders.md](../media/media-holders.md)），
+`migrate-references` 拔掉，既存媒體永不自動刪。**client 端必須同步**（/docs/design/media/chunked-upload-spec.md §12），否則 E2EE 房間的附件 7 天後被掃掉。
 
-### 2.6 ✅ 合併後再審與外部審查的修補（[review-followups-2026-09-06.md](review-followups-2026-09-06.md)），三支，維護者 2026-09-06 同意
+### 2.6 ✅ 合併後再審與外部審查的修補（[/docs/design/history/review-followups-2026-09-06.md](../history/review-followups-2026-09-06.md)），三支，維護者 2026-09-06 同意
 
 PR #24 合併後對 main 重看一次，加上 `../external-review` 兩輪（2026-09-05）逐條對現在的程式碼驗證；外部審查 14 條裡 4 條已由 #24 修掉、8 條仍在、1 條降級、1 條文件講反話，另抓到 1 條新的 P1。
 
@@ -85,7 +85,7 @@ PR #24 合併後對 main 重看一次，加上 `../external-review` 兩輪（202
 |---|---|---|
 | `media/managed-origin` | 既存媒體被縮圖拉進 `mxc_managed` 後 7 天被掃（P1，只有 `create`／Seal 確立受管）；`(mxc, Interfix)` 前綴；頭像幽靈持有者；墓碑 TTL 文件 | ✅ PR #26 |
 | `wbf/auth-and-ws-lifetime` | `/_wbf/*` 與 WebSocket 不查帳號鎖定（P1）；WebSocket 在登出／到期後仍有權限、關機時 `State` 懸空（P1） | ✅ PR #28 |
-| `media/upload-lifecycle` | Seal 在本地儲存收整檔進記憶體、S3 的 1 MiB parts（P1）；`Status` 冷載入不持鎖、sweeper 鎖下不重讀進度（P2）；升級前舊上傳卡配額（P2） | ✅ PR #48（分支名是 `wbf/upload-lifecycle`）。🚫 最後一項（review-followups §2.8）**不做**：這個 fork 從未上線，不可能有那種列。⚠️ S3 那半沒有對真的 S3／MinIO 跑過 |
+| `media/upload-lifecycle` | Seal 在本地儲存收整檔進記憶體、S3 的 1 MiB parts（P1）；`Status` 冷載入不持鎖、sweeper 鎖下不重讀進度（P2）；升級前舊上傳卡配額（P2） | ✅ PR #48（分支名是 `wbf/upload-lifecycle`）。🚫 最後一項（/docs/design/history/review-followups-2026-09-06.md §2.8）**不做**：這個 fork 從未上線，不可能有那種列。⚠️ S3 那半沒有對真的 S3／MinIO 跑過 |
 
 ### 2.7 ✅ WS 的 `Login`／`Refresh`／`Logout`（提案 #29，實作 PR #30，2026-09-07 合併）
 
@@ -101,7 +101,7 @@ Logout 後直接關線；同一條連線重複 Login 允許；**登入限速預�
 定案：client 多連線分工（server 不知道）；每個 (user, device) 最多 4 條 WS，超過踢新的，匿名不算、HTTP 不算；一條連線依序處理、落地才 Ack；
 `Recent` 是 client 拉的視窗（預設 320 條），在 WS 上拆成 `Event/Batch` 串流（meta `{tc, bc, fs, ls, r}`，`tc` 是一窗的條數、`r = 0` 一窗結束），下一窗帶 `before`，HTTP 回 `Unsupported`。
 第一部分（§1–§6）已合併；三處跟提案不同（名額在發 token 前拿、一趟收齊一窗、一問一答 handler 保留簽名）在文件裡標 📎。
-**第二部分**（§8：review-followups §2.2／§2.5，上傳生命週期）✅ **PR #48（2026-09-13 合併）**：Seal 一律串流（本地不再整檔進記憶體、送 S3 的 part 不再違反 5 MiB 下限）、`upload_status` 補鎖、sweeper 在鎖下重讀進度。📎 §2.8（#16～#18 之間的舊格式上傳列）**不做** —— 維護者 2026-09-13 確認這個 fork 從未真實上線，不可能有那種列。client 端要跟的東西：wbf-matrix-client #15。
+**第二部分**（§8：/docs/design/history/review-followups-2026-09-06.md §2.2／§2.5，上傳生命週期）✅ **PR #48（2026-09-13 合併）**：Seal 一律串流（本地不再整檔進記憶體、送 S3 的 part 不再違反 5 MiB 下限）、`upload_status` 補鎖、sweeper 在鎖下重讀進度。📎 §2.8（#16～#18 之間的舊格式上傳列）**不做** —— 維護者 2026-09-13 確認這個 fork 從未真實上線，不可能有那種列。client 端要跟的東西：wbf-matrix-client #15。
 
 ### 2.9 ✅ WS 訂閱與推送（工作 2 PR #36）――共用核心 PR #42、to-device PR #43（2026-09-12）、Draft Message（工作 3 PR #45）、`id` 型別 byte（提案 PR #46 → 實作 #47，2026-09-13）
 
@@ -113,20 +113,20 @@ Logout 後直接關線；同一條連線重複 Login 允許；**登入限速預�
 **工作 2 已合併（PR #36）**：`service/channels`、`Event/Subscribe`／`Unsubscribe`／`Push`、`append_pdu` 與 `state_cache` 兩個 hook。
 📎 那個模組 PR #42 之後叫 `service/streams`（共用核心 ＋ 房間政策），要找程式碼看那裡。
 ⚠️ 提案寫的 registry 是 `user → 連線`，實作定案是 **`connection_id` → 訂閱者**（訂閱者是連線，不是使用者也不是裝置）；channel 是 DB 成員資格的記憶體投影。
-client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
+client 側的三條契約在 [/docs/design/events/event-push.md](../events/event-push.md) §2.1。
 ✅ **補窗依 `rooms` 過濾已完成（PR #51）**：本來 `Subscribe{rooms, cg_seq}` 的補窗是**全域**的（`collect_window` 不分房），靠 §2.1 要求 client 不拿非訂閱房的事件推進水位（審查者 rumia R4）—— 而那等於要求 client 不要相信 server 剛剛送給它的東西。
 同一支順便給 `Event/Recent` 加了 `rooms`，**一個房間 ＋ `before` 就是那個房間的歷史**（維護者 2026-09-13 問「WS 能不能拿單房歷史」）。
 
 **共用核心已合併（PR #42）**：推送的記帳從「每條連線一份」改成「**每段會話**一份」（`id` 是會話的名字、`seq` 是它裡面的計數，
-[wbf-wire-format.md](wbf-wire-format.md) §4.1），一條連線因此背得動好幾種訂閱 —— 這是**正常形狀**，不是一種訂閱開一條線。
+[/docs/design/wire/wire-format.md](../wire/wire-format.md) §4.1），一條連線因此背得動好幾種訂閱 —— 這是**正常形狀**，不是一種訂閱開一條線。
 
-**to-device 已合併（PR #43）**：`0x16 Device` 的訂閱、推送、`Fetch` 補洞與銷毀的閉環（[wbf-to-device.md](wbf-to-device.md)）。
+**to-device 已合併（PR #43）**：`0x16 Device` 的訂閱、推送、`Fetch` 補洞與銷毀的閉環（[/docs/design/keys/to-device.md](../keys/to-device.md)）。
 ⚠️ 裝置綁定是「**後來的接手**」（維護者 2026-09-12 推翻提案原本的拒絕規則），被接手的那條收到 `Superseded`(1505)。
-📎 **取法後來改過（PR #88，2026-09-28）**：`Fetch` **不帶 `cd_seq`**，從佇列最舊的還沒銷毀的一則開始；翻頁是「銷毀這一窗、再叫一次」。client 自己記水位那條路會**永久漏金鑰**，理由與三條路的成因在 [wbf-to-device.md](wbf-to-device.md) §2／§3.1.2。
+📎 **取法後來改過（PR #88，2026-09-28）**：`Fetch` **不帶 `cd_seq`**，從佇列最舊的還沒銷毀的一則開始；翻頁是「銷毀這一窗、再叫一次」。client 自己記水位那條路會**永久漏金鑰**，理由與三條路的成因在 [/docs/design/keys/to-device.md](../keys/to-device.md) §2／§3.1.2。
 
-**工作 3 Draft Message ✅ PR #45（2026-09-13 合併）**：照 [streaming-messages.md](streaming-messages.md) §3–§8（`Stream` kind、server 零狀態、每片從佔位事件點讀驗作者、`wbf_draft_max_room_members`）。審查期間維護者加了片的 `prev` 指標（每片指向它接在哪一片之後），外部審查另外抓到七條「開著的草稿是一張不會過期的許可證」型的漏洞，全部修掉。
+**工作 3 Draft Message ✅ PR #45（2026-09-13 合併）**：照 [/docs/design/events/streaming-messages.md](../events/streaming-messages.md) §3–§8（`Stream` kind、server 零狀態、每片從佔位事件點讀驗作者、`wbf_draft_max_room_members`）。審查期間維護者加了片的 `prev` 指標（每片指向它接在哪一片之後），外部審查另外抓到七條「開著的草稿是一張不會過期的許可證」型的漏洞，全部修掉。
 ✅ **發送佇列的記憶體界已修（PR #50）**（起於維護者 2026-09-13 問「4 個 client 的記憶體高峰」）：原本 `wbf_ws_send_queue_len` 數的是**包數**（32），而一個 pack 最大 16.07 MiB → **每條連線 514 MiB**、4 裝置 × 4 條 ≈ 9 GiB。現在多一個 **`wbf_ws_send_queue_bytes`（預設 16 MiB）**，額度跟著 pack 排隊、寫完才還；同時把 `wbf_data_max_bytes` 從 16 MiB 降到 **2 MiB**（維護者定），所以一個滿包（meta 64 KiB ＋ data ＋ 32 byte 外框 ＝ 2,166,816 bytes）在預算裡放得下 **7** 個。每條連線的最壞值 ≈ **20 MiB**，4 裝置 × 4 條 ≈ 0.3 GiB。
-✅ **同家族的窗已修（PR #53）**：`Event/Recent` 的窗（最多 500 **筆**，每筆只要求小於一個 pack，理論上 ~1 GiB）與 `Device/Fetch`（一整窗先收齊、再一次造完所有 pack，等於整窗兩份）原本都**數筆數、不數 bytes**。現在多一個 **`wbf_window_max_bytes`（預設 8 MiB），先於則數生效**（維護者 2026-09-14 指定），pack 送一個造一個；被截斷的窗在 `Batch` 帶 `more: true`、被截斷的訂閱補窗第一個 `Push` 帶 `gap: true`（[wbf-pack-pipeline.md](wbf-pack-pipeline.md) §6.3）。⚠️ client 要跟：判斷「還有沒有更舊的」改看 `more`，不看 `tc < limit`。
+✅ **同家族的窗已修（PR #53）**：`Event/Recent` 的窗（最多 500 **筆**，每筆只要求小於一個 pack，理論上 ~1 GiB）與 `Device/Fetch`（一整窗先收齊、再一次造完所有 pack，等於整窗兩份）原本都**數筆數、不數 bytes**。現在多一個 **`wbf_window_max_bytes`（預設 8 MiB），先於則數生效**（維護者 2026-09-14 指定），pack 送一個造一個；被截斷的窗在 `Batch` 帶 `more: true`、被截斷的訂閱補窗第一個 `Push` 帶 `gap: true`（[/docs/design/wire/pack-pipeline.md](../wire/pack-pipeline.md) §6.3）。⚠️ client 要跟：判斷「還有沒有更舊的」改看 `more`，不看 `tc < limit`。
 📍 另外維護者提過**大塊懶加載**（佇列裡只放指標，寫的時候才讀檔），那個要先寫提案：它會改 `Outgoing` 的語意、要給送出任務發 `Error` 的能力（檔案可能在排隊期間消失）。📎 實測的另一端：空資料庫、沒人連線時閒置 **42 MiB**（6 核）。
 🔲 **兩件 PR #51 的 e2e 量到、還沒處理的**（等維護者決定要不要做）：
 - **連線死掉之後名額要 ~5 秒才回來**：有推播還排著的連線結束時會先把佇列排空（`DRAIN_TIMEOUT` 5 秒）才還 `wbf_ws_max_connections_per_device` 的名額，實測兩次都是 **5.1 秒**。
@@ -138,34 +138,34 @@ client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
 維護者 2026-09-10 指定，起因是 PR #36 審查指出 `parse_meta` 失敗回 `Conflict` 語意不準。三條規則：**code 一律事先定義**（先在表上加一列才能發）、
 **每個 code 有序號**（`code_id`，1000 起、家族分段、`0` 永遠不合法、不重用）、**client 不認得的 code 就當「失敗且不知道能不能重試」**（不重試、往上報）。
 連帶把「連兩次壞就關線」換成**連線健康計數器**（解不開的框 −1、解得開的 pack 歸零、到 `wbf_ws_corrupt_budget`（8）Close 1002）——📎 舊那條**從來沒被實作過**。
-表與規則在 [wbf-wire-format.md](wbf-wire-format.md) §2.1／§3.4。⚠️ 歸位（格式錯的請求 `Conflict`／`Corrupt` → `InvalidRequest`）與 `code_id` 是**線上看得見的改動**，client 要跟。
+表與規則在 [/docs/design/wire/wire-format.md](../wire/wire-format.md) §2.1／§3.4。⚠️ 歸位（格式錯的請求 `Conflict`／`Corrupt` → `InvalidRequest`）與 `code_id` 是**線上看得見的改動**，client 要跟。
 
-### 2.11 ✅ 常用 Matrix API 走通道（批 1、2、3、4 全部合併，常用的基礎已齊）（[wbf-api-bridge.md](wbf-api-bridge.md)，設計 PR #55 已合併；實作分支 `wbf/api-bridge`，號碼總表 [../bridge-specs/index.md](../bridge-specs/index.md)）
+### 2.11 ✅ 常用 Matrix API 走通道（批 1、2、3、4 全部合併，常用的基礎已齊）（[/docs/design/wire/api-bridge.md](../wire/api-bridge.md)，設計 PR #55 已合併；實作分支 `wbf/api-bridge`，號碼總表 [/docs/bridge-specs/index.md](../../bridge-specs/index.md)）
 
 維護者 2026-09-14：account 註冊／登入／登出、session、room、device 這些常用端點改成 WS pack，「看能做多少、多快，慢慢移植」。
 提案的核心是**一座通用的橋**而不是一支一支手搬：pack 轉成一個**內部的 HTTP request（不走網路）**丟進 axum 的 `Router`（維護者 2026-09-14 定的形狀）—— 認證、關卡（鎖定、暫停、UIAA）、ruma 解析、route 函式全部是 HTTP 那條路本身，只有一份，WS 不會漏抄，上游檔案也不用動。
 分批搬：批 1 一般的已登入端點（37 支，PR #56 已合併）、批 2 註冊與要 UIAA 的 8 支（PR #63 已合併：註冊帶 `inhibit_login` 再送原生 `Login`，停用帳號、改密碼、刪裝置的 UIAA 兩輪）。E2EE 的金鑰端點（21 支）也走這座橋，見 §2.12。
-**批 3 ✅ PR #77（2026-09-21 合併，提案 #76）**：房間其餘 8 支（升級、敲門、joined_members、目錄可見性兩支、摘要、階層、mutual_rooms）、關聯與討論串 4 支、過濾器 2 支（`0x12 Sync`）、在線狀態 2 支（`0x15 Receipt`）、capabilities 1 支（`0x1C Misc`），加上**新 kind `0x1D Report`** 的三支檢舉（維護者決定三支放一起，而不是跟著被檢舉的東西分到三個 kind）—— 共 20 支，總表 86 列。⭐ **kind 照 [wbf-wire-format.md](wbf-wire-format.md) §3.3 的分配表走**，不是挑一個看起來像的。順便補上 `Hello` 的 `features`（`"stream"`、`"device"`、`"bridge"` —— §2.9 記的那條缺口，**client 要跟**）。同一個端點的舊 URL（`im.nheko.summary`、`uk.half-shot.msc2666`）**不另給 subtype 號**，HTTP 上照舊 —— 維護者 2026-09-20 定的界線：「**bridge 不管內容是什麼，只管怎麼原樣 forward**」。
+**批 3 ✅ PR #77（2026-09-21 合併，提案 #76）**：房間其餘 8 支（升級、敲門、joined_members、目錄可見性兩支、摘要、階層、mutual_rooms）、關聯與討論串 4 支、過濾器 2 支（`0x12 Sync`）、在線狀態 2 支（`0x15 Receipt`）、capabilities 1 支（`0x1C Misc`），加上**新 kind `0x1D Report`** 的三支檢舉（維護者決定三支放一起，而不是跟著被檢舉的東西分到三個 kind）—— 共 20 支，總表 86 列。⭐ **kind 照 [/docs/design/wire/wire-format.md](../wire/wire-format.md) §3.3 的分配表走**，不是挑一個看起來像的。順便補上 `Hello` 的 `features`（`"stream"`、`"device"`、`"bridge"` —— §2.9 記的那條缺口，**client 要跟**）。同一個端點的舊 URL（`im.nheko.summary`、`uk.half-shot.msc2666`）**不另給 subtype 號**，HTTP 上照舊 —— 維護者 2026-09-20 定的界線：「**bridge 不管內容是什麼，只管怎麼原樣 forward**」。
 **批 4 ✅ PR #81（2026-09-21 合併，提案 #80）**：起於回答「常用的做完了沒」—— 拿 `src/api/router.rs` 註冊的 **177 個 client 端點**逐一對橋的 86 列（而不是照這份文件自己的說法），維護者定了「兩塊都做」：**推播與通知 12 支**（新 kind `0x18 Push`）、**目錄與搜尋 4 支**（`0x13` 續號➕新 kind `0x1A Search`），再加**既有領域裡漏掉的 5 支**（房間別名、時間戳跳轉、媒體設定與連結預覽、TURN）—— 共 21 支，總表 **107 列**。四個新 kind（`0x18`、`0x19 Media`、`0x1A Search`、`0x1B Voip`）的號碼本來就在 §3.3 的分配表上，**這一批沒有要挑的 kind**，`pack.rs` 也一行沒改。
 🚫 **帳號資料的「刪」不搬**（維護者 2026-09-21 同意）：它只有 unstable 路徑（MSC3391 未進規格），`pick_path` 只收 v3 與較新的穩定版本 —— 所以「能讀能寫不能刪」不是漏搬，是 Matrix 還沒定案。
 
-⭐ **到這裡，常用面沒有洞了**：登入註冊、房間與成員、訊息與歷史、媒體、E2EE、裝置與 to-device、已讀與輸入中、關聯與討論串、推播設定、目錄與搜尋、檢舉 —— 全部在通道上。剩下的是明確不搬的（`/sync`、SSO、舊媒體、`/messages`）與 client 日常用不到的（3pid、OpenID、QR 登入、admin），清單在 [wbf-api-bridge.md](wbf-api-bridge.md) §3「不搬」。
+⭐ **到這裡，常用面沒有洞了**：登入註冊、房間與成員、訊息與歷史、媒體、E2EE、裝置與 to-device、已讀與輸入中、關聯與討論串、推播設定、目錄與搜尋、檢舉 —— 全部在通道上。剩下的是明確不搬的（`/sync`、SSO、舊媒體、`/messages`）與 client 日常用不到的（3pid、OpenID、QR 登入、admin），清單在 [/docs/design/wire/api-bridge.md](../wire/api-bridge.md) §3「不搬」。
 🔲 **剩下的一件後續**（審查提的，cirno）：現在的釘名測試守得住「宣告的名字拼錯」，守不住「ruma 有而我沒宣告」（`MediaPreview` 漏了 `ts` 就是這一類）。要結構性消掉，得從 ruma 型別枚舉 query 欄位去反核宣告名單。
 
-### 2.12 ✅ E2EE 全走通道（[wbf-e2ee.md](wbf-e2ee.md)，設計 PR #66；(A) PR #67、(B) PR #68、(C) PR #70）
+### 2.12 ✅ E2EE 全走通道（[/docs/design/keys/e2ee-over-channel.md](../keys/e2ee-over-channel.md)，設計 PR #66；(A) PR #67、(B) PR #68、(C) PR #70）
 
 起因是 client（issue #65）用 `matrix-sdk-crypto` 的 `OlmMachine`、**不靠 `/sync`**：金鑰上傳／查詢／claim／變動／交叉簽章／簽章、發 to-device、金鑰備份 14 支，全部走橋（wire 上沒有新東西）。
 唯一的新 pack 是 **`0x16 0x08 CryptoState`**：把**這個裝置自己的金鑰存量**（一次性金鑰還剩幾把、fallback key 用掉沒）推給持有它 to-device 佇列的那條連線。
 ⚠️ **(B) 做過一次又重做**（維護者 2026-09-17：「matrix server 已經存在正常金鑰分發行為，而且可以讓官方 client work，那我們沒必要動」）：第一版還推「別人的裝置清單變動」並改了 `/sync`、`/keys/changes`，整段拿掉，Matrix 原本的金鑰分發回到上游。別人的裝置變動改由 §2.13 那套負責。
 
-### 2.13 ✅ 加密訊息送出時把關（[wbf-room-device-version.md](wbf-room-device-version.md)，提案 PR #72；F1＋F2＋F4 PR #73、F3 PR #74、補件 PR #75）
+### 2.13 ✅ 加密訊息送出時把關（[/docs/design/keys/room-device-version.md](../keys/room-device-version.md)，提案 PR #72；F1＋F2＋F4 PR #73、F3 PR #74、補件 PR #75）
 
-題目與達標條件在問題書 [e2ee-send-guard-problem.md](e2ee-send-guard-problem.md)（維護者 2026-09-16 要的）：原本「Bob 的新裝置解不解得開」靠一條推播鏈，掉一環就**靜默**送出別人解不開的訊息，而且沒有人知道。
+題目與達標條件在問題書 [/docs/design/keys/e2ee-send-guard-problem.md](../keys/e2ee-send-guard-problem.md)（維護者 2026-09-16 要的）：原本「Bob 的新裝置解不解得開」靠一條推播鏈，掉一環就**靜默**送出別人解不開的訊息，而且沒有人知道。
 答案是兩個號碼：每個帳號一個**裝置版本號**（`序號-雜湊`，金鑰一動就前進），每個房間一個**房間版本號**（房間目前狀態裡算得數的成員集合的**雜湊**），`/members` 兩個都帶；有約定的 client 送加密訊息時帶房間版本號，**在房間鎖內比對，對不上回 `1506 RoomDevicesChanged`、訊息不寫入也不扇出**；裝置一變就推 `0x14 0x07 DeviceChanged` 給有約定的連線（加速，不是正確性的來源）。
 🚫 **沒有約定的 client 一切照舊**：HTTP 不檢查、沒宣告 `org.wbftw.device_versions` 的連線不檢查，Matrix 的 `/sync`、`/keys/*` 語意沒動。
-達成狀態逐條（含維護者改過的決定與接受的缺口）在問題書 §9；client 端要做的在 `amaid/wbf-matrix-client#45`。
+達成狀態逐條（含維護者改過的決定與接受的缺口）在 /docs/design/keys/e2ee-send-guard-problem.md §9；client 端要做的在 `amaid/wbf-matrix-client#45`。
 
-### 2.14 ✅ WebSocket 連線上限：每 device 4→8，每來源位址 40，以及位址怎麼解析（[wbf-pack-pipeline.md](wbf-pack-pipeline.md) §2.1／§2.2，提案 PR #84，實作 PR #85，2026-09-25 合併）
+### 2.14 ✅ WebSocket 連線上限：每 device 4→8，每來源位址 40，以及位址怎麼解析（[/docs/design/wire/pack-pipeline.md](../wire/pack-pipeline.md) §2.1／§2.2，提案 PR #84，實作 PR #85，2026-09-25 合併）
 
 起因是維護者 2026-09-24 要把每 device 的 4 調成 8，順手加一道「每個 IP 最多 40 條」。
 ⭐ **後者補的是一個看不到的角落**：`(user, device)` 那道閘門**看不到匿名連線**（兩者皆無），所以沒有 token 的人要開幾條就開幾條，只受 30 秒未登入超時擋著。按位址算是唯一擋得到它的那道，因此它在**認證之前**檢查。
@@ -195,7 +195,7 @@ client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
 | 8 | `wbf/ws.rs` 的 `Ping(_) \| Pong(_) => continue` 在 revalidate **之前** | 🔲 前半（控制框也 revalidate）；**後半另開設計提案**（登出／刪裝置／鎖帳號要拆掉訂閱）|
 | 3 | `timeline/purge.rs` 的 `release_range` 無條件放掉整段，而迴圈接著**保留** state 與本地事件 → **釋放的集合 ≠ 刪除的集合** | 🔲 **另開一支，動手前先寫設計說明**（現在是先釋放後刪除，那是**不可逆遺失**的方向）|
 
-🚨 **#1 順帶暴露一件比它本身更重要的事**：我的「全套測試」指令 `--workspace --exclude tuwunel` 把 `src/main/tests` 整組排除，而那個 bug 又只在 debug build 發作 —— **唯一看得到它的那組測試，正好是唯一沒跑的那組**。兩個盲點互相遮蔽，所以「全套綠」被我當成事實報出去很多次。兩套測試怎麼跑寫在 [windows-build.md](windows-build.md)。
+🚨 **#1 順帶暴露一件比它本身更重要的事**：我的「全套測試」指令 `--workspace --exclude tuwunel` 把 `src/main/tests` 整組排除，而那個 bug 又只在 debug build 發作 —— **唯一看得到它的那組測試，正好是唯一沒跑的那組**。兩個盲點互相遮蔽，所以「全套綠」被我當成事實報出去很多次。兩套測試怎麼跑寫在 [/docs/design/build/windows-build.md](../build/windows-build.md)。
 
 📎 值得做的 🟡（未做）：`client_ip.rs` 的 `rightmost_x_forwarded_for` 是「最右邊**解得開的**」而不是「最右邊」（壞的方向是 fail open）、bridge router 缺 `CatchPanicLayer`、`m.room.member` 的 `avatar_url` 不算持有者。
 
@@ -210,7 +210,7 @@ client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
 | 💭 Services 級的測試夾具 | 「可刪」決策（本地 ∧ 有 `mxc_managed` ∧ 無持有者）、purge 與備份到期的冪等，目前只有 e2e 涵蓋（雙扣本身已被集合語意消掉） | 需要能在測試裡建起 Services 的夾具；有了夾具很多「靠讀碼確認」的東西都能變測試 |
 | ✅ admin 指令顯示「誰持有」 | `!admin media refcount <mxc>` 從 #24 起印持有者清單與是否受管 | 持有者集合天然有這個答案，不用另做 |
 
-## 4. 大的未定（核心設計 §7）
+## 4. 大的未定（/docs/design/overview/why-not-matrix-and-core-design.md §7）
 
 這些不是功能，是會改變後面每一步形狀的決定。**還沒定，也不急著定**，但每次要開一個新的大項目前先看一眼它們有沒有變成擋路的。
 
@@ -222,13 +222,13 @@ client 側的三條契約在 [wbf-event-push.md](wbf-event-push.md) §2.1。
 
 ## 5. 明確不做
 
-- 🚫 **server 端內容過濾／轉檔**：E2EE 下只看得到密文，做不到（核心設計 §5.4、§5.5）。
+- 🚫 **server 端內容過濾／轉檔**：E2EE 下只看得到密文，做不到（/docs/design/overview/why-not-matrix-and-core-design.md §5.4、§5.5）。
 - 🚫 **與 Matrix 規格相容**：一旦要相容，每個改進都得走 MSC 流程。
 - 🚫 **fork 成熟客戶端**：拿到的是 UI 的掌控權，不是系統的（核心設計 Phase 2）。
-- 🚫 **改 crate 名、binary 名、設定路徑**：跟上游每次 merge 都衝突，永久的（[fork-overview.md](fork-overview.md)）。
+- 🚫 **改 crate 名、binary 名、設定路徑**：跟上游每次 merge 都衝突，永久的（[/docs/design/overview/fork-overview.md](fork-overview.md)）。
 - 🚫 **刪除的寬限期**：維護者要立刻生效；「刪錯能救」的答案是重新上傳。
 
 ## 6. 每一項怎麼進來
 
-不論大小，一樣的四步（[fork-overview.md](fork-overview.md)）：`docs/design/` 寫提案 → 維護者同意 → 開分支 → PR 進 `main`。
-feat、重大 fix、refactor 合併後在 [`CHANGELOG-fork.md`](../../CHANGELOG-fork.md) 兩張表各留一列，並回來改這裡的狀態標記。
+不論大小，一樣的四步（[/docs/design/overview/fork-overview.md](fork-overview.md)）：`/docs/design/` 寫提案 → 維護者同意 → 開分支 → PR 進 `main`。
+feat、重大 fix、refactor 合併後在 [`CHANGELOG-fork.md`](../../../CHANGELOG-fork.md) 兩張表各留一列，並回來改這裡的狀態標記。

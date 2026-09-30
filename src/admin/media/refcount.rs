@@ -5,7 +5,7 @@ use tuwunel_core::Result;
 
 use crate::admin_command;
 
-/// Lists who holds a media item (see docs/design/media-holders.md), and
+/// Lists who holds a media item (see /docs/design/media/media-holders.md), and
 /// whether the holder model manages it at all.
 #[admin_command]
 pub(super) async fn refcount(&self, mxc: OwnedMxcUri) -> Result {

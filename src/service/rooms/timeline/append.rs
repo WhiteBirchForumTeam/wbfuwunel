@@ -241,7 +241,7 @@ where
 	drop(insert_lock);
 
 	// The event is committed: anyone listening to this room over a wbf
-	// WebSocket gets it now (docs/design/wbf-event-push.md 3). Never blocks:
+	// WebSocket gets it now (/docs/design/events/event-push.md 3). Never blocks:
 	// a full queue drops the push and the client fills in with Recent.
 	self.publish_to_channels(pdu.room_id(), pdu.sender(), &pdu_id)
 		.await;

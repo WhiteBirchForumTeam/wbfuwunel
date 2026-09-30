@@ -37,7 +37,7 @@ pub(crate) const MEMBER_EVENTS_PATHS: [&str; 2] =
 ///
 /// The room's member events, filtered by `membership` / `not_membership`
 /// (`at` is ignored, as upstream). Two fields more than Matrix, which a client
-/// that does not know them ignores (docs/design/wbf-room-device-version.md
+/// that does not know them ignores (/docs/design/keys/room-device-version.md
 /// §5): each joined member's `unsigned["org.wbftw.device_version"]`, and the
 /// room's `org.wbftw.room_version` at the top.
 ///

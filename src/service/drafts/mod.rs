@@ -1,5 +1,5 @@
 //! Drafts (`0x02 Stream`): the throttles a draft's pieces pass through
-//! (`docs/design/streaming-messages.md` §7).
+//! (`/docs/design/events/streaming-messages.md` §7).
 //!
 //! Everything else about a draft is either persistent (the anchoring event,
 //! read from the timeline) or momentary (a piece, broadcast to the room's

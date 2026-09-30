@@ -1,5 +1,5 @@
 //! A holder: one foreign key from a media item to the thing that keeps it
-//! alive. See `docs/design/media-holders.md` §2.
+//! alive. See `/docs/design/media/media-holders.md` §2.
 //!
 //! Keys are built here and nowhere else. `mxc_holder` answers "who holds M"
 //! (prefix `M`); `holder_mxc` answers "what does this holder hold" (prefix

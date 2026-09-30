@@ -1,5 +1,5 @@
 //! The `Session` kind: `Login`, `Refresh`, `Logout` over the channel
-//! (`docs/design/wbf-wire-format.md` §6.3).
+//! (`/docs/design/wire/wire-format.md` §6.3).
 //!
 //! A `Login` pack's meta is the body of a Matrix `POST /login`, decoded by
 //! the same ruma type and checked by the same handlers the HTTP route uses;
@@ -13,7 +13,7 @@
 //! gate the users service asks before it writes any token: a device at
 //! `wbf_ws_max_connections_per_device` is refused with `TooManyConnections`,
 //! nothing is minted or replaced, and the connection is closed (pipeline
-//! §2.1).
+//! /docs/design/wire/wire-format.md §2.1).
 
 use std::net::IpAddr;
 
@@ -321,7 +321,7 @@ mod tests {
 		let Failure::Reject(reject) = refuse_login(throttled) else { panic!("a login refusal is a Reject") };
 		let mut pack = reject.into_pack(0, 14);
 		let built: String = pack.iter().map(|byte| format!("{byte:02x}")).collect();
-		let vectors: Value = serde_json::from_str(include_str!("../../../../docs/design/wbf-vectors.json")).expect("JSON");
+		let vectors: Value = serde_json::from_str(include_str!("../../../../docs/design/wire/wbf-vectors.json")).expect("JSON");
 		let vector = vectors["packs"]
 			.as_array()
 			.expect("a packs list")

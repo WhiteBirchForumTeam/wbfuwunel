@@ -3,7 +3,7 @@
 //! meta fills the template's variables, data is the body — and handed to the
 //! same routing table the HTTP listener serves, so authentication, the gates
 //! and the route itself are the HTTP road, not a copy of it
-//! (`docs/design/wbf-api-bridge.md`; numbers in `docs/bridge-specs/index.md`).
+//! (`/docs/design/wire/api-bridge.md`; numbers in `docs/bridge-specs/index.md`).
 //!
 //! 🚨 The table below is an allowlist. A pack never carries a method or a
 //! path: it names a row, and a row that is not here is `UnknownKind`. Letting
@@ -47,7 +47,7 @@ const STABLE_VERSION_PREFIX: &str = "/_matrix/client/v";
 /// `docs/bridge-specs/index.md`.
 pub(super) struct BridgedEndpoint {
 	pub(super) kind: Kind,
-	/// In `0x20`–`0x9F` (`docs/bridge-specs/index.md` §1.4).
+	/// In `0x20`–`0x9F` (`/docs/bridge-specs/index.md` §1.4).
 	pub(super) subtype: u8,
 	/// The name the specs index gives it, for errors and logs.
 	pub(super) name: &'static str,
@@ -66,7 +66,7 @@ pub(super) struct EndpointShape {
 	pub(super) path_template: &'static str,
 }
 
-/// Every bridged endpoint, in the order of `docs/bridge-specs/index.md` §2.
+/// Every bridged endpoint, in the order of `/docs/bridge-specs/index.md` §2.
 /// ⚠️ That table is the authority for the numbers; this one must agree with
 /// it row for row. Numbers are never reused.
 static BRIDGED_ENDPOINTS: &[BridgedEndpoint] = &[
@@ -116,7 +116,8 @@ static BRIDGED_ENDPOINTS: &[BridgedEndpoint] = &[
 	row(Kind::Room, 0x32, "Summary", shape_of::<room::get_summary::v1::Request>, &["via"]),
 	row(Kind::Room, 0x33, "Hierarchy", shape_of::<space::get_hierarchy::v1::Request>, &["from", "limit", "max_depth", "suggested_only"]),
 	row(Kind::Room, 0x34, "MutualRooms", shape_of::<membership::mutual_rooms::v1::Request>, &["user_id", "from"]),
-	// Batch 4: the public directory (wbf-wire-format.md §3.3 puts the directory in this kind) and a room's aliases.
+	// Batch 4: the public directory (/docs/design/wire/wire-format.md §3.3 puts the directory in
+	// this kind) and a room's aliases.
 	row(Kind::Room, 0x35, "PublicRooms", shape_of::<directory::get_public_rooms::v3::Request>, &["limit", "since", "server"]),
 	row(Kind::Room, 0x36, "PublicRoomsFiltered", shape_of::<directory::get_public_rooms_filtered::v3::Request>, &["server"]),
 	row(Kind::Room, 0x37, "RoomAliases", shape_of::<room::aliases::v3::Request>, NO_QUERY),
@@ -138,7 +139,7 @@ static BRIDGED_ENDPOINTS: &[BridgedEndpoint] = &[
 	row(Kind::Receipt, 0x20, "Typing", shape_of::<typing::create_typing_event::v3::Request>, NO_QUERY),
 	row(Kind::Receipt, 0x21, "ReadMarkers", shape_of::<read_marker::set_read_marker::v3::Request>, NO_QUERY),
 	row(Kind::Receipt, 0x22, "Receipt", shape_of::<receipt::create_receipt::v3::Request>, NO_QUERY),
-	// Batch 3: presence belongs to this kind (wbf-wire-format.md §3.3).
+	// Batch 3: presence belongs to this kind (/docs/design/wire/wire-format.md §3.3).
 	row(Kind::Receipt, 0x23, "GetPresence", shape_of::<presence::get_presence::v3::Request>, NO_QUERY),
 	row(Kind::Receipt, 0x24, "SetPresence", shape_of::<presence::set_presence::v3::Request>, NO_QUERY),
 	// 0x16 Device
@@ -147,7 +148,7 @@ static BRIDGED_ENDPOINTS: &[BridgedEndpoint] = &[
 	row(Kind::Device, 0x22, "UpdateDevice", shape_of::<device::update_device::v3::Request>, NO_QUERY),
 	row(Kind::Device, 0x23, "DeleteDevice", shape_of::<device::delete_device::v3::Request>, NO_QUERY),
 	row(Kind::Device, 0x24, "DeleteDevices", shape_of::<device::delete_devices::v3::Request>, NO_QUERY),
-	// docs/design/wbf-e2ee.md (A): sending to-device; receiving is the native `Push`.
+	// /docs/design/keys/e2ee-over-channel.md (A): sending to-device; receiving is the native `Push`.
 	row(Kind::Device, 0x25, "SendToDevice", shape_of::<to_device::send_event_to_device::v3::Request>, NO_QUERY),
 
 	row(Kind::Keys, 0x20, "KeysUpload", shape_of::<keys::upload_keys::v3::Request>, NO_QUERY),
@@ -157,7 +158,7 @@ static BRIDGED_ENDPOINTS: &[BridgedEndpoint] = &[
 	row(Kind::Keys, 0x24, "SigningKeysUpload", shape_of::<keys::upload_signing_keys::v3::Request>, NO_QUERY),
 	row(Kind::Keys, 0x25, "SignaturesUpload", shape_of::<keys::upload_signatures::v3::Request>, NO_QUERY),
 
-	// Server-side key backup (docs/design/wbf-e2ee.md (C)): the versions first,
+	// Server-side key backup (/docs/design/keys/e2ee-over-channel.md (C)): the versions first,
 	// then the keys in them, each of the three at all / one room / one session.
 	row(Kind::Keys, 0x30, "CreateBackupVersion", shape_of::<backup::create_backup_version::v3::Request>, NO_QUERY),
 	row(Kind::Keys, 0x31, "LatestBackupInfo", shape_of::<backup::get_latest_backup_info::v3::Request>, NO_QUERY),
@@ -304,7 +305,7 @@ pub(super) async fn handle(
 ) -> Result<(), Failure> {
 	let header = view.header;
 	// The split in `dispatch` already sent only bridge calls here; this is
-	// the road asking again (docs/design/wbf-api-bridge.md §2.3).
+	// the road asking again (/docs/design/wire/api-bridge.md §2.3).
 	if !header.flags.is_bridged() {
 		return Err(Reject::code(RejectCode::Unsupported, "a native pack reached the bridge").into());
 	}
@@ -424,7 +425,8 @@ fn parse_variables(meta: &[u8]) -> Result<Map<String, Value>, Reject> {
 }
 
 /// Args:
-///     path_template: example: `/_matrix/client/v3/rooms/{room_id}/state/{event_type}/{state_key}`
+///     path_template: example:
+/// `/_matrix/client/v3/rooms/{room_id}/state/{event_type}/{state_key}`
 /// Return:
 ///     Vec<&str>  the variable names in order, example: `["room_id", "event_type", "state_key"]`;
 ///     empty for a template with none.
@@ -963,7 +965,7 @@ mod tests {
 	/// not a hand-written example that happens to decode.
 	#[test]
 	fn the_bridge_reply_vectors_are_what_the_server_builds() {
-		const VECTORS: &str = include_str!("../../../../docs/design/wbf-vectors.json");
+		const VECTORS: &str = include_str!("../../../../docs/design/wire/wbf-vectors.json");
 		let vectors: serde_json::Value = serde_json::from_str(VECTORS).expect("the vectors file is JSON");
 		let bytes_of = |name: &str| -> Vec<u8> {
 			let hex = vectors["packs"]

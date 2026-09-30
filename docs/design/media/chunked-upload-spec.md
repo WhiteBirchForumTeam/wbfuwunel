@@ -1,7 +1,7 @@
 # 分塊上傳／下載 規格書（給 client 開發者）
 
 > 這是**線上規格**：byte 怎麼排、每個訊息帶什麼、server 會怎麼回。設計理由與取捨在
-> [chunked-upload.md](chunked-upload.md)，pack 通用格式在 [wbf-wire-format.md](wbf-wire-format.md)。
+> [/docs/design/media/chunked-upload.md](chunked-upload.md)，pack 通用格式在 [/docs/design/wire/wire-format.md](../wire/wire-format.md)。
 > 兩份有出入時，以本文為準；本文與 server 程式有出入時，那是 bug，請開 issue。
 >
 > 狀態：2026-09-03，對應 `media/chunked-upload-a` 分支（PR #16）。
@@ -28,7 +28,7 @@ client 把檔案切成**明文固定大小**的塊，每塊自己加密，一塊
 
 連上 WebSocket 後建議先送一個 `Hello`（kind `0x01` Control、subtype `0x01`，meta JSON `{ "protocol": 1, "client": "…", "features": [] }`），
 server 回 Ack meta，**跟上傳有關的**是這幾個：`{ "protocol": 1, "server": "<server name>", "features": […], "chunk_size_default": 65536, "chunk_size_large": 1048576, "data_max_bytes": 2101248 }`。
-📎 回應還有其他欄位（引擎版本、`Recent` 的預設與上限、每裝置連線上限……），完整清單在 [wbf-wire-format.md](wbf-wire-format.md) §3.2 的 `Hello` 列；`features` 實際上不只 `upload`／`download`，要偵測能力就看那個清單。⚠️ **`data_max_bytes` 照 server 回的切包，不要寫死** —— 它是設定項，預設在 2026-09-13 從 16 MiB 降到 2 MiB。
+📎 回應還有其他欄位（引擎版本、`Recent` 的預設與上限、每裝置連線上限……），完整清單在 [/docs/design/wire/wire-format.md](../wire/wire-format.md) §3.2 的 `Hello` 列；`features` 實際上不只 `upload`／`download`，要偵測能力就看那個清單。⚠️ **`data_max_bytes` 照 server 回的切包，不要寫死** —— 它是設定項，預設在 2026-09-13 從 16 MiB 降到 2 MiB。
 `Ping`（subtype `0x04`，meta 任意）回 `Pong`（subtype `0x05`）把 meta 原樣還回。
 
 ## 2. pack
@@ -54,7 +54,7 @@ server 回 Ack meta，**跟上傳有關的**是這幾個：`{ "protocol": 1, "se
 
 回應 pack：`kind = 0x01`，`subtype = 0x02 Ack` 或 `0x03 Error`，`flags` 帶 `IS_RESPONSE`，`id` 與 `seq` **抄請求的**。
 Ack 的 meta 是 JSON（各訊息定義）；Error 的 meta 是 JSON `{ "code_id": <序號>, "code": "...", "message": "...", ...該 code 定義的欄位 }` ——
-**程式比對 `code_id`**，`code` 是它的名字，完整清單與意思見 [wbf-wire-format.md](wbf-wire-format.md) §3.4（那張表是唯一的來源）。
+**程式比對 `code_id`**，`code` 是它的名字，完整清單與意思見 [/docs/design/wire/wire-format.md](../wire/wire-format.md) §3.4（那張表是唯一的來源）。
 
 ## 3. 上傳（kind `0x03`）
 
@@ -91,7 +91,7 @@ Ack meta：
   "chunk_size": 65536, "chunk_max_bytes": 69632, "expires_at": 1788516156 }
 ```
 
-- `id`：**原樣抄進之後每個 pack 標頭的 `id`**。⚠️ 它的第一個 byte 是型別（`0x03` ＝ 上傳，[wbf-wire-format.md](wbf-wire-format.md) §2.2），其餘 7 byte 是值；🚨 **client 不要自己組這個數字** —— 拿 `Ack` 給的就對了。值是 56-bit 隨機，server 發號前確認沒和進行中的上傳、既有媒體、墓碑撞到。
+- `id`：**原樣抄進之後每個 pack 標頭的 `id`**。⚠️ 它的第一個 byte 是型別（`0x03` ＝ 上傳，[/docs/design/wire/wire-format.md](../wire/wire-format.md) §2.2），其餘 7 byte 是值；🚨 **client 不要自己組這個數字** —— 拿 `Ack` 給的就對了。值是 56-bit 隨機，server 發號前確認沒和進行中的上傳、既有媒體、墓碑撞到。
 - `mxc`：**同一個值**的另一種寫法：media id ＝ 把型別 byte 拔掉之後那 7 byte 的小寫 hex，也就是 **14 個字元**。房間事件的 `url` 用它。
   📎 舉例：`id` 是 `249342211600893996`（`0x03` ‖ `0x75d76b9dfb482c`）→ media id 是 `75d76b9dfb482c`。
   ⚠️ **這個改動之前上傳的媒體是 16 個字元**，client 兩種都要認得 —— media id 對任何人來說都只是一個字串，🚫 不要驗它的長度。
@@ -289,7 +289,7 @@ CRC-32C 自檢向量：`"123456789"` → `E3069283`。
 
 ## 11. 測試向量：規格的可執行版本
 
-[`wbf-vectors.json`](wbf-vectors.json) 是這份規格的黃金向量，**由 server 的實作產生**（`src/core/wbf/vectors.rs`，
+[/docs/design/wire/wbf-vectors.json](../wire/wbf-vectors.json) 是這份規格的黃金向量，**由 server 的實作產生**（`src/core/wbf/vectors.rs`，
 `WBF_VECTORS_WRITE=1 cargo test -p tuwunel_core wbf::vectors::regenerate`），不手打。server 自己的單元測試每次都對著它跑；
 檔案過期就紅。
 
@@ -306,7 +306,7 @@ client 的做法（任何語言）：把這個檔複製一份進自己的 repo�
 這是維護者 2026-09-04 定的共用方式：**共用的是規格與向量，不是程式碼**；Rust client 要直接用 server 的 codec 也可以，
 但向量測試一樣要跑。
 
-## 12. ⚠️ 送訊息時要宣告附件，否則媒體留不住（提案 [media-attachments.md](media-attachments.md)，維護者 2026-09-06 定方向）
+## 12. ⚠️ 送訊息時要宣告附件，否則媒體留不住（提案 [/docs/design/media/media-attachments.md](media-attachments.md)，維護者 2026-09-06 定方向）
 
 server 在 E2EE 房間讀不到訊息內容，所以它不知道哪則訊息用了哪個 mxc；**沒被任何訊息指到的新媒體，計數是 0，
 後台掃描會把它清掉**（保護期 `media_unreferenced_grace_seconds`，至少 7 天）。要讓附件跟著訊息活，client 必須在**送訊息的那個請求**裡宣告：

@@ -1,4 +1,4 @@
-//! The vocabulary of `Control/Error` codes (`docs/design/wbf-wire-format.md`
+//! The vocabulary of `Control/Error` codes (`/docs/design/wire/wire-format.md`
 //! §3.4). Every code a pack may carry is a variant here, and a variant is the
 //! only way to name one: both wire fields — the number a program compares and
 //! the name a person reads — come from this table, so a call site cannot
@@ -6,7 +6,8 @@
 //! the type: the codes drifted (`Conflict` meaning "your JSON is malformed"
 //! in eleven places) exactly because each call site wrote its own string.
 //!
-//! Adding a code is two edits in this order: the row in §3.4 first, then the
+//! Adding a code is two edits in this order: the row in /docs/design/wire/wire-format.md §3.4
+//! first, then the
 //! variant here.
 
 use super::PackError;
@@ -59,11 +60,11 @@ pub enum RejectCode {
 	Truncated,
 	/// 1505: a later connection of the same device took this subscription
 	/// over, and it has ended. ⚠️ The only code the server sends unasked: it
-	/// carries the *subscription's* id, not a request's (§3.4).
+	/// carries the *subscription's* id, not a request's (/docs/design/wire/wire-format.md §3.4).
 	Superseded,
 	/// 1506: an encrypted send carried a room device version that is no
 	/// longer the room's; carries the current `room_version`. Nothing was
-	/// sent (docs/design/wbf-room-device-version.md §7).
+	/// sent (/docs/design/keys/room-device-version.md §7).
 	RoomDevicesChanged,
 	/// 1901: the server's own fault.
 	Internal,
@@ -95,7 +96,7 @@ impl RejectCode {
 	/// Return:
 	///     u16  the wire's `code_id`, example: 1201. Always 1000 or above, so
 	///     a missing field or a defaulted `0` can never read as a real code;
-	///     the hundreds say which family it is (§3.4).
+	///     the hundreds say which family it is (/docs/design/wire/wire-format.md §3.4).
 	#[must_use]
 	pub const fn id(self) -> u16 {
 		match self {
@@ -165,7 +166,8 @@ impl RejectCode {
 	}
 
 	/// Whether this code says the frame itself could not be read, which is
-	/// what the connection health counter counts (§2.1). A code that means
+	/// what the connection health counter counts (/docs/design/wire/wire-format.md §2.1). A code
+	/// that means
 	/// "the request was wrong" does not: the peer speaks the protocol.
 	#[must_use]
 	pub const fn is_undecodable_frame(self) -> bool {
@@ -206,7 +208,7 @@ mod tests {
 		// `decode` reads the kind byte before it checks the checksums, so an
 		// unassigned kind is refused by a pack that is framed perfectly —
 		// its sender speaks wbf. Counting it against the connection's health
-		// (wire-format §2.1) would close a working client after eight of
+		// (/docs/design/wire/wire-format.md §2.1) would close a working client after eight of
 		// them; PR #38 did exactly that until cirno caught it.
 		assert!(!RejectCode::for_pack_error(&PackError::UnknownKind(0x7f)).is_undecodable_frame());
 		assert!(!RejectCode::for_pack_error(&PackError::SectionTooLarge { len: 1 << 33 }).is_undecodable_frame());

@@ -1,5 +1,5 @@
 //! The `0x16 Device` kind: a device's to-device queue over the channel
-//! (`docs/design/wbf-to-device.md`).
+//! (`/docs/design/keys/to-device.md`).
 //!
 //! Shaped like `Event` — `Subscribe` to be pushed, `Fetch` to fill a gap —
 //! with one thing no room stream has: **the client destroys what it has
@@ -9,7 +9,8 @@
 //!
 //! Two rules follow from that, and both are refusals rather than repairs:
 //! only the connection whose session holds the device may subscribe to its
-//! queue (§4), and only the connection holding it may destroy from it — a
+//! queue (/docs/design/keys/to-device.md §4), and only the connection holding it may destroy
+//! from it — a
 //! second connection deleting items the first is still importing would lose
 //! them for good.
 
@@ -85,7 +86,7 @@ struct ItemWindow {
 ///     view: meta example: `{"device_id":"PHONE"}`. `cd_seq` is still read
 ///         here (the catch-up window), but a client should not send it — it
 ///         subscribes and then calls `Fetch{}` once
-///         (docs/design/wbf-to-device.md §3.1.2)
+///         (/docs/design/keys/to-device.md §3.1.2)
 /// Return:
 ///     Result<(), Failure>  Ack meta `{latest_cd_seq}`, then the to-device
 ///     catch-up as `Push` packs (with `cd_seq`), then one `CryptoState`;
@@ -164,7 +165,7 @@ pub(super) async fn handle_device_subscribe(
 	}
 
 	// The device's key supply as it is now, so the client knows whether to
-	// upload keys without asking (docs/design/wbf-e2ee.md §3).
+	// upload keys without asking (/docs/design/keys/e2ee-over-channel.md §3).
 	services
 		.users
 		.push_crypto_state(&session.user, &device)
@@ -333,7 +334,7 @@ async fn read_items(
 			// Full by bytes: this item is the next window's first, and the
 			// client reaches it by destroying this window and asking again
 			// with no `cd_seq` — the queue head is the waterline
-			// (docs/design/wbf-to-device.md §3.1.2).
+			// (/docs/design/keys/to-device.md §3.1.2).
 			break;
 		}
 		items.push(Item { count, json: json.to_vec() });

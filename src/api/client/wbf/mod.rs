@@ -1,5 +1,5 @@
 //! The wbf pack endpoints and the line a pack travels from a transport to
-//! its handler and back (`docs/design/wbf-pack-pipeline.md`).
+//! its handler and back (`/docs/design/wire/pack-pipeline.md`).
 //!
 //! `POST /_wbf/v1/pack` is the HTTP transport, one pack per request, meant for
 //! debugging and scripts. `GET /_wbf/v1/ws` (`ws.rs`) is the WebSocket channel
@@ -444,7 +444,7 @@ struct Admission {
 	/// It may come over `POST /_wbf/v1/pack`. Off for kinds whose reply is a
 	/// stream and for kinds that change a connection's session.
 	http_ok: bool,
-	/// What the header's `id` must be for this pair (wire-format §2.2).
+	/// What the header's `id` must be for this pair (/docs/design/wire/wire-format.md §2.2).
 	///
 	/// ⚠️ It lives in this table and not a second one because it answers the
 	/// same question the rest of the row does — what this `(kind, subtype)`
@@ -468,7 +468,7 @@ const fn admission(kind: Kind, subtype: u8) -> Option<Admission> {
 	// The four transports, each spelled once, then the id type per row: a
 	// pack with no conversation carries a zero id, a client-named one
 	// carries the client's number, and the two the server mints name what
-	// they name (§2.2).
+	// they name (/docs/design/wire/wire-format.md §2.2).
 	let logged_in_any_transport =
 		Admission { anonymous_ok: false, http_ok: true, id_type: IdType::None };
 	let logged_in_websocket_only =
@@ -532,7 +532,7 @@ fn compose_upload_id(value: u64) -> Result<u64, Reject> {
 }
 
 /// Refuses a pack whose `id` is not the kind of identifier this
-/// `(kind, subtype)` takes (wire-format §2.2).
+/// `(kind, subtype)` takes (/docs/design/wire/wire-format.md §2.2).
 ///
 /// ⭐ This is what makes the type byte worth carrying. Without the check it
 /// is decoration: a client could put an upload id where a subscription's
@@ -624,7 +624,7 @@ pub(crate) async fn handle_pack(
 ) -> Result<SessionChange, ReplyError> {
 	let (id, seq) = (view.header.id, view.header.seq);
 	// A bridge call's refusal says it answers a bridge call, the way its
-	// success does (`docs/design/wbf-api-bridge.md` §2.3).
+	// success does (`/docs/design/wire/api-bridge.md` §2.3).
 	let reply_flags = if view.header.flags.is_bridged() {
 		Flags::IS_RESPONSE.union(Flags::IS_BRIDGED)
 	} else {
@@ -644,7 +644,7 @@ pub(crate) async fn handle_pack(
 /// Splits the two roads a pack can take, on `IS_BRIDGED` and nothing else:
 /// a bridge call goes to `bridge::handle` and its table, everything else to
 /// the native handlers and theirs. Neither road looks at the other's table
-/// (`docs/design/wbf-api-bridge.md` §2.3).
+/// (`/docs/design/wire/api-bridge.md` §2.3).
 async fn dispatch(
 	services: &Services,
 	ctx: &PackContext<'_>,
@@ -934,7 +934,7 @@ fn matrix_error_fields(status: StatusCode, body: &[u8]) -> Map<String, Value> {
 /// `Internal`. It used to stop at 404/410/400/413, which turned a
 /// `M_FORBIDDEN` or an expired token into "the server's own fault" — the
 /// native handlers rarely met those, the bridge meets them all the time
-/// (`docs/design/wbf-api-bridge.md` §2.4).
+/// (`/docs/design/wire/api-bridge.md` §2.4).
 ///
 /// Args:
 ///     status: example: StatusCode::FORBIDDEN
@@ -974,7 +974,7 @@ async fn handle_upload_create(services: &Services, user: &UserId, view: &PackVie
 	let created = services.media.upload_create(user, request).await?;
 	// ⭐ The client is handed the id already composed with its type, so that
 	// putting a type byte on an upload id is written once here rather than
-	// once in every client, in every language (wire-format §2.2).
+	// once in every client, in every language (/docs/design/wire/wire-format.md §2.2).
 	let upload_id = compose_upload_id(created.upload_id)?;
 
 	Ok(ack(
@@ -1132,7 +1132,7 @@ fn mxc_from_meta(meta: &Value) -> std::result::Result<String, Reject> {
 
 /// What `Hello` tells a client this server can do: one string per capability,
 /// never one per batch of migrated endpoints — whether a single endpoint is on
-/// the bridge is answered by sending it (`docs/design/wbf-api-bridge.md` §3
+/// the bridge is answered by sending it (`/docs/design/wire/api-bridge.md` §3
 /// batch 3-C). `bridge` says the `IS_BRIDGED` flag is understood at all; the
 /// numbers are in `docs/bridge-specs/index.md`.
 /// ⚠️ These strings are the wire contract: add, never rename or remove.
@@ -1401,13 +1401,13 @@ mod tests {
 		let meta = view.meta_json().expect("json");
 		assert_eq!(meta["code"], "NotFound");
 		// Both go on the wire: the number is what a program compares
-		// (wire-format §3.4), the name is what a person reads.
+		// (/docs/design/wire/wire-format.md §3.4), the name is what a person reads.
 		assert_eq!(meta["code_id"], 1501);
 	}
 
 	#[test]
 	fn a_malformed_request_is_not_reported_as_a_state_conflict() {
-		// The border in wire-format §3.4: content the handler cannot accept
+		// The border in /docs/design/wire/wire-format.md §3.4: content the handler cannot accept
 		// however the server is feeling is InvalidRequest, and a Conflict is
 		// reserved for a request the current state refuses.
 		let mut pack = Reject::from(tuwunel_core::wbf::PackError::TooShort { len: 4 }).into_pack(0, 0);
@@ -1446,7 +1446,7 @@ mod tests {
 		// The message is what it was before the fields were added.
 		assert_eq!(meta["message"], "M_USER_LOCKED: This account has been locked.");
 
-		const VECTORS: &str = include_str!("../../../../docs/design/wbf-vectors.json");
+		const VECTORS: &str = include_str!("../../../../docs/design/wire/wbf-vectors.json");
 		let vectors: Value = serde_json::from_str(VECTORS).expect("the vectors file is JSON");
 		let hex = vectors["packs"]
 			.as_array()

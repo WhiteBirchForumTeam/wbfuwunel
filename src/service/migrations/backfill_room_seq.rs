@@ -6,7 +6,7 @@
 //! rooms looks the same as one that always did. Forward events are numbered
 //! 1, 2, 3… in count order; backfilled events 0, −1, −2… from the newest
 //! backfilled downward, which is the order backfill itself hands them out.
-//! See `docs/design/room-seq-and-recent.md` §1.3.
+//! See `/docs/design/events/room-seq-and-recent.md` §1.3.
 
 use std::collections::BTreeMap;
 

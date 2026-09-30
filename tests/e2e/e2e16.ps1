@@ -1,5 +1,5 @@
 . (Join-Path $PSScriptRoot 'wbf-helpers.ps1')
-# Device versions (docs/design/wbf-room-device-version.md): each joined member's device version and the room's
+# Device versions (/docs/design/keys/room-device-version.md): each joined member's device version and the room's
 # version on /members (F2), the account version that moves with its keys (F1), and the encrypted Event/Send that is
 # refused with 1506 once the room's version has moved (F4); scenario 2 is the DeviceChanged push to connections that
 # declared device versions (F3).
@@ -8,7 +8,7 @@
 # ("it changed"), never `-gt` ("it grew"). That is what the server itself asks -- `send.rs` only ever
 # compares `expected != room_device_version`. The old `-gt` encoded a property nothing relied on, and
 # relying on it is what let the version fall back on a re-invite (external review 2026-09-29,
-# wbf-room-device-version.md §4.2).
+# /docs/design/keys/room-device-version.md §4.2).
 $OUT = "$S\e2e16-out"; New-Item -ItemType Directory -Force $OUT | Out-Null
 $RESULT = "$OUT\results.txt"; '' | Out-File $RESULT -Encoding utf8
 $script:Pass = 0; $script:Fail = 0; $script:Skipped = 0

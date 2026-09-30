@@ -7,8 +7,8 @@
 //! reverse stream per joined room merged by count is the global order. That
 //! count is the `g_seq` each served event already carries in its
 //! `unsigned`; the request's `cg_seq` and `before` and the batches' `fs` and
-//! `ls` are the same number. See `docs/design/room-seq-and-recent.md` §2 and
-//! `docs/design/wbf-pack-pipeline.md` §6.
+//! `ls` are the same number. See `/docs/design/events/room-seq-and-recent.md` §2 and
+//! `/docs/design/wire/pack-pipeline.md` §6.
 //!
 //! A window is small (`wbf_recent_max_limit` events and `wbf_window_max_bytes`
 //! bytes, whichever is reached first), so it is gathered whole before the
@@ -191,7 +191,7 @@ pub(super) struct Window {
 /// joined. Catching up used to be **global** whatever the subscription said,
 /// so a connection subscribed to one room was pushed events of rooms it never
 /// asked about; the design document papered over it by asking clients not to
-/// advance their watermark on those (wbf-event-push §2.1, 審查者 rumia R4).
+/// advance their watermark on those (/docs/design/events/event-push.md §2.1, 審查者 rumia R4).
 /// Asking a client not to believe what the server just sent it is not a rule
 /// anybody can keep — this is the same filter `Recent` uses, applied where
 /// the promise was made.
@@ -459,7 +459,7 @@ fn build_batches(
 		})
 }
 
-/// One `Batch`: its meta is the six fields of pipeline §6.2.
+/// One `Batch`: its meta is the six fields of /docs/design/wire/pack-pipeline.md §6.2.
 fn batch_pack(
 	id: u64,
 	seq: u32,

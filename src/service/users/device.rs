@@ -582,7 +582,7 @@ pub fn add_to_device_event(
 		.put(key, Json(&item));
 
 	// The one write point, so the one place a subscribed device hears about
-	// it (`docs/design/wbf-to-device.md` §4). Pushing never blocks this: a
+	// it (`/docs/design/keys/to-device.md` §4). Pushing never blocks this: a
 	// device that is not connected costs a lookup, and a full queue drops
 	// the push and leaves `gap` for the client to fill in with `Fetch`.
 	self.push_to_device_stream(target_user_id, target_device_id, *count, &item);
@@ -655,7 +655,7 @@ fn push_to_device_stream(
 }
 
 /// Removes exactly the named to-device items, and reports which of them are
-/// gone (`docs/design/wbf-to-device.md` §5).
+/// gone (`/docs/design/keys/to-device.md` §5).
 ///
 /// This is what `Device/ItemsDestroy` runs. Unlike `remove_to_device_events`
 /// it is not a prefix: the client names each item, because what it has

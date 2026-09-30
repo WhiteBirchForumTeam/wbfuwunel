@@ -1,8 +1,8 @@
 # `0x10 Session`：註冊與登入前
 
-> 號碼總表與共通規則在 [index.md](index.md)；UIAA 的兩輪在 index §1.5。這份只寫**每支端點帶什麼、回什麼、會怎麼被拒**。
+> 號碼總表與共通規則在 [index.md](index.md)；UIAA 的兩輪在 /docs/bridge-specs/index.md §1.5。這份只寫**每支端點帶什麼、回什麼、會怎麼被拒**。
 > 請求的前 4 bytes 一律是 `01 10 SS 10`；成功回覆 `01 01 02 14`、失敗 `01 01 03 14`。`id` 填 0。
-> ⚠️ 這個 kind 同時有**原生**的 pack：`Login`（`0x01`）、`Refresh`（`0x02`）、`Logout`（`0x03`）。那些**不帶** bit4、會改變這條連線的身份，規格在 [wbf-wire-format.md](../design/wbf-wire-format.md) §6.3。這份的四支**都不改變連線身份**。
+> ⚠️ 這個 kind 同時有**原生**的 pack：`Login`（`0x01`）、`Refresh`（`0x02`）、`Logout`（`0x03`）。那些**不帶** bit4、會改變這條連線的身份，規格在 [/docs/design/wire/wire-format.md](../design/wire/wire-format.md) §6.3。這份的四支**都不改變連線身份**。
 > 📎 這四支通常在**沒登入的連線**上送（橋不帶 token，就像沒帶 `Authorization` 的 HTTP 請求）。沒登入的 WS 連線只活 `wbf_ws_unauthenticated_timeout`（預設 30 秒，從升級算起）。HTTP pack 在傳輸層就要 token，所以匿名只能走 WS。
 > 範例裡的 JSON 是 e2e13 情境 2 實跑的輸出（`session`、token 這類值每次不同）。
 
@@ -35,7 +35,7 @@
 |---|---|
 | 請求 meta | 空；訪客註冊是 `{"kind":"guest"}`（query 變數，省略是 `user`） |
 | 請求 data | `/register` 的 body：`username`、`password`、`inhibit_login: true`、`initial_device_display_name`?；第二輪加 `auth` |
-| 第一輪回覆 | `Error`，`status` 401、沒有 `errcode`；data 是 `{"flows":[…],"session":"…"}`（index §1.5） |
+| 第一輪回覆 | `Error`，`status` 401、沒有 `errcode`；data 是 `{"flows":[…],"session":"…"}`（/docs/bridge-specs/index.md §1.5） |
 | 成功回覆 data | `{"user_id":"@dave:localhost","device_id":null}`（`inhibit_login` 時沒有裝置、沒有 token） |
 
 **`flows` 看 server 設定**：沒設註冊碼 → `[{"stages":["m.login.dummy"]}]`；設了 `registration_token` → `[{"stages":["m.login.registration_token"]}]`，第二輪的 `auth` 是 `{"type":"m.login.registration_token","token":"…","session":"…"}`。另外可能有同意條款（`m.login.terms`）、email（`m.login.email.identity`）。
@@ -65,7 +65,7 @@
 
 `GET /_matrix/client/v1/register/m.login.registration_token/validity`
 
-📎 **v1 路徑**：這支只有 v1（MSC3231 進規格時就是 v1）。橋在沒有 v3 時取最新的穩定版本（橋的設計 §3 批 2-C）。
+📎 **v1 路徑**：這支只有 v1（MSC3231 進規格時就是 v1）。橋在沒有 v3 時取最新的穩定版本（/docs/design/wire/api-bridge.md §3 批 2-C）。
 
 | | |
 |---|---|

@@ -399,7 +399,7 @@ async fn handle_join(&self, room_id: &RoomId, user_id: &UserId, count: PduCount)
 
 	self.mark_as_joined(user_id, room_id, count);
 
-	// The join hook of the wbf channels (docs/design/wbf-event-push.md 3):
+	// The join hook of the wbf channels (/docs/design/events/event-push.md 3):
 	// the user's account-wide subscribers start listening to this room.
 	self.services.streams.follow(user_id, room_id);
 

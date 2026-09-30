@@ -1,6 +1,6 @@
 . (Join-Path $PSScriptRoot 'wbf-helpers.ps1')
 # The server user: @system, displayname "[SYS] <server_name>", and the startup gate that refuses an @system account
-# this server did not create (docs/design/server-user.md).
+# this server did not create (/docs/design/accounts/server-user.md).
 # Scenario 2 needs a binary from before the rename (its server user is @conduit, so "system" is a free username
 # there); point E2E_OLD_EXE at one, or the scenario is skipped.
 $OLDEXE = $env:E2E_OLD_EXE

@@ -15,7 +15,7 @@ struct Queue {
 /// Prints how much to-device each of a user's devices is holding.
 ///
 /// A to-device item lives until its device destroys it (`Device/ItemsDestroy`,
-/// `docs/design/wbf-to-device.md` §6): there is no time limit, because
+/// `/docs/design/keys/to-device.md` §6): there is no time limit, because
 /// dropping key material silently costs more than the disk does. The price of
 /// that decision is a queue nobody is ever coming back for — a phone that was
 /// lost and never logged out — and this is how anyone sees one. Without it,

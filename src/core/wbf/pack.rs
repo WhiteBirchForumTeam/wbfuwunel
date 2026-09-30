@@ -42,7 +42,7 @@ pub const OVERHEAD: usize = HEADER_LEN + 4 + 4 + 4 + 4;
 pub const TRAILER_LEN: usize = OVERHEAD - HEADER_LEN;
 
 /// Message families. Numbers are the on-wire byte and never change; see
-/// `docs/design/wbf-wire-format.md` §3.3 for the reserved ranges.
+/// `/docs/design/wire/wire-format.md` §3.3 for the reserved ranges.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum Kind {
@@ -133,7 +133,7 @@ impl Flags {
 	/// the final fragment of a stream.
 	pub const IS_LAST: Self = Self(0b0000_1000);
 	/// This pack is a Matrix endpoint call through the bridge
-	/// (`docs/design/wbf-api-bridge.md` §2.3); its reply carries it too.
+	/// (`/docs/design/wire/api-bridge.md` §2.3); its reply carries it too.
 	///
 	/// ⭐ It was a reserved bit until the bridge, so a server older than the
 	/// bridge refuses such a pack as `Corrupt` instead of reading it as
@@ -639,7 +639,7 @@ mod tests {
 		assert_eq!(
 			decodable.len(),
 			19,
-			"a kind was added or removed; `docs/design/wbf-wire-format.md` §3.3 is the allocation table and has to say the same"
+			"a kind was added or removed; `/docs/design/wire/wire-format.md` §3.3 is the allocation table and has to say the same"
 		);
 	}
 }

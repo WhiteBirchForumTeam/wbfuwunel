@@ -1,5 +1,5 @@
 . (Join-Path $PSScriptRoot 'wbf-helpers.ps1')
-# The bridge: a pack flagged IS_BRIDGED (bit4) is a Matrix endpoint call (docs/design/wbf-api-bridge.md,
+# The bridge: a pack flagged IS_BRIDGED (bit4) is a Matrix endpoint call (/docs/design/wire/api-bridge.md,
 # numbers in docs/bridge-specs/index.md). Scenario 0 pins the layer itself: the split on bit4, each road looking
 # only at its own table, and every reply to a bridge call saying so. The endpoint scenarios come with the batches.
 $OUT = "$S\e2e13-out"; New-Item -ItemType Directory -Force $OUT | Out-Null
@@ -300,7 +300,7 @@ $wsA.Dispose(); $wsB.Dispose(); $wsC.Dispose()
 Stop-Server $server
 
 Log '################ Scenario 2: batch 2, registration and the UIAA endpoints through the bridge ################'
-# docs/design/wbf-api-bridge.md §3 batch 2. Registration: an anonymous connection registers with inhibit_login and
+# /docs/design/wire/api-bridge.md §3 batch 2. Registration: an anonymous connection registers with inhibit_login and
 # then sends the native Session/Login. UIAA: the 401's flows and session arrive in data, the second round carries
 # auth. Every gate is the HTTP one, so each refusal is compared with what HTTP answers.
 function Same-Refusal($bridged, $http) { $bridged.subtype -eq 3 -and (Is-BridgedReply $bridged) -and $bridged.status -eq $http.status -and "$($bridged.meta.errcode)" -eq "$($http.json.errcode)" -and $http.status -ge 400 }
@@ -459,7 +459,7 @@ $anon5.Dispose()
 Stop-Server $server
 
 Log '################ Scenario 3: E2EE (A), the key endpoints and sending to-device through the bridge ################'
-# docs/design/wbf-e2ee.md §2. Each endpoint is the HTTP one, so each is checked against HTTP: what the bridge uploads HTTP
+# /docs/design/keys/e2ee-over-channel.md §2. Each endpoint is the HTTP one, so each is checked against HTTP: what the bridge uploads HTTP
 # reads back, a key the bridge claims HTTP no longer counts, and a to-device sent through the bridge arrives as the
 # native Device/Push on the receiver's holding connection.
 $db5 = "$S\e2e13db5"; Remove-Item -Recurse -Force $db5 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db5 | Out-Null
@@ -570,7 +570,7 @@ Check '[3.9] without logging in, the key endpoints and SendToDevice are refused 
 $anon6.Dispose(); $wsHold.Dispose(); $wsK.Dispose(); $wsL.Dispose()
 Stop-Server $server
 Log '################ Scenario 4: E2EE (C), server-side key backup through the bridge ################'
-# docs/design/wbf-e2ee.md §4. Fourteen rows, all of them the HTTP endpoint: what the bridge writes HTTP reads back,
+# /docs/design/keys/e2ee-over-channel.md §4. Fourteen rows, all of them the HTTP endpoint: what the bridge writes HTTP reads back,
 # what the bridge deletes HTTP no longer finds, and every refusal is the one HTTP gives.
 $db6 = "$S\e2e13db6"; Remove-Item -Recurse -Force $db6 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db6 | Out-Null
 $cfg6 = Write-Config $db6 86400
@@ -658,7 +658,7 @@ $anon7.Dispose(); $wsM.Dispose()
 Stop-Server $server
 
 Log '################ Scenario 5: batch 3, the rest of the room, relations, presence, filters, capabilities, reports ################'
-# docs/design/wbf-api-bridge.md §3 batch 3. Same rule as every batch: each endpoint through the bridge and through
+# /docs/design/wire/api-bridge.md §3 batch 3. Same rule as every batch: each endpoint through the bridge and through
 # Matrix HTTP, the answers compared. Two things are new here and get their own checks: the kind `0x1D Report`
 # (opened by this batch, no native subtypes) and the `features` list in Hello.
 $db6 = "$S\e2e13db6"; Remove-Item -Recurse -Force $db6 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db6 | Out-Null
@@ -836,7 +836,7 @@ $wsD.Dispose(); $wsE.Dispose()
 Stop-Server $server
 
 Log '################ Scenario 6: batch 4, push rules, the directory, search, media config, TURN ################'
-# docs/design/wbf-api-bridge.md §3 batch 4. Same rule as every batch: each endpoint through the bridge and through
+# /docs/design/wire/api-bridge.md §3 batch 4. Same rule as every batch: each endpoint through the bridge and through
 # Matrix HTTP, the answers compared. Four kinds are opened here (0x18 Push, 0x19 Media, 0x1A Search, 0x1B Voip) and
 # none of them has a native subtype, so each one's "without bit4" defence is checked too.
 $db7 = "$S\e2e13db7"; Remove-Item -Recurse -Force $db7 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db7 | Out-Null

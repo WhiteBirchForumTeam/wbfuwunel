@@ -1,6 +1,6 @@
 //! `GET /_wbf/v1/ws`: the WebSocket channel, one pack per binary message.
 //!
-//! A connection is a queue (`docs/design/wbf-pack-pipeline.md` §1): one
+//! A connection is a queue (`/docs/design/wire/pack-pipeline.md` §1): one
 //! receive loop that takes messages in arrival order and runs one handler at
 //! a time, and one send task that writes everything queued for the peer, in
 //! order, from a bounded channel. Handlers reach the peer only through that
@@ -15,7 +15,7 @@
 //! (`revalidate`): a token that was logged out, revoked, expired or whose
 //! account was locked stops working at the next message, not never. `Login`
 //! and `Refresh` replace the connection's session; `Logout` ends it and the
-//! connection is closed. See `docs/design/wbf-wire-format.md` §6.1 and §6.3.
+//! connection is closed. See `/docs/design/wire/wire-format.md` §6.1 and §6.3.
 //!
 //! The task serving a socket outlives the request that upgraded it, so it is
 //! spawned through `services.connections`, which `Services::stop` joins:
@@ -97,7 +97,7 @@ pub(crate) async fn ws_route(
 	// database read: a connection this gate turns away should not pay for a
 	// lookup first. It is also the only gate a connection that never logs in
 	// ever meets — the per-device count needs an identity, and an anonymous
-	// upgrade has none (`docs/design/wbf-pack-pipeline.md` §2.2).
+	// upgrade has none (`/docs/design/wire/pack-pipeline.md` §2.2).
 	let max_per_address = services.config.wbf_ws_max_connections_per_address;
 	let address_slot = match services
 		.connections
@@ -183,7 +183,7 @@ async fn serve(
 	session: Option<Session>,
 	// Held, never read: this is the connection's place in its address's count,
 	// and it is given back when this function returns, however it returns
-	// (`docs/design/wbf-pack-pipeline.md` §2.2). The device's place lives on
+	// (`/docs/design/wire/pack-pipeline.md` §2.2). The device's place lives on
 	// the `Session` instead, because a `Login` can replace it.
 	_address_slot: Option<AddressSlot>,
 	bridge: Option<BridgeRouter>,
@@ -307,7 +307,7 @@ async fn serve(
 					break;
 				}
 				// A peer whose frames stop decoding is not speaking this
-				// protocol (wire-format §2.1); one bad frame is not worth a
+				// protocol (/docs/design/wire/wire-format.md §2.1); one bad frame is not worth a
 				// reconnect, a run of them is all this connection is doing.
 				// Not every refusal from `decode` is that: a pack whose kind
 				// byte is simply unassigned is framed perfectly, and its
@@ -420,7 +420,7 @@ async fn send_queued(mut sink: futures::stream::SplitSink<WebSocket, Message>, m
 fn close(code: u16, reason: &'static str) -> Outgoing { Outgoing::Close { code, reason } }
 
 /// How much unreadable input a connection may send before it is closed
-/// (wire-format §2.1).
+/// (/docs/design/wire/wire-format.md §2.1).
 ///
 /// Only the frame counts. A pack that decodes clears the score even when its
 /// handler then refuses it: a peer whose packs decode does speak this

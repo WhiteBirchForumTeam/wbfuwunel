@@ -3,10 +3,10 @@
 > **狀態：本文件的列式索引已被精確計數取代；留作設計紀錄。**
 >
 > ✅ 2026-09-02：`mxc_holder`（一列一個持有者）退場，標為 `DROPPED`。取代它的是 `mxc_refcount: mxc → i64`，
-> ±1 走 RocksDB merge operator，純寫入、同一交易 —— 見 [media-gc.md](media-gc.md) §2。
+> ±1 走 RocksDB merge operator，純寫入、同一交易 —— 見 [/docs/design/media/media-gc.md](media-gc.md) §2。
 > 七個維護點（事件寫入、backfill、redact、歷史清除、房間清除、頭像設定、帳號停用）**保留**，只換底層呼叫。
 > ⚠️ 一條語意跟著變：**redact 不再當下釋放引用** —— 原文備份（`save_unredacted_events`）才是持有者，
-> 備份被丟掉時才 −1；見 [media-gc.md](media-gc.md) §3.0。
+> 備份被丟掉時才 −1；見 [/docs/design/media/media-gc.md](media-gc.md) §3.0。
 > ⏳ 仍未實作：**任何會刪掉 bytes 的東西**、墓碑、`migrate-references`。
 >
 > 下面的內容是列式索引時期的推理。§3.1「為什麼不是計數器」的前提（`Txn` 不能讀）**仍然成立**，
@@ -16,7 +16,7 @@
 > holder，把頭像也納入），理由都寫在該節與 §3.7。
 >
 > 撰寫日期：2026-09-01。上位文件：
-> [why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md) §5.4。
+> [/docs/design/overview/why-not-matrix-and-core-design.md](../overview/why-not-matrix-and-core-design.md) §5.4。
 >
 > ⚠️ **命名**：專案名為 **wbfuwunel**。程式碼裡的 crate 與路徑仍是上游的 `tuwunel-*`，
 > 這份文件引用路徑時照實寫。
@@ -261,6 +261,6 @@ mimetype），只是縮圖破圖、下載失敗 —— 看起來像「壞掉」�
 - 🚫 **不做跨使用者去重。** E2EE 下每次上傳用不同金鑰，同一份明文產生完全不同的密文，內容
   位址不會撞。去重只在「同一份密文被多處引用」（＝轉發）時發生，而那正是引用計數在算的東西。
 - 🚫 **不動事件 DAG。** 這份提案只碰媒體 bytes 的生命週期。事件層要不要保留 DAG 是
-  [why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md) 的待驗 1，另案。
+  [/docs/design/overview/why-not-matrix-and-core-design.md](../overview/why-not-matrix-and-core-design.md) 的待驗 1，另案。
 - 🚫 **不做分塊與 Merkle。** 那是同一份設計文件的 §5.2，跟這份互相獨立：引用計數算的是
   「一份媒體」，不管它內部怎麼切。兩者可以分開做，先做哪個都行。

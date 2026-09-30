@@ -1,14 +1,14 @@
 # 分塊上傳、續傳、range 下載（提案，第三版）
 
 > **狀態：維護者 2026-09-03 同意（PR #15）；A 支已合併（PR #16，2026-09-03），B 支（WebSocket、中間層、向量）已合併（PR #18，2026-09-04）。server 端可用；下一步是 client。** §9 的答案已寫回各節。
-> **要寫 client 的人請讀 [chunked-upload-spec.md](chunked-upload-spec.md)**：那是線上規格（byte 排法、每個訊息、錯誤碼、流程）；本文是設計與取捨的紀錄。
-> 這是 [roadmap.md](roadmap.md) §2.1，核心設計
-> [why-not-matrix-and-core-design.md](why-not-matrix-and-core-design.md) §5.2 的 server 端。
+> **要寫 client 的人請讀 [/docs/design/media/chunked-upload-spec.md](chunked-upload-spec.md)**：那是線上規格（byte 排法、每個訊息、錯誤碼、流程）；本文是設計與取捨的紀錄。
+> 這是 [/docs/design/overview/roadmap.md](../overview/roadmap.md) §2.1，核心設計
+> [/docs/design/overview/why-not-matrix-and-core-design.md](../overview/why-not-matrix-and-core-design.md) §5.2 的 server 端。
 > 第三版依維護者 2026-09-03 的指示：**以 WebSocket 通道為主，所有請求與回應都是同一種二進位 pack
-> （[wbf-wire-format.md](wbf-wire-format.md)）；HTTP 只是「把一個 pack 用 POST 送一次」的選用測試路徑，
+> （[/docs/design/wire/wire-format.md](../wire/wire-format.md)）；HTTP 只是「把一個 pack 用 POST 送一次」的選用測試路徑，
 > 不另做 JSON 加 base64 的端點。** 塊的加密、CRC、塊大小、超時等第二版的決定不變。
 >
-> 讀這份之前先知道：媒體的引用計數與刪除已經上線（[media-gc.md](media-gc.md)），
+> 讀這份之前先知道：媒體的引用計數與刪除已經上線（[/docs/design/media/media-gc.md](media-gc.md)），
 > 分塊媒體**仍是一個 mxc、一個計數、一個物件**，本提案不動那套。
 
 ## 1. 要拿到什麼
@@ -52,7 +52,7 @@ client 預設只有這兩個數字，64 KiB 是預設。但那是 client 的選�
 - **server 不檢查塊的長度是否「對」**。data 段是 client 封裝（加密、標籤、nonce、框架）之後的密文，封裝後多大是 client 的事；精確的 64 KiB 在**解封裝**那端檢查，解密出來不是 64 KiB 就是那一塊壞了。server 對「完整」的定義只有兩樣：`data_crc` 對、序列沒漏。
 - **封裝後每一塊多長都可以不同**，server 不記住任何「應該多長」、不拿前一塊檢查後一塊；它只**記錄**每一塊落在哪、多長（`mxc_chunk`，§3.1）。server 知道的是明文塊大小（宣告的），而最後一塊的明文允許比它小。
 - server 檢查的是**上限**（防攻擊，不是定義）：`media_chunk_size_min ≤ chunk_size ≤ media_chunk_size_max`（預設 **4 KiB** 到 **2 MiB**）；每一塊 `data_len ≤ chunk_size + media_chunk_overhead_max`（預設冗餘 4 KiB，蓋標籤與封裝），超過就 `Error(TooLarge)`，所以 client 宣告了塊大小就不能中途把塊變大；`chunk_size + media_chunk_overhead_max ≤ wbf_data_max_bytes`（單包硬上限，meta 與 data 各一個，不讓任何一段無限長）。空塊拒收。
-- **一個塊正好是一個 pack 的 data 段**：client 把第 i 塊明文加密後直接寫進 pack 的 `data_slot`（[wbf-wire-format.md](wbf-wire-format.md) §5），
+- **一個塊正好是一個 pack 的 data 段**：client 把第 i 塊明文加密後直接寫進 pack 的 `data_slot`（[/docs/design/wire/wire-format.md](../wire/wire-format.md) §5），
   沒有第二次加密、沒有複製。
 
 ### 2.3 以塊為單位加密，server 只看 CRC
@@ -86,7 +86,7 @@ WebSocket 上是一框一 pack；HTTP 上是 `POST /_wbf/v1/pack` 一次一 pack
 | `mediaid_upload_progress` | `upload_id`（u64 BE） | `Cbor(UploadProgress)` | 上傳的**進度**，每塊重寫（幾十 byte）：`received_count`（下一塊的 index）、`total_len`（累計，也就是暫存檔長度與下一塊的偏移）、`finished`、`truncated`（§6）、`last_chunk_at`。與 `mxc_chunk` 那一塊的位置同一個 txn。宣告與進度分兩列，是為了每塊不重寫那 64 KiB 的描述。沒有 bitmap：有序序列的「已收」永遠是 0..n 連續。沒有 `state` 欄：兩個 seal 撞在一起靠鎖與冪等收尾 |
 
 鍵是 `upload_id` 而不是 mxc 字串，因為 pack 的標頭帶的就是它，server 一個點讀就找到，不用解 meta。
-⚠️ **標頭的 `id` 是 `0x03 ‖ upload_id`**（型別 byte ＋ 7 byte 的值，[wbf-wire-format.md](wbf-wire-format.md) §2.2，PR #47）；**列的鍵是拔掉型別之後那個值**。所以「上傳 id」這個詞在這份文件裡一律指那個值，線上那 8 個 byte 比它多一個型別 byte。
+⚠️ **標頭的 `id` 是 `0x03 ‖ upload_id`**（型別 byte ＋ 7 byte 的值，[/docs/design/wire/wire-format.md](../wire/wire-format.md) §2.2，PR #47）；**列的鍵是拔掉型別之後那個值**。所以「上傳 id」這個詞在這份文件裡一律指那個值，線上那 8 個 byte 比它多一個型別 byte。
 **`upload_id` 與 mxc 是同一個唯一值的兩種寫法**：server 在 `Create` 時隨機發 **56 bit**，mxc 的 media id 就是它的 **14 位** hex（`mxc://server/22334455667788`）。沒有對照表；上傳、下載、房間事件用的都是這一個地址。
 🚫 **不要驗 media id 的長度**：型別 byte 之前鑄的媒體是 16 個字元，它們照樣有效（字串，不會跟 14 個字元的新 id 相撞）。
 它是**隨機值，不是計數器**：不累加、不常駐、不落地，server 跑多久都沒有用完或溢位的問題。唯一的風險是撞號（一百萬個媒體下 56 bit 每次約 1.4×10⁻¹¹），而撞到會蓋掉別人的媒體，所以 `Create` 發號前多兩次點讀：進行中的上傳、既有媒體、壓碑，任一個有就重抽（fail closed，成本可忽略）。
@@ -103,7 +103,7 @@ TTL 設 `media_upload_ttl × 2` 當兜底，真正的清理是 §6 的 sweeper�
 
 標頭：`id = 0x03 ‖ upload_id`（`Create` 時整個是 0 —— 號還沒鑄，型別 `0x00`；組好的 `id` 從 `Ack` 抄），`seq` = 塊 index（`Chunk`，0 起）或請求號（其他）。meta 明文，但**只放 server 運作非知道不可的欄位**（尺寸、mxc、位置）；`Create` 的 meta 是 16 byte 二進位的 `EncryptedFileInfo`（§2.2），其他 subtype 的 meta 是 JSON 或空。
 檔名、MIME、尺寸、金鑰、每塊的雜湊、整檔的雜湊，一律不給 server：那些在房間裡那則**加密事件**的內容（§7），跟 Matrix E2EE 的 `m.file` 一樣，server 存的是它不知道是什麼的 bytes。
-📎 `META_ENCRYPTED` 旗標**現在沒有任何 kind 在用**：它本來是留給串流訊息的，但草稿定案時 meta 成了明文的 room id（server 要靠它知道往哪個房間廣播），所以 `Stream` 的 flags 也是 0 —— 見 [wbf-wire-format.md](wbf-wire-format.md) §3.1。
+📎 `META_ENCRYPTED` 旗標**現在沒有任何 kind 在用**：它本來是留給串流訊息的，但草稿定案時 meta 成了明文的 room id（server 要靠它知道往哪個房間廣播），所以 `Stream` 的 flags 也是 0 —— 見 [/docs/design/wire/wire-format.md](../wire/wire-format.md) §3.1。
 
 | subtype | 請求 meta | 請求 data | 回應（`Ack` 的 meta） |
 |---|---|---|---|
@@ -113,7 +113,7 @@ TTL 設 `media_upload_ttl × 2` 當兜底，真正的清理是 §6 的 sweeper�
 | `0x04 Seal` | 無 | **可選**：新的加密描述，取代 `Create` 時那份 | `{ "mxc": "…" }`。還沒完成 → `Error(Conflict)` 帶目前塊數與 bytes |
 | `0x05 Abort` | 無 | 無 | `{ "ok": true }`。取消：列、已記的塊位置、暫存檔一起刪。沒叫 Abort 也不會卡住：`media_upload_ttl` 到了 sweeper 清（§6） |
 
-`Chunk` 是**有序類**（[wbf-wire-format.md](wbf-wire-format.md) §4）：同一個 `id` 之內 `seq` 必須 0, 1, 2, … 遞增，server 記 `next_seq`；來的不是 `next_seq`
+`Chunk` 是**有序類**（[/docs/design/wire/wire-format.md](../wire/wire-format.md) §4）：同一個 `id` 之內 `seq` 必須 0, 1, 2, … 遞增，server 記 `next_seq`；來的不是 `next_seq`
 → `Error(OutOfOrder)` 帶 `expected_seq`，client 從那裡重送。WebSocket 保證到達順序，所以順序錯一定是 client 邏輯錯。
 可以連續送不等回應（滑動窗口 client 決定）；要逐塊確認就帶 `WANT_ACK`。續傳（斷線重連）：先 `Status` 拿到 `received`，從那個 index 當 `seq` 接著送；
 或直接送，送錯了 server 的 `Error(OutOfOrder)` 就是「把第 `expected_seq` 塊再給我」。兩條都不需要 server 記任何除了 `received_count` 以外的東西。`Create`、`Status`、`Seal`、`Abort` 是無序類（一問一答）。
@@ -156,7 +156,7 @@ TTL 設 `media_upload_ttl × 2` 當兜底，真正的清理是 §6 的 sweeper�
 
 這整份是**加密事件的內容**：檔名（`body`）、MIME、明文大小、金鑰都只有房間成員看得到。server 那邊對這個 mxc 只知道塊大小、塊數、線上總長（§3.1）。
 
-`url` 仍是 mxc，引用計數照算。不認識的 client 當普通檔案整份拿到但解不開 —— 已知且接受（核心設計 §6 Phase 0 的退化策略是「看得到一個連結」）。金鑰仍走既有的 `file.key` 分發。
+`url` 仍是 mxc，引用計數照算。不認識的 client 當普通檔案整份拿到但解不開 —— 已知且接受（/docs/design/overview/why-not-matrix-and-core-design.md §6 Phase 0 的退化策略是「看得到一個連結」）。金鑰仍走既有的 `file.key` 分發。
 
 ## 8. 設定
 
@@ -169,7 +169,7 @@ TTL 設 `media_upload_ttl × 2` 當兜底，真正的清理是 §6 的 sweeper�
 | `media_upload_ttl` | 86400 | 最後一塊之後多久沒動視為遺棄 |
 | `media_upload_max_len` | 10 GiB | 單檔上限（線上 bytes），同時推出塊數上限 `ceil(上限 / chunk_size)`；超過就強制結束、標 `truncated`（§6）。0 = 不限 |
 | `media_download_default_len` | 1 MiB | `Read` 沒給 `len` 時一次回多少 |
-| `wbf_meta_max_bytes` / `wbf_data_max_bytes` | 64 KiB / 2 MiB + 4 KiB | 單包硬上限，meta 與 data 各一個（[wbf-wire-format.md](wbf-wire-format.md)） |
+| `wbf_meta_max_bytes` / `wbf_data_max_bytes` | 64 KiB / 2 MiB + 4 KiB | 單包硬上限，meta 與 data 各一個（[/docs/design/wire/wire-format.md](../wire/wire-format.md)） |
 
 `max_pending_media_uploads`、`media_rc_create_*` 沿用。
 
@@ -186,21 +186,21 @@ TTL 設 `media_upload_ttl × 2` 當兜底，真正的清理是 §6 的 sweeper�
 8. **與舊 client 的相容**（2026-09-03）：分塊媒體是逐塊 AEAD 的密文串起來，舊 client 走標準下載拿得到、解不開，這是接受的。**只有單塊**可能相容，而且條件是 client 對那一塊用 Matrix 標準附件加密（AES-256-CTR + SHA-256）並在事件帶標準 `file` 欄；server 不用為此做任何事。`max_pending_media_uploads` 維持上游預設 5，維護者說媒體之後可能自己重做。
 9. **單檔上限是唯一的額度**（2026-09-03）：預設 10 GiB，塊數上限由它推出（`ceil(上限 / chunk_size)`）。超過就強制終止、截斷，不完整的檔帶著警告狀態發出（`truncated`），狀態存在上傳列與 seal 後的 `mxc_chunked` 列。這是額度不是檢查，不違反第 7 條。
 10. **串流模式**（2026-09-03，維護者指出漏了）：`file_size = 0` 且 `chunk_count = 0` 當哨兵，`IS_LAST` 結束，`Seal` 可帶新的加密描述（§2.2）。
-11. **client 怎麼共用協議**（2026-09-04）：維護者選「規格＋黃金向量」為主，不共用程式碼、不用 submodule、不寫編譯時拉檔的腳本（那是手工版的 git dependency，把耦合藏起來而不是減少）。向量檔 [wbf-vectors.json](wbf-vectors.json) 由 server 實作產生（`src/core/wbf/vectors.rs`），server 每次測試對著它跑，client 複製一份對著測，漂移在測試階段被抓到。Rust client 要直接用 `core/wbf` 的 codec 也可以（抽成小 crate 用 git dependency），但向量測試一樣要跑。matrix-rust-sdk 用自己的 fork 當 git dependency，不動它內部；自己協議的 client 邏輯另一個 crate。
-12. **預告**：未來所有 HTTP 請求都會遷到 WS，kind 的分配見 [wbf-wire-format.md](wbf-wire-format.md) §3.3。
+11. **client 怎麼共用協議**（2026-09-04）：維護者選「規格＋黃金向量」為主，不共用程式碼、不用 submodule、不寫編譯時拉檔的腳本（那是手工版的 git dependency，把耦合藏起來而不是減少）。向量檔 [/docs/design/wire/wbf-vectors.json](../wire/wbf-vectors.json) 由 server 實作產生（`src/core/wbf/vectors.rs`），server 每次測試對著它跑，client 複製一份對著測，漂移在測試階段被抓到。Rust client 要直接用 `core/wbf` 的 codec 也可以（抽成小 crate 用 git dependency），但向量測試一樣要跑。matrix-rust-sdk 用自己的 fork 當 git dependency，不動它內部；自己協議的 client 邏輯另一個 crate。
+12. **預告**：未來所有 HTTP 請求都會遷到 WS，kind 的分配見 [/docs/design/wire/wire-format.md](../wire/wire-format.md) §3.3。
 
 ## 10. 分幾支
 
 | 支 | 內容 | 驗收 |
 |---|---|---|
-| A | `core/wbf/pack.rs` 與 `file_info.rs`（Pack、`EncryptedFileInfo`、單元測試）；`mediaid_upload`／`mxc_chunk`／`mxc_chunked` CF；暫存檔；`handle_pack` 的 `Upload` 與 `Download` 兩個 kind；`POST /_wbf/v1/pack`；sweeper；provider `get_range` | **以 [chunked-upload-spec.md](chunked-upload-spec.md) 為準**，e2e（HTTP 送 pack 的腳本）覆蓋：Create 的各種拒絕；有序上傳、跳號回 `OutOfOrder`、重送冪等、壞 CRC 被拒且說是 data；`IS_LAST`；seal 後標準 download 與原 bytes 逐 byte 相同；`Info` 回加密描述；`Read` 按塊與按明文位置整塊交回；變長塊；截斷；串流模式；abort；過期被 sweeper 清；`refcount` 是 0 |
+| A | `core/wbf/pack.rs` 與 `file_info.rs`（Pack、`EncryptedFileInfo`、單元測試）；`mediaid_upload`／`mxc_chunk`／`mxc_chunked` CF；暫存檔；`handle_pack` 的 `Upload` 與 `Download` 兩個 kind；`POST /_wbf/v1/pack`；sweeper；provider `get_range` | **以 [/docs/design/media/chunked-upload-spec.md](chunked-upload-spec.md) 為準**，e2e（HTTP 送 pack 的腳本）覆蓋：Create 的各種拒絕；有序上傳、跳號回 `OutOfOrder`、重送冪等、壞 CRC 被拒且說是 data；`IS_LAST`；seal 後標準 download 與原 bytes 逐 byte 相同；`Info` 回加密描述；`Read` 按塊與按明文位置整塊交回；變長塊；截斷；串流模式；abort；過期被 sweeper 清；`refcount` 是 0 |
 | B | WebSocket 通道（`/_wbf/v1/ws`，`src/api/client/wbf/ws.rs`）：升級時驗 Bearer、每個 binary message 一個 pack、依序處理依序回、`Hello`（回 server 名、features、建議塊大小、單包上限）、`Ping`、連線內多 id 分流、連線不保存上傳狀態（`OutOfOrder` 一律由 DB 列判）、idle 超時（`wbf_ws_idle_timeout`）、超大 frame 由 socket 層拒；同一個 `handle_pack` | e2e7（PowerShell `ClientWebSocket`）：無 token 升級被拒；Hello／Ping；字串 frame 回 Corrupt；兩個上傳在同一連線交錯；跳號回 OutOfOrder；重送舊塊後下一塊仍收；WS 先、HTTP 中、WS 後的同一上傳；三個 pack 連發不等回應、回應依序；idle 超時關連線；seal 後標準下載逐 byte 相同；Info／Read 走 WS；標頭壞回 MetaCrc；同一上傳 HTTP 送前半、WS 送後半、seal 成功；超過單包上限的 frame 被拒（當時是 17 MiB；PR #50 把上限降到約 2.1 MiB 之後，e2e7 改送剛好越線的 3 MiB） |
 
 A 先，因為它把 pack 與儲存定下來；B 與流式訊息共用通道。
 
 ## 11. 明確不在這支裡
 
-- 客戶端（[roadmap.md](roadmap.md) §4）。
-- 去重（核心設計 §5.4：E2EE 下不成立）。
+- 客戶端（[/docs/design/overview/roadmap.md](../overview/roadmap.md) §4）。
+- 去重（/docs/design/overview/why-not-matrix-and-core-design.md §5.4：E2EE 下不成立）。
 - 聯邦。分塊媒體不透過聯邦提供。
 - 內容檢查。密文，做不到。

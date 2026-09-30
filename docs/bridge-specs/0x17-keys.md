@@ -2,11 +2,11 @@
 
 > 號碼總表與共通規則在 [index.md](index.md)。這份只寫**每支端點帶什麼、回什麼、會怎麼被拒**。
 > 請求的前 4 bytes 一律是 `01 17 SS 10`；成功回覆 `01 01 02 14`、失敗 `01 01 03 14`。`id` 填 0。
-> 為什麼搬、搬哪些：[wbf-e2ee.md](../design/wbf-e2ee.md) §2（E2EE 的 (A)）。**發** to-device 不在這個 kind，在 `0x16` 的 `0x25`（[0x16-device.md](0x16-device.md)）。
-> 這個 kind 裝的是裝置金鑰（`0x20`–`0x25`）與 server 端金鑰備份（`0x30`–`0x3D`），目前沒有原生的 pack。自己的 OTK 剩幾把由 `0x16` 的原生 `CryptoState` 推（wbf-e2ee.md §3），不靠這裡的端點輪詢。
+> 為什麼搬、搬哪些：[/docs/design/keys/e2ee-over-channel.md](../design/keys/e2ee-over-channel.md) §2（E2EE 的 (A)）。**發** to-device 不在這個 kind，在 `0x16` 的 `0x25`（[0x16-device.md](0x16-device.md)）。
+> 這個 kind 裝的是裝置金鑰（`0x20`–`0x25`）與 server 端金鑰備份（`0x30`–`0x3D`），目前沒有原生的 pack。自己的 OTK 剩幾把由 `0x16` 的原生 `CryptoState` 推（/docs/design/keys/e2ee-over-channel.md §3），不靠這裡的端點輪詢。
 > ⚠️ **`CryptoState` 只講自己的金鑰存量，不講別人的裝置清單**（維護者 2026-09-17：Matrix 原本的金鑰分發已經能用，不動它）——
 > `device_lists` 那半整個拿掉了，e2e15 還斷言它必須**不存在**。「同房的人誰的裝置變了」改由
-> [wbf-room-device-version.md](../design/wbf-room-device-version.md) 那套負責（送出時比對房間版本號，對不上回 `1506`）。
+> [/docs/design/keys/room-device-version.md](../design/keys/room-device-version.md) 那套負責（送出時比對房間版本號，對不上回 `1506`）。
 > 下面的範例都是 e2e13 實跑的回覆（裝置金鑰是情境 3、備份是情境 4）。金鑰是假的（server 存金鑰時不驗簽章，驗簽章的只有 `0x25`）。
 
 ## `0x20` KeysUpload —— 上傳自己裝置的金鑰、補 OTK、換 fallback key
@@ -45,7 +45,7 @@
 | 回覆 data | `{"failures":{},"one_time_keys":{"@kate:localhost":{"M70FM5YkEz":{"signed_curve25519:AAAB1":{"key":"…","signatures":{…}}}}}}` |
 
 - ⚠️ **claim 走的那把就從對方的庫存消失**（e2e13 [3.3]：3 → 2，再用 HTTP claim 一次 → 1，而且拿到的是另一把）。OTK 用完之後回的是 fallback key。
-- 被 claim 的那個裝置要知道自己少了一把才會補：之後由 `CryptoState` 推（wbf-e2ee.md §3.4），在那之前用 `0x20` 送 `{}` 讀回數量。
+- 被 claim 的那個裝置要知道自己少了一把才會補：之後由 `CryptoState` 推（/docs/design/keys/e2ee-over-channel.md §3.4），在那之前用 `0x20` 送 `{}` 讀回數量。
 
 ## `0x23` KeyChanges —— 兩個位置之間誰的金鑰變了
 
@@ -57,7 +57,7 @@
 | 請求 data | 空 |
 | 回覆 data | `{"changed":["@kate:localhost"],"left":[]}` |
 
-- ⚠️ **`left` 永遠是空陣列**（上游的 `// TODO`），而且 `changed` 只看金鑰變動、**不含「有人新加入跟我同一個加密房」**。這跟上游一致，**不改**（wbf-e2ee.md §3，維護者 2026-09-17 重作 (B)：Matrix 原本的金鑰分發不動）。客製 client 判斷要不要重新查裝置，走 [wbf-room-device-version.md](../design/wbf-room-device-version.md)。
+- ⚠️ **`left` 永遠是空陣列**（上游的 `// TODO`），而且 `changed` 只看金鑰變動、**不含「有人新加入跟我同一個加密房」**。這跟上游一致，**不改**（/docs/design/keys/e2ee-over-channel.md §3，維護者 2026-09-17 重作 (B)：Matrix 原本的金鑰分發不動）。客製 client 判斷要不要重新查裝置，走 [/docs/design/keys/room-device-version.md](../design/keys/room-device-version.md)。
 - `from`／`to` 是 server 的 count：HTTP 的 client 拿 `/sync` 的 `next_batch`。
 
 **會怎麼被拒**：`from` 或 `to` 不是數字 → `InvalidRequest`（1201），meta `{"code":"InvalidRequest","code_id":1201,"errcode":"M_INVALID_PARAM","message":"M_INVALID_PARAM: Invalid `from`.","status":400}`（e2e13 [3.4]）。
@@ -72,7 +72,7 @@
 | 請求 data | `{"master_key":{"user_id":"@kate:localhost","usage":["master"],"keys":{"ed25519:bWFz…":"bWFz…"}},"self_signing_key":{…},"user_signing_key":{…}}`；要 UIAA 時多一個 `auth` |
 | 回覆 data | `{}` |
 
-**什麼時候要 UIAA**（兩輪怎麼走見 index §1.5）：
+**什麼時候要 UIAA**（兩輪怎麼走見 /docs/bridge-specs/index.md §1.5）：
 
 | 情況 | 結果 |
 |---|---|
@@ -80,7 +80,7 @@
 | 重送一模一樣的金鑰（例：斷線後重試） | 不要 UIAA，`Ack` |
 | **換掉**既有的金鑰 | 第一輪 `Error`，`status` 401，data `{"flows":[{"stages":["m.login.password"]}],"params":{},"session":"U520STi8zjjer06UBGgwefBjmkXetoC5"}`；第二輪帶 `auth` → `Ack` |
 
-📎 設計文件（wbf-e2ee.md §2）原本寫「要 UIAA」—— 實際只有**換掉**既有的才要，上面這張是 server 現在的行為。
+📎 設計文件（/docs/design/keys/e2ee-over-channel.md §2）原本寫「要 UIAA」—— 實際只有**換掉**既有的才要，上面這張是 server 現在的行為。
 
 ## `0x25` SignaturesUpload —— 上傳簽章（驗證裝置）
 
@@ -97,7 +97,7 @@
 
 ## `0x30`–`0x34` 金鑰備份的版本
 
-server 端金鑰備份（[wbf-e2ee.md](../design/wbf-e2ee.md) §4 的 (C)）。一份備份有一個**版本**，金鑰都掛在版本底下。`0x32`–`0x34` 的 `version` 是 **path 變數**；`0x30`、`0x31` 沒有變數。
+server 端金鑰備份（[/docs/design/keys/e2ee-over-channel.md](../design/keys/e2ee-over-channel.md) §4 的 (C)）。一份備份有一個**版本**，金鑰都掛在版本底下。`0x32`–`0x34` 的 `version` 是 **path 變數**；`0x30`、`0x31` 沒有變數。
 
 | subtype | 端點 | 請求 meta | 請求 data | 回覆 data |
 |---|---|---|---|---|
@@ -125,7 +125,7 @@ server 端金鑰備份（[wbf-e2ee.md](../design/wbf-e2ee.md) §4 的 (C)）。�
 | `0x3C` DeleteBackupKeysForRoom | `DELETE /room_keys/keys/{room_id}` | `{"room_id":"!r:localhost","version":"97"}` | 空 | `{"etag":"102","count":0}` |
 | `0x3D` DeleteBackupKeysForSession | `DELETE /room_keys/keys/{room_id}/{session_id}` | `{"room_id":"!r:localhost","session_id":"session-one","version":"97"}` | 空 | `{"etag":"102","count":2}` |
 
-- ⚠️ **`version` 在這九支是 query 變數**，在 `0x32`–`0x34` 是 path 變數。**client 兩邊都一樣寫進 meta**，橋照端點的模板自己決定放哪裡（wbf-e2ee.md §4）。
+- ⚠️ **`version` 在這九支是 query 變數**，在 `0x32`–`0x34` 是 path 變數。**client 兩邊都一樣寫進 meta**，橋照端點的模板自己決定放哪裡（/docs/design/keys/e2ee-over-channel.md §4）。
 - **`count` 是這份備份現在總共有幾把金鑰**，`etag` 每次寫入前進；刪除也回這兩個。
 - **`session_data` 是 client 加密過的東西**，server 不看內容。
 

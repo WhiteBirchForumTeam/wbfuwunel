@@ -54,7 +54,7 @@ pub fn build(router: Router<State>, server: &Server) -> Router<State> {
 }
 
 /// The routing table the wbf bridge hands its internal requests to
-/// (`docs/design/wbf-api-bridge.md` §2.1): the same `build` as the served
+/// (`/docs/design/wire/api-bridge.md` §2.1): the same `build` as the served
 /// router, without the HTTP middleware an internal call has no use for.
 ///
 /// ⚠️ It travels as an extension of the served router rather than a global:
@@ -343,7 +343,7 @@ fn register_client_room_routes(router: Router<State>) -> Router<State> {
 		.ruma_route(&client::get_public_rooms_filtered_route)
 		.ruma_route(&client::search_users_route)
 		// Not `ruma_route`: the answer carries a field ruma's type has no room
-		// for (docs/design/wbf-room-device-version.md §5.2).
+		// for (/docs/design/keys/room-device-version.md §5.2).
 		.route(client::MEMBER_EVENTS_PATHS[0], get(client::get_member_events_route))
 		.route(client::MEMBER_EVENTS_PATHS[1], get(client::get_member_events_route))
 		.ruma_route(&client::get_protocols_route)

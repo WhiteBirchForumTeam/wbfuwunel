@@ -1,8 +1,8 @@
 # wbf pack：通道與 HTTP 共用的二進位封包，以及收發的管線
 
 > **狀態：✅ 已實作，並且是現行契約**（第三版 2026-09-03 定，之後每一支都寫回這裡：`0x16 Device` PR #43、`0x02 Stream` PR #45、§2.2 的 `id` 型別 byte PR #46／#47）。定義 fork 自己的即時通道（WebSocket over TLS）上**每一個二進位訊框**，也是 HTTP 測試路徑的
-> request body 與 response body —— **兩邊都是 pack，沒有 JSON 回應**。分塊上傳（[chunked-upload.md](chunked-upload.md)）與
-> 流式訊息（[streaming-messages.md](streaming-messages.md)）都建立在它上面。
+> request body 與 response body —— **兩邊都是 pack，沒有 JSON 回應**。分塊上傳（[/docs/design/media/chunked-upload.md](../media/chunked-upload.md)）與
+> 流式訊息（[/docs/design/events/streaming-messages.md](../events/streaming-messages.md)）都建立在它上面。
 > 第三版依維護者 2026-09-03 指示：**pack 不管加密、只管格式與 CRC；拆包禁止 O(n) 掃描；加密好的 bytes 直接落在 data 段不再複製；
 > 收發兩端都有同一套「封裝 → 送出 → 接收 → 拆包」的管線（池）；順序守則依 kind 分兩類。**
 > 撰寫日期：2026-09-03。
@@ -31,7 +31,7 @@ offset  size  欄位          說明
                             bit1 WANT_ACK：發送者要求對這個 pack 回 Ack
                             bit2 IS_RESPONSE：這是對 (id, seq) 那個請求的回應
                             bit3 IS_LAST：這個有序序列的最後一個（上傳的最後一塊、流的最後一片）
-                            bit4 IS_BRIDGED：這是走橋的 Matrix 端點呼叫，回應也帶（wbf-api-bridge.md §2.3；號碼在 ../bridge-specs/index.md）
+                            bit4 IS_BRIDGED：這是走橋的 Matrix 端點呼叫，回應也帶（/docs/design/wire/api-bridge.md §2.3；號碼在 ../bridge-specs/index.md）
                             其餘保留（bit5–bit7），必須為 0
 4       8     id            會話／物件識別：[id_type 1 byte] ‖ [值 7 byte]，型別表在 §2.2
                             0x00 = 無（整個 id 必須是 0）、0x01 client 的會話號、
@@ -52,7 +52,7 @@ offset  size  欄位          說明
 - **拒收**：`version ≠ 1`、保留旗標非 0、長度與實際對不上、任一 CRC 不合 → 丟掉，回 `Control/Error`（§3）。
   關不關連線見 §2.1。
 - **上限**：`meta_len ≤ wbf_meta_max_bytes`（預設 64 KiB）、`data_len ≤ wbf_data_max_bytes`（預設 **2 MiB**，要放得下大塊，
-  [chunked-upload.md](chunked-upload.md) §2.2）。
+  [/docs/design/media/chunked-upload.md](../media/chunked-upload.md) §2.2）。
 - 📎 **CRC 不抓竄改**（那是 data 裡的 AEAD 標籤的事），**也不是在替 TLS 補位**。維護者 2026-09-10 問「CRC 對不上的機會有多高」，
   答案要講清楚，否則下一個人會以為它在防網路雜訊：
 
@@ -162,7 +162,7 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 | **已經存在的媒體** | ✅ 不受影響。它們的 media id 是 16 個字元的字串，與 14 個字元的新 id 不會相撞；🚫 任何人都不要驗 media id 的長度 |
 | **舊 client** | ⛔ 每一個帶 `id` 的包都會被拒（`InvalidRequest`）—— 這就是 [BREAKING] 的意思 |
 
-**跟這支一起改的**：`wbf-vectors.json` 重出（順手補上一直沒有的 `0x02 Stream` 七個包）、e2e 腳本、`chunked-upload-spec.md` 的 id 敘述，以及 client repo 的協議同步 issue（[wbf-matrix-client#29](http://ai.zooy.cc:30008/amaid/wbf-matrix-client/issues/29)）。
+**跟這支一起改的**：`/docs/design/wire/wbf-vectors.json` 重出（順手補上一直沒有的 `0x02 Stream` 七個包）、e2e 腳本、`/docs/design/media/chunked-upload-spec.md` 的 id 敘述，以及 client repo 的協議同步 issue（[wbf-matrix-client#29](http://ai.zooy.cc:30008/amaid/wbf-matrix-client/issues/29)）。
 
 ## 3. kind、subtype、meta
 
@@ -187,37 +187,37 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 
 | kind | subtype | meta（JSON） | data |
 |---|---|---|---|
-| `0x01 Control` | `0x01 Hello` | `{ "protocol": 1, "client": "…", "features": [...] }`（client 的 `features` server **只讀一項**：`"org.wbftw.device_versions"`，記在這條連線上、下一個 `Hello` 覆蓋，見 [wbf-room-device-version.md](wbf-room-device-version.md) §6.2、§7.1；meta 不是 JSON 或沒有這個清單＝沒宣告）。回應 `{ "protocol", "server", "engine", "engine_version", "features", "connection_id", "recent_default_limit", "recent_max_limit", "recent_default_batch", "recent_max_batch", "max_connections_per_device", "max_connections_per_address", "chunk_size_default", "chunk_size_large", "data_max_bytes" }` —— `features` 目前是 `["upload","download","recent","batch","seq","attachments","login","push","stream","device","bridge","org.wbftw.device_versions"]`；兩個 `max_connections_*` 是**這一刻**的設定，它們可以熱改，🚫 **client 不要把它們當成不變量**；`connection_id` 只給除錯（HTTP 上是 0）；**`data_max_bytes` 是這台 server 的單包 data 上限，client 照它切包，🚫 不要寫死**（預設在 PR #50 從 16 MiB 降到 2 MiB） | 無 |
+| `0x01 Control` | `0x01 Hello` | `{ "protocol": 1, "client": "…", "features": [...] }`（client 的 `features` server **只讀一項**：`"org.wbftw.device_versions"`，記在這條連線上、下一個 `Hello` 覆蓋，見 [/docs/design/keys/room-device-version.md](../keys/room-device-version.md) §6.2、§7.1；meta 不是 JSON 或沒有這個清單＝沒宣告）。回應 `{ "protocol", "server", "engine", "engine_version", "features", "connection_id", "recent_default_limit", "recent_max_limit", "recent_default_batch", "recent_max_batch", "max_connections_per_device", "max_connections_per_address", "chunk_size_default", "chunk_size_large", "data_max_bytes" }` —— `features` 目前是 `["upload","download","recent","batch","seq","attachments","login","push","stream","device","bridge","org.wbftw.device_versions"]`；兩個 `max_connections_*` 是**這一刻**的設定，它們可以熱改，🚫 **client 不要把它們當成不變量**；`connection_id` 只給除錯（HTTP 上是 0）；**`data_max_bytes` 是這台 server 的單包 data 上限，client 照它切包，🚫 不要寫死**（預設在 PR #50 從 16 MiB 降到 2 MiB） | 無 |
 | | `0x02 Ack` | 各 kind 定的回應內容；`IS_RESPONSE = 1`，`id`、`seq` 抄請求 | 視 kind（`Download/Read` 的回應 data 是讀出的 bytes） |
 | | `0x03 Error` | `{ "code_id": <序號>, "code": "…", "message": "…" }` ＋ 該 code 定義的欄位；程式比對 `code_id`，`code` 是它的名字；**完整清單在 §3.4**，那張表是唯一的來源 | 無 |
 | | `0x04 Ping` / `0x05 Pong` | `{ "nonce": … }` | 無 |
-| `0x02 Stream`（草稿，[streaming-messages.md](streaming-messages.md)） | `0x01 Draft` | ⚠️ **這個 kind 的 meta 不是 JSON，是 room id 本身**（UTF-8 文字）——`id` 已經說了是哪則草稿，meta 只剩房間。`Draft` 的 `id` **整個填 0**（型別 `0x00`：還沒有草稿可指）；回應 `{ "event_id", "g_seq", "id" }`，**`id` ＝ `0x02 ‖ g_seq`（§2.2），之後每包直接抄它填 header 的 `id`** —— 🚫 client 不要自己疊型別 byte；**只走 WS**。房間人數超過 `wbf_draft_max_room_members` → `Conflict` | 無 |
+| `0x02 Stream`（草稿，[/docs/design/events/streaming-messages.md](../events/streaming-messages.md)） | `0x01 Draft` | ⚠️ **這個 kind 的 meta 不是 JSON，是 room id 本身**（UTF-8 文字）——`id` 已經說了是哪則草稿，meta 只剩房間。`Draft` 的 `id` **整個填 0**（型別 `0x00`：還沒有草稿可指）；回應 `{ "event_id", "g_seq", "id" }`，**`id` ＝ `0x02 ‖ g_seq`（§2.2），之後每包直接抄它填 header 的 `id`** —— 🚫 client 不要自己疊型別 byte；**只走 WS**。房間人數超過 `wbf_draft_max_room_members` → `Conflict` | 無 |
 | | `0x02 Abandon` | `id` = 草稿 id；只有作者能發；回應 `{ "redaction_event_id" }` —— 它就是 redact 那則錨，訂閱者從**普通的 `Event/Push`** 收到 | 無 |
 | | `0x03 Keypoint`（作者） | **完整內容**，接收者拿它換掉整個 buffer。`seq` 是作者的片計數（**從 1 起**，0 保留），⚠️ `prev` 必須是 **0**：它自己就是起點 | **`prev`(u32 大端) ‖ 密文** |
 | | `0x04 Delta`（作者） | 相對於 `prev` 那一片之後的狀態的差異；差異本身是 client 之間的約定，server 不讀 | 同上 |
 | | `0x05 Append`（作者） | 接在 `prev` 那一片之後的狀態末尾 | 同上 |
 | | `0x10 Demand` | **任何成員**都能發：向作者要一次完整內容。跟其他片一樣**廣播全房**（不特別路由），寫草稿的那台回 `Keypoint`，其他人忽略 | 無 |
 | | *三種片共同* | 片**不回 Ack**（盡快語意，掉了就掉了）；server 只做三個無狀態檢查：data ≥ 4 byte、`seq ≥ 1`、`Keypoint` 的 `prev` = 0，不合都是 `InvalidRequest`。⭐ `prev` 讓接收者**套之前**就知道自己對不對得上；中途加入或漏掉一片都會對不上 → 發 `Demand` | |
-| `0x03 Upload` | `Create` `Chunk` `Status` `Seal` `Abort` | [chunked-upload.md](chunked-upload.md) §4 | 塊 bytes（`Chunk`） |
-| `0x04 Download` | `Info` `Read` | [chunked-upload.md](chunked-upload.md) §5 | 回應的 data 是讀出的 bytes |
+| `0x03 Upload` | `Create` `Chunk` `Status` `Seal` `Abort` | [/docs/design/media/chunked-upload.md](../media/chunked-upload.md) §4 | 塊 bytes（`Chunk`） |
+| `0x04 Download` | `Info` `Read` | [/docs/design/media/chunked-upload.md](../media/chunked-upload.md) §5 | 回應的 data 是讀出的 bytes |
 | `0x10 Session`（§6.3） | `0x01 Login` | Matrix `/login` 的請求體原樣：`{ "type": "m.login.password" \| "m.login.token", "identifier", "password" \| "token", "device_id"?, "initial_device_display_name"?, "refresh_token"?: bool }`；回應 `{ "user_id", "device_id", "access_token", "refresh_token"?, "expires_in_ms"? }` | 無 |
 | | `0x02 Refresh` | `{ "refresh_token" }`；回應同 `Login` | 無 |
 | | `0x03 Logout` | `{ "all"?: bool }`；回應 `{}`，緊接 server 送 Close 1000 關線 | 無 |
 | `0x14 Event` | `0x01 Recent` | `{ "rooms"?: ["!…"], "limit": 320?, "cg_seq": <g_seq>?, "before": <g_seq>?, "batch": 10? }`（沒帶 `rooms` = 每個加入的房；**一個房 ＋ `before` 就是那個房的歷史**；點名了不在的房→ `Forbidden`），**`id` 由 client 選**（回應抄它）；回應是一串 `0x03 Batch`，不是 `Ack`；**只走 WS**，HTTP 回 `Error(Unsupported)` | 無 |
-| `0x14 Event` | `0x03 Batch`（只有 server → client） | `{ "tc", "bc", "fs", "ls", "r", "more" }`：這一窗總則數、這批則數、這批最新／最舊的 g_seq、這批之後還剩幾則；`r = 0` 就是這窗結束。**`more`**：這窗停在上限（`limit` 或 `wbf_window_max_bytes`）、更舊的可能還有 —— 🚨 **判斷「還要不要翻下一窗」看它，不看 `tc < limit`**（沒有這個欄位當 `true`）。`id` 抄 `Recent`，`seq` 從 0 嚴格 +1 | `bc` 則事件，每則 u32 大端長度 ＋ 事件 JSON（含 `room_id`；`unsigned` 帶 `org.wbftw.wbfuwunel.r_seq` 與 `…g_seq`），新到舊，見 [room-seq-and-recent.md](room-seq-and-recent.md) §2、[wbf-pack-pipeline.md](wbf-pack-pipeline.md) §6 |
+| `0x14 Event` | `0x03 Batch`（只有 server → client） | `{ "tc", "bc", "fs", "ls", "r", "more" }`：這一窗總則數、這批則數、這批最新／最舊的 g_seq、這批之後還剩幾則；`r = 0` 就是這窗結束。**`more`**：這窗停在上限（`limit` 或 `wbf_window_max_bytes`）、更舊的可能還有 —— 🚨 **判斷「還要不要翻下一窗」看它，不看 `tc < limit`**（沒有這個欄位當 `true`）。`id` 抄 `Recent`，`seq` 從 0 嚴格 +1 | `bc` 則事件，每則 u32 大端長度 ＋ 事件 JSON（含 `room_id`；`unsigned` 帶 `org.wbftw.wbfuwunel.r_seq` 與 `…g_seq`），新到舊，見 [/docs/design/events/room-seq-and-recent.md](../events/room-seq-and-recent.md) §2、[/docs/design/wire/pack-pipeline.md](pack-pipeline.md) §6 |
 | `0x14 Event` | `0x04 Subscribe` | `{ "rooms"?: ["!…"], "cg_seq"?: <g_seq> }`，**`id` 由 client 選**（之後每個 `Push` 抄它）；沒帶 `rooms` = 帳號層（所有加入的房，含之後加入的）；回應 `{ "latest_g_seq", "joined", "skipped": […] }`；**只走 WS** | 無 |
 | | `0x05 Unsubscribe` | `{ "rooms"?: ["!…"] }`；沒帶 = 全退；回應 `{}`；退不存在的是 no-op。**退訂退的是當下的 channel，不是黑名單**：帳號層訂閱者（`Subscribe` 沒帶 `rooms`）點名退掉某房之後，**再加入那個房時仍會被自動加回來** | 無 |
-| | `0x06 Push`（只有 server → client） | `{ "bc", "fs", "ls", "gap": bool }`；`id` 抄 `Subscribe`，`seq` 每推一次 +1；`gap: true` = 前面有推送被丟，**或 `cg_seq` 的補窗被上限截斷了**（PR #53，帶在補窗的第一個 `Push`），用 `Recent` 補；事件驅動類，不 Ack、不重送，見 [wbf-event-push.md](wbf-event-push.md) | `bc` 則事件，跟 `Batch` 同一個長度前綴切法 |
-| | `0x07 DeviceChanged`（只有 server → client） | `{ "user_id", "device_version", "rooms": { "!房": <房間版本號>, … }, "gap": bool }`；**只推給 `Hello.features` 宣告過 `org.wbftw.device_versions` 的連線**，沒宣告的連線永遠收不到。某人的裝置版本號變了（換裝置、換金鑰、交叉簽章、簽章），這條連線訂閱中而且他在裡面的房間，各帶新的房間版本號；**一條連線一次變動只收一個**，不管共同幾個房。`id`、`seq`、`gap` 跟這條連線的 `Push` 共用（同一個 `Event/Subscribe`）。事件驅動類，不 Ack、不重送；丟了由 `gap` 提醒、最後由送出時的 `1506` 擋，見 [wbf-room-device-version.md](wbf-room-device-version.md) §6 | 無 |
-| `0x14 Event` | `0x02 Send` | `{ "room_id", "type", "txn_id", "attachments": [mxc…], "room_version"? }`；回應 `{ "event_id" }`。`room_version`（u64）：這一則加密訊息的房間金鑰是照哪個房間版本號發的，對不上回 `Error(RoomDevicesChanged)`（1506）、什麼都沒送。只檢查 `m.room.encrypted`；宣告過 `org.wbftw.device_versions` 的連線送加密訊息漏帶是 `InvalidRequest`，見 [wbf-room-device-version.md](wbf-room-device-version.md) §7 | 事件 content 的 JSON（E2EE 就是 `m.room.encrypted` 的 content）。`attachments` 是 server 讀不到密文時唯一的引用來源，見 [media-attachments.md](media-attachments.md) |
-| `0x16 Device` | `0x04 Subscribe` | `{ "device_id" }`（`cd_seq` 仍然收但 🚫 client 不該送，見 [wbf-to-device.md](wbf-to-device.md) §3.1.2），**`id` 由 client 選**（之後每個 `Push`、`CryptoState` 抄它）；`device_id` 必須是這條連線 session 的那個，否則 `Error(Forbidden)`；回應 `{ "latest_cd_seq" }`；**只走 WS**。⚠️ 一個裝置同時只有一條連線在收，而且**後來的接手** —— 被接手的那條收到 `Error(Superseded)`（1505），見 [wbf-to-device.md](wbf-to-device.md) §4 | 無 |
+| | `0x06 Push`（只有 server → client） | `{ "bc", "fs", "ls", "gap": bool }`；`id` 抄 `Subscribe`，`seq` 每推一次 +1；`gap: true` = 前面有推送被丟，**或 `cg_seq` 的補窗被上限截斷了**（PR #53，帶在補窗的第一個 `Push`），用 `Recent` 補；事件驅動類，不 Ack、不重送，見 [/docs/design/events/event-push.md](../events/event-push.md) | `bc` 則事件，跟 `Batch` 同一個長度前綴切法 |
+| | `0x07 DeviceChanged`（只有 server → client） | `{ "user_id", "device_version", "rooms": { "!房": <房間版本號>, … }, "gap": bool }`；**只推給 `Hello.features` 宣告過 `org.wbftw.device_versions` 的連線**，沒宣告的連線永遠收不到。某人的裝置版本號變了（換裝置、換金鑰、交叉簽章、簽章），這條連線訂閱中而且他在裡面的房間，各帶新的房間版本號；**一條連線一次變動只收一個**，不管共同幾個房。`id`、`seq`、`gap` 跟這條連線的 `Push` 共用（同一個 `Event/Subscribe`）。事件驅動類，不 Ack、不重送；丟了由 `gap` 提醒、最後由送出時的 `1506` 擋，見 [/docs/design/keys/room-device-version.md](../keys/room-device-version.md) §6 | 無 |
+| `0x14 Event` | `0x02 Send` | `{ "room_id", "type", "txn_id", "attachments": [mxc…], "room_version"? }`；回應 `{ "event_id" }`。`room_version`（u64）：這一則加密訊息的房間金鑰是照哪個房間版本號發的，對不上回 `Error(RoomDevicesChanged)`（1506）、什麼都沒送。只檢查 `m.room.encrypted`；宣告過 `org.wbftw.device_versions` 的連線送加密訊息漏帶是 `InvalidRequest`，見 [/docs/design/keys/room-device-version.md](../keys/room-device-version.md) §7 | 事件 content 的 JSON（E2EE 就是 `m.room.encrypted` 的 content）。`attachments` 是 server 讀不到密文時唯一的引用來源，見 [/docs/design/media/media-attachments.md](../media/media-attachments.md) |
+| `0x16 Device` | `0x04 Subscribe` | `{ "device_id" }`（`cd_seq` 仍然收但 🚫 client 不該送，見 [/docs/design/keys/to-device.md](../keys/to-device.md) §3.1.2），**`id` 由 client 選**（之後每個 `Push`、`CryptoState` 抄它）；`device_id` 必須是這條連線 session 的那個，否則 `Error(Forbidden)`；回應 `{ "latest_cd_seq" }`；**只走 WS**。⚠️ 一個裝置同時只有一條連線在收，而且**後來的接手** —— 被接手的那條收到 `Error(Superseded)`（1505），見 [/docs/design/keys/to-device.md](../keys/to-device.md) §4 | 無 |
 | | `0x05 Unsubscribe` | `{}`；回應 `{}`；沒訂也是 no-op。退訂**同時解除裝置綁定**，下一條連線不必靠搶佔就拿得到 | 無 |
-| | `0x01 Fetch` | `{ "limit": 1000? }`，**`id` 由 client 選**；回應是一串 `0x02 Batch`，不是 `Ack`；**只走 WS**。⭐ **不帶 `cd_seq` 就是正確的叫法**：從佇列**最舊的還沒銷毀的**一則開始，翻頁靠銷毀；`cd_seq` 仍然收但 🚫 client 不該送（[wbf-to-device.md](wbf-to-device.md) §3.1.2）。📎 `limit: 0` 就是「不要」，回一則空 `Batch` | 無 |
+| | `0x01 Fetch` | `{ "limit": 1000? }`，**`id` 由 client 選**；回應是一串 `0x02 Batch`，不是 `Ack`；**只走 WS**。⭐ **不帶 `cd_seq` 就是正確的叫法**：從佇列**最舊的還沒銷毀的**一則開始，翻頁靠銷毀；`cd_seq` 仍然收但 🚫 client 不該送（[/docs/design/keys/to-device.md](../keys/to-device.md) §3.1.2）。📎 `limit: 0` 就是「不要」，回一則空 `Batch` | 無 |
 | | `0x02 Batch`（只有 server → client） | `{ "tc", "bc", "ot", "nt", "counts": [u64…], "r", "more" }`：這一窗總則數、這批則數、這批**最舊／最新**的 count、逐則的 count、之後還剩幾則；`r = 0` 就是這窗結束；`more` 跟 `Event/Batch` 同一個意思（這窗停在上限，後面可能還有）。⚠️ 名字是 `ot`／`nt` 不是 `fs`／`ls`，因為**順序相反**：to-device 是**舊到新**（client 照這個順序匯入再銷毀） | `bc` 則項目，跟 `Event/Batch` 同一個長度前綴切法 |
 | | `0x06 Push`（只有 server → client） | `{ "bc", "ot", "nt", "counts": [u64…], "gap": bool }`；`id` 抄 `Subscribe`，`seq` 每推一次 +1；`gap: true` = 前面有推送被丟，或 `Subscribe{cd_seq}` 的補窗被上限截斷了，用 **`Fetch{}`**（不帶 `cd_seq`）補 | 同上 |
 | | `0x03 ItemsDestroy` | `{ "tc" }`；**data 是 `tc` 個 u64 大端的 count**（不是 JSON、不是前綴，就是 `tc × 8` byte）；`tc` 與 data 長度對不上 → `Error(InvalidRequest)`，**一則都不刪**；只有持有這個佇列的連線能發，否則 `Error(Forbidden)`。回應**先** `Control/Ack`（只表示收到命令），**再**一則 `0x07 ItemsDestroyed` | `tc × 8` byte |
 | | `0x07 ItemsDestroyed`（只有 server → client） | `{ "tc", "bc" }`：命令裡有幾則、**真的沒了**幾則；data 是那 `bc` 個 count。⚠️ 一則都沒刪也會回（空清單），否則「沒刪掉」跟「server 沒回應」在 client 眼裡一樣。已經不在的**算銷毀成功** —— client 要的是狀態，不是事件 | `bc × 8` byte |
-| | `0x08 CryptoState`（只有 server → client） | `{ "otk_counts", "unused_fallback_key_types", "gap" }`，**每個欄位都一定出現**（`[]` 是「都用掉了」，不是「不支援」）；跟 `Push` 共用同一個訂閱的 `id`、`seq`、`gap`。訂閱成功後一定送一個，之後這個裝置的一次性金鑰或 fallback key 變了就推。見 [wbf-e2ee.md](wbf-e2ee.md) §3 | 無 |
+| | `0x08 CryptoState`（只有 server → client） | `{ "otk_counts", "unused_fallback_key_types", "gap" }`，**每個欄位都一定出現**（`[]` 是「都用掉了」，不是「不支援」）；跟 `Push` 共用同一個訂閱的 `id`、`seq`、`gap`。訂閱成功後一定送一個，之後這個裝置的一次性金鑰或 fallback key 變了就推。見 [/docs/design/keys/e2ee-over-channel.md](../keys/e2ee-over-channel.md) §3 | 無 |
 | 其餘 | — | 拒收並回 `Error(UnknownKind)` | |
 
 ### 3.3 kind 的分配表（為之後把所有 HTTP 請求遷到 WS 預留）
@@ -226,7 +226,7 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 所以 kind 按 **API 領域**分、subtype 是領域內的操作；一個領域不超過 256 個操作，一個 kind 就夠。領域照 Matrix client-server 規格的章節切，
 這樣遷移時一章對一個 kind，不用猜。先占號、不先定 subtype；**已分配的號不改**。
 
-📌 **走橋的 subtype（flags bit4 `IS_BRIDGED`）不列在 §3.2**：它們的號碼、對應的 Matrix 端點與變數，唯一的權威是 [../bridge-specs/index.md](../bridge-specs/index.md)（設計在 [wbf-api-bridge.md](wbf-api-bridge.md)）。§3.2 只列原生的。每個 kind 裡 `0x01`–`0x1F` 給原生、`0x20`–`0x9F` 給橋、`0xA0` 以上保留。
+📌 **走橋的 subtype（flags bit4 `IS_BRIDGED`）不列在 §3.2**：它們的號碼、對應的 Matrix 端點與變數，唯一的權威是 [/docs/bridge-specs/index.md](../../bridge-specs/index.md)（設計在 [/docs/design/wire/api-bridge.md](api-bridge.md)）。§3.2 只列原生的。每個 kind 裡 `0x01`–`0x1F` 給原生、`0x20`–`0x9F` 給橋、`0xA0` 以上保留。
 
 | kind | 領域 | 對應的 Matrix 章節 / 現在的 `src/api/client/` |
 |---|---|---|
@@ -248,7 +248,7 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 | `0x1A` | Search | search、user directory（`search.rs`、`user_directory.rs`） |
 | `0x1B` | Voip | TURN、rtc（`voip.rs`、`rtc.rs`） |
 | `0x1C` | Misc | capabilities、versions、well-known、openid、thirdparty、tags（其餘） |
-| `0x1D` | Report | 檢舉事件、房間、使用者（`report/` 三支都在裡面）—— 原本在 `0x1C Misc`，維護者 2026-09-20 決定三支放一起、自成一個 kind（[wbf-api-bridge.md](wbf-api-bridge.md) §3 批 3） |
+| `0x1D` | Report | 檢舉事件、房間、使用者（`report/` 三支都在裡面）—— 原本在 `0x1C Misc`，維護者 2026-09-20 決定三支放一起、自成一個 kind（[/docs/design/wire/api-bridge.md](api-bridge.md) §3 批 3） |
 | `0x1E`–`0x1F` | 保留給 Matrix 尚未引進的章節 | |
 | `0x20` | Admin | `!admin` 指令與 synapse admin API（`admin/`） |
 | `0x21`–`0xEF` | 未分配 | |
@@ -272,7 +272,7 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 |---|---|---|---|---|---|
 | 1001 | `UnsupportedVersion` | pack 的版本位不是這個 server 支援的 | pack 解碼 | | 升級 client；重試沒有用（這個跟 `Corrupt` 一樣扣 §2.1 的計數器） |
 | 1002 | `Corrupt` | **這個 pack 解不開**：CRC 對不上、被截斷、保留旗標有值、送的是文字 frame | pack 解碼 | | 重連**一次**就好；再來一次就是編碼端的 bug（實務上多半是，見 §2 的 📎），往上報，🚫 不要一直重連 |
-| 1101 | `UnknownKind` | 這個 `(kind, subtype)` 沒有 handler | pack 解碼（kind 位未分配）、原生准入表、或**橋的分配表**（帶 bit4 時只查橋的表，不帶時只查原生的；wbf-api-bridge.md §2.3） | | 這個 server 不會做這件事；別重試。📎 兩條路都**不**扣 §2.1 的計數器 —— 框是好的 |
+| 1101 | `UnknownKind` | 這個 `(kind, subtype)` 沒有 handler | pack 解碼（kind 位未分配）、原生准入表、或**橋的分配表**（帶 bit4 時只查橋的表，不帶時只查原生的；/docs/design/wire/api-bridge.md §2.3） | | 這個 server 不會做這件事；別重試。📎 兩條路都**不**扣 §2.1 的計數器 —— 框是好的 |
 | 1102 | `Unsupported` | 有 handler，但**不走這個傳輸**（例：`Recent`／`Subscribe`／`Session` 只走 WS）。📎 另外是橋與原生兩條路各自的防呆：bit4 跟走到的路不符（分流已經保證，實務上不會出現） | 准入表、兩條路的防呆 | | 換傳輸（開 WS），不是重試 |
 | 1103 | `TooLarge` | 超過 `wbf_meta_max_bytes`／`wbf_data_max_bytes`，或上傳宣告的大小上限 | 准入表、上傳 | | 切小再送 |
 | 1201 | `InvalidRequest` | pack 解得開，但 **meta／data 不是這個 subtype 要的**：JSON 壞、型別錯、缺欄位、值超出範圍、mxc 解不出來 | 各 handler | | client 的 bug；照 `message` 修，重送同樣的東西一定再錯 |
@@ -285,12 +285,12 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 | 1502 | `Conflict` | 請求**合法**，但跟 server 目前的狀態衝突（例：這個上傳已經封存／已經完成） | 上傳等有狀態的 kind | | 先讀狀態（`Upload/Status`）再決定；重送同一個請求還是會衝突 |
 | 1503 | `OutOfOrder` | 有序類的 `seq` 不是接收端等的那個（§4） | 有序類 | `expected_seq` | 從 `expected_seq` 重送，🚫 不要自己重排 |
 | 1504 | `Truncated` | 上傳觸到大小上限，被封成不完整（可以 Seal） | 上傳 | `received`、`total_len`、`finished`、`truncated` | 照那幾個數字決定 Seal 還是 Abort |
-| 1505 | `Superseded` | **這個訂閱被同一裝置後來的連線接手了**，它到此為止（`0x16 Device`，見 [wbf-to-device.md](wbf-to-device.md) §4） | 獨佔型訂閱的註冊表 | | 這條連線的那個訂閱已經沒了，別再等它的 `Push`；要收就重訂（但那會把現在那條踢掉）。⚠️ 連線本身沒關，它的其他訂閱照常 |
-| 1506 | `RoomDevicesChanged` | 加密的 `Event/Send` 帶的 `room_version` **不是房間現在的**：從那之後有人加入、離開、被踢或封鎖，或成員的裝置變了。**什麼都沒送**（見 [wbf-room-device-version.md](wbf-room-device-version.md) §7） | `Event/Send`（在房間鎖內比對） | `room_version`：房間現在的號碼 | 重拿成員清單（`Members`）、只重查版本號變了的人、補發房間金鑰（有人離開就換一把），帶新號碼重送。要不要重試、重試幾次是 client 的事 |
+| 1505 | `Superseded` | **這個訂閱被同一裝置後來的連線接手了**，它到此為止（`0x16 Device`，見 [/docs/design/keys/to-device.md](../keys/to-device.md) §4） | 獨佔型訂閱的註冊表 | | 這條連線的那個訂閱已經沒了，別再等它的 `Push`；要收就重訂（但那會把現在那條踢掉）。⚠️ 連線本身沒關，它的其他訂閱照常 |
+| 1506 | `RoomDevicesChanged` | 加密的 `Event/Send` 帶的 `room_version` **不是房間現在的**：從那之後有人加入、離開、被踢或封鎖，或成員的裝置變了。**什麼都沒送**（見 [/docs/design/keys/room-device-version.md](../keys/room-device-version.md) §7） | `Event/Send`（在房間鎖內比對） | `room_version`：房間現在的號碼 | 重拿成員清單（`Members`）、只重查版本號變了的人、補發房間金鑰（有人離開就換一把），帶新號碼重送。要不要重試、重試幾次是 client 的事 |
 | 1901 | `Internal` | server 自己的錯 | 任何地方 | | 可以退避重試；連續發生就是 server 的 bug |
 
 📌 **Matrix 的錯誤怎麼對到這張表**（`wbf/mod.rs` 的 `reject_code_for_status`，原生 handler 的 `Error` 與走橋的回應共用這一份）：400 → `InvalidRequest`、401 → `Unauthorized`、403 → `Forbidden`、404／410 → `NotFound`、409 → `Conflict`、413 → `TooLarge`、429 → `RateLimited`，**其餘一律 `Internal`**。
-⚠️ 橋之前這張對應只認 404／410、400、413，401／403／429 全被報成 `Internal`（「server 自己的錯」）—— 原生 handler 很少碰到，所以沒被發現；橋每天都會碰到（wbf-api-bridge.md §2.4）。這是**原生 kind 也看得見的改變**。
+⚠️ 橋之前這張對應只認 404／410、400、413，401／403／429 全被報成 `Internal`（「server 自己的錯」）—— 原生 handler 很少碰到，所以沒被發現；橋每天都會碰到（/docs/design/wire/api-bridge.md §2.4）。這是**原生 kind 也看得見的改變**。
 📌 **從 Matrix 錯誤來的 `Error` 都多帶 Matrix 的欄位**（`wbf/mod.rs` 的 `matrix_error_fields`，走橋的回覆、原生 handler 的 `Reject::from(Error)`、session 閘門的拒絕共用這一份規則）：`status`（Matrix 的 HTTP 狀態碼，一定有）、`errcode`、`retry_after_ms`、`soft_logout` —— 後三個 Matrix 的 body 裡有才有，沒有就**不出現**，不填空字串。原生的錯誤是把 `Error` 照 HTTP 會回的樣子轉成 body 再讀，所以同一個錯誤，走橋與不走橋的 `errcode` 一樣。
 - `message` 不變：原生的仍是 `"M_USER_LOCKED: This account has been locked."` 這種帶前綴的字串；走橋的是 body 的 `error`。
 - **走橋的另外把 data 放 Matrix 錯誤回應的 body 原樣**（../bridge-specs/index.md §1.2），UIAA 的 `flows`／`session` 也在裡面；原生的 data 是空的。
@@ -409,7 +409,7 @@ WebSocket 本身保證到達順序，所以**順序錯一定是邏輯錯誤**，
   —— **切片指回原緩衝**，沒有複製。接收端要解密就在 `data` 上原地解。
 - **派發**：按 kind 查表（陣列索引，不是 match 字串）交給 handler；有序類先過 `next_seq` 檢查。handler 要送回應就走封裝那條。
 
-**server 端**（實作見 [wbf-pack-pipeline.md](wbf-pack-pipeline.md)，2026-09-07 起）：一條 WebSocket 連線 = 一個接收 loop ＋ 一個發送 task（有界佇列 `PackQueue`：包數 `wbf_ws_send_queue_len` **與** bytes `wbf_ws_send_queue_bytes`，誰先用完誰擋，PR #50）；
+**server 端**（實作見 [/docs/design/wire/pack-pipeline.md](pack-pipeline.md)，2026-09-07 起）：一條 WebSocket 連線 = 一個接收 loop ＋ 一個發送 task（有界佇列 `PackQueue`：包數 `wbf_ws_send_queue_len` **與** bytes `wbf_ws_send_queue_bytes`，誰先用完誰擋，PR #50）；
 **沒有**每連線的順序狀態表（有序類由上傳服務從 DB 判，§6.1）。handler 的契約是 `(services, ctx, view, reply) -> Result<SessionChange, Failure>`，
 回應全部經 `Reply` 進發送佇列，可以送 0..n 個 pack（`Recent` 的 Batch 串流就是 n 個）；HTTP 的 `POST /_wbf/v1/pack` 呼叫同一條派發，`Reply` 在 HTTP 上只裝得下一個 pack，
 串流型的 kind 由准入表擋在 HTTP 之外（`Error(Unsupported)`）。有序類在 HTTP 上仍要 `seq` 正確 —— server 從 DB 讀 `next_seq`。
@@ -425,9 +425,9 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 
 `GET /_wbf/v1/ws`（維護者 2026-09-03 定：自己的前綴，照 `/_名字/版本/功能` 的慣例；端點本身就跟上游切開了，不用借 `/_tuwunel/`），`Authorization: Bearer <access token>`，Upgrade，只接受 TLS。每個 binary message = 一個 pack。
 一條連線同時跑很多 upload 與 stream，靠 `id` 分流；斷線後上傳進度在 DB（重連續傳）、流進入 abandoned 計時。
-伺服器：axum `ws` feature，落點 `src/api/client/wbf/ws.rs`（B 支）。升級時驗 Bearer（錯了回 401，body 仍是 Error pack）；之後每個 binary message 一個 pack，依到達順序一個一個處理、回應依同一順序送回（client 可以連發不等 Ack）；字串 frame 回 `Error(Corrupt)`；到達的 pack 超過 `wbf_meta_max_bytes + wbf_data_max_bytes + 外框` 由 WebSocket 層拒收。連線**不保存任何上傳狀態**：`OutOfOrder` 一律由上傳服務判定，用的是 service 層**跨連線共用**的記憶體狀態（每個上傳一把鎖，DB 列為真相、txn 執行後才推進記憶體，見 [chunked-upload.md](chunked-upload.md) §3.1），不論塊從哪條連線或 HTTP 來；重連從 `Status` 接。（第一版曾放一張每連線的 `id → 下一塊` 表當捷徑，審查指出它在冪等重送後會倒退、在跨傳輸時會過期，先於 DB 否決合法的塊，整張拿掉。）沉默超過 `wbf_ws_idle_timeout`（預設 300 秒）server 關連線，上傳進度不受影響。「只接受 TLS」由前置代理保證，server 本身不檢查。
+伺服器：axum `ws` feature，落點 `src/api/client/wbf/ws.rs`（B 支）。升級時驗 Bearer（錯了回 401，body 仍是 Error pack）；之後每個 binary message 一個 pack，依到達順序一個一個處理、回應依同一順序送回（client 可以連發不等 Ack）；字串 frame 回 `Error(Corrupt)`；到達的 pack 超過 `wbf_meta_max_bytes + wbf_data_max_bytes + 外框` 由 WebSocket 層拒收。連線**不保存任何上傳狀態**：`OutOfOrder` 一律由上傳服務判定，用的是 service 層**跨連線共用**的記憶體狀態（每個上傳一把鎖，DB 列為真相、txn 執行後才推進記憶體，見 [/docs/design/media/chunked-upload.md](../media/chunked-upload.md) §3.1），不論塊從哪條連線或 HTTP 來；重連從 `Status` 接。（第一版曾放一張每連線的 `id → 下一塊` 表當捷徑，審查指出它在冪等重送後會倒退、在跨傳輸時會過期，先於 DB 否決合法的塊，整張拿掉。）沉默超過 `wbf_ws_idle_timeout`（預設 300 秒）server 關連線，上傳進度不受影響。「只接受 TLS」由前置代理保證，server 本身不檢查。
 
-**連線背後的 session（2026-09-06，`wbf/auth-and-ws-lifetime`，[review-followups-2026-09-06.md](review-followups-2026-09-06.md) §2.3／§2.4）**：
+**連線背後的 session（2026-09-06，`wbf/auth-and-ws-lifetime`，[/docs/design/history/review-followups-2026-09-06.md](../history/review-followups-2026-09-06.md) §2.3／§2.4）**：
 
 - 升級時的驗證跟標準 client 路由一樣多：token 存在、沒到期、**帳號沒被鎖**（MSC3939，`M_USER_LOCKED` 401）。`POST /_wbf/v1/pack` 同一套。
 - 升級時驗過的不算永久：server 記住 `Session { user, device, token }`，**每個 binary message 處理前重驗一次**（token 仍解到同一個 user 與 device、沒到期、沒被鎖），而且在**解碼之前**：已失效的 session 不能靠送壞封包讓連線活着（review，rumia）。
@@ -438,10 +438,10 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
   等最多 `JOIN_TIMEOUT`（15 秒）：連線的 loop 看到 stopping 就自己結束，會等到超時的只有卡在某個永不返回的呼叫裡的 task，那時 abort 它（drop future 連帶 drop 對 `Services` 的借用），不讓一條連線卡整個關機（review，rumia）。
   已經在關機的 server 拒絕新的升級（503，body 仍是 Error pack）。
 - `Login`／`Refresh`／`Logout` subtype（§6.3）建在同一個 `Session` 上：Login 就是換掉這條連線的 Session。
-- **每個 (user, device) 最多 `wbf_ws_max_connections_per_device` 條 WS**（預設 **8**，2026-09-24 從 4 調高；[pack-pipeline](wbf-pack-pipeline.md) §2.1，維護者 2026-09-07 定）：帶 Bearer 升級超過 → **不升級**，429 ＋ `Error(TooManyConnections)`；
+- **每個 (user, device) 最多 `wbf_ws_max_connections_per_device` 條 WS**（預設 **8**，2026-09-24 從 4 調高；[pack-pipeline](pack-pipeline.md) §2.1，維護者 2026-09-07 定）：帶 Bearer 升級超過 → **不升級**，429 ＋ `Error(TooManyConnections)`；
   匿名連線不算，`Login`／`Refresh` 拿到身份那刻才算，超過 → `Error(TooManyConnections)` 然後 Close 1008，**而且不發任何 token**（名額在 users service 寫 token 之前的 `admit` 閘門檢查，被拒的登入不會換掉該裝置其他連線的 token）；
   同一連線同一裝置再登入不多佔一格；連線結束名額就回來（RAII，`Services.connections` 的 `ConnectionSlot`）。HTTP 不算。踢的永遠是新的那條。
-- **每個來源位址最多 `wbf_ws_max_connections_per_address` 條 WS**（預設 40；[pack-pipeline](wbf-pack-pipeline.md) §2.2，維護者 2026-09-24 定）：⭐ 跟上一條不同，**匿名連線也算**，而且在**認證之前**就檢查 ——
+- **每個來源位址最多 `wbf_ws_max_connections_per_address` 條 WS**（預設 40；[pack-pipeline](pack-pipeline.md) §2.2，維護者 2026-09-24 定）：⭐ 跟上一條不同，**匿名連線也算**，而且在**認證之前**就檢查 ——
   上一條按身份算，所以擋不到還沒有身份的連線；這一條按位址算，是唯一擋得到匿名連線的那道。超過 → **不升級**（舊的照常跑），429 ＋ `Error(TooManyConnectionsFromAddress)`。HTTP 不算。
   **IPv6 按 `/64` 算**，不按確切位址：家用 IPv6 本來就拿一整個 `/64`，換位址零成本，按確切位址算等於沒有上限。
   ⚠️ 位址取自 `ClientIp`，而它的規則是（維護者 2026-09-25）：**有設 `reverse_proxy_ip_header` 就讀那個 header，OR peer 落在 `localhost_ip`（預設 loopback）就讀 `X-Forwarded-For`；兩條都不成立就只信傳輸層 peer、完全不碰 header**。所以**代理在另一台、又沒設 `reverse_proxy_ip_header` 的話，全部連線會算成代理那一個位址**（啟動時有 warning）；同機代理與 unix socket 不必設定，peer 就是 loopback。
@@ -554,7 +554,7 @@ HTTP `/login` 現在**沒有**限速（只有 OIDC 端點有 `oidc_rc_per_second
 | 三個 subtype 的 handler、未登入 Session、白名單 | `src/api/client/wbf/{mod,ws,login}.rs` |
 | 限速 | `src/core/config/mod.rs`（`login_rc_*`）、既有 OIDC token bucket 抽成共用 |
 | 未登入超時 | `src/core/config/mod.rs`（`wbf_ws_unauthenticated_timeout`）、`ws.rs` |
-| 向量 | `wbf-vectors.json` 加 Login／Refresh／Logout 各一個 pack |
+| 向量 | `/docs/design/wire/wbf-vectors.json` 加 Login／Refresh／Logout 各一個 pack |
 
 #### 6.3.9 維護者 2026-09-07 定的
 

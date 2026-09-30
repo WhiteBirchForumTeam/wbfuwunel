@@ -49,35 +49,18 @@ git log --oneline upstream/main..main
 
 ## 文件
 
-fork 專屬的文件都在 [`docs/design/`](docs/design/)。它們刻意不進上游的 mdBook 目錄，
-這張表就是索引：
+fork 專屬的文件都在 [`/docs/design/`](docs/design/)，一個資料夾回答一類問題。它們刻意不進上游的 mdBook 目錄。
+
+📖 **索引在 [/docs/design/index.md](docs/design/index.md)** —— 每一份文件講什麼、哪些是現行契約、哪些只是歷史，都在那裡。
+這裡不再重複一張表：⭐ 同一份清單有兩份副本，遲早漂移，而漂移的那天不會有人通知你。
+
+最常要找的三份：
 
 | 想知道 | 看 |
 |---|---|
-| **接下來做什麼、可能做什麼、明確不做什麼** | [docs/design/roadmap.md](docs/design/roadmap.md) |
-| 這個 fork 跟上游的關係、分支模型、改動的流程 | [docs/design/fork-overview.md](docs/design/fork-overview.md) |
-| 為什麼要 fork、目標與非目標、核心設計方向 | [docs/design/why-not-matrix-and-core-design.md](docs/design/why-not-matrix-and-core-design.md) |
-| 程式碼結構導覽（要改東西時去哪裡找） | [docs/design/repo-structure.md](docs/design/repo-structure.md) |
-| Windows 建置與實跑驗證 | [docs/design/windows-build.md](docs/design/windows-build.md) |
-| 媒體引用計數（上半：索引，已被下一筆取代） | [docs/design/media-refcount.md](docs/design/media-refcount.md) |
-| 媒體的真正刪除：計數器時期的收集器、墓碑 410、每 mxc 一鎖（計數與哨兵已被下兩筆取代） | [docs/design/media-gc.md](docs/design/media-gc.md) |
-| E2EE 下的媒體引用：送訊息時宣告 `attachments`（header 或 `Event/Send`）、驗證、對舊 client 的一次性警告 | [docs/design/media-attachments.md](docs/design/media-attachments.md) |
-| **媒體持有者集合**：以外鍵取代引用計數，重做是 no-op；五張表、一個管理器、收集器與 7 天掃描 | [docs/design/media-holders.md](docs/design/media-holders.md) |
-| PR #24 合併後的再審與外部審查（2026-09-05 兩輪）的逐條驗證：哪些已修、哪些仍在、建議怎麼修 | [docs/design/review-followups-2026-09-06.md](docs/design/review-followups-2026-09-06.md) |
-| 分塊上傳、續傳、range 下載（提案，已實作：PR #16、#18；以塊加密、CRC、先 HTTP 後 WebSocket） | [docs/design/chunked-upload.md](docs/design/chunked-upload.md) |
-| **分塊上傳／下載規格書**（給 client 開發者：byte 排法、每個訊息、錯誤碼、流程） | [docs/design/chunked-upload-spec.md](docs/design/chunked-upload-spec.md) |
-| 規格的黃金測試向量（server 實作產生，client 複製一份對著測；漂移在測試階段被抓到） | [docs/design/wbf-vectors.json](docs/design/wbf-vectors.json) |
-| **WS 訂閱與推送**（已實作，PR #36；註冊表 PR #42 抽成所有串流共用的核心）：一房一個純記憶體 channel、訂閱者是連線、推送絕不阻塞 append（掉了記 `gap`、用 `Recent` 補）；§2.1 是 **client 的契約**（水位認 `ls`、沒收到 `gap` 不等於沒漏過；點名訂閱的補窗從 PR #51 起只含它自己的房、被上限截斷的補窗從 PR #53 起帶 `gap`） | [docs/design/wbf-event-push.md](docs/design/wbf-event-push.md) |
-| **to-device 走通道**（`0x16 Device`，已實作，PR #43）：訂閱一個裝置、推送、`Fetch` 補洞；**銷毀是帶結果的命令**（`ItemsDestroy` → `Ack` 收到 → `ItemsDestroyed` 真的沒了的那些），沒銷毀的永遠留著；一個裝置同時只有一條連線在收，而且**後來的接手**，被接手的那條收到 `Superseded`(1505) | [docs/design/wbf-to-device.md](docs/design/wbf-to-device.md) |
-| **Draft Message**（`0x02 Stream`，已實作，PR #45）：佔位事件當錨（草稿用它的 `g_seq` 命名）、`Keypoint`（≤ 8 KiB，換掉整個 buffer）／`Delta`／`Append` 只廣播、`Demand` 要全文、收尾是 client 自己 `Abandon` 再送正常訊息 | [docs/design/streaming-messages.md](docs/design/streaming-messages.md) |
-| pack 處理管線（§1–§6 已實作，PR #33；§8 第二部分 PR #48）：連線即佇列、每 device 8 條 WS（發 token 前的 `admit` 閘門）、**每來源位址 40 條**（升級前、讀 token 前的閘門，匿名也算；`1403`）、**§2.2 client 位址怎麼解析**（有設 `reverse_proxy_ip_header` 就讀那個 header，OR peer 落在 `localhost_ip`（預設 loopback）就讀最右邊的 `X-Forwarded-For`，否則只信傳輸層 peer；⚠️ 這兩個設定是 `ip_source`／`ip_source_trusted_subnets` 改名來的，舊名字**拒絕啟動**）、發送 task 與**以 bytes 計的佇列預算**（PR #50）、handler 契約與准入表、`Recent` 的 client 拉窗 ＋ `Event/Batch` 串流（**窗的 bytes 上限與 `more`**，PR #53）、HTTP→WS 搬遷的模子 | [docs/design/wbf-pack-pipeline.md](docs/design/wbf-pack-pipeline.md) |
-| WebSocket 通道的二進位封包外框（兩者共用）；**§2.1 連線健康計數器**（連續 8 個解不開的框就關線）；**§3.4 錯誤詞表**（每個 `code` 的序號、意思、client 該怎麼辦；不認得就不認得）；§6.1 連線背後的 session（每個 message 重驗、關機 join）；§6.3 `Session` kind：`Login`／`Refresh`／`Logout` 走通道、匿名升級 30 秒、HTTP 與通道共用的登入限速 | [docs/design/wbf-wire-format.md](docs/design/wbf-wire-format.md) |
-| 每房連續序號 `r_seq`、全域序號 `g_seq`，與跨房間的 `Event/Recent`（client 帶快取水位、只拿差異） | [docs/design/room-seq-and-recent.md](docs/design/room-seq-and-recent.md) |
-| ✅ **常用 Matrix API 走通道**（設計 PR #55；批 1 的 37 支 PR #56、批 2 的 8 支 PR #63、批 3 的 20 支 PR #77、批 4 的 21 支 PR #81 —— 總表 107 列，常用面沒有洞了）：一座通用的橋 —— pack 轉成內部 HTTP request 丟進 Router，flags bit4 分流，關卡只有一份 | [docs/design/wbf-api-bridge.md](docs/design/wbf-api-bridge.md) |
-| **橋的規格總表**：走橋的每個 kind／subtype 是幾號、請求前 4 個 byte、對到哪個 Matrix 端點、帶哪些變數；每個 kind 的詳細範例在同目錄 | [docs/bridge-specs/index.md](docs/bridge-specs/index.md) |
-| ✅ **E2EE 全走通道**（設計 PR #66；(A) 金鑰端點與發 to-device 走橋 PR #67、(B) `0x16 0x08 CryptoState` PR #68、(C) 金鑰備份走橋 PR #70）：client 不靠 `/sync` 也能做 E2EE。⚠️ (B) **只帶這個裝置自己的金鑰存量**（一次性金鑰數量、fallback key 用掉沒）—— 別人的裝置清單改由下一列那套負責，Matrix 原本的金鑰分發一個字都沒動 | [docs/design/wbf-e2ee.md](docs/design/wbf-e2ee.md) |
-| ✅ **裝置版本號、房間版本號，與送出時比對**（提案 PR #72；F1＋F2＋F4 PR #73、F3 PR #74、補件 PR #75）：每個帳號一個 `序號-雜湊`、每個房間一個版本號，`/members` 兩個都帶；有約定的 client 送加密訊息帶房間版本號，過期就回 **`1506 RoomDevicesChanged`**、訊息不會送出；裝置一變就推 `0x14 0x07 DeviceChanged` 給有約定的連線。🚫 沒有約定的 client（含 HTTP）行為完全不變 | [docs/design/wbf-room-device-version.md](docs/design/wbf-room-device-version.md) |
-| ✅ **問題書：加密訊息送出時把關**（答案已實作，達成狀態逐條在 §9）：原本「新裝置解不解得開」靠一條推播鏈、掉一環就靜默失敗；現在是 server 收訊息時檢查得出來的條件 | [docs/design/e2ee-send-guard-problem.md](docs/design/e2ee-send-guard-problem.md) |
+| **接下來做什麼、可能做什麼、明確不做什麼** | [/docs/design/overview/roadmap.md](docs/design/overview/roadmap.md) |
+| 這個 fork 跟上游的關係、分支模型、改動要怎麼進來 | [/docs/design/overview/fork-overview.md](docs/design/overview/fork-overview.md) |
+| 做過什麼、為什麼、行為有什麼變 | [/CHANGELOG-fork.md](CHANGELOG-fork.md) |
 
 上游的使用文件（[`docs/`](docs/) 其餘部分：設定、部署、維護）大體仍適用，因為程式碼的骨架還是
 上游的。但凡 `CHANGELOG-fork.md` 寫了行為有變的地方，以它為準。
@@ -89,13 +72,13 @@ cargo build --release
 ```
 
 Windows 上的完整流程、依賴與實跑驗證在
-[docs/design/windows-build.md](docs/design/windows-build.md)。設定檔從
+[/docs/design/build/windows-build.md](docs/design/build/windows-build.md)。設定檔從
 [`tuwunel-example.toml`](tuwunel-example.toml) 複製後修改，`server_name` 與 `database_path`
 必填。第一個註冊的帳號是伺服器管理員。
 
 ## 改動的流程
 
-1. 先寫文件或方案（`docs/design/`）。
+1. 先寫文件或方案（`/docs/design/`）。
 2. 維護者同意。
 3. 開分支，開 PR，目標分支 `main`。
 4. feat、重大 fix、refactor 合併進 `main` 之後，在 `CHANGELOG-fork.md` 留一筆；純文件的分支不用。

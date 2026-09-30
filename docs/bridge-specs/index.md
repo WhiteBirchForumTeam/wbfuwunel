@@ -1,10 +1,10 @@
 # 橋的規格：搬上通道的 Matrix 端點總表
 
 > **這份文件回答：哪些 Matrix 端點已經（或這一批要）走橋、每個的 kind／subtype 是幾號、送出去的 pack 前幾個 byte 長什麼樣、對到哪個端點、要帶哪些變數。**
-> 設計與規則在 [../design/wbf-api-bridge.md](../design/wbf-api-bridge.md)（下稱「橋的設計」），這裡只放**分配結果**。
-> ⭐ **這張表是走橋的 subtype 號的唯一權威**：[wbf-wire-format.md](../design/wbf-wire-format.md) §3.2 只列原生的 subtype，走橋的一律指到這裡 —— 兩份表遲早漂移。
+> 設計與規則在 [/docs/design/wire/api-bridge.md](../design/wire/api-bridge.md)（下稱「橋的設計」），這裡只放**分配結果**。
+> ⭐ **這張表是走橋的 subtype 號的唯一權威**：[/docs/design/wire/wire-format.md](../design/wire/wire-format.md) §3.2 只列原生的 subtype，走橋的一律指到這裡 —— 兩份表遲早漂移。
 > 每個 kind 的完整範例（請求與回應的 meta、data、錯誤）在同一個目錄的 `KIND.md`，隨搬的那一批一起寫：[0x10-session.md](0x10-session.md)、[0x11-account.md](0x11-account.md)、[0x12-sync.md](0x12-sync.md)、[0x13-room.md](0x13-room.md)、[0x14-event.md](0x14-event.md)、[0x15-receipt.md](0x15-receipt.md)、[0x16-device.md](0x16-device.md)、[0x17-keys.md](0x17-keys.md)、[0x18-push.md](0x18-push.md)、[0x19-media.md](0x19-media.md)、[0x1A-search.md](0x1A-search.md)、[0x1B-voip.md](0x1B-voip.md)、[0x1C-misc.md](0x1C-misc.md)、[0x1D-report.md](0x1D-report.md)。
-> 狀態：批 1 的 37 支、批 2 的 8 支（註冊、UIAA）、E2EE (A) 的 7 支（金鑰、發 to-device，[wbf-e2ee.md](../design/wbf-e2ee.md) §2）、E2EE (C) 的 14 支（金鑰備份，同文件 §4）、批 3 的 20 支（房間其餘、關聯與討論串、在線狀態／過濾器／capabilities、檢舉）與批 4 的 21 支（推播、目錄與搜尋、媒體設定與連結預覽、TURN、房間別名、時間戳跳轉）**已實作**：server 的表（`src/api/client/wbf/bridge.rs` 的 `BRIDGED_ENDPOINTS`）逐列跟這份總表比對（單元測試 `the_specs_index_and_this_table_list_the_same_endpoints`，對不上就紅）；每支都在 e2e13（批 1 情境 1、批 2 情境 2、E2EE (A) 情境 3、E2EE (C) 情境 4、批 3 情境 5、批 4 情境 6）跟原本的 HTTP 端點比對過結果。
+> 狀態：批 1 的 37 支、批 2 的 8 支（註冊、UIAA）、E2EE (A) 的 7 支（金鑰、發 to-device，[/docs/design/keys/e2ee-over-channel.md](../design/keys/e2ee-over-channel.md) §2）、E2EE (C) 的 14 支（金鑰備份，同文件 §4）、批 3 的 20 支（房間其餘、關聯與討論串、在線狀態／過濾器／capabilities、檢舉）與批 4 的 21 支（推播、目錄與搜尋、媒體設定與連結預覽、TURN、房間別名、時間戳跳轉）**已實作**：server 的表（`src/api/client/wbf/bridge.rs` 的 `BRIDGED_ENDPOINTS`）逐列跟這份總表比對（單元測試 `the_specs_index_and_this_table_list_the_same_endpoints`，對不上就紅）；每支都在 e2e13（批 1 情境 1、批 2 情境 2、E2EE (A) 情境 3、E2EE (C) 情境 4、批 3 情境 5、批 4 情境 6）跟原本的 HTTP 端點比對過結果。
 
 ## 1. 一個走橋的 pack 怎麼讀
 
@@ -15,9 +15,9 @@ offset  bytes              意思
 0       01                 version 1
 1       KK                 kind（下表）
 2       SS                 subtype（下表）
-3       10                 flags：bit4 IS_BRIDGED（橋的設計 §2.3）。其他旗標照 wire-format §2 自由組合，例如要 Ack 就是 12
+3       10                 flags：bit4 IS_BRIDGED（/docs/design/wire/api-bridge.md §2.3）。其他旗標照 /docs/design/wire/wire-format.md §2 自由組合，例如要 Ack 就是 12
 4       00 00 00 00 00 00 00 00   id：型別 0x00（無）—— 一個請求一個回應，不開會話
-12      xx xx xx xx        seq：client 自己的請求號，回應抄回來，用來對表（wire-format §4 無序類）
+12      xx xx xx xx        seq：client 自己的請求號，回應抄回來，用來對表（/docs/design/wire/wire-format.md §4 無序類）
 16…     meta               JSON 物件：模板的變數（§1.3）
 …       data               HTTP body 的原樣 bytes；沒有 body 的端點（GET、大部分 DELETE）data 長度 0
 ```
@@ -28,16 +28,16 @@ offset  bytes              意思
 
 | 結果 | 前 4 byte | meta | data |
 |---|---|---|---|
-| 成功（HTTP 2xx） | `01 01 02 14`（`Control/Ack`，flags ＝ `IS_RESPONSE` ＋ `IS_BRIDGED`） | `{"status": 200, "headers": {"content-type": "application/json"}}` —— 只有表上宣告要轉的 header（橋的設計 §2.2） | Matrix 回應的 body，原樣 bytes |
-| 失敗 | `01 01 03 14`（`Control/Error`，同樣帶 `IS_BRIDGED`） | `{"code_id", "code", "message", "status"}`，Matrix body 裡有的話再帶 `errcode`、`retry_after_ms`、`soft_logout`（橋的設計 §2.4；規則跟原生的錯誤共用，wire-format §3.4）。`message` 是 body 的 `error`，最多 1024 bytes，超過就在字元邊界截斷並以 `…` 結尾 —— 完整的文字在 data | Matrix 錯誤回應的 body，原樣 bytes（見 §4 待確認 1） |
+| 成功（HTTP 2xx） | `01 01 02 14`（`Control/Ack`，flags ＝ `IS_RESPONSE` ＋ `IS_BRIDGED`） | `{"status": 200, "headers": {"content-type": "application/json"}}` —— 只有表上宣告要轉的 header（/docs/design/wire/api-bridge.md §2.2） | Matrix 回應的 body，原樣 bytes |
+| 失敗 | `01 01 03 14`（`Control/Error`，同樣帶 `IS_BRIDGED`） | `{"code_id", "code", "message", "status"}`，Matrix body 裡有的話再帶 `errcode`、`retry_after_ms`、`soft_logout`（/docs/design/wire/api-bridge.md §2.4；規則跟原生的錯誤共用，/docs/design/wire/wire-format.md §3.4）。`message` 是 body 的 `error`，最多 1024 bytes，超過就在字元邊界截斷並以 `…` 結尾 —— 完整的文字在 data | Matrix 錯誤回應的 body，原樣 bytes（見 §4 待確認 1） |
 
 `id`、`seq` 抄請求。
 
-⚠️ **有一種拒絕比橋還早**：WebSocket 在**每個 pack 解碼之前**先問 session 還算不算數（登出、裝置被撤、token 過期、帳號被鎖，`ws.rs` 的 `revalidate`）。不算數就回通道自己的 `Error`（`01 01 03 04`：**沒有** `IS_BRIDGED`，因為那時 pack 還沒解；data 是空的）然後**關連線**。meta 一樣帶 Matrix 的欄位，例：`{"code":"Unauthorized","code_id":1301,"errcode":"M_USER_LOCKED","message":"M_USER_LOCKED: This account has been locked.","soft_logout":true,"status":401}`（向量 `error_session_locked`）。這條不分走不走橋，e2e13 [1.27] 驗過；欄位規則見 [wire-format §3.4](../design/wbf-wire-format.md)。
+⚠️ **有一種拒絕比橋還早**：WebSocket 在**每個 pack 解碼之前**先問 session 還算不算數（登出、裝置被撤、token 過期、帳號被鎖，`ws.rs` 的 `revalidate`）。不算數就回通道自己的 `Error`（`01 01 03 04`：**沒有** `IS_BRIDGED`，因為那時 pack 還沒解；data 是空的）然後**關連線**。meta 一樣帶 Matrix 的欄位，例：`{"code":"Unauthorized","code_id":1301,"errcode":"M_USER_LOCKED","message":"M_USER_LOCKED: This account has been locked.","soft_logout":true,"status":401}`（向量 `error_session_locked`）。這條不分走不走橋，e2e13 [1.27] 驗過；欄位規則見 [/docs/design/wire/wire-format.md §3.4](../design/wire/wire-format.md)。
 
 ### 1.3 meta 的變數
 
-- **變數名＝ ruma 路徑模板裡的名字**（`room_id`、`user_id`、`event_type`…），不另取一套（橋的設計 §2.2）。下表「變數」欄照抄。
+- **變數名＝ ruma 路徑模板裡的名字**（`room_id`、`user_id`、`event_type`…），不另取一套（/docs/design/wire/api-bridge.md §2.2）。下表「變數」欄照抄。
 - **path 變數**：必須是字串；server 會 percent-encode。缺了、或不是字串 → `InvalidRequest`。
   ⚠️ **空字串是合法的值**，不是「缺了」：`state_key` 最常是 `""`（`m.room.topic`、`m.room.name` 都是）。`{"state_key": ""}` 會組成 `/state/m.room.topic/`，server 本來就註冊了這個結尾有斜線的路徑。**沒給 `state_key` 才是缺**。
 - **query 變數**：可以是字串、數字、布林，或它們的陣列（陣列會變成重複的參數，例如 `via`）。**沒給就整個省掉**，不送空值。
@@ -46,10 +46,10 @@ offset  bytes              意思
 
 ### 1.4 subtype 號怎麼分
 
-- **每個 kind 裡，`0x01`–`0x1F` 給原生的 pack，`0x20`–`0x9F` 給走橋的，`0xA0` 以上保留。** 現在所有原生的 subtype 都在 `0x1F` 以下（最大的是 `Stream/Demand` 的 `0x10`），所以同一個 kind 裡兩邊不會撞號（橋的設計 §2.3「號碼空間只有一個」）。
+- **每個 kind 裡，`0x01`–`0x1F` 給原生的 pack，`0x20`–`0x9F` 給走橋的，`0xA0` 以上保留。** 現在所有原生的 subtype 都在 `0x1F` 以下（最大的是 `Stream/Demand` 的 `0x10`），所以同一個 kind 裡兩邊不會撞號（/docs/design/wire/api-bridge.md §2.3「號碼空間只有一個」）。
   📎 這個區間只是**分配慣例**，讓人一眼看出號碼是誰的；server 判斷走不走橋仍然只看 bit4 與各自的表，不看號碼大小。實作時會有一個單元測試守兩件事：橋的表每一列都落在 `0x20`–`0x9F`、兩張表的鍵沒有交集。
-- 同一個 kind 裡照 Matrix 規格章節裡端點出現的順序排。**分配了就不改**（wire-format §3.3 的規矩）；端點下線就讓那個號碼空著。
-- 一個 subtype 對一個 Matrix 端點（橋的設計 §2.2）。
+- 同一個 kind 裡照 Matrix 規格章節裡端點出現的順序排。**分配了就不改**（/docs/design/wire/wire-format.md §3.3 的規矩）；端點下線就讓那個號碼空著。
+- 一個 subtype 對一個 Matrix 端點（/docs/design/wire/api-bridge.md §2.2）。
 
 ### 1.5 要 UIAA 的端點（批 2）
 
@@ -70,7 +70,7 @@ offset  bytes              意思
 
 ### `0x10 Session`（註冊與登入前）
 
-📎 `0x01`–`0x03` 是原生的 `Login`、`Refresh`、`Logout`（wire-format §6.3）。註冊要帶 `inhibit_login: true`，建好帳號再送 `Login`，這條連線才會變成那個帳號（橋的設計 §3 批 2-A）。
+📎 `0x01`–`0x03` 是原生的 `Login`、`Refresh`、`Logout`（/docs/design/wire/wire-format.md §6.3）。註冊要帶 `inhibit_login: true`，建好帳號再送 `Login`，這條連線才會變成那個帳號（/docs/design/wire/api-bridge.md §3 批 2-A）。
 
 | subtype | 前 4 bytes | 名稱 | 做什麼 | 端點 | 變數（path ／ query） | data |
 |---|---|---|---|---|---|---|
@@ -181,8 +181,8 @@ offset  bytes              意思
 
 ### `0x17 Keys`（端對端加密的金鑰）
 
-📎 這個 kind 目前沒有原生的 pack。OTK 數量是 `0x16` 的原生 `CryptoState`（[wbf-e2ee.md](../design/wbf-e2ee.md) §3），不在這裡。
-⚠️ **裝置清單變動不在 `CryptoState` 裡**（維護者 2026-09-17 決定不動 Matrix 原本的金鑰分發）：那件事由 [wbf-room-device-version.md](../design/wbf-room-device-version.md) 的送出時比對負責。
+📎 這個 kind 目前沒有原生的 pack。OTK 數量是 `0x16` 的原生 `CryptoState`（[/docs/design/keys/e2ee-over-channel.md](../design/keys/e2ee-over-channel.md) §3），不在這裡。
+⚠️ **裝置清單變動不在 `CryptoState` 裡**（維護者 2026-09-17 決定不動 Matrix 原本的金鑰分發）：那件事由 [/docs/design/keys/room-device-version.md](../design/keys/room-device-version.md) 的送出時比對負責。
 
 | subtype | 前 4 bytes | 名稱 | 做什麼 | 端點 | 變數（path ／ query） | data |
 |---|---|---|---|---|---|---|
@@ -277,7 +277,7 @@ offset  bytes              意思
 | 什麼 | 在哪 |
 |---|---|
 | 送訊息、翻歷史、訂閱推送、to-device | 已經是原生 pack |
-| `/sync`、SSO 等瀏覽器登入、舊的整檔媒體 | 不搬（橋的設計 §3） |
+| `/sync`、SSO 等瀏覽器登入、舊的整檔媒體 | 不搬（/docs/design/wire/api-bridge.md §3） |
 
 ## 4. 寫程式時要確認、目前是提案的
 

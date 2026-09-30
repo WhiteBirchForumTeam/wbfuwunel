@@ -6,12 +6,12 @@
 //! retained original of a redacted event, a local user's avatar). Adding and
 //! removing holders are set operations, so doing either twice is a no-op;
 //! there is no "exactly once" to get right, which is what sank the counter
-//! this replaces (`docs/design/media-holders.md` §1).
+//! this replaces (`/docs/design/media/media-holders.md` §1).
 //!
 //! This module is the only writer of the five tables (`mxc_holder`,
 //! `holder_mxc`, `room_mxc`, `mxc_room`, `mxc_managed`). Every path that makes or
 //! breaks a reference calls one of the entry points below inside its own
-//! transaction; the list of those paths is `media-holders.md` §4.
+//! transaction; the list of those paths is `/docs/design/media/media-holders.md` §4.
 //!
 //! Where an event's references come from: plaintext content names its media
 //! and the server reads it; encrypted content names nothing the server can

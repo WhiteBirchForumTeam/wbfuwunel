@@ -1,8 +1,8 @@
 # 提案：裝置版本號、房間版本號，與送出時比對
 
 > **這份文件回答：server 要新增哪幾樣東西，才能讓客製 client「只在要發的時候、只對那個房間」確認房間金鑰該發給誰，並且在它看到的名單過期時被擋下來、而不是靜默送出別人解不開的訊息。**
-> 狀態：✅ 維護者同意（PR #72 合併）。✅ **四個功能都已實作並合併**：F1＋F2＋F4（PR #73）、F3（PR #74）、補件（PR #75：只被別人簽過的金鑰，雜湊要跟沒被簽過一樣；問題書條件 2／6 的 e2e）；實作時跟這份不一樣的地方寫在各節的 📌。討論的全過程（走過哪些路、為什麼不走）在 [wbf-device-index-notes.md](wbf-device-index-notes.md)；它回答的問題與達標條件在 [e2ee-send-guard-problem.md](e2ee-send-guard-problem.md)。
-> 前提：[wbf-e2ee.md](wbf-e2ee.md) 的 (A) 已合併；(B) `CryptoState`（PR #68）與這份不衝突，§9 講兩者的關係（已定案：(B) 只帶自己的金鑰存量）。
+> 狀態：✅ 維護者同意（PR #72 合併）。✅ **四個功能都已實作並合併**：F1＋F2＋F4（PR #73）、F3（PR #74）、補件（PR #75：只被別人簽過的金鑰，雜湊要跟沒被簽過一樣；問題書條件 2／6 的 e2e）；實作時跟這份不一樣的地方寫在各節的 📌。討論的全過程（走過哪些路、為什麼不走）在**沒有合併的分支** `docs/device-index-notes`（commit `25b23c6`），⚠️ 不在 `main` 上；它回答的問題與達標條件在 [/docs/design/keys/e2ee-send-guard-problem.md](e2ee-send-guard-problem.md)。
+> 前提：[/docs/design/keys/e2ee-over-channel.md](e2ee-over-channel.md) 的 (A) 已合併；(B) `CryptoState`（PR #68）與這份不衝突，§9 講兩者的關係（已定案：(B) 只帶自己的金鑰存量）。
 > 🚫 **HTTP 與一般 Matrix client 的行為不變**：這裡加的東西全是擴展，沒有約定的 client 不會被檢查、不會收到陌生的 pack。
 
 ## 0. 一句話
@@ -183,7 +183,7 @@
 
 ### 5.3 順手清掉 `at`
 
-上游忽略 `at`（程式註解 `TODO: at a specific point in time`），帶了沒作用，但 [0x13-room.md](../bridge-specs/0x13-room.md) 寫成「取某個時間點的名單」好像能用。
+上游忽略 `at`（程式註解 `TODO: at a specific point in time`），帶了沒作用，但 [/docs/bridge-specs/0x13-room.md](../../bridge-specs/0x13-room.md) 寫成「取某個時間點的名單」好像能用。
 
 - 從橋的表拿掉（`bridge.rs` 的 `Members` 那一列只剩 `membership`、`not_membership`），通道上帶 `at` 會被橋回 `InvalidRequest`，不再默默忽略。
 - 同步改 `bridge-specs/index.md`、`0x13-room.md`。
@@ -220,7 +220,7 @@
 兩層保證：
 
 1. **只推給宣告過的連線**：client 在 `Control/Hello` 的 `features` 裡帶 `"org.wbftw.device_versions"`，server 記在這條連線上，才推 `DeviceChanged`。**沒宣告的連線永遠收不到**，舊 client 看不到任何陌生的 pack。
-   - 📎 這是 server **第一次讀 client 的 `features`**。[wire-format §3.2](wbf-wire-format.md) 那一格目前寫「client 的 `features` server 目前不讀」，要一起改。
+   - 📎 這是 server **第一次讀 client 的 `features`**。[/docs/design/wire/wire-format.md §3.2](../wire/wire-format.md) 那一格目前寫「client 的 `features` server 目前不讀」，要一起改。
    - server 的 `Hello` 回應 `features` 加上 `"org.wbftw.device_versions"`，client 據此知道這台 server 支援。
 2. **名字帶命名空間**：`org.wbftw.` 字首，不佔 Matrix 的 `m.`。
 
@@ -261,7 +261,7 @@
 |---|---|---|
 | **1506** | **`RoomDevicesChanged`** | `room_version`：目前的號碼 |
 
-  1500 狀態家族；號碼與名字維護者 2026-09-17 同意。實作時加進 [wire-format §3.4](wbf-wire-format.md) 的錯誤表。
+  1500 狀態家族；號碼與名字維護者 2026-09-17 同意。實作時加進 [/docs/design/wire/wire-format.md §3.4](../wire/wire-format.md) 的錯誤表。
 
 ### 7.2 client 收到 1506
 
@@ -310,7 +310,7 @@ HTTP 送訊息不帶這個欄位，所以**不檢查**。這條路的正確性�
 | 某人加入／離開房間時，對房裡每個線上成員判斷「還有沒有共同加密房」再推（`push_membership_change`，背景 task） | 產生上面的 `changed`／`left` | **不需要**。這是 (B) 最貴的一段：每次加入離開都要做「成員數 × 共同房間判斷」 |
 | 某人金鑰變動時，推 `changed: [他]` 給同房的人（`push_key_change`，背景 task） | 同上 | **不需要**：F3 取代 |
 | `Device/Subscribe{dl_seq}` 的補窗（掃成員索引＋共同房間判斷） | 重連時補上面那兩個清單 | **不需要** |
-| HTTP：`/sync` 共用的兩層、`left` 補上自己離開的房間（wbf-e2ee.md 決定 7）、`/keys/changes` 的 `left` 不再是空的 | 給**一般 Matrix client** | **跟客製 client 無關，但一般 client 受惠**，應該保留 |
+| HTTP：`/sync` 共用的兩層、`left` 補上自己離開的房間（/docs/design/keys/e2ee-over-channel.md 決定 7）、`/keys/changes` 的 `left` 不再是空的 | 給**一般 Matrix client** | **跟客製 client 無關，但一般 client 受惠**，應該保留 |
 
 ### 9.2 兩個選項
 
@@ -320,7 +320,7 @@ HTTP 送訊息不帶這個欄位，所以**不檢查**。這條路的正確性�
 - **(b) (B) 合併前先拿掉通道上的「別人的裝置清單」**：
   - `CryptoState` 只剩 `otk_counts`、`unused_fallback_key_types`、`gap`；拿掉 `device_lists`、`dl_seq`，`Device/Subscribe` 不再收 `dl_seq`。
   - 拿掉 `push_membership_change`、`push_key_change` 兩個背景推送。
-  - **保留 HTTP 那半**（`/sync` 的共用層與 wbf-e2ee.md 決定 7、`/keys/changes` 的 `left`）。
+  - **保留 HTTP 那半**（`/sync` 的共用層與 /docs/design/keys/e2ee-over-channel.md 決定 7、`/keys/changes` 的 `left`）。
   - 好處：通道上只有一套機制；server 不做那段高成本的判斷。
   - 壞處：在這份提案實作完之前，客製 client 在通道上**沒有**裝置清單變動的訊號（要的話只能用橋的 `KeyChanges`）。📎 issue #65 的 client 計畫裡，「自己加密送訊息」這一步本來就排在等 server 的後面，還沒上線。
 
@@ -335,7 +335,7 @@ HTTP 送訊息不帶這個欄位，所以**不檢查**。這條路的正確性�
 - **HTTP 那半也不保留**：`/sync` 的共用層、決定 7、`/keys/changes` 的 `left` 全部回到上游。9.1 表最後一列說「一般 client 受惠」，但官方 client 靠上游行為已經能用，所以不動。
 - 客製 client 的裝置清單訊號只靠這份提案（F1–F4）。
 
-## 10. 達標條件（對應問題書 §6）
+## 10. 達標條件（對應 /docs/design/keys/e2ee-send-guard-problem.md §6）
 
 | # | 條件 | 怎麼驗 |
 |---|---|---|

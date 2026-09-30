@@ -1,5 +1,5 @@
 //! `Event/Subscribe` and `Event/Unsubscribe`: what a WebSocket connection
-//! listens to (`docs/design/wbf-event-push.md`).
+//! listens to (`/docs/design/events/event-push.md`).
 //!
 //! A subscription is the connection's: `Subscribe` puts this connection into
 //! the channels of the rooms it names (each checked for membership), or of

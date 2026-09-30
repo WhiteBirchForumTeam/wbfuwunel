@@ -28,7 +28,7 @@ use super::{ConnectionId, PackQueue, Streams};
 pub const EVENT_PUSH_SUBTYPE: u8 = 0x06;
 
 /// `Event/DeviceChanged`, server to client only, and only to connections that
-/// declared device versions (docs/design/wbf-room-device-version.md §6).
+/// declared device versions (/docs/design/keys/room-device-version.md §6).
 pub const EVENT_DEVICE_CHANGED_SUBTYPE: u8 = 0x07;
 
 /// One event as it goes on the wire: its global position and its JSON as
@@ -223,7 +223,7 @@ impl Streams {
 	///
 	/// 🚨 A window cut short (by its count or its bytes) is the newest part of
 	/// what the client is missing, not all of it — and a client moves its
-	/// watermark on every `Push` (wbf-event-push §2.1), so without a word it
+	/// watermark on every `Push` (/docs/design/events/event-push.md §2.1), so without a word it
 	/// would step over the rest for good. The first pack of such a window
 	/// therefore carries `gap: true`, which is the one signal a subscriber
 	/// already acts on by asking `Recent`.
@@ -362,7 +362,8 @@ mod tests {
 		metas
 	}
 
-	/// §6.2: a connection that did not declare device versions never sees the
+	/// /docs/design/keys/room-device-version.md §6.2: a connection that did not declare device
+	/// versions never sees the
 	/// pack; one that did gets **one** per change, naming only the rooms it
 	/// listens to.
 	#[test]
@@ -438,7 +439,7 @@ mod tests {
 	/// `DeviceChanged` vector must be the bytes this server builds.
 	#[test]
 	fn the_device_changed_vector_is_what_the_server_builds() {
-		const VECTORS: &str = include_str!("../../../docs/design/wbf-vectors.json");
+		const VECTORS: &str = include_str!("../../../docs/design/wire/wbf-vectors.json");
 		let vectors: serde_json::Value = serde_json::from_str(VECTORS).expect("the vectors file is JSON");
 		let hex = vectors["packs"]
 			.as_array()

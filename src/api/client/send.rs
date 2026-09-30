@@ -41,7 +41,7 @@ struct ExtractRelatesTo {
 ///   allowed
 /// - `X-Wbf-Attachments: mxc://a,mxc://b` declares the media the event
 ///   attaches, which the server cannot read out of encrypted content; see
-///   `docs/design/media-attachments.md`.
+///   `/docs/design/media/media-attachments.md`.
 pub(crate) async fn send_message_event_route(
 	State(services): State<crate::State>,
 	body: Ruma<send_message_event::v3::Request>,
@@ -59,7 +59,7 @@ pub(crate) async fn send_message_event_route(
 		declared_attachments: declared,
 		via_legacy_http: true,
 		may_write_reserved_type: false,
-		// HTTP is never checked (docs/design/wbf-room-device-version.md §7.3).
+		// HTTP is never checked (/docs/design/keys/room-device-version.md §7.3).
 		expected_room_device_version: None,
 	};
 
@@ -112,7 +112,7 @@ pub(crate) struct SendMessageEvent<'a> {
 	pub(crate) may_write_reserved_type: bool,
 	/// The room device version the sender handed its room key out by: `Some`
 	/// only from `Event/Send`, and then checked under the room lock
-	/// (docs/design/wbf-room-device-version.md §7.1).
+	/// (/docs/design/keys/room-device-version.md §7.1).
 	pub(crate) expected_room_device_version: Option<u64>,
 }
 
@@ -275,7 +275,8 @@ pub(crate) async fn send_message_event(
 	}
 
 	// Under the room lock, so no member event lands between this and the
-	// append (§4.4); after the repeated-transaction check, so a retry of a
+	// append (/docs/design/keys/room-device-version.md §4.4); after the repeated-transaction
+	// check, so a retry of a
 	// send that went through still answers with its event.
 	if let Some(expected) = expected_room_device_version {
 		let room_device_version = services

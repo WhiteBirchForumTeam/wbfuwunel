@@ -1,4 +1,4 @@
-//! The hash half of a device version (`docs/design/wbf-room-device-version.md`
+//! The hash half of a device version (`/docs/design/keys/room-device-version.md`
 //! §3.4): a fingerprint of an account's keys that any client can recompute
 //! from what `/keys/query` shows it.
 //!
@@ -126,7 +126,7 @@ mod tests {
 	}
 
 	/// The vector a client checks its own implementation against
-	/// (docs/design/wbf-room-device-version.md §3.4). It was computed a second
+	/// (/docs/design/keys/room-device-version.md §3.4). It was computed a second
 	/// time outside Rust, from the algorithm as written there.
 	#[test]
 	fn the_documented_vector() {

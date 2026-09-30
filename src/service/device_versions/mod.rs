@@ -1,6 +1,7 @@
-//! Device versions (`docs/design/wbf-room-device-version.md`): one per account,
+//! Device versions (`/docs/design/keys/room-device-version.md`): one per account,
 //! `seq-hash`, which moves whenever the account's keys do (§3), and one per
-//! room, derived from its member events and its members' device versions (§4).
+//! room, derived from its member events and its members' device versions
+//! (/docs/design/keys/room-device-version.md §4).
 //! A client that sends with a room's version is refused (1506) once it has
 //! moved: who it would hand the room key to has changed since it looked.
 
@@ -71,10 +72,11 @@ pub struct DeviceVersion {
 	/// `device_keys_hash` of the keys as they are now.
 	pub hash: String,
 	/// The server-wide position of the last change: the same counter as
-	/// `g_seq`. ⚠️ A room's version does not use this any more —— §4.2 made it a
+	/// `g_seq`. ⚠️ A room's version does not use this any more ——
+	/// /docs/design/keys/room-device-version.md §4.2 made it a
 	/// hash of the member set, so nothing takes the larger of two positions.
 	/// The one use left is standing in as the seq when a stored row cannot be
-	/// read (§3.3).
+	/// read (/docs/design/keys/room-device-version.md §3.3).
 	pub pos: u64,
 }
 
@@ -107,7 +109,8 @@ impl crate::Service for Service {
 /// Return:
 ///     Result<DeviceVersion>  the stored one; an account without one gets
 ///     `seq` 1 and the position of its last key change (0 when it has none),
-///     written back (§3.3), with `UNHASHABLE` when its keys cannot be read
+///     written back (/docs/design/keys/room-device-version.md §3.3), with `UNHASHABLE` when its
+/// keys cannot be read
 ///     or hashed. Err only when the stored one cannot be read.
 #[implement(Service)]
 pub async fn get_device_version(&self, user_id: &UserId) -> Result<DeviceVersion> {
@@ -124,7 +127,8 @@ pub async fn get_device_version(&self, user_id: &UserId) -> Result<DeviceVersion
 	// what `pos` means, and recording something else would be a lie.
 	// ⚠️ The reason this *used* to matter is gone: `pos` once fed the room
 	// version, so taking "now" refused every room's senders once for a change
-	// that never happened. Since §4.2 became a hash over `seq-hash`, `pos`
+	// that never happened. Since /docs/design/keys/room-device-version.md §4.2 became a hash
+	// over `seq-hash`, `pos`
 	// does not reach the room version at all.
 	let version = DeviceVersion {
 		seq: 1,
@@ -191,14 +195,15 @@ pub async fn bump_device_version(&self, user_id: &UserId, pos: u64) -> DeviceVer
 	}
 
 	// Still under the account's lock, so two changes of one account are
-	// announced in the order they were made (§6).
+	// announced in the order they were made (/docs/design/keys/room-device-version.md §6).
 	self.announce_device_change(user_id, &version, rooms)
 		.await;
 
 	version
 }
 
-/// F3 (§6): tells the connections that declared device versions and listen
+/// F3 (/docs/design/keys/room-device-version.md §6): tells the connections that declared device
+/// versions and listen
 /// to a room `user_id` is in that the account's devices changed, with each
 /// such room's new version. Only the rooms somebody would be told about are
 /// computed; a room whose version cannot be computed is left out, and the
@@ -227,12 +232,14 @@ async fn announce_device_change(&self, user_id: &UserId, version: &DeviceVersion
 	}
 }
 
-/// The room's device version (§4.1), cached by the room state it came from.
+/// The room's device version (/docs/design/keys/room-device-version.md §4.1), cached by the room
+/// state it came from.
 ///
 /// Args:
 ///     room_id: example: "!r:localhost"
 /// Return:
-///     Result<u64>  the hash of §4.1, example: 81234; Err when the room has no
+///     Result<u64>  the hash of /docs/design/keys/room-device-version.md §4.1, example: 81234;
+/// Err when the room has no
 ///     state, or a counted member event's state_key is not a user id.
 #[implement(Service)]
 pub async fn get_room_device_version(&self, room_id: &RoomId) -> Result<u64> {
@@ -276,7 +283,8 @@ pub async fn get_room_device_version(&self, room_id: &RoomId) -> Result<u64> {
 	Ok(version)
 }
 
-/// §4.1: a hash over who currently holds this room's keys — every `join`,
+/// /docs/design/keys/room-device-version.md §4.1: a hash over who currently holds this room's
+/// keys — every `join`,
 /// `leave` and `ban` member of the room **state**, and the joined members'
 /// device versions.
 ///
@@ -290,7 +298,8 @@ pub async fn get_room_device_version(&self, room_id: &RoomId) -> Result<u64> {
 /// was holding the maximum up vanished and the version fell back to a value a
 /// client may still be holding. It would then pass the gate with a stale
 /// member list and send the room key to someone who had left — the very leak
-/// §4.2 reasoned about, through a door that reasoning missed (external review
+/// /docs/design/keys/room-device-version.md §4.2 reasoned about, through a door that reasoning
+/// missed (external review
 /// 2026-09-29). A hash cannot fall back: a different set is a different value.
 ///
 /// 📎 This is what the per-account device version has always done, and the
@@ -375,7 +384,7 @@ fn to_room_version_hash(mut items: Vec<(String, Vec<u8>)>) -> Result<u64> {
 }
 
 /// `invite` and `knock` do not change who holds the room key; the `join`
-/// that may follow does (§4.1).
+/// that may follow does (/docs/design/keys/room-device-version.md §4.1).
 fn is_membership_counted(membership: &MembershipState) -> bool {
 	matches!(membership, MembershipState::Join | MembershipState::Leave | MembershipState::Ban)
 }

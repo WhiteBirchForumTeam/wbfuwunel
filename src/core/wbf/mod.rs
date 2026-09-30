@@ -1,7 +1,7 @@
 //! The fork's own wire protocol: one binary pack per request, response,
 //! chunk or fragment, carried over a WebSocket channel or, for testing, one
 //! per HTTP request. The pack neither encrypts nor decrypts; it only knows
-//! its own layout and checksums. See `docs/design/wbf-wire-format.md`.
+//! its own layout and checksums. See `/docs/design/wire/wire-format.md`.
 
 pub mod error_code;
 pub mod events;
