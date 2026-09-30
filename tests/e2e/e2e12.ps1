@@ -294,6 +294,37 @@ $null = Destroy $ws3 55 (@($secondWindow | ForEach-Object { Counts $_ }))
 $emptied = @(Fetch-Oldest $ws3 56 @{})
 Check '[3.4] with everything destroyed the queue is empty: destroyed counts never come back' `
   ($emptied.Count -eq 1 -and $emptied[0].meta.tc -eq 0 -and $emptied[0].meta.r -eq 0) (Describe $emptied[0])
+
+# Scenario 4: one message too large for a pack is refused at the door.
+# 🚨 Why this cannot be handled on the way out (/docs/design/keys/to-device.md 3.1.2): the read
+# window admits its first item whatever the size -- it has to, or a window could never advance --
+# so an oversized item builds a pack the connection cannot carry, the connection dies, the client
+# reconnects, the queue head is the same item, and it dies again. The client cannot destroy what it
+# never received and there is deliberately no skip, so that device never gets another room key.
+# The sender is the only party that can act on it, so the sender is who is told.
+# The queue is empty here ([3.4]), which is what makes "nothing was written" checkable.
+$tooBig = 'x' * (2 * 1024 * 1024 + 8192)
+$txnBig = [guid]::NewGuid().ToString('N')
+$bigBody = [pscustomobject]@{ messages = @{ $reg3A.user_id = @{ $dev3A = @{ msgtype = 'm.test'; body = $tooBig } } } }
+$refused = Http PUT "/_matrix/client/v3/sendToDevice/m.room.message/$txnBig" $bigBody $tok3B
+Check '[4.1] a to-device message too large for one pack is refused with 413 M_TOO_LARGE' `
+  ($refused.status -eq 413 -and $refused.json.errcode -eq 'M_TOO_LARGE') "status=$($refused.status) body=$($refused.text)"
+
+# ⭐ The refusal must leave nothing behind: the size is checked before a count is taken, so the
+# queue is still empty. If it were checked after the write, this would find one item -- and that
+# item would be the jam.
+$afterRefusal = @(Fetch-Oldest $ws3 57 @{})
+Check '[4.2] the refused message was not written: the queue is still empty' `
+  ($afterRefusal.Count -eq 1 -and $afterRefusal[0].meta.tc -eq 0) (Describe $afterRefusal[0])
+
+# And the queue still works right afterwards -- the refusal is not a wedge of its own.
+$null = Send-ToDevice $tok3B $reg3A.user_id $dev3A 'after-the-refusal'
+$null = Drain $ws3 2000
+$afterOk = @(Fetch-Oldest $ws3 58 @{})
+$afterBodies = @($afterOk | ForEach-Object { Items ([byte[]]$_.data) } | ForEach-Object { $_.content.body })
+Check '[4.3] a normal message right after the refusal still arrives' `
+  ($afterBodies.Count -eq 1 -and $afterBodies[0] -eq 'after-the-refusal') "bodies=$($afterBodies -join ',')"
+
 $ws3.Dispose()
 Stop-Server $server
 
