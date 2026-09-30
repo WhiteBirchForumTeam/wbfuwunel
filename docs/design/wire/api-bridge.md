@@ -1,7 +1,7 @@
 # 常用 Matrix API 走通道：一座通用的橋，而不是一支一支手搬
 
 > **這份文件回答：怎麼把大部分常用的 Matrix client API 改成 WebSocket pack，搬的順序是什麼，每一支要花多少。**
-> 狀態：✅ 維護者同意（PR #55）；橋的層與批 1 的 37 支 PR #56、批 2（註冊＋UIAA，8 支）PR #62＋#63、批 3（20 支＋新 kind `0x1D Report` ＋ `features`）PR #76＋#77，**都已合併**（總表 86 列）。**批 4（21 支＋四個新 kind）2026-09-21 提案中**（§3 批 4，一條待決定在 §5）。維護者 2026-09-14：「把大部分常用的 api 接口改成 web socket pack 的模式 —— account 註冊、登入、登出、session 相關、room 相關、device，看能做多少、多快；行數少就多做一點，難度高就少做一點，慢慢移植。」
+> 狀態：✅ 維護者同意（PR #55）；橋的層與批 1 的 37 支 PR #56、批 2（註冊＋UIAA，8 支）PR #62＋#63、批 3（20 支＋新 kind `0x1D Report` ＋ `features`）PR #76＋#77，以及批 4（21 支＋四個新 kind `0x18 Push`、`0x19 Media`、`0x1A Search`、`0x1B Voip`）PR #80＋#81，**全部已合併** —— 總表 **107 列**，常用面沒有洞了。§5 那條待決定（檢舉三支放哪裡）維護者 2026-09-20 已經定了：新 kind `0x1D Report`。維護者 2026-09-14：「把大部分常用的 api 接口改成 web socket pack 的模式 —— account 註冊、登入、登出、session 相關、room 相關、device，看能做多少、多快；行數少就多做一點，難度高就少做一點，慢慢移植。」
 > 上位文件：[/docs/design/wire/pack-pipeline.md](pack-pipeline.md) §7（搬一個端點的七步）、[/docs/design/wire/wire-format.md](wire-format.md) §3.3（kind 分配表）。
 
 ## 0. 一句話
