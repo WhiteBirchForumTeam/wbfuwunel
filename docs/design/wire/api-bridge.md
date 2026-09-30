@@ -137,6 +137,18 @@ data = {"topic":"大家好"} 的 bytes
 - 更窄的別名（「設 topic」這種）以後真的常用再加，不要一開始就讓同一個端點有兩個入口。
 - 📎 **變數的名字就用 ruma 模板裡的名字**（`room_id`、`event_type`、`state_key`），不另取一套 —— 另取一套就是第二份會漂移的對照表。每一列的變數名寫進 /docs/design/wire/wire-format.md §3.2。
 
+🚨 **一個路徑變數就是一段，而且填完的路徑段數必須跟模板一樣**（外部審查 2026-09-29 抓到，已修）：
+`.` 與 `..` **不能當值**，橋回 `InvalidRequest`。它們不會被當成字面字串搬過去 —— URL 會把它們解掉，
+於是**那一段整個消失**，請求落到**另一個端點**上：`session_id` 是 `.` 就讓
+`DELETE /room_keys/keys/{session_id}`（刪一個 session）變成 `DELETE /room_keys/keys`（**刪整個備份**）。
+⭐ 這是「刪一筆」悄悄變成「刪全部」，所以拒絕，不是編碼。
+
+📎 其餘的值都**照字面搬、該編碼的編碼**，不要自己再限制：
+
+- `/` 會被百分號編碼（`a/b` → `a%2Fb`），**不會**變成兩段 —— megolm 的 session id 是 base64，本來就可能含 `/`。
+- **空字串是合法的值**：`state_key` 的 `""` 留下一個結尾的 `/`，段數不變（多數 state 事件就是空的 `state_key`）。
+- `%`、`?`、`#`、空白都會被編碼。
+
 ### 2.3 旗標 bit4 `IS_BRIDGED`：這個 pack 是不是走橋（維護者 2026-09-14 定）
 
 旗標位組現在用到 bit3（`META_ENCRYPTED`、`WANT_ACK`、`IS_RESPONSE`、`IS_LAST`），**bit4 給橋**：設了就是「這個 pack 是一個轉成 HTTP 請求的 Matrix 端點呼叫」。

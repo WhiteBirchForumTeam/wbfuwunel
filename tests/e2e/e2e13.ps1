@@ -626,6 +626,22 @@ $hgoneSession = Http GET "/_matrix/client/v3/room_keys/keys/$(Enc $room)/$(Enc $
 Check '[4.6] DeleteBackupKeysForSession: gone through the bridge, and reading it back is refused exactly as HTTP refuses it' `
   ((Is-Ack $delSession) -and (Same-Refusal $goneSession $hgoneSession)) "delete=$($delSession.text) gone=$($goneSession.metaText) http=$($hgoneSession.status) $($hgoneSession.text)"
 
+# 🚨 A path variable of "." must be refused, not carried (external review 2026-09-29).
+# `.` is not a literal segment: the URL resolves it away, so the segment vanishes and
+# `DELETE /room_keys/keys/{session_id}` becomes `DELETE /room_keys/keys` -- "delete one
+# session" silently becomes "delete the whole backup". ⭐ So this checks both halves: the
+# bridge refuses with InvalidRequest, AND the two sessions still in the backup are still
+# there afterwards. The second half is the one that would have caught the bug.
+$dotSession = Bridge $wsM 0x17 0x3D @{ room_id = $room; session_id = '.'; version = $version }
+$dotDotSession = Bridge $wsM 0x17 0x3D @{ room_id = $room; session_id = '..'; version = $version }
+$survived = Http GET "/_matrix/client/v3/room_keys/keys?version=$(Enc $version)" $null $tokM
+$survivedNames = @($survived.json.rooms.$room.sessions.PSObject.Properties.Name)
+Check '[4.6b] a session_id of "." or ".." is refused, and the rest of the backup is untouched' `
+  ($dotSession.subtype -eq 3 -and $dotSession.meta.code_id -eq 1201 `
+    -and $dotDotSession.subtype -eq 3 -and $dotDotSession.meta.code_id -eq 1201 `
+    -and $survivedNames.Count -eq 2) `
+  "dot=$($dotSession.metaText) dotdot=$($dotDotSession.metaText) sessions_left=$($survivedNames -join ',')"
+
 $delRoom = Bridge $wsM 0x17 0x3C @{ room_id = $room; version = $version }
 $afterRoom = Http GET "/_matrix/client/v3/room_keys/keys?version=$(Enc $version)" $null $tokM
 $addBack = Bridge $wsM 0x17 0x37 @{ room_id = $room; session_id = $session; version = $version } (Backup-Data 'Y2lwaGVyLWZvdXI')
