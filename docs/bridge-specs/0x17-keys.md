@@ -45,7 +45,7 @@
 | 回覆 data | `{"failures":{},"one_time_keys":{"@kate:localhost":{"M70FM5YkEz":{"signed_curve25519:AAAB1":{"key":"…","signatures":{…}}}}}}` |
 
 - ⚠️ **claim 走的那把就從對方的庫存消失**（e2e13 [3.3]：3 → 2，再用 HTTP claim 一次 → 1，而且拿到的是另一把）。OTK 用完之後回的是 fallback key。
-- 被 claim 的那個裝置要知道自己少了一把才會補：之後由 `CryptoState` 推（/docs/design/keys/e2ee-over-channel.md §3.4），在那之前用 `0x20` 送 `{}` 讀回數量。
+- 被 claim 的那個裝置要知道自己少了一把才會補：之後由 `CryptoState` 推（/docs/design/keys/e2ee-over-channel.md §3.2 的 `otk_counts`、§3.3 什麼時候推），在那之前用 `0x20` 送 `{}` 讀回數量。
 
 ## `0x23` KeyChanges —— 兩個位置之間誰的金鑰變了
 

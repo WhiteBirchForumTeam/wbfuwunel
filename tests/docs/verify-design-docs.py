@@ -4,7 +4,13 @@
   - DEAD LINK    a markdown link points at a file that is not there.
   - STALE NAME   a document's pre-2026-09-30 file name is still written somewhere.
   - STALE PATH   a path from before the reorganisation (no category folder).
+  - NO SUCH §   a citation names a section the target document does not have.
+                 🚨 This is the one that catches content loss: if a document is
+                 truncated, the sections other docs cite stop existing.
   - NOT IN INDEX a design doc no one can find from /docs/design/index.md.
+  - NO SUCH DOC  prose names a /docs/... path that is not in this repo. A path
+                 in another repo must say so and name the repo, so that a
+                 reader is not sent looking for a local file.
 
 Run from the repo root: `python tests/docs/verify-design-docs.py`. Exit code 1 lists
 every problem. CLAUDE.md D asks for a script that walks the whole repo after a rename,
@@ -81,7 +87,55 @@ for path in walk_files({".md", ".rs", ".toml", ".ps1", ".py", ".json", ".hcl", "
             if stale in line:
                 problems.append("STALE PATH " + path + ":" + str(line_no) + "  " + stale)
 
-# 3. every design doc must be reachable from the index
+# 3. a /docs/... path written in prose must exist here, or say which repo it is in
+OTHER_REPO_MARKS = ("amaid/wbf-matrix-client", "另一個 repo", "client repo")
+URL = re.compile(r"https?://\S+")
+for path in walk_files({".md", ".rs", ".toml", ".ps1"}):
+    lines = read(path).splitlines()
+    for line_no, line in enumerate(lines, 1):
+        # A path inside a URL belongs to some other project's site, not to this repo.
+        bare = URL.sub(" ", line)
+        if not bare.count("/docs/"):
+            continue
+        # The marker may sit a line or two above: a citation wraps.
+        nearby = " ".join(lines[max(0, line_no - 3):line_no + 1])
+        if any(mark in nearby for mark in OTHER_REPO_MARKS):
+            continue
+        for match in re.finditer(r"/docs/[A-Za-z0-9._/-]+\.(?:md|json)", bare):
+            target = match.group(0).lstrip("/")
+            if not os.path.exists(target):
+                problems.append(
+                    "NO SUCH DOC " + path + ":" + str(line_no) + "  " + match.group(0)
+                )
+
+# 4. a cited section must exist in the document being cited
+HEADING = re.compile(r"^#{1,6}\s+([0-9]+(?:\.[0-9]+)*)\.?\s")
+sections_of = {}
+for path in walk_files({".md"}):
+    found = set()
+    for line in read(path).splitlines():
+        match = HEADING.match(line)
+        if match:
+            number = match.group(1)
+            found.add(number)
+            found.add(number.split(".")[0])
+    sections_of[os.path.normpath(path).replace(os.sep, "/")] = found
+
+CITATION = re.compile(r"(/docs/[A-Za-z0-9._/-]+\.md)`?\s*§([0-9]+(?:\.[0-9]+)*)")
+for path in walk_files({".md", ".rs", ".ps1", ".toml"}):
+    for line_no, line in enumerate(read(path).splitlines(), 1):
+        for target, section in CITATION.findall(line):
+            local = target.lstrip("/")
+            known = sections_of.get(local)
+            if known is None or not known:
+                continue
+            if section not in known:
+                problems.append(
+                    "NO SUCH §  " + path + ":" + str(line_no)
+                    + "  " + target + " §" + section
+                )
+
+# 5. every design doc must be reachable from the index
 index_path = os.path.join("docs", "design", "index.md")
 if not os.path.exists(index_path):
     problems.append("MISSING    docs/design/index.md")

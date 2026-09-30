@@ -1,8 +1,10 @@
 # to-device 走通道：`0x16 Device` 的訂閱、推送與銷毀
 
 > **狀態**：✅ 已實作（提案 2026-09-11 PR #41 核可，實作 PR #43 2026-09-12 合併；討論過程在本 repo 的 issue #39 與 PR #41）。
-> 起點是 client 端（`amaid/wbf-matrix-client`）的需求，原文在 client repo 的
-> `/docs/design/to-device-push-proposal.md`；它列的四個待決事項維護者 2026-09-10／2026-09-11 都拍板了，
+> 起點是 client 端的需求，原文在**另一個 repo**：`amaid/wbf-matrix-client` 的
+> `/docs/design/keys/to-device-client.md`（⚠️ 它原本叫 `/docs/design/to-device-push-proposal.md`，
+> server 這邊做完之後在那邊被改寫成 client 的接線文件，2026-09-30 又隨該 repo 的改組搬進 `keys/`）；
+> 它列的四個待決事項維護者 2026-09-10／2026-09-11 都拍板了，
 > 連同討論中改掉的形狀（銷毀的閉環、`to`、`ot`／`nt`、上限）一起寫在下面各節。
 > 🔁 **合併前後改掉的一條**：§4 的裝置綁定從「拒絕後來的」翻成「**後來的接手**」（維護者 2026-09-12）——
 > 理由與被接手那條收到的 `Superseded`(1505) 都寫在 §4。§10 的三件事實作時查過，結論記在那節。

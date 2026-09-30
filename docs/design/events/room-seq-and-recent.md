@@ -1,7 +1,7 @@
 # 每房連續序號 `r_seq` 與跨房間「全域最近 N 則」
 
 > **這份文件回答：client 的聊天模型要 server 配合的兩件事，server 端怎麼做、為什麼這樣做。**
-> 需求出處：issue #20（wbf-matrix-client `/docs/design/chat-model.md` §4.3、§7）。
+> 需求出處：issue #20（**另一個 repo**：`amaid/wbf-matrix-client` 的 `/docs/design/rooms/chat-model.md` §4.3、§7 —— ⚠️ 該 repo 2026-09-30 改組，那份從 `/docs/design/chat-model.md` 搬進 `rooms/`）。
 > 狀態：✅ 已實作（提案 PR #21 維護者 2026-09-05 同意，實作分支 `event/room-seq-recent` PR #22 合併；2026-09-14 補標，原本停在 🔧）。
 > `Event/Recent` 之後的變化：Batch 串流（PR #33）、`rooms` 點名（PR #51）、窗的 bytes 上限與 `more`（PR #53）—— 線上欄位的權威在 [/docs/design/wire/pack-pipeline.md](../wire/pack-pipeline.md) §6。
 > 相關：[/docs/design/wire/wire-format.md](../wire/wire-format.md)（pack 與 kind 分配）、[/docs/design/overview/roadmap.md](../overview/roadmap.md)。

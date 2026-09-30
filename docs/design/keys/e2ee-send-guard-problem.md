@@ -43,8 +43,8 @@ Bob 在 B2 上傳金鑰 → mark_device_key_update 寫 keychangeid 索引（Bob 
 |---|---|---|---|
 | P1 | **鏈上任一環掉了**：推播佇列滿被丟（有 `gap`，但要 client 處理對）、client 的 bug、重連補窗漏算 | Alice 一直只發給 Bob 的舊裝置 | **沒有人**。B2 解不開，Alice 那邊一切正常 |
 | P2 | **競態**：Bob 加 B2 的時間落在 Alice `/keys/query` 之後、送出之前 | 那一則 B2 解不開（之後的訊息會補發金鑰） | 沒有人 |
-| P3 | **server 替每個 client 算同房關係**：`share_encrypted_room` 是兩人房間清單取交集再逐房問加不加密；補窗要掃成員索引；`/sync` 與通道兩份材料要靠 e2e 比對防漂移（/docs/design/keys/e2ee-over-channel.md §3.4.1、決定 6） | 複雜、成本跟房間數成正比 | — |
-| P4 | **`left` 不準**：被 forget 的離開查不到（/docs/design/keys/e2ee-over-channel.md §3.4.1） | client 多追蹤一個人（安全側的誤差） | — |
+| P3 | **server 替每個 client 算同房關係**：`share_encrypted_room` 是兩人房間清單取交集再逐房問加不加密；補窗要掃成員索引；`/sync` 與通道兩份材料要靠 e2e 比對防漂移（📕 那是 **(B) 第一版**的做法，維護者 2026-09-17 整個重作掉了 —— 現在的 `CryptoState` 只帶這個裝置自己的金鑰存量，不算同房關係；見 /docs/design/keys/e2ee-over-channel.md §3 的 🔁 與 §6 決定 6） | 複雜、成本跟房間數成正比 | — |
+| P4 | **`left` 不準**：被 forget 的離開查不到（/docs/design/keys/e2ee-over-channel.md §2 —— 那裡寫著 `/keys/changes` 的 `left` 至今仍是空的） | client 多追蹤一個人（安全側的誤差） | — |
 | P5 | **HTTP 送訊息那條路**跟通道各走各的 | 任何只在通道做的檢查，HTTP 都繞得過 | — |
 
 ⭐ **P1、P2 是這份文件的主題**：它們是**正確性**問題，而且是**靜默**的。P3–P5 是成本與邊界，答案要一併交代，但不能為了它們放掉 P1、P2。
