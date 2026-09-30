@@ -79,13 +79,17 @@ pub(crate) async fn send_event_to_device_route(
 
 			match target_device_id_maybe {
 				| DeviceIdOrAllDevices::DeviceId(target_device_id) => {
+					// 🚨 Refused here, not on the way out: a message too large for one
+					// pack jams the target device's queue for good, and the target can
+					// do nothing about it (§3.1.2). The sender is the only party that
+					// can act, so the sender is who hears about it — 413.
 					let count = services.users.add_to_device_event(
 						sender_user,
 						target_user_id,
 						target_device_id,
 						event_type,
 						&event,
-					);
+					)?;
 
 					services
 						.sending
@@ -107,21 +111,36 @@ pub(crate) async fn send_event_to_device_route(
 						.is_interested_in_user(target_user_id)
 						.await;
 
+					// The same size gate, once, before any device is written to: the
+					// message is the same for all of them, and refusing after writing
+					// to some would leave a jammed queue behind on those (§3.1.2).
+					services
+						.users
+						.check_to_device_event_size(sender_user, event_type, &event)?;
+
 					let deliveries: Deliveries = services
 						.users
 						.all_device_ids(target_user_id)
 						.map(|target_device_id| {
-							let count = services.users.add_to_device_event(
-								sender_user,
-								target_user_id,
-								target_device_id,
-								event_type,
-								&event,
-							);
+							// The check above makes a refusal here unreachable, but it
+							// is still a `Result`: log and skip that device rather than
+							// take the whole request down for it (CLAUDE.md P).
+							let count = services
+								.users
+								.add_to_device_event(
+									sender_user,
+									target_user_id,
+									target_device_id,
+									event_type,
+									&event,
+								)
+								.log_err()
+								.ok();
 
 							(target_device_id, count)
 						})
 						.ready_filter_map(|(target_device_id, count)| {
+							let count = count?;
 							interested.then(|| (target_device_id.to_owned(), count))
 						})
 						.collect()
