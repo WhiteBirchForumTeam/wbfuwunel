@@ -479,6 +479,12 @@ fn refuse_undeclared_variables(
 ///     is a value (a `state_key` of `""` leaves a trailing `/`); a variable
 ///     that is missing or not a string is `InvalidRequest`.
 fn fill_path(path_template: &str, variables: &Map<String, Value>) -> Result<String, Reject> {
+	// One count for both sides of the comparison below: a template is written with
+	// a leading `/` and so is a built path, so both are trimmed the same way.
+	fn count_path_segments(path: &str) -> usize {
+		path.trim_start_matches('/').split('/').count()
+	}
+
 	let mut url = Url::parse("http://bridge.invalid/").expect("a constant URL parses");
 	{
 		let mut segments = url
@@ -512,6 +518,30 @@ fn fill_path(path_template: &str, variables: &Map<String, Value>) -> Result<Stri
 						));
 					}
 
+					// 🚨 A tab, newline or carriage return is **dropped** rather than
+					// encoded, and that defeats the check above: `".\n"` is not equal to
+					// `"."`, but the URL throws the newline away and *then* resolves the
+					// `.` — the segment empties out. `"..\n"` eats the segment before it.
+					// It also silently corrupts ordinary values: `"a\tb"` arrives as
+					// `"ab"`, so a session_id or state_key would not match the one the
+					// client meant (cirno, PR #100).
+					// ⚠️ This is narrower than HTTP, where the same character survives as
+					// `%0A` — the difference is written up in
+					// /docs/design/wire/api-bridge.md §2.2, because refusing is the only
+					// option that is not "silently send something else".
+					if let Some(dropped) = value
+						.chars()
+						.find(|character| matches!(character, '\t' | '\n' | '\r'))
+					{
+						return Err(Reject::code(
+							RejectCode::InvalidRequest,
+							format!(
+								"`{name}` cannot contain {dropped:?}: a URL drops it instead of \
+								 encoding it, which would change the path"
+							),
+						));
+					}
+
 					segments.push(value);
 				},
 				| Some(_) => {
@@ -524,7 +554,28 @@ fn fill_path(path_template: &str, variables: &Map<String, Value>) -> Result<Stri
 		}
 	}
 
-	Ok(url.path().to_owned())
+	let filled = url.path().to_owned();
+
+	// 🚨 The invariant, enforced rather than only tested: **a filled path has the
+	// same number of segments as its template**. Anything that changes the count
+	// has moved the request to a different endpoint, and whether that endpoint is
+	// another real route depends on the template — so this cannot be audited row by
+	// row, it has to be checked here. The two rules above name the values we know
+	// about; this one holds even when a future version of `url` normalizes
+	// something new.
+	let template_segments = count_path_segments(path_template);
+	let filled_segments = count_path_segments(&filled);
+	if filled_segments != template_segments {
+		return Err(Reject::code(
+			RejectCode::InvalidRequest,
+			format!(
+				"a path variable changed the shape of the path: {template_segments} segments \
+				 were asked for and {filled_segments} came out"
+			),
+		));
+	}
+
+	Ok(filled)
 }
 
 /// Args:
@@ -1103,7 +1154,13 @@ mod path_segment_tests {
 		let template = "/x/{v}/y";
 		let expected = template.split('/').count();
 
-		for value in [".", "..", "", "a/b", "%2F", "%2E", ".hidden", "a.b", "...", "x"] {
+		// 🚨 `\t`, `\n` and `\r` are here because a URL **drops** them instead of
+		// encoding them, so they get resolved *after* the `.`/`..` check and empty
+		// the segment out or eat the one before it (cirno, PR #100).
+		for value in [
+			".", "..", "", "a/b", "%2F", "%2E", ".hidden", "a.b", "...", "x", ".\n", "\t.", "..\n",
+			"\n.", "a\tb", "\r",
+		] {
 			match fill_one(template, value) {
 				| Ok(path) => assert_eq!(
 					path.split('/').count(),
@@ -1112,6 +1169,36 @@ mod path_segment_tests {
 				),
 				| Err(_) => (),
 			}
+		}
+	}
+
+	/// ⚠️ The other half of the one above, which on its own counts **any** refusal
+	/// as keeping the promise: a guard written too widely — `contains('.')`, say —
+	/// would refuse most of these and still leave that test green. So the values
+	/// that must go through are asserted to go through.
+	#[test]
+	fn a_value_that_is_only_unusual_is_not_refused() {
+		for value in ["", "a/b", "%2F", "%2E", ".hidden", "a.b", "...", "x", "a b", "!r:l", "@u:l"]
+		{
+			let filled = fill_one("/x/{v}/y", value);
+
+			assert!(filled.is_ok(), "a value of {value:?} was refused: {filled:?}");
+		}
+	}
+
+	/// The three characters a URL drops rather than encodes. Refusing them is
+	/// narrower than HTTP (where the client sends `%0A` and it survives), and that
+	/// is the trade: the alternative is sending a value the client did not write.
+	#[test]
+	fn a_value_holding_a_character_the_url_would_drop_is_refused() {
+		for value in [".\n", "\t.", "..\n", "\n.", "a\tb", "\r", "x\n"] {
+			let filled = fill_one("/_matrix/client/v3/room_keys/keys/{v}", value);
+
+			assert!(
+				filled.is_err(),
+				"a value of {value:?} was accepted and gave {filled:?}; the tab or newline is \
+				 dropped, so that is not the path the client asked for",
+			);
 		}
 	}
 
