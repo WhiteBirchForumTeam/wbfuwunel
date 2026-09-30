@@ -84,6 +84,28 @@ pub fn to_address_group(address: IpAddr) -> IpAddr {
 	}
 }
 
+/// Takes the finished tasks out of the set without waiting for anything.
+///
+/// Args:
+///     set: the tracked connection tasks
+fn reap_finished(set: &mut JoinSet<()>) {
+	while let Some(joined) = set.try_join_next() {
+		log_if_abnormal(joined);
+	}
+}
+
+/// One place for this message, so reaping a finished task reports a panic the
+/// same way shutdown does — 🚨 a reap that swallowed it would turn a connection
+/// task's panic into silence, and this is the only thing that speaks for it.
+///
+/// Args:
+///     joined: what the `JoinSet` handed back for one finished task
+fn log_if_abnormal(joined: Result<(), tokio::task::JoinError>) {
+	if let Err(e) = joined {
+		error!(?e, "A connection task ended abnormally.");
+	}
+}
+
 /// One connection's place in its source address's count. Dropping it gives
 /// the place back, exactly as `ConnectionSlot` does.
 pub struct AddressSlot {
@@ -269,11 +291,35 @@ impl Connections {
 		};
 		match tasks.as_mut() {
 			| Some(set) => {
+				// 🚨 Reaped here because a `JoinSet` keeps an entry for every task it
+				// ever started until someone joins it —— and the only join used to be
+				// at shutdown, so a server that had served a million connections
+				// carried a million entries for its whole life, and `len()` (the
+				// number shutdown logs and compares against the timeout) counted the
+				// dead ones too. Reaping on the way in costs one non-blocking pass
+				// and needs no extra task: what is left is bounded by the live
+				// connections plus whatever finished since the last new one
+				// (external review 2026-09-29 #7).
+				reap_finished(set);
 				set.spawn(task);
 				true
 			},
 			| None => false,
 		}
+	}
+
+	/// Return:
+	///     usize  how many connection tasks are tracked right now —— live ones
+	///     plus any that finished since the last `spawn`; 0 once shutdown has
+	///     taken the set.
+	#[must_use]
+	pub fn count_tracked_tasks(&self) -> usize {
+		match self.tasks.lock() {
+			| Ok(tasks) => tasks,
+			| Err(poisoned) => poisoned.into_inner(),
+		}
+		.as_ref()
+		.map_or(0, JoinSet::len)
 	}
 
 	/// Refuses new connections from now on and waits for the running ones to
@@ -303,9 +349,7 @@ impl Connections {
 		}
 		let drain = async {
 			while let Some(joined) = set.join_next().await {
-				if let Err(e) = joined {
-					error!(?e, "A connection task ended abnormally.");
-				}
+				log_if_abnormal(joined);
 			}
 		};
 		if tokio::time::timeout(JOIN_TIMEOUT, drain).await.is_err() {
@@ -477,5 +521,72 @@ mod address_tests {
 			);
 		}
 		assert_eq!(connections.count_for_address(address), 0);
+	}
+
+}
+
+#[cfg(test)]
+mod task_tracking_tests {
+	use super::*;
+
+	/// 🚨 The leak this guards: a `JoinSet` keeps an entry for every task it ever
+	/// started until someone joins it, and the only join is at shutdown — so
+	/// without reaping, the count here would be one per connection the server has
+	/// ever served, for its whole life.
+	///
+	/// The promise is deliberately weaker than "it is zero the moment a task
+	/// ends": nothing runs between connections, so the count falls on the next
+	/// `spawn`. That is what makes it bounded, and it is what is asserted.
+	#[tokio::test]
+	async fn a_task_that_finished_stops_being_tracked_on_the_next_spawn() {
+		let connections = Connections::new();
+
+		for _ in 0..8 {
+			assert!(connections.spawn(async {}), "the set is open");
+			// Let the task run to completion before the next spawn reaps it.
+			tokio::task::yield_now().await;
+		}
+
+		assert_eq!(
+			connections.count_tracked_tasks(),
+			1,
+			"only the task spawned last should still be tracked; the seven before it finished",
+		);
+	}
+
+	/// ⚠️ The other direction, so the reap cannot be "join everything": a task
+	/// still running must stay tracked, or shutdown would not wait for it.
+	#[tokio::test]
+	async fn a_task_still_running_stays_tracked() {
+		let connections = Connections::new();
+		let (release, held) = tokio::sync::oneshot::channel::<()>();
+
+		assert!(connections.spawn(async move {
+			let _waited = held.await;
+		}));
+		assert!(connections.spawn(async {}));
+		tokio::task::yield_now().await;
+		assert!(connections.spawn(async {}));
+
+		assert_eq!(
+			connections.count_tracked_tasks(),
+			2,
+			"the one waiting on the channel and the one just spawned",
+		);
+
+		let _released = release.send(());
+	}
+
+	/// And the count says 0 once shutdown has taken the set, rather than panicking
+	/// or reporting the tasks it already waited for.
+	#[tokio::test]
+	async fn the_count_is_zero_after_shutdown_took_the_set() {
+		let connections = Connections::new();
+
+		assert!(connections.spawn(async {}));
+		connections.close_and_join().await;
+
+		assert_eq!(connections.count_tracked_tasks(), 0);
+		assert!(!connections.spawn(async {}), "and nothing new is started");
 	}
 }
