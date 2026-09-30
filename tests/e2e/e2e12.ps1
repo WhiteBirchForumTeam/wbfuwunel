@@ -317,6 +317,30 @@ $afterRefusal = @(Fetch-Oldest $ws3 57 @{})
 Check '[4.2] the refused message was not written: the queue is still empty' `
   ($afterRefusal.Count -eq 1 -and $afterRefusal[0].meta.tc -eq 0) (Describe $afterRefusal[0])
 
+# 🚨 `*` (all of a user's devices) goes down a different branch, and it was rewritten by this
+# fix -- the gate has to run *before* any device is written to, or a refusal lands after some
+# of them already hold the jam. Nothing may be written, so the queue is still empty after.
+$txnAll = [guid]::NewGuid().ToString('N')
+$allBody = [pscustomobject]@{ messages = @{ $reg3A.user_id = @{ '*' = @{ msgtype = 'm.test'; body = $tooBig } } } }
+$refusedAll = Http PUT "/_matrix/client/v3/sendToDevice/m.room.message/$txnAll" $allBody $tok3B
+$afterAllRefusal = @(Fetch-Oldest $ws3 59 @{})
+Check '[4.2b] the same refusal for `*` (all devices), and again nothing was written' `
+  ($refusedAll.status -eq 413 -and $refusedAll.json.errcode -eq 'M_TOO_LARGE' `
+    -and $afterAllRefusal.Count -eq 1 -and $afterAllRefusal[0].meta.tc -eq 0) `
+  "status=$($refusedAll.status) tc=$($afterAllRefusal[0].meta.tc)"
+
+# 🚨 And a *remote* target: that message never enters our queue, so the gate at the write point
+# never sees it -- before this fix it went out as an EDU and the sender got 200 while the far
+# side dropped it. The sender is the only party that can act, whichever side the target is on.
+# 📎 No federation partner is running here; what is checked is that the refusal happens before
+# the EDU is queued, which is exactly what 413 instead of 200 shows.
+$txnRemote = [guid]::NewGuid().ToString('N')
+$remoteBody = [pscustomobject]@{ messages = @{ '@someone:other.invalid' = @{ 'DEV' = @{ msgtype = 'm.test'; body = $tooBig } } } }
+$refusedRemote = Http PUT "/_matrix/client/v3/sendToDevice/m.room.message/$txnRemote" $remoteBody $tok3B
+Check '[4.2c] a message to a remote device is refused too, not queued as an EDU with a 200' `
+  ($refusedRemote.status -eq 413 -and $refusedRemote.json.errcode -eq 'M_TOO_LARGE') `
+  "status=$($refusedRemote.status) body=$($refusedRemote.text)"
+
 # And the queue still works right afterwards -- the refusal is not a wedge of its own.
 $null = Send-ToDevice $tok3B $reg3A.user_id $dev3A 'after-the-refusal'
 $null = Drain $ws3 2000

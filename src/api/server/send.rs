@@ -756,6 +756,7 @@ async fn handle_edu_direct_to_device_event(
 	if let Err(error) = services
 		.users
 		.check_to_device_event_size(sender, ev_type, &event)
+		.map(|_measured| ())
 	{
 		warn!(
 			%sender, %target_user_id, %ev_type, %error,

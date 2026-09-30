@@ -618,18 +618,21 @@ const fn to_item_max_len(data_max: usize) -> usize { data_max.saturating_sub(EVE
 ///     event_type: example: "m.room_key"
 ///     content: the to-device event's content
 /// Return:
-///     Result  Ok when it fits in one pack; Err(Request(TooLarge)) when it does
-///     not, which the client API answers with 413; Err(Request(BadJson)) when it
-///     cannot be serialized at all.
+///     Result<(serde_json::Value, usize)>  the stored item and its length, so a
+///     caller that goes on to write it does not build or measure it again;
+///     Err(Request(TooLarge)) when it does not fit in one pack, which the client
+///     API answers with 413; Err(Request(BadJson)) when it cannot be serialized.
 #[implement(super::Service)]
 pub fn check_to_device_event_size(
 	&self,
 	sender: &UserId,
 	event_type: &str,
 	content: &serde_json::Value,
-) -> Result {
+) -> Result<(serde_json::Value, usize)> {
 	let item = to_stored_item(sender, event_type, content);
-	let item_len = to_stored_item_len(&item)?;
+	let item_len = serde_json::to_vec(&item)
+		.map(|bytes| bytes.len())
+		.map_err(|e| err!(Request(BadJson("this to-device message cannot be stored: {e}"))))?;
 	let max_len = self.get_to_device_item_max_len();
 	if item_len > max_len {
 		return Err!(Request(TooLarge(
@@ -637,16 +640,7 @@ pub fn check_to_device_event_size(
 		)));
 	}
 
-	Ok(())
-}
-
-/// Return:
-///     Result<usize>  the bytes the item takes in the queue; Err when it cannot
-///     be serialized.
-fn to_stored_item_len(item: &serde_json::Value) -> Result<usize> {
-	serde_json::to_vec(item)
-		.map(|bytes| bytes.len())
-		.map_err(|e| err!(Request(BadJson("this to-device message cannot be stored: {e}"))))
+	Ok((item, item_len))
 }
 
 #[implement(super::Service)]
@@ -659,11 +653,10 @@ pub fn add_to_device_event(
 	content: &serde_json::Value,
 ) -> Result<u64> {
 	// Checked before a count is taken, so a refused message leaves nothing
-	// behind.
-	self.check_to_device_event_size(sender, event_type, content)?;
+	// behind. It hands back the item it measured, so this path builds and
+	// serializes it once, not twice.
+	let (item, item_len) = self.check_to_device_event_size(sender, event_type, content)?;
 
-	let item = to_stored_item(sender, event_type, content);
-	let item_len = to_stored_item_len(&item)?;
 	let count = self.services.globals.next_count();
 	let key = (target_user_id, target_device_id, *count);
 	self.db

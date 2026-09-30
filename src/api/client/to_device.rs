@@ -46,6 +46,28 @@ pub(crate) async fn send_event_to_device_route(
 
 	for (target_user_id, map) in &body.messages {
 		for (target_device_id_maybe, event) in map {
+			let event_type = &body.event_type.to_string();
+			let content: serde_json::Value = event
+				.deserialize_as()
+				.map_err(|_| Error::BadRequest(ErrorKind::InvalidParam, "Event is invalid"))?;
+
+			// 🚨 Checked before the local/remote fork, not inside it. A message to a
+			// *remote* device never reaches our queue, so the gate at our write point
+			// never sees it — it goes out as an EDU, the far side's federation entry
+			// drops it with a warning, and the sender gets 200 with the message gone.
+			// "The sender is the only party that can act on it" (§3.1.2) is true
+			// whichever side the target is on, and local → remote is the ordinary way
+			// a room key crosses servers.
+			// 📎 What we measure is what *we* could not carry. A server with a smaller
+			// `wbf_data_max_bytes` may still drop it, and there is nothing we can tell
+			// the sender about that from here.
+			// 📎 Only the gate is wanted here; the item it measured is rebuilt per
+			// target device inside `add_to_device_event`, which checks again — this is
+			// the one place a *remote* target is reached at all.
+			let _measured = services
+				.users
+				.check_to_device_event_size(sender_user, event_type, &content)?;
+
 			if !services.globals.user_is_local(target_user_id) {
 				let mut map = BTreeMap::new();
 				map.insert(target_device_id_maybe.clone(), event.clone());
@@ -71,11 +93,8 @@ pub(crate) async fn send_event_to_device_route(
 				continue;
 			}
 
-			let event_type = &body.event_type.to_string();
-
-			let event = event
-				.deserialize_as()
-				.map_err(|_| Error::BadRequest(ErrorKind::InvalidParam, "Event is invalid"))?;
+			// The same value the gate above measured, so nothing is deserialized twice.
+			let event = content;
 
 			match target_device_id_maybe {
 				| DeviceIdOrAllDevices::DeviceId(target_device_id) => {
@@ -111,13 +130,10 @@ pub(crate) async fn send_event_to_device_route(
 						.is_interested_in_user(target_user_id)
 						.await;
 
-					// The same size gate, once, before any device is written to: the
-					// message is the same for all of them, and refusing after writing
-					// to some would leave a jammed queue behind on those (§3.1.2).
-					services
-						.users
-						.check_to_device_event_size(sender_user, event_type, &event)?;
-
+					// 📎 The size gate already ran above, before the local/remote fork
+					// and so before any device is written to — which is what stops a
+					// refusal from landing after some of this user's devices were
+					// already written to (§3.1.2).
 					let deliveries: Deliveries = services
 						.users
 						.all_device_ids(target_user_id)
