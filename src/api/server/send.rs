@@ -747,15 +747,33 @@ async fn handle_edu_direct_to_device_event(
 	ev_type: &str,
 	event: serde_json::Value,
 ) {
+	// 🚨 One oversized message is skipped, not answered with an error: this is a
+	// federation transaction carrying many EDUs, and failing it would make the
+	// remote resend the whole thing for ever. Dropping this one message costs the
+	// target one key; letting it through jams that device's queue for good
+	// (/docs/design/keys/to-device.md §3.1.2). 🚫 The sender cannot be told ——
+	// federation has nowhere to put a per-EDU refusal —— so it is logged loudly.
+	if let Err(error) = services
+		.users
+		.check_to_device_event_size(sender, ev_type, &event)
+		.map(|_measured| ())
+	{
+		warn!(
+			%sender, %target_user_id, %ev_type, %error,
+			"a to-device message from another server is too large for one pack; dropping it",
+		);
+		return;
+	}
+
 	match target_device_id_maybe {
 		| DeviceIdOrAllDevices::DeviceId(ref target_device_id) => {
-			let count = services.users.add_to_device_event(
-				sender,
-				target_user_id,
-				target_device_id,
-				ev_type,
-				&event,
-			);
+			let Ok(count) = services
+				.users
+				.add_to_device_event(sender, target_user_id, target_device_id, ev_type, &event)
+				.log_err()
+			else {
+				return;
+			};
 
 			services
 				.sending
@@ -781,17 +799,18 @@ async fn handle_edu_direct_to_device_event(
 				.users
 				.all_device_ids(target_user_id)
 				.map(|target_device_id| {
-					let count = services.users.add_to_device_event(
-						sender,
-						target_user_id,
-						target_device_id,
-						ev_type,
-						&event,
-					);
+					// The check above makes a refusal here unreachable, but it is
+					// still a `Result`: log and skip that device (CLAUDE.md P).
+					let count = services
+						.users
+						.add_to_device_event(sender, target_user_id, target_device_id, ev_type, &event)
+						.log_err()
+						.ok();
 
 					(target_device_id, count)
 				})
 				.ready_filter_map(|(target_device_id, count)| {
+					let count = count?;
 					interested.then(|| (target_device_id.to_owned(), count))
 				})
 				.collect()
