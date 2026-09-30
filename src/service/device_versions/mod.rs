@@ -53,7 +53,7 @@ pub struct Service {
 	/// cache: every entry can be computed again, so a restart loses nothing.
 	room_versions: StdRwLock<HashMap<OwnedRoomId, (ShortStateHash, u64)>>,
 	/// Moves on every device-version change; an entry computed while it moved
-	/// may have read a member's old position and is not kept.
+	/// may have read a member's old device version and is not kept.
 	device_changes: AtomicU64,
 }
 
@@ -71,7 +71,10 @@ pub struct DeviceVersion {
 	/// `device_keys_hash` of the keys as they are now.
 	pub hash: String,
 	/// The server-wide position of the last change: the same counter as
-	/// `g_seq`, so a room's version can take the larger of the two.
+	/// `g_seq`. ⚠️ A room's version does not use this any more —— §4.2 made it a
+	/// hash of the member set, so nothing takes the larger of two positions.
+	/// The one use left is standing in as the seq when a stored row cannot be
+	/// read (§3.3).
 	pub pos: u64,
 }
 
@@ -229,8 +232,8 @@ async fn announce_device_change(&self, user_id: &UserId, version: &DeviceVersion
 /// Args:
 ///     room_id: example: "!r:localhost"
 /// Return:
-///     Result<u64>  example: 81234; Err when the room has no state or a member
-///     event cannot be placed.
+///     Result<u64>  the hash of §4.1, example: 81234; Err when the room has no
+///     state, or a counted member event's state_key is not a user id.
 #[implement(Service)]
 pub async fn get_room_device_version(&self, room_id: &RoomId) -> Result<u64> {
 	let shortstatehash = self
@@ -376,7 +379,6 @@ fn to_room_version_hash(mut items: Vec<(String, Vec<u8>)>) -> Result<u64> {
 fn is_membership_counted(membership: &MembershipState) -> bool {
 	matches!(membership, MembershipState::Join | MembershipState::Leave | MembershipState::Ban)
 }
-
 
 #[implement(Service)]
 async fn find_stored_version(&self, user_id: &UserId) -> Result<DeviceVersion> {

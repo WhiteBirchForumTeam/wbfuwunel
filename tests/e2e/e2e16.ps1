@@ -274,14 +274,20 @@ Check '[1.11] a kick moves the room version, and the kicked member forgetting th
 # and an invite is not counted -- so she drops out of the counted set entirely. Under the old
 # "largest position wins" rule the number then fell back to what the room had before Carol was ever
 # involved, and a client still holding that number would pass the gate with a member list that still
-# had her in it. ⭐ The assertion that bites is `-ne $rvBeforeInvite`: that is the exact value the old
-# code returned here.
+# had her in it. ⭐ The assertion that bites is `-ne $rvBan`: under the old rule the largest position
+# left in the counted set at this point was Dave's ban, so the old code returned exactly $rvBan here.
+# `-ne $rvBeforeInvite` and `-ne $rvKick` were both already true under the old rule (Dave's ban is
+# newer than anything $rvBeforeInvite saw, and older than Carol's kick), so neither of those two can
+# tell the rules apart on its own -- they are kept for the shape of the scenario, not as the guard.
+# 📌 Under the hash $rvKick and $rvBan are the same value: both were computed over
+# {Alice:join, Bob:join, Carol:leave, Dave:ban}. That is correct -- the same key holders are the same
+# version -- and it is why `-ne $rvBan` is the one that moves when the set really loses Carol.
 $null = Http POST "/_matrix/client/v3/rooms/$(Enc $room)/invite" @{ user_id = $carol } $tokA
 $rvReinvite = Room-Version (Members $tokA $room)
-$afterReinvite = Send-Event $wsA $room 'm.room.encrypted' $rvKick 't-10'
+$afterReinvite = Send-Event $wsA $room 'm.room.encrypted' $rvKick 't-10b'
 Check '[1.11b] re-inviting a member who left does not bring back a room version the room already had' `
-  ([uint64]$rvReinvite -ne [uint64]$rvBeforeInvite -and [uint64]$rvReinvite -ne [uint64]$rvKick -and (Is-1506 $afterReinvite $rvReinvite)) `
-  "before_invite=$rvBeforeInvite kick=$rvKick reinvite=$rvReinvite"
+  ([uint64]$rvReinvite -ne [uint64]$rvBan -and [uint64]$rvReinvite -ne [uint64]$rvBeforeInvite -and [uint64]$rvReinvite -ne [uint64]$rvKick -and (Is-1506 $afterReinvite $rvReinvite)) `
+  "before_invite=$rvBeforeInvite ban=$rvBan kick=$rvKick reinvite=$rvReinvite"
 
 # Conditions 7 and 8 of §10: no agreement, no check; an agreement cannot be skipped.
 $httpSend = Http PUT "/_matrix/client/v3/rooms/$(Enc $room)/send/m.room.encrypted/t-http" ($MEGOLM | ConvertFrom-Json) $tokA

@@ -112,7 +112,7 @@ Bob 在 B2 上傳金鑰 → mark_device_key_update 寫 keychangeid 索引（Bob 
 
 ## 9. 達成狀態（2026-09-20）
 
-答案是 [wbf-room-device-version.md](wbf-room-device-version.md)：每個帳號一個**裝置版本號**（`序號-雜湊`），每個房間一個**房間版本號**（成員事件位置與成員裝置版本位置的最大值），成員清單把兩者交給 client，加密訊息送出時比對房間版本號，對不上回 **`1506 RoomDevicesChanged`**。
+答案是 [wbf-room-device-version.md](wbf-room-device-version.md)：每個帳號一個**裝置版本號**（`序號-雜湊`），每個房間一個**房間版本號**（房間目前狀態裡算得數的成員集合的**雜湊**），成員清單把兩者交給 client，加密訊息送出時比對房間版本號，對不上回 **`1506 RoomDevicesChanged`**。
 
 📎 名稱對照：§4 候選裡的 `dv` ＝ 現在的**房間版本號**（`org.wbftw.room_version`）；候選的拒絕碼名 `DeviceSetChanged` ＝ 現在的 `RoomDevicesChanged`（1506）。
 
