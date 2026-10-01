@@ -306,7 +306,7 @@ try {
       # `id`/`seq` = 0/0 down as the contract for a control-frame refusal: a control
       # frame has no header to copy them from (cirno, PR #103 review).
       $addressed = if ($refusal.id -eq 0 -and $refusal.seq -eq 0 -and $refusal.metaText -match 'Unauthorized') { 'ok' } else { 'FAIL' }
-      Log "[3.2d] logged out, NOT sending any pack -> server answered the keep-alive frame: $(Describe $refusal)  ($addressed: expect Error Unauthorized id=0 seq=0)"
+      Log "[3.2d] logged out, NOT sending any pack -> server answered the keep-alive frame: $(Describe $refusal)  (${addressed}: expect Error Unauthorized id=0 seq=0)"
       $t2 = $wsC.ReceiveAsync([ArraySegment[byte]]$buf, [Threading.CancellationToken]::None)
       if ($t2.Wait(5000)) { Log "[3.2d-ii] then server sent $($t2.Result.MessageType) code=$($t2.Result.CloseStatus) state=$($wsC.State)  (expect Close, PolicyViolation)" } else { Log "[3.2d-ii] no close within 5 s, state=$($wsC.State)  (expect Close: FAIL)" }
     } else {
