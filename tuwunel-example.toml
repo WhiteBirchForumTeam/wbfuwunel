@@ -3186,7 +3186,14 @@
 # closes it, in seconds. Uploads in progress are unaffected: their state
 # is in the database and a reconnecting client resumes from `Status`.
 #
-#wbf_ws_idle_timeout = 300
+# 🚨 This is also the worst case for how long a session that was logged
+# out, revoked, expired or locked keeps its connection — the session is
+# checked on every frame, but a client that sends nothing at all is only
+# noticed when this runs out (/docs/design/wire/pack-pipeline.md §3.1).
+# ⚠️ A client must therefore send something (a `Control/Ping` pack or a
+# WebSocket ping) more often than this, or it will be reconnecting.
+#
+#wbf_ws_idle_timeout = 60
 
 # How long a wbf WebSocket connection that was upgraded without a bearer
 # token may exist before it logs in, in seconds. Counted from the upgrade,

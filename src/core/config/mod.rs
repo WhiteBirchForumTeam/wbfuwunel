@@ -3654,7 +3654,14 @@ pub struct Config {
 	/// closes it, in seconds. Uploads in progress are unaffected: their state
 	/// is in the database and a reconnecting client resumes from `Status`.
 	///
-	/// default: 300
+	/// 🚨 This is also the worst case for how long a session that was logged
+	/// out, revoked, expired or locked keeps its connection — the session is
+	/// checked on every frame, but a client that sends nothing at all is only
+	/// noticed when this runs out (/docs/design/wire/pack-pipeline.md §3.1).
+	/// ⚠️ A client must therefore send something (a `Control/Ping` pack or a
+	/// WebSocket ping) more often than this, or it will be reconnecting.
+	///
+	/// default: 60
 	#[serde(default = "default_wbf_ws_idle_timeout")]
 	pub wbf_ws_idle_timeout: u64,
 
@@ -6178,7 +6185,7 @@ fn default_wbf_meta_max_bytes() -> usize { 64 * 1024 }
 
 fn default_wbf_data_max_bytes() -> usize { 2 * 1024 * 1024 + 4096 }
 
-fn default_wbf_ws_idle_timeout() -> u64 { 300 }
+fn default_wbf_ws_idle_timeout() -> u64 { 60 }
 
 fn default_wbf_ws_unauthenticated_timeout() -> u64 { 30 }
 

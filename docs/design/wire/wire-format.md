@@ -425,7 +425,7 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 
 `GET /_wbf/v1/ws`（維護者 2026-09-03 定：自己的前綴，照 `/_名字/版本/功能` 的慣例；端點本身就跟上游切開了，不用借 `/_tuwunel/`），`Authorization: Bearer <access token>`，Upgrade，只接受 TLS。每個 binary message = 一個 pack。
 一條連線同時跑很多 upload 與 stream，靠 `id` 分流；斷線後上傳進度在 DB（重連續傳）、流進入 abandoned 計時。
-伺服器：axum `ws` feature，落點 `src/api/client/wbf/ws.rs`（B 支）。升級時驗 Bearer（錯了回 401，body 仍是 Error pack）；之後每個 binary message 一個 pack，依到達順序一個一個處理、回應依同一順序送回（client 可以連發不等 Ack）；字串 frame 回 `Error(Corrupt)`；到達的 pack 超過 `wbf_meta_max_bytes + wbf_data_max_bytes + 外框` 由 WebSocket 層拒收。連線**不保存任何上傳狀態**：`OutOfOrder` 一律由上傳服務判定，用的是 service 層**跨連線共用**的記憶體狀態（每個上傳一把鎖，DB 列為真相、txn 執行後才推進記憶體，見 [/docs/design/media/chunked-upload.md](../media/chunked-upload.md) §3.1），不論塊從哪條連線或 HTTP 來；重連從 `Status` 接。（第一版曾放一張每連線的 `id → 下一塊` 表當捷徑，審查指出它在冪等重送後會倒退、在跨傳輸時會過期，先於 DB 否決合法的塊，整張拿掉。）沉默超過 `wbf_ws_idle_timeout`（預設 300 秒）server 關連線，上傳進度不受影響。「只接受 TLS」由前置代理保證，server 本身不檢查。
+伺服器：axum `ws` feature，落點 `src/api/client/wbf/ws.rs`（B 支）。升級時驗 Bearer（錯了回 401，body 仍是 Error pack）；之後每個 binary message 一個 pack，依到達順序一個一個處理、回應依同一順序送回（client 可以連發不等 Ack）；字串 frame 回 `Error(Corrupt)`；到達的 pack 超過 `wbf_meta_max_bytes + wbf_data_max_bytes + 外框` 由 WebSocket 層拒收。連線**不保存任何上傳狀態**：`OutOfOrder` 一律由上傳服務判定，用的是 service 層**跨連線共用**的記憶體狀態（每個上傳一把鎖，DB 列為真相、txn 執行後才推進記憶體，見 [/docs/design/media/chunked-upload.md](../media/chunked-upload.md) §3.1），不論塊從哪條連線或 HTTP 來；重連從 `Status` 接。（第一版曾放一張每連線的 `id → 下一塊` 表當捷徑，審查指出它在冪等重送後會倒退、在跨傳輸時會過期，先於 DB 否決合法的塊，整張拿掉。）沉默超過 `wbf_ws_idle_timeout`（預設 60 秒）server 關連線，上傳進度不受影響。「只接受 TLS」由前置代理保證，server 本身不檢查。
 
 **連線背後的 session（2026-09-06，`wbf/auth-and-ws-lifetime`，[/docs/design/history/review-followups-2026-09-06.md](../history/review-followups-2026-09-06.md) §2.3／§2.4）**：
 
@@ -496,7 +496,7 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
   帶 Bearer 升級照 §6.1 不變，直接是已登入。兩條路都在，client 自己選。
 - **未登入的連線最多活 30 秒**：新 config `wbf_ws_unauthenticated_timeout`（預設 30 秒），**從升級起算，不是 idle**：送 Ping 不延長。到時還沒登入送 Close 1008。
   理由（維護者）：連上但沒授權的連線不能佔著什麼都不做；帳密本來就是先打好才開連線送的，30 秒夠（註冊也一樣）；斷了 client 重連就好，自動重連是 client 的事。
-  已登入的連線照舊用 `wbf_ws_idle_timeout`（300 秒）。
+  已登入的連線照舊用 `wbf_ws_idle_timeout`（預設 60 秒）。
 - **Login 成功後這條連線的 Session 換成新的**，之後每個 message 的重驗用新 token。同一條連線再送 Login：允許，換成另一個 session（舊 token 不撤，
   那是 Logout 的事）。切帳號用這條，不需要先 Logout。
 - **Refresh 成功後 Session 的 token 換新**，user／device 不變；舊 access token 照 Matrix 語意失效。
