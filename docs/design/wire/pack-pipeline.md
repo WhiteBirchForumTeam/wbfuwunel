@@ -266,7 +266,10 @@ struct Queued { outgoing: Outgoing, _room: Option<OwnedSemaphorePermit> }  // �
   - 🚨 **`spawn` 那一道不是多餘的**：**panic 的 task 跑不到自己的最後一步**，所以它既留下自己那筆、也不幫別人收。
     一連串 panic 的連線會堆著，直到下一條連線進來。這條有測試釘住（`connections.rs` 的 `task_tracking_tests`）。
   - 🚨 **task 拿的必須是 `Weak`，不是 `Arc`**（cirno 在 PR #101 抓到，是我造成的）：集合持有 task 的 future，
-    而 future 反過來持有集合 —— 那是一個**參照環**，配置永遠不會被釋放；而真正會咬的是
+    而 future 反過來持有集合 —— 那是一個**參照環**。📎 ⚠️ 環的代價有條件（cirno 在 PR #101 複審時指出）：
+    task 正常結束時它自己的 future 就被 drop、環當場斷，所以連線陸續結束時不會累積；
+    **只要有一條 task 永遠不結束（＝卡住的連線，也正是 `JOIN_TIMEOUT` 要擋的那個），那塊配置就永遠不會被釋放**。
+    而真正會咬的是
     **`JoinSet` 自己的 `Drop`（它會 abort 所有還在跑的）只要有任何 task 活著就永遠不會觸發**。
     ⭐ 而那個 abort 是本節安全論證的**機械層**：handler 透過**原始指標**借 `Services`（`api/router/state.rs`），
     所以一個在 `Services` 掉了之後還被 poll 的 task 就是 use-after-free。

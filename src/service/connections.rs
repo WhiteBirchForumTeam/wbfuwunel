@@ -50,9 +50,12 @@ type TaskSet = Arc<Mutex<Option<JoinSet<()>>>>;
 /// What a task holds to reach the set it is itself in.
 ///
 /// 🚨 **`Weak`, never `Arc`.** The set owns the task's future and the future would
-/// own the set back — a cycle, so the allocation could never be freed, and, the
-/// part that actually bites, **`JoinSet`'s own `Drop` (which aborts everything
-/// still running) could never fire while any task was alive**. That abort is the
+/// own the set back — a cycle. A finishing task drops its own future and lets go,
+/// so the cycle costs nothing while connections keep ending; ⚠️ **one connection
+/// that never ends pins the set for good** — and a connection that never ends is
+/// exactly what `JOIN_TIMEOUT` is there for. The part that actually bites is the
+/// other half: **`JoinSet`'s own `Drop` (which aborts everything still running)
+/// could never fire while any task was alive**. That abort is the
 /// mechanical half of this module's safety argument: a handler borrows `Services`
 /// through a raw pointer, so a task still being polled after `Services` is gone
 /// is a use-after-free. Dropping `Connections` has to be able to stop these
@@ -362,9 +365,10 @@ impl Connections {
 	}
 
 	/// Return:
-	///     usize  how many connection tasks are tracked right now —— live ones
-	///     plus any that finished since the last `spawn`; 0 once shutdown has
-	///     taken the set.
+	///     usize  how many connection tasks are tracked right now —— the live
+	///     ones plus the finished entries nobody has reaped yet (normally at
+	///     most one, since tasks reap each other; ones that panicked pile up
+	///     until the next `spawn`); 0 once shutdown has taken the set.
 	#[must_use]
 	pub fn count_tracked_tasks(&self) -> usize {
 		lock_tasks(&self.tasks)
@@ -701,11 +705,10 @@ mod task_tracking_tests {
 
 		tokio::task::yield_now().await;
 
-		assert_eq!(
-			*ran_past_the_await
+		assert!(
+			!*ran_past_the_await
 				.lock()
 				.expect("a test-local lock"),
-			false,
 			"the task kept running after `Connections` was dropped",
 		);
 	}
