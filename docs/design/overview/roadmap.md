@@ -180,7 +180,7 @@ client 側的三條契約在 [/docs/design/events/event-push.md](../events/event
 ⚠️ **行為改變，部署要看**：兩項設定**改名**，舊名字留在設定裡**拒絕啟動**（忽略對這兩個設定是 fail open）；`localhost_ip` 的語意跟舊名**相反**（舊的是「這個 peer 跳過安全解析」，新的是「這個 peer 可以指名 client」）。同機代理與 unix socket 因此零設定就是 per-client；⚠️ 但**分開的容器不算 loopback**，那種部署要指名 header。
 📎 這一支自己弄壞過一個測試：預設 4→8 之後 e2e13 `[2.7]` 靠預設值撞上限，期望被拒的 login 其實成功了，而那支從改預設之後沒重跑過 —— 現在數字寫死在該測試自己的 config 裡。
 
-### 2.15 🔲 外部審查 2026-09-29 的修補（三支已合併，其餘照嚴重度排）
+### 2.15 🔲 外部審查 2026-09-29 的修補（五條已合併，其餘照嚴重度排）
 
 維護者 2026-09-29 拿來一份對 `main`（`d0f60ee`）的外部 code review：**八條 🔴 我逐條回原始碼驗，認七條、一條描述要修正**，⭐ 其中四條踩在我自己寫的程式上。維護者定的處理方式是**照嚴重度切成幾支**，不是一支全包。
 
@@ -191,7 +191,7 @@ client 側的三條契約在 [/docs/design/events/event-push.md](../events/event
 | 5 | 房間版本號取最大值，re-invite 會倒退 → 金鑰發給已離開的人 | ✅ PR #94 |
 | 4 | to-device **單則沒有上限** → 一則 20 MiB 讓受害裝置的佇列永久卡死 | ✅ PR #99 —— 存進佇列前就擋、回 413（維護者 2026-09-29 定）|
 | 6 | 橋的 `fill_path` 沒擋 `.` / `..`：`session_id: "."` 讓 `/room_keys/keys/{id}` 變成 `/room_keys/keys`（刪一個 session 變成刪整個備份）| ✅ PR #100 —— 三層防線：拒 `.`／`..`、拒 `\t\n\r`（它們被**丟掉**不是被編碼，會繞過前者）、執行期比對段數 |
-| 7 | `service/connections.rs` 的 `JoinSet` 只在 `close_and_join()` 回收 → 每條歷來連線留一筆到程序結束 | ✅ PR #101（待審）—— 回收放在 `spawn` 與**每個 task 的最後一步**，界限 ≤ 1 筆。⭐ 真正難查的後果不是記憶體，是 `set.len()`（關機 log 與 `JOIN_TIMEOUT` 用它）把死掉的也算進去 |
+| 7 | `service/connections.rs` 的 `JoinSet` 只在 `close_and_join()` 回收 → 每條歷來連線留一筆到程序結束 | ✅ PR #101（待審）—— 回收放在 `spawn` 與**每個 task 的最後一步**，正常結束的界限 ≤ 1 筆（panic 的要等下一條連線）。⭐ 真正難查的後果不是記憶體，是關機那行 log 印的 `set.len()` 把死掉的也算進去。⚠️ 審查又抓到一條：第一版用 `Arc` 讓 task 伸回來，那是**參照環**，並且拿掉了 `JoinSet` 掉落即 abort 那道機械層防線（改成 `Weak`）|
 | 8 | `wbf/ws.rs` 的 `Ping(_) \| Pong(_) => continue` 在 revalidate **之前** | 🔲 前半（控制框也 revalidate）；**後半另開設計提案**（登出／刪裝置／鎖帳號要拆掉訂閱）|
 | 3 | `timeline/purge.rs` 的 `release_range` 無條件放掉整段，而迴圈接著**保留** state 與本地事件 → **釋放的集合 ≠ 刪除的集合** | 🔲 **另開一支，動手前先寫設計說明**（現在是先釋放後刪除，那是**不可逆遺失**的方向）|
 

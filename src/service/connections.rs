@@ -105,9 +105,9 @@ pub fn to_address_group(address: IpAddr) -> IpAddr {
 ///
 /// 🚨 A poisoned lock must not take the process down: refusing every new
 /// connection for the rest of the server's life is worse than the panic that
-/// poisoned it (CLAUDE.md P). ⚠️ Nothing may be awaited while this is held —— the
-/// guard is not `Send`, and `close_and_join` depends on the lock being free
-/// while it waits.
+/// poisoned it, so the guard is taken either way.
+/// ⚠️ Nothing may be awaited while this is held — the guard is not `Send`, and
+/// `close_and_join` depends on the lock being free while it waits.
 ///
 /// Args:
 ///     tasks: the shared task set
@@ -325,9 +325,9 @@ impl Connections {
 				// someone joins it, and the only join used to be at shutdown — so a
 				// server that had served a million connections carried a million
 				// entries for its whole life. The entry is small, but `len()` is the
-				// number shutdown logs and measures against its timeout, so it was
-				// also reporting a million open connections when three were open
-				// (external review 2026-09-29 #7).
+				// number shutdown prints — and prints again beside `JOIN_TIMEOUT`
+				// when it gives up — so it was reporting a million open connections
+				// when three were open (external review 2026-09-29 #7).
 				//
 				// Reaped in two places, and the second is what bounds it:
 				//   - here, so a burst of new connections clears the last burst;
