@@ -22,7 +22,7 @@
 use std::{
 	collections::HashMap,
 	net::IpAddr,
-	sync::{Arc, Mutex, MutexGuard},
+	sync::{Arc, Mutex, MutexGuard, Weak},
 	time::Duration,
 };
 
@@ -43,9 +43,22 @@ type SlotTable = Arc<Mutex<HashMap<(OwnedUserId, OwnedDeviceId), u32>>>;
 /// Open connections per source address, keyed by `to_address_group`.
 type AddressTable = Arc<Mutex<HashMap<IpAddr, u32>>>;
 
-/// The tracked connection tasks. `Arc` because each task reaches back into it
-/// as its last act, to take the finished ones out —— see `spawn`.
+/// The tracked connection tasks. Shared because each task reaches back into it
+/// as its last act, to take the finished ones out — see `spawn`.
 type TaskSet = Arc<Mutex<Option<JoinSet<()>>>>;
+
+/// What a task holds to reach the set it is itself in.
+///
+/// 🚨 **`Weak`, never `Arc`.** The set owns the task's future and the future would
+/// own the set back — a cycle, so the allocation could never be freed, and, the
+/// part that actually bites, **`JoinSet`'s own `Drop` (which aborts everything
+/// still running) could never fire while any task was alive**. That abort is the
+/// mechanical half of this module's safety argument: a handler borrows `Services`
+/// through a raw pointer, so a task still being polled after `Services` is gone
+/// is a use-after-free. Dropping `Connections` has to be able to stop these
+/// tasks, and it cannot if the thing that stops them is held by the tasks
+/// themselves (cirno, PR #101).
+type WeakTaskSet = Weak<Mutex<Option<JoinSet<()>>>>;
 
 pub struct Connections {
 	/// `None` once `close_and_join` has begun: nothing may start after that.
@@ -327,12 +340,17 @@ impl Connections {
 				// shutdown able to wait for the connections at all.
 				reap_finished(set);
 
-				let tasks = self.tasks.clone();
+				let tasks: WeakTaskSet = Arc::downgrade(&self.tasks);
 				set.spawn(async move {
 					task.await;
 
 					// The task's own last act. Its entry stays until someone else
 					// comes along; everything that finished before it goes now.
+					// Gone means `Connections` was dropped while this ran — there is
+					// no set left to tidy, and nothing to say about it.
+					let Some(tasks) = tasks.upgrade() else {
+						return;
+					};
 					if let Some(set) = lock_tasks(&tasks).as_mut() {
 						reap_finished(set);
 					}
@@ -643,6 +661,53 @@ mod task_tracking_tests {
 		);
 
 		let _released = release.send(());
+	}
+
+	/// 🚨 **Dropping `Connections` must still abort the tasks still running.**
+	///
+	/// That is `JoinSet`'s own `Drop`, and it is the mechanical half of this
+	/// module's safety argument — a handler borrows `Services` through a raw
+	/// pointer, so a task polled after `Services` is gone is a use-after-free.
+	/// ⚠️ Holding the set by `Arc` from inside a task silently removes it: the set
+	/// owns the future, the future owns the set, and nothing can ever be dropped
+	/// (cirno, PR #101). The task reaches back with a `Weak` for exactly this.
+	#[tokio::test]
+	async fn dropping_connections_aborts_what_was_still_running() {
+		let ran_past_the_await = Arc::new(Mutex::new(false));
+		let flag = ran_past_the_await.clone();
+		let (release, held) = tokio::sync::oneshot::channel::<()>();
+
+		let connections = Connections::new();
+		assert!(connections.spawn(async move {
+			let _waited = held.await;
+			if let Ok(mut flag) = flag.lock() {
+				*flag = true;
+			}
+		}));
+		tokio::task::yield_now().await;
+
+		drop(connections);
+
+		// ⚠️ An abort is a request, not an event: the task is dropped the next time
+		// the runtime looks at it. Asserting straight after the drop would be
+		// asserting that cancellation is synchronous, which it is not.
+		for _ in 0..4 {
+			tokio::task::yield_now().await;
+		}
+
+		// Its future is gone and with it the receiver — a send that finds nobody
+		// home is the proof, and it does not depend on the task running anything.
+		assert!(release.send(()).is_err(), "the task should have been aborted with the set");
+
+		tokio::task::yield_now().await;
+
+		assert_eq!(
+			*ran_past_the_await
+				.lock()
+				.expect("a test-local lock"),
+			false,
+			"the task kept running after `Connections` was dropped",
+		);
 	}
 
 	/// And the count says 0 once shutdown has taken the set, rather than panicking
