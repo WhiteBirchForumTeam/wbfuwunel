@@ -204,6 +204,7 @@ client 側的三條契約在 [/docs/design/events/event-push.md](../events/event
 
 | 項目 | 一句話 | 前提 / 觸發條件 |
 |---|---|---|
+| 📄 **預設不說自己的版本** | 詳細版本（**帶 git commit**）現在有**六處**對外說，其中三處**不用認證** —— 等於指出「這台跑哪個 commit」，對著公開 repo 就查得出它還沒修哪些洞。新設定 `publish_server_version`（預設 `false`）。🚫 實作名與 `features` 不藏（功能協商要用）。提案：[/docs/design/wire/hide-server-version.md](../wire/hide-server-version.md) | 維護者 2026-10-01 提；⏳ 提案裡有四件要他決定（設定名、User-Agent 要不要一起藏、`/_tuwunel/server_version` 要不要加認證、`compiler` 是否跟著藏）|
 | 💭 歷史保留政策 | 事件超過 N 天自動 purge（config ＋ 每房間覆寫 ＋ 一個 worker 呼叫既有的 `purge_history`），原文備份跟著同一期限走 | 維護者 2026-09-03 的看法是**事件一直長是自然的，不必加**。列在這裡是因為若哪天要「算得出來的容量」變成「有上限的容量」，這是唯一的開關 |
 | 💭 遠端媒體快取 TTL | 別台伺服器的媒體被抓來快取後沒有過期時間，收集器也不碰它 | **只有打開聯邦才會發生**（`allow_federation = false` 時連出去的請求在 `federation/execute.rs` 就被擋）。開聯邦之前必做 |
 | 💭 RocksDB 空間回收 | 刪除只寫 tombstone 記錄，空間靠 compaction；大量清理後可能要手動 compaction 或調 periodic compaction | 第一次大量刪房或 purge 之後量一次（`migrate-references` 已拔掉） |
