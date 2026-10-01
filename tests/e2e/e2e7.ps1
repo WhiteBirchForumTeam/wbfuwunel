@@ -288,6 +288,13 @@ if ($t.Wait(5000)) { Log "[3.2c] then server sent $($t.Result.MessageType) code=
 # reset wbf_ws_idle_timeout (60 s in this config), so the connection stayed open indefinitely and
 # kept receiving whatever its subscriptions pushed. The client sends nothing after the logout here:
 # the only traffic is .NET's own keep-alive control frame, once a second.
+#
+# 🚨 This block is the only one in this suite whose result reaches the exit code (see the end of
+# the file). The older scenarios print `FAIL` and exit 0, which is how an edit of mine broke the
+# whole script while my check — counting `FAIL` lines — still reported green: a script that never
+# ran has no FAIL lines. ⭐ Count the good evidence, not the absence of bad (rumia and cirno,
+# PR #103 review). Only this block is wired up; converting the rest is its own change.
+$script:TeardownFail = $false
 $regC = Api Post '/_matrix/client/v3/register' '{"username":"carol","password":"correct-horse-battery","auth":{"type":"m.login.dummy"}}' $null
 $tokC = $regC.access_token
 $wsC = Ws-Open $tokC 1
@@ -305,16 +312,23 @@ try {
       # 🚨 The only assertion in this suite, because §3.1 of pack-pipeline.md writes
       # `id`/`seq` = 0/0 down as the contract for a control-frame refusal: a control
       # frame has no header to copy them from (cirno, PR #103 review).
-      $addressed = if ($refusal.id -eq 0 -and $refusal.seq -eq 0 -and $refusal.metaText -match 'Unauthorized') { 'ok' } else { 'FAIL' }
+      # ⚠️ Every field, not the meta text: `-match 'Unauthorized'` passes on any pack
+      # whose meta merely contains that word, which is not what this claims to guard
+      # (rumia, PR #103 review). kind 1 = Control, subtype 3 = Error.
+      $addressed = if ($refusal.kind -eq 1 -and $refusal.subtype -eq 3 -and $refusal.meta.code -eq 'Unauthorized' -and $refusal.id -eq 0 -and $refusal.seq -eq 0) { 'ok' } else { $script:TeardownFail = $true; 'FAIL' }
       Log "[3.2d] logged out, NOT sending any pack -> server answered the keep-alive frame: $(Describe $refusal)  (${addressed}: expect Error Unauthorized id=0 seq=0)"
       $t2 = $wsC.ReceiveAsync([ArraySegment[byte]]$buf, [Threading.CancellationToken]::None)
-      if ($t2.Wait(5000)) { Log "[3.2d-ii] then server sent $($t2.Result.MessageType) code=$($t2.Result.CloseStatus) state=$($wsC.State)  (expect Close, PolicyViolation)" } else { Log "[3.2d-ii] no close within 5 s, state=$($wsC.State)  (expect Close: FAIL)" }
+      if ($t2.Wait(5000)) {
+        $closed = if ($t2.Result.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close -and $t2.Result.CloseStatus -eq [System.Net.WebSockets.WebSocketCloseStatus]::PolicyViolation) { 'ok' } else { $script:TeardownFail = $true; 'FAIL' }
+        Log "[3.2d-ii] then server sent $($t2.Result.MessageType) code=$($t2.Result.CloseStatus) state=$($wsC.State)  (${closed}: expect Close, PolicyViolation)"
+      } else { $script:TeardownFail = $true; Log "[3.2d-ii] no close within 5 s, state=$($wsC.State)  (FAIL: expect Close)" }
     } else {
-      Log "[3.2d] logged out, NOT sending any pack -> server sent $($m.MessageType) code=$($m.CloseStatus) state=$($wsC.State)  (expect the refusal pack first, then Close)"
+      $script:TeardownFail = $true
+      Log "[3.2d] logged out, NOT sending any pack -> server sent $($m.MessageType) code=$($m.CloseStatus) state=$($wsC.State)  (FAIL: expect the refusal pack first, then Close)"
     }
   }
-  else { Log "[3.2d] nothing within 20 s while only control frames were sent, state=$($wsC.State)  (expect a refusal and a Close: FAIL, the frame kind decided whether the session was checked)" }
-} catch { $inner = $_.Exception; while ($inner.InnerException) { $inner = $inner.InnerException }; Log "[3.2d] receive failed: $($inner.GetType().Name): $($inner.Message) state=$($wsC.State)  (expect a refusal and a Close, not a failure: FAIL)" }
+  else { $script:TeardownFail = $true; Log "[3.2d] nothing within 20 s while only control frames were sent, state=$($wsC.State)  (FAIL: the frame kind decided whether the session was checked)" }
+} catch { $script:TeardownFail = $true; $inner = $_.Exception; while ($inner.InnerException) { $inner = $inner.InnerException }; Log "[3.2d] receive failed: $($inner.GetType().Name): $($inner.Message) state=$($wsC.State)  (FAIL: expect a refusal and a Close, not a failure)" }
 
 # [3.3] shutdown with a connection open: the server closes it, the process exits, nothing dangles
 $wsA = Ws-Open $tokA
@@ -558,4 +572,9 @@ Log ''; Log 'DONE'
 
 # Leave on purpose: a pending ReceiveAsync or an undisposed socket can keep this process alive
 # long after DONE is written, which makes a finished run look like a hang.
+#
+# ⚠️ Only [3.2d] reaches this code: the older scenarios print their expected value and leave the
+# reading to a person (README §「舊式」). A non-zero exit here therefore means *that* block failed,
+# never "this suite is green" — ⭐ so read `DONE` plus this code, not one of them (PR #103 review).
+if ($script:TeardownFail) { Log '[3.2d] FAILED -> exit 1'; exit 1 }
 exit 0

@@ -44,13 +44,50 @@ STALE_PATHS = [
 problems = []
 
 
+def is_symlink_stub(path):
+    """
+    Args:
+        path: a file this walk found, example: "docs/contributing.md"
+    Return:
+        bool  True when the file is a symbolic link to another file in this
+        repo, under either checkout shape; otherwise False.
+
+    🚨 Two files here are symlinks the fork inherited (`development.md` ->
+    `docs/development.md`, `docs/contributing.md` -> `../CONTRIBUTING.md`, both
+    mode 120000). Their links belong to the *target*'s directory, but a walk
+    resolves them against the *link*'s directory, which invents dead links that
+    no reader can see -- and ⭐ it did so on Linux only, because a Windows
+    checkout with `core.symlinks=false` writes the target path into a plain
+    file instead, where there is nothing to resolve. A check that answers
+    differently per platform is a lying observable: it reported ALL CLEAR to
+    the author and two dead links to review (cirno, PR #103).
+    """
+    if os.path.islink(path):
+        return True
+    # The `core.symlinks=false` shape: the whole file is one relative path.
+    try:
+        with io.open(path, "r", encoding="utf-8") as handle:
+            body = handle.read(512)
+    except (IOError, OSError, UnicodeDecodeError):
+        return False
+    if "\n" in body.strip() or not body.strip():
+        return False
+    target = os.path.join(os.path.dirname(path) or ".", body.strip())
+    return os.path.isfile(target)
+
+
 def walk_files(exts):
     for root, dirs, files in os.walk("."):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         for name in files:
             path = os.path.normpath(os.path.join(root, name))
-            if os.path.splitext(name)[1] in exts and os.path.abspath(path) != os.path.abspath(SELF):
-                yield path
+            if os.path.splitext(name)[1] not in exts:
+                continue
+            if os.path.abspath(path) == os.path.abspath(SELF):
+                continue
+            if is_symlink_stub(path):
+                continue
+            yield path
 
 
 def read(path):

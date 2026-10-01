@@ -456,7 +456,7 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 ### 6.3 `Login`／`Refresh`／`Logout` —— 在通道上取得與放掉 session
 
 > 狀態：✅ 已實作，PR #30 2026-09-07 合併（提案 #29，§6.3.9 的點維護者都定了）。起因：維護者 2026-09-06 提出「登入應該有 WS 專用的 pack 格式；升級帶 Bearer 可以留著」。
-> 建在 PR #28 的 `Session` 上（§6.1「連線背後的 session」）：Login 就是**換掉這條連線的 Session**，其餘機制（每個 message 重驗、關機 join）不變。
+> 建在 PR #28 的 `Session` 上（§6.1「連線背後的 session」）：Login 就是**換掉這條連線的 Session**，其餘機制（每個 frame 重驗、關機 join）不變。
 
 #### 6.3.1 為什麼要有
 
@@ -497,17 +497,17 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 - **未登入的連線最多活 30 秒**：新 config `wbf_ws_unauthenticated_timeout`（預設 30 秒），**從升級起算，不是 idle**：送 Ping 不延長。到時還沒登入送 Close 1008。
   理由（維護者）：連上但沒授權的連線不能佔著什麼都不做；帳密本來就是先打好才開連線送的，30 秒夠（註冊也一樣）；斷了 client 重連就好，自動重連是 client 的事。
   已登入的連線照舊用 `wbf_ws_idle_timeout`（預設 60 秒）。
-- **Login 成功後這條連線的 Session 換成新的**，之後每個 message 的重驗用新 token。同一條連線再送 Login：允許，換成另一個 session（舊 token 不撤，
+- **Login 成功後這條連線的 Session 換成新的**，之後每個 frame 的重驗用新 token。同一條連線再送 Login：允許，換成另一個 session（舊 token 不撤，
   那是 Logout 的事）。切帳號用這條，不需要先 Logout。
 - **Refresh 成功後 Session 的 token 換新**，user／device 不變；舊 access token 照 Matrix 語意失效。
 - **Logout 成功後 server 送 Ack、再送 Close 1000 關線**（維護者定：換帳號重開一條 WS 就好）。`all: true` 撤全部 device，
-  同一個 user 的**其他** WS 連線在下一個 message 的重驗就被關（§6.1 的機制，不用另外通知）。
-- **重驗照舊每個 message 一次**；未登入狀態沒有 token，跳過重驗（沒東西可驗），只做 kind 白名單。
+  同一個 user 的**其他** WS 連線在下一個 frame 的重驗就被關（§6.1 的機制，不用另外通知）。
+- **重驗照舊每個 frame 一次**（§6.1：控制框也算）；未登入狀態沒有 token，跳過重驗（沒東西可驗），只做 kind 白名單。
 - **server 的責任只有即時回應**。client 的登入重試（維護者建議：3 秒沒回應重送、連續 3 次算伺服器無回應）是 client 的事，這裡不規定。
 
 #### 6.3.4 限速（這條是必做，不是加分）
 
-HTTP `/login` 現在**沒有**限速（只有 OIDC 端點有 `oidc_rc_per_second`／`oidc_rc_burst_count`）。開了 WS Login 等於多一個入口，而 WS 的每個 message 比一個 HTTP 請求便宜，
+HTTP `/login` 現在**沒有**限速（只有 OIDC 端點有 `oidc_rc_per_second`／`oidc_rc_burst_count`）。開了 WS Login 等於多一個入口，而 WS 的每個 frame 比一個 HTTP 請求便宜，
 不限速就是給暴力破解開快車道。提案：
 
 - 新 config `login_rc_per_second`／`login_rc_burst_count`，**同一個 token bucket 同時管 HTTP `/login`、`/refresh` 與 WS `Login`／`Refresh`**，key 是 client IP
