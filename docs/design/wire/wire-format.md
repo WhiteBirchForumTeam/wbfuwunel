@@ -294,7 +294,7 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 📌 **從 Matrix 錯誤來的 `Error` 都多帶 Matrix 的欄位**（`wbf/mod.rs` 的 `matrix_error_fields`，走橋的回覆、原生 handler 的 `Reject::from(Error)`、session 閘門的拒絕共用這一份規則）：`status`（Matrix 的 HTTP 狀態碼，一定有）、`errcode`、`retry_after_ms`、`soft_logout` —— 後三個 Matrix 的 body 裡有才有，沒有就**不出現**，不填空字串。原生的錯誤是把 `Error` 照 HTTP 會回的樣子轉成 body 再讀，所以同一個錯誤，走橋與不走橋的 `errcode` 一樣。
 - `message` 不變：原生的仍是 `"M_USER_LOCKED: This account has been locked."` 這種帶前綴的字串；走橋的是 body 的 `error`。
 - **走橋的另外把 data 放 Matrix 錯誤回應的 body 原樣**（../bridge-specs/index.md §1.2），UIAA 的 `flows`／`session` 也在裡面；原生的 data 是空的。
-- ⭐ **session 閘門的拒絕**（token 缺、錯、過期、被撤、帳號被鎖；HTTP pack 的認證、WS 升級時的認證、WS 每個 pack 之前的 `revalidate`）一律是 `Unauthorized`，不管 Matrix 的狀態碼是幾 —— 帶的 `errcode` 讓 client 分得出被鎖（`M_USER_LOCKED`，`soft_logout: true`）、過期（`M_UNKNOWN_TOKEN`，`soft_logout: true`）、被登出或撤銷（`M_UNKNOWN_TOKEN`，**沒有** `soft_logout`：要重新登入，不是 refresh）、沒帶 token（`M_MISSING_TOKEN`）。向量 `error_session_locked`。
+- ⭐ **session 閘門的拒絕**（token 缺、錯、過期、被撤、帳號被鎖；HTTP pack 的認證、WS 升級時的認證、WS **每個 frame**（含 Ping／Pong）之前的 `revalidate`，見 /docs/design/wire/pack-pipeline.md §3.1）一律是 `Unauthorized`，不管 Matrix 的狀態碼是幾 —— 帶的 `errcode` 讓 client 分得出被鎖（`M_USER_LOCKED`，`soft_logout: true`）、過期（`M_UNKNOWN_TOKEN`，`soft_logout: true`）、被登出或撤銷（`M_UNKNOWN_TOKEN`，**沒有** `soft_logout`：要重新登入，不是 refresh）、沒帶 token（`M_MISSING_TOKEN`）。向量 `error_session_locked`。
 - 📌 跟 Matrix 的 body 一樣，`soft_logout` 只會是 `true` 或不出現。之前 `Session` 的拒絕會寫 `"soft_logout": false`、限速不知道要等多久時寫 `"retry_after_ms": null`，現在兩者都是**不出現**（向量 `error_rate_limited` 也多了 `errcode`、`status`）。
 - 📎 這是原生 kind 也看得見的**加欄位**（維護者 2026-09-14 同意）；舊的 client 不認得就略過，不破壞。
 

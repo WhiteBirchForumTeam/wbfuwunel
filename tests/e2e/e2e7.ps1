@@ -111,9 +111,13 @@ function Exec([string]$cfg, [string[]]$cmds, [string]$tag) {
 }
 
 # ---------- WebSocket ----------
-function Ws-Open($tok) {
+function Ws-Open($tok, [int]$keepAliveSeconds = 0) {
   $ws = New-Object System.Net.WebSockets.ClientWebSocket
   if ($tok) { $ws.Options.SetRequestHeader('Authorization', "Bearer $tok") }
+  # Only [3.2d] passes this. It is the only way to make .NET emit a WebSocket
+  # control frame: the API has no SendPing, so the keep-alive timer is it.
+  # Must be set before ConnectAsync.
+  if ($keepAliveSeconds -gt 0) { $ws.Options.KeepAliveInterval = [TimeSpan]::FromSeconds($keepAliveSeconds) }
   $ws.ConnectAsync([Uri]'ws://127.0.0.1:8015/_wbf/v1/ws', [Threading.CancellationToken]::None).Wait()
   $ws
 }
@@ -278,6 +282,34 @@ Log "[3.2b] after HTTP logout, Ping -> $(Describe $r)  (expect Error Unauthorize
 $buf = New-Object byte[] 4096
 $t = $wsB.ReceiveAsync([ArraySegment[byte]]$buf, [Threading.CancellationToken]::None)
 if ($t.Wait(5000)) { Log "[3.2c] then server sent $($t.Result.MessageType) code=$($t.Result.CloseStatus) state=$($wsB.State)  (expect Close, PolicyViolation)" } else { Log "[3.2c] no close within 5 s, state=$($wsB.State)  (expect Close: FAIL)" }
+
+# [3.2d] external review 2026-09-29 #8: a logged-out session that sends only WebSocket control
+# frames must be closed too. Before the fix, Ping/Pong `continue`d before `revalidate` and still
+# reset wbf_ws_idle_timeout (60 s in this config), so the connection stayed open indefinitely and
+# kept receiving whatever its subscriptions pushed. The client sends nothing after the logout here:
+# the only traffic is .NET's own keep-alive control frame, once a second.
+$regC = Api Post '/_matrix/client/v3/register' '{"username":"carol","password":"correct-horse-battery","auth":{"type":"m.login.dummy"}}' $null
+$tokC = $regC.access_token
+$wsC = Ws-Open $tokC 1
+$r = Ws-Call $wsC $ping
+Log "[3.2d-i] carol connected with keep-alive, Ping -> $(Describe $r)  (expect Pong)"
+$null = Api Post '/_matrix/client/v3/logout' '{}' $tokC
+$t = $wsC.ReceiveAsync([ArraySegment[byte]]$buf, [Threading.CancellationToken]::None)
+try {
+  if ($t.Wait(20000)) {
+    $m = $t.Result
+    if ($m.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Binary) {
+      # The refusal is addressed to no session: a control frame carries no header to copy id/seq from.
+      $p = Read-Pack ([byte[]]$buf[0..($m.Count - 1)])
+      Log "[3.2d] logged out, NOT sending any pack -> server answered the keep-alive frame: $(Describe $p)  (expect Error Unauthorized id=0 seq=0)"
+      $t2 = $wsC.ReceiveAsync([ArraySegment[byte]]$buf, [Threading.CancellationToken]::None)
+      if ($t2.Wait(5000)) { Log "[3.2d-ii] then server sent $($t2.Result.MessageType) code=$($t2.Result.CloseStatus) state=$($wsC.State)  (expect Close, PolicyViolation)" } else { Log "[3.2d-ii] no close within 5 s, state=$($wsC.State)  (expect Close: FAIL)" }
+    } else {
+      Log "[3.2d] logged out, NOT sending any pack -> server sent $($m.MessageType) code=$($m.CloseStatus) state=$($wsC.State)  (expect the refusal pack first, then Close)"
+    }
+  }
+  else { Log "[3.2d] nothing within 20 s while only control frames were sent, state=$($wsC.State)  (expect a refusal and a Close: FAIL, the frame kind decided whether the session was checked)" }
+} catch { $inner = $_.Exception; while ($inner.InnerException) { $inner = $inner.InnerException }; Log "[3.2d] receive failed: $($inner.GetType().Name): $($inner.Message) state=$($wsC.State)  (expect a refusal and a Close, not a failure: FAIL)" }
 
 # [3.3] shutdown with a connection open: the server closes it, the process exits, nothing dangles
 $wsA = Ws-Open $tokA

@@ -306,7 +306,9 @@ client                                          server
 - client 怎麼分辨「要 UIAA」和「沒登入」：**走橋的回覆（bit4）、status 401、data 有 `flows`** ＝ UIAA 挑戰；沒登入的 401 有 `errcode` `M_MISSING_TOKEN`／`M_UNKNOWN_TOKEN`、沒有 `flows`。→ **決定 2**（要不要在 meta 另加一個旗標，省得 client 解 data）。
 - `session` 由 server 存。已登入的這幾支以「這個帳號、這個裝置」為鍵，所以同一個裝置的另一條連線也接得上（實作時 e2e 驗）。
 - **對連線的影響**：
-  - 停用帳號、刪掉**自己這個**裝置之後，這條連線的 token 就失效。回覆照樣先送到，**下一個 pack** 被 `revalidate` 擋下並關連線（批 1 §1.2 那一道）。
+  - 停用帳號、刪掉**自己這個**裝置之後，這條連線的 token 就失效。回覆照樣先送到，**下一個 frame** 被 `revalidate` 擋下並關連線（批 1 §1.2 那一道）。
+    📎 **下一個 frame 不是「下一個 pack」**：Ping／Pong 也算（/docs/design/wire/pack-pipeline.md §3.1，外部審查 #8），
+    否則一個只 ping 的 client 可以讓失效的連線無限期開著。
   - 改密碼的 `logout_devices` 保留發請求的那個裝置（HTTP 本來的行為），所以這條連線不受影響。
 - 密碼猜測的限速：跟 HTTP 的 UIAA 一樣（同一個 `auth_uiaa`），橋不另加也不減。
 
