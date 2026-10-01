@@ -300,8 +300,9 @@ try {
     $m = $t.Result
     if ($m.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Binary) {
       # The refusal is addressed to no session: a control frame carries no header to copy id/seq from.
-      $p = Read-Pack ([byte[]]$buf[0..($m.Count - 1)])
-      Log "[3.2d] logged out, NOT sending any pack -> server answered the keep-alive frame: $(Describe $p)  (expect Error Unauthorized id=0 seq=0)"
+      # 🚨 Not `$p`: that name holds this script's server process, and [3.3c] still needs it.
+      $refusal = Read-Pack ([byte[]]$buf[0..($m.Count - 1)])
+      Log "[3.2d] logged out, NOT sending any pack -> server answered the keep-alive frame: $(Describe $refusal)  (expect Error Unauthorized id=0 seq=0)"
       $t2 = $wsC.ReceiveAsync([ArraySegment[byte]]$buf, [Threading.CancellationToken]::None)
       if ($t2.Wait(5000)) { Log "[3.2d-ii] then server sent $($t2.Result.MessageType) code=$($t2.Result.CloseStatus) state=$($wsC.State)  (expect Close, PolicyViolation)" } else { Log "[3.2d-ii] no close within 5 s, state=$($wsC.State)  (expect Close: FAIL)" }
     } else {
