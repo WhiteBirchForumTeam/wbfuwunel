@@ -248,7 +248,7 @@ Log "[2.3] fresh connection, Status of sealed D -> $(Describe $r)  (expect NotFo
 try { $ws2.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, 'bye', [Threading.CancellationToken]::None).Wait(3000) | Out-Null } catch {}
 Stop-Server $p
 # ================= Scenario 3: the session behind the connection (review-followups 2.3 / 2.4) =================
-# A locked account is refused on both transports; a logged-out token stops working at the next pack, not never;
+# A locked account is refused on both transports; a logged-out token stops working at the next frame, not never (control frames included, [3.2d]);
 # a connection still open at shutdown is closed by the server and the process exits without dangling references.
 Log '################ Scenario 3: locked account, logout mid-connection, shutdown with a connection open ################'
 $db3 = "$S\e2e7db-3"; Remove-Item -Recurse -Force $db3 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db3 | Out-Null
@@ -272,7 +272,7 @@ $null = Api Put "/_synapse/admin/v2/users/$([uri]::EscapeDataString('@bob:localh
 $r = Send-Pack $ping $tokB
 Log "[3.1c] unlocked bob, HTTP Ping -> $(Describe $r)  (expect http=200 Pong)"
 
-# [3.2] logout while connected: the next pack is refused and the server closes the connection
+# [3.2] logout while connected: the next frame is refused and the server closes the connection
 $wsB = Ws-Open $tokB
 $r = Ws-Call $wsB $ping
 Log "[3.2a] bob connected, Ping -> $(Describe $r)  (expect Pong)"
@@ -302,7 +302,11 @@ try {
       # The refusal is addressed to no session: a control frame carries no header to copy id/seq from.
       # 🚨 Not `$p`: that name holds this script's server process, and [3.3c] still needs it.
       $refusal = Read-Pack ([byte[]]$buf[0..($m.Count - 1)])
-      Log "[3.2d] logged out, NOT sending any pack -> server answered the keep-alive frame: $(Describe $refusal)  (expect Error Unauthorized id=0 seq=0)"
+      # 🚨 The only assertion in this suite, because §3.1 of pack-pipeline.md writes
+      # `id`/`seq` = 0/0 down as the contract for a control-frame refusal: a control
+      # frame has no header to copy them from (cirno, PR #103 review).
+      $addressed = if ($refusal.id -eq 0 -and $refusal.seq -eq 0 -and $refusal.metaText -match 'Unauthorized') { 'ok' } else { 'FAIL' }
+      Log "[3.2d] logged out, NOT sending any pack -> server answered the keep-alive frame: $(Describe $refusal)  ($addressed: expect Error Unauthorized id=0 seq=0)"
       $t2 = $wsC.ReceiveAsync([ArraySegment[byte]]$buf, [Threading.CancellationToken]::None)
       if ($t2.Wait(5000)) { Log "[3.2d-ii] then server sent $($t2.Result.MessageType) code=$($t2.Result.CloseStatus) state=$($wsC.State)  (expect Close, PolicyViolation)" } else { Log "[3.2d-ii] no close within 5 s, state=$($wsC.State)  (expect Close: FAIL)" }
     } else {

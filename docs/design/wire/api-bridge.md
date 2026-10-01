@@ -336,7 +336,7 @@ client                                          server
 每支橋打一次、HTTP 打一次、結果一致；另外：
 - 註冊的反向檢查：`allow_registration = false` 被拒、registration token 錯被拒、`system` 註冊不到（`M_USER_IN_USE`）、`forbidden_usernames` 被拒 —— 跟 HTTP 一模一樣。
 - 完整流程：匿名 WS 連線 → `Register`（UIAA 兩輪）→ `Login` → `WhoAmI` 是新帳號；超過裝置名額的 `Login` 照樣 `TooManyConnections`。
-- UIAA：第一輪拿到 `flows`＋`session`、密碼錯拿到 `M_FORBIDDEN` 且 `session` 不變、第二輪成功；刪掉自己的裝置後下一個 pack 被拒並關連線。
+- UIAA：第一輪拿到 `flows`＋`session`、密碼錯拿到 `M_FORBIDDEN` 且 `session` 不變、第二輪成功；刪掉自己的裝置後下一個 frame 被拒並關連線。
 
 ### 批 3：房間其餘、關聯與討論串、在線狀態／filter／capabilities、檢舉（20 支，✅ PR #77，2026-09-21 合併）
 

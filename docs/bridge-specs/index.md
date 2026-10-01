@@ -66,7 +66,7 @@ offset  bytes              意思
 
 - **怎麼認出「要 UIAA」**：走橋的回覆（bit4）、`status` 401、data 有 `flows`。沒登入的 401 帶 `errcode` `M_MISSING_TOKEN`／`M_UNKNOWN_TOKEN`、沒有 `flows`。（維護者 2026-09-15 定：不另加 meta 欄位）
 - `session` 存在 server。註冊的 `session` 跟連線無關，**沒登入的連線只活 `wbf_ws_unauthenticated_timeout`（預設 30 秒）**，來不及就重連一條、帶同一個 `session` 接著送。
-- **做完之後這條連線還算不算數**：刪掉自己這個裝置、停用帳號之後，回覆照樣先到，**下一個 pack** 在橋之前被拒（§1.2 那一道：`Unauthorized`、沒有 bit4、關連線）。改密碼的 `logout_devices` 保留發請求的裝置，這條連線不受影響。
+- **做完之後這條連線還算不算數**：刪掉自己這個裝置、停用帳號之後，回覆照樣先到，**下一個 frame**（Ping／Pong 也算）在橋之前被拒（§1.2 那一道：`Unauthorized`、沒有 bit4、關連線）。改密碼的 `logout_devices` 保留發請求的裝置，這條連線不受影響。
 
 ## 2. 總表（批 1、批 2、E2EE (A)(C)）
 

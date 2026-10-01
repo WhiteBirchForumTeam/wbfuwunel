@@ -191,7 +191,12 @@ handler 送第二個 pack 就是 bug，由 `Reply` 型別在 HTTP 模式下拒�
 📌 **所以 `wbf_ws_idle_timeout` 的預設從 300 降到 60 秒**（維護者 2026-10-01 定）：在後半做完之前，
 那個數字**就是**「遠端登出一個被偷的裝置」最壞要等多久。⚠️ **這對 client 是一條契約**：
 它必須比這個間隔更頻繁地送東西（`Control/Ping` pack 或 WebSocket ping），否則會一直在重連。
-📎 既有的 e2e 全部自己寫死這個設定，沒有一支靠預設值。
+🚨 **而「既有的 e2e 全部自己寫死這個設定」是錯的**（cirno 在 PR #103 複審抓到，原本這裡這樣寫）：
+只有 e2e7（2／60）、e2e11／e2e12（120）、e2e17（60）寫死；**e2e8／9／13／15／16 吃的正是這個預設**，
+而改預設那一輪只重跑了 e2e7。⚠️ **同型事故這個 repo 已經記過一次**（§2.14 的
+`wbf_ws_max_connections_per_device` 4→8，e2e13 `[2.7]` 靠預設值撞上限）。
+📌 修法是**把它寫進共用的 `Write-Config`**（`tests/e2e/wbf-helpers.ps1`）與 e2e9 自己那份：
+⭐ **一支靠預設值的測試，就是一支會在預設改動時無聲改行為的測試。**
 ⭐ 而 **後半不能取代這一半**：token **過期**是一個時間（`check_token` 比對 `expires_at`），
 **沒有任何事件可以掛勾** —— 只有「每個 frame 問一次」接得住它。兩半是互補，不是二選一。
 
@@ -202,9 +207,12 @@ handler 送第二個 pack 就是 bug，由 `Reply` 型別在 HTTP 模式下拒�
 📎 **Text frame 原本也繞過它**，但那條是有界的：`health.record_undecodable_frame()` 數到上限就關連線。
 控制框沒有任何計數器，所以它是無界的那個。
 
-📎 代價是**每個 frame 一次點讀**（含控制框）。那跟原本「每個 pack 一次」同一個數量級 ——
-一個**有效** session 猛送 ping 造成的讀取量，跟它猛送 pack 一樣；而一個**無效**的 session
-**在第一個 ping 就被關掉**，所以它製造不出第二次。
+📎 代價是**每個 frame 一次點讀**（含控制框）。⚠️ **那個「同一個數量級」只在飽和時成立**
+（cirno 在 PR #103 複審補的）：一個**有效** session 猛送 ping 的讀取量跟它猛送 pack 一樣，
+而一個**無效**的 session **在第一個 ping 就被關掉**、製造不出第二次 —— 🚨 **但常態不是飽和**：
+一條**閒置**連線的 keep-alive 原本**一次都不讀**，現在每次都要 `find_from_token` ＋ `locked_check`
+（`wbf/mod.rs` 的 `check_token`，🚫 沒有快取，見 [/docs/design/wire/wire-format.md](wire-format.md) §6.1
+「不做每 N 秒才驗的快取」）。那是**資源**不是正確性，而維護者定的 60 秒契約讓它有界（每條連線每 60 秒至少一次）。
 ⚠️ 匿名（還沒登入）的連線沒有 session 可問，它靠的是 `wbf_ws_unauthenticated_timeout`。
 
 📎 **控制框被拒時 `Error(Unauthorized)` 的 `id`／`seq` 是 `0`／`0`** —— 控制框沒有 header 可以抄。
