@@ -22,7 +22,7 @@
 use std::{
 	collections::HashMap,
 	net::IpAddr,
-	sync::{Arc, Mutex},
+	sync::{Arc, Mutex, MutexGuard},
 	time::Duration,
 };
 
@@ -43,9 +43,13 @@ type SlotTable = Arc<Mutex<HashMap<(OwnedUserId, OwnedDeviceId), u32>>>;
 /// Open connections per source address, keyed by `to_address_group`.
 type AddressTable = Arc<Mutex<HashMap<IpAddr, u32>>>;
 
+/// The tracked connection tasks. `Arc` because each task reaches back into it
+/// as its last act, to take the finished ones out —— see `spawn`.
+type TaskSet = Arc<Mutex<Option<JoinSet<()>>>>;
+
 pub struct Connections {
 	/// `None` once `close_and_join` has begun: nothing may start after that.
-	tasks: Mutex<Option<JoinSet<()>>>,
+	tasks: TaskSet,
 	/// How many connections each (user, device) has right now. The only
 	/// count there is: a slot is taken here and given back by its drop.
 	slots: SlotTable,
@@ -81,6 +85,25 @@ pub fn to_address_group(address: IpAddr) -> IpAddr {
 			octets[8..].fill(0);
 			IpAddr::V6(octets.into())
 		},
+	}
+}
+
+/// The task set's lock, with a poisoned lock treated as usable.
+///
+/// 🚨 A poisoned lock must not take the process down: refusing every new
+/// connection for the rest of the server's life is worse than the panic that
+/// poisoned it (CLAUDE.md P). ⚠️ Nothing may be awaited while this is held —— the
+/// guard is not `Send`, and `close_and_join` depends on the lock being free
+/// while it waits.
+///
+/// Args:
+///     tasks: the shared task set
+/// Return:
+///     MutexGuard  the set, or `None` inside it once shutdown took it
+fn lock_tasks(tasks: &TaskSet) -> MutexGuard<'_, Option<JoinSet<()>>> {
+	match tasks.lock() {
+		| Ok(guard) => guard,
+		| Err(poisoned) => poisoned.into_inner(),
 	}
 }
 
@@ -170,7 +193,7 @@ impl Connections {
 	#[must_use]
 	pub fn new() -> Self {
 		Self {
-			tasks: Mutex::new(Some(JoinSet::new())),
+			tasks: Arc::new(Mutex::new(Some(JoinSet::new()))),
 			slots: Arc::new(Mutex::new(HashMap::new())),
 			addresses: Arc::new(Mutex::new(HashMap::new())),
 		}
@@ -282,26 +305,38 @@ impl Connections {
 	where
 		F: Future<Output = ()> + Send + 'static,
 	{
-		// A poisoned lock must not take the process down: refusing every new
-		// connection for the server's life is worse than the panic that poisoned
-		// it (CLAUDE.md P).
-		let mut tasks = match self.tasks.lock() {
-			| Ok(tasks) => tasks,
-			| Err(poisoned) => poisoned.into_inner(),
-		};
+		let mut tasks = lock_tasks(&self.tasks);
 		match tasks.as_mut() {
 			| Some(set) => {
-				// 🚨 Reaped here because a `JoinSet` keeps an entry for every task it
-				// ever started until someone joins it —— and the only join used to be
-				// at shutdown, so a server that had served a million connections
-				// carried a million entries for its whole life, and `len()` (the
-				// number shutdown logs and compares against the timeout) counted the
-				// dead ones too. Reaping on the way in costs one non-blocking pass
-				// and needs no extra task: what is left is bounded by the live
-				// connections plus whatever finished since the last new one
+				// 🚨 A `JoinSet` keeps an entry for every task it ever started until
+				// someone joins it, and the only join used to be at shutdown — so a
+				// server that had served a million connections carried a million
+				// entries for its whole life. The entry is small, but `len()` is the
+				// number shutdown logs and measures against its timeout, so it was
+				// also reporting a million open connections when three were open
 				// (external review 2026-09-29 #7).
+				//
+				// Reaped in two places, and the second is what bounds it:
+				//   - here, so a burst of new connections clears the last burst;
+				//   - at the end of every task (below), so connections closing
+				//     clear each other even while nothing new arrives.
+				// ⚠️ A task cannot take out *its own* entry — it is still running, so
+				// `try_join_next` will not return it. One stale entry can therefore
+				// remain, belonging to whichever task finished last. Getting to zero
+				// would mean not using `JoinSet`, and `JoinSet` is what makes
+				// shutdown able to wait for the connections at all.
 				reap_finished(set);
-				set.spawn(task);
+
+				let tasks = self.tasks.clone();
+				set.spawn(async move {
+					task.await;
+
+					// The task's own last act. Its entry stays until someone else
+					// comes along; everything that finished before it goes now.
+					if let Some(set) = lock_tasks(&tasks).as_mut() {
+						reap_finished(set);
+					}
+				});
 				true
 			},
 			| None => false,
@@ -314,12 +349,9 @@ impl Connections {
 	///     taken the set.
 	#[must_use]
 	pub fn count_tracked_tasks(&self) -> usize {
-		match self.tasks.lock() {
-			| Ok(tasks) => tasks,
-			| Err(poisoned) => poisoned.into_inner(),
-		}
-		.as_ref()
-		.map_or(0, JoinSet::len)
+		lock_tasks(&self.tasks)
+			.as_ref()
+			.map_or(0, JoinSet::len)
 	}
 
 	/// Refuses new connections from now on and waits for the running ones to
@@ -332,10 +364,7 @@ impl Connections {
 		// follows is awaited. Poisoned here would mean shutdown never waits for
 		// the open connections — the one path where panicking helps least
 		// (CLAUDE.md P).
-		let taken = match self.tasks.lock() {
-			| Ok(mut tasks) => tasks.take(),
-			| Err(poisoned) => poisoned.into_inner().take(),
-		};
+		let taken = lock_tasks(&self.tasks).take();
 		let Some(mut set) = taken else {
 			return;
 		};
@@ -534,23 +563,62 @@ mod task_tracking_tests {
 	/// without reaping, the count here would be one per connection the server has
 	/// ever served, for its whole life.
 	///
-	/// The promise is deliberately weaker than "it is zero the moment a task
-	/// ends": nothing runs between connections, so the count falls on the next
-	/// `spawn`. That is what makes it bounded, and it is what is asserted.
+	/// ⭐ The promise is **at most one stale entry**, and it does not depend on new
+	/// connections arriving: every task reaps as its last act, so the ones closing
+	/// clear each other. The one that can remain belongs to whichever task
+	/// finished last — it was still running when it looked, so it could not take
+	/// out its own entry.
 	#[tokio::test]
-	async fn a_task_that_finished_stops_being_tracked_on_the_next_spawn() {
+	async fn tasks_that_finished_stop_being_tracked_without_a_new_connection() {
 		let connections = Connections::new();
 
+		// Started together, so nothing after this is a `spawn` that could reap.
 		for _ in 0..8 {
 			assert!(connections.spawn(async {}), "the set is open");
-			// Let the task run to completion before the next spawn reaps it.
+		}
+
+		// Let them all run to their end, where each one reaps.
+		for _ in 0..8 {
 			tokio::task::yield_now().await;
 		}
+
+		let tracked = connections.count_tracked_tasks();
+
+		assert!(
+			tracked <= 1,
+			"eight finished tasks left {tracked} entries; at most the last one should remain",
+		);
+	}
+
+	/// 🚨 Why the reap in `spawn` is not redundant with the one at the end of a
+	/// task: **a task that panics never reaches its own last step.** It leaves its
+	/// entry and it does not clear anyone else's, so a run of panicking
+	/// connections would pile up with nothing to collect them — until the next
+	/// connection arrives and `spawn` does.
+	#[tokio::test]
+	async fn a_new_connection_clears_tasks_that_panicked_and_so_never_reaped() {
+		let connections = Connections::new();
+
+		// Started together: a `spawn` in between would reap, which is the very
+		// thing being shown to be necessary.
+		for _ in 0..8 {
+			assert!(connections.spawn(async { panic!("a connection task that fails") }));
+		}
+		for _ in 0..8 {
+			tokio::task::yield_now().await;
+		}
+
+		let piled_up = connections.count_tracked_tasks();
+
+		assert_eq!(piled_up, 8, "a panicking task cannot reap: all eight entries are still here");
+
+		// The next connection is what clears them.
+		assert!(connections.spawn(async {}));
 
 		assert_eq!(
 			connections.count_tracked_tasks(),
 			1,
-			"only the task spawned last should still be tracked; the seven before it finished",
+			"only the connection just started should be tracked",
 		);
 	}
 
