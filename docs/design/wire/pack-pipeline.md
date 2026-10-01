@@ -249,6 +249,31 @@ struct Queued { outgoing: Outgoing, _room: Option<OwnedSemaphorePermit> }  // �
   （`JoinSet` 裡 `serve` 用 `tokio::join!` 等發送 task）。15 秒的 `JOIN_TIMEOUT` 不變。
   📎 實作：`serve` 結束時 drop 掉所有 sender，再等發送 task 最多 `DRAIN_TIMEOUT`（5 秒）把佇列寫完；對端不讀就 abort 它、socket 隨之關掉。
   發送 task 只持有 socket 的 sink，不借 `Services`，所以它比 `serve` 晚一點結束也不會懸空。
+- 🚨 **`JoinSet` 要主動回收，不然它會記著每一條開過的連線**（外部審查 2026-09-29 #7）：`JoinSet` 的語意是
+  「幫你記著每一個 task，直到你來問結果」，而原本只有關機時才問 —— 於是一台服務過一百萬條連線的 server
+  在它的生命週期裡帶著一百萬筆帳。⚠️ **task 本身是真的結束了**（future 被 drop、buffer 與 `Services` 的借用都釋放），
+  漏的只有那一筆帳；但 **`set.len()` 把死掉的也算進去**，而那正是關機那行 log 印的數字
+  （以及放棄等待時跟 `JOIN_TIMEOUT` 一起印出來的 `stuck`）—— ⭐ 所以真正難查的後果不是記憶體，
+  是**一個會騙人的觀測值**。📎 ⚠️ 程式裡**沒有**拿這個數字跟 `JOIN_TIMEOUT` 做比較（比的是 drain 花的時間），
+  原本這一句寫成「比對」是誇大了（cirno 在 PR #101 指出）。
+  - **回收在兩個地方**，第二個才是讓它有界的那個：
+    1. `spawn` 時 —— 一批新連線湧入，把上一批清掉。
+    2. **每個 task 結束前的最後一步** —— 連線陸續關掉、而沒有新連線進來時，它們互相清。
+  - ⚠️ **一個 task 清不掉自己那一筆**（它還在跑，`try_join_next` 不會回傳它），所以最後結束的那個會留一筆。
+    界限是 **≤ 1 —— 但那只對「正常結束」的 task 成立**（cirno 在 PR #101 要求寫清）：panic 的帳自己收不掉，
+    要等下一條連線進來、或下一個正常結束的 task 來收。要到 0 就得不用 `JoinSet`，
+    而 `JoinSet` 正是「關機真的等完所有連線」的依據。
+  - 🚨 **`spawn` 那一道不是多餘的**：**panic 的 task 跑不到自己的最後一步**，所以它既留下自己那筆、也不幫別人收。
+    一連串 panic 的連線會堆著，直到下一條連線進來。這條有測試釘住（`connections.rs` 的 `task_tracking_tests`）。
+  - 🚨 **task 拿的必須是 `Weak`，不是 `Arc`**（cirno 在 PR #101 抓到，是我造成的）：集合持有 task 的 future，
+    而 future 反過來持有集合 —— 那是一個**參照環**。📎 ⚠️ 環的代價有條件（cirno 在 PR #101 複審時指出）：
+    task 正常結束時它自己的 future 就被 drop、環當場斷，所以連線陸續結束時不會累積；
+    **只要有一條 task 永遠不結束（＝卡住的連線，也正是 `JOIN_TIMEOUT` 要擋的那個），那塊配置就永遠不會被釋放**。
+    而真正會咬的是
+    **`JoinSet` 自己的 `Drop`（它會 abort 所有還在跑的）只要有任何 task 活著就永遠不會觸發**。
+    ⭐ 而那個 abort 是本節安全論證的**機械層**：handler 透過**原始指標**借 `Services`（`api/router/state.rs`），
+    所以一個在 `Services` 掉了之後還被 poll 的 task 就是 use-after-free。
+    🚨 **能取消它們的東西，不能握在被取消者手上。** 測試：`dropping_connections_aborts_what_was_still_running`。
   📎 Close frame 入隊也有同一個上限（`enqueue_close`，PR #33 review，rumia）：佇列滿且對端不讀時，接收 loop 不會為了送 Close 永遠等，5 秒後直接結束、socket drop。
   最壞的記憶體界：一條連線 **`wbf_ws_send_queue_bytes`（預設 16 MiB）**，加上正在寫的那個與正在收的那個。
   ⚠️ **原本這個界是「幾個 pack」而不是「幾 bytes」**（`wbf_ws_send_queue_len × wbf_data_max_bytes` ＝ 32 × 16 MiB ＝ **512 MiB**，而且這行字就這樣寫著、沒有人把它乘出來）——

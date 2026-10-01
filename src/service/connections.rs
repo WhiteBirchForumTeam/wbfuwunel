@@ -22,7 +22,7 @@
 use std::{
 	collections::HashMap,
 	net::IpAddr,
-	sync::{Arc, Mutex},
+	sync::{Arc, Mutex, MutexGuard, Weak},
 	time::Duration,
 };
 
@@ -43,9 +43,29 @@ type SlotTable = Arc<Mutex<HashMap<(OwnedUserId, OwnedDeviceId), u32>>>;
 /// Open connections per source address, keyed by `to_address_group`.
 type AddressTable = Arc<Mutex<HashMap<IpAddr, u32>>>;
 
+/// The tracked connection tasks. Shared because each task reaches back into it
+/// as its last act, to take the finished ones out — see `spawn`.
+type TaskSet = Arc<Mutex<Option<JoinSet<()>>>>;
+
+/// What a task holds to reach the set it is itself in.
+///
+/// 🚨 **`Weak`, never `Arc`.** The set owns the task's future and the future would
+/// own the set back — a cycle. A finishing task drops its own future and lets go,
+/// so the cycle costs nothing while connections keep ending; ⚠️ **one connection
+/// that never ends pins the set for good** — and a connection that never ends is
+/// exactly what `JOIN_TIMEOUT` is there for. The part that actually bites is the
+/// other half: **`JoinSet`'s own `Drop` (which aborts everything still running)
+/// could never fire while any task was alive**. That abort is the
+/// mechanical half of this module's safety argument: a handler borrows `Services`
+/// through a raw pointer, so a task still being polled after `Services` is gone
+/// is a use-after-free. Dropping `Connections` has to be able to stop these
+/// tasks, and it cannot if the thing that stops them is held by the tasks
+/// themselves (cirno, PR #101).
+type WeakTaskSet = Weak<Mutex<Option<JoinSet<()>>>>;
+
 pub struct Connections {
 	/// `None` once `close_and_join` has begun: nothing may start after that.
-	tasks: Mutex<Option<JoinSet<()>>>,
+	tasks: TaskSet,
 	/// How many connections each (user, device) has right now. The only
 	/// count there is: a slot is taken here and given back by its drop.
 	slots: SlotTable,
@@ -81,6 +101,47 @@ pub fn to_address_group(address: IpAddr) -> IpAddr {
 			octets[8..].fill(0);
 			IpAddr::V6(octets.into())
 		},
+	}
+}
+
+/// The task set's lock, with a poisoned lock treated as usable.
+///
+/// 🚨 A poisoned lock must not take the process down: refusing every new
+/// connection for the rest of the server's life is worse than the panic that
+/// poisoned it, so the guard is taken either way.
+/// ⚠️ Nothing may be awaited while this is held — the guard is not `Send`, and
+/// `close_and_join` depends on the lock being free while it waits.
+///
+/// Args:
+///     tasks: the shared task set
+/// Return:
+///     MutexGuard  the set, or `None` inside it once shutdown took it
+fn lock_tasks(tasks: &TaskSet) -> MutexGuard<'_, Option<JoinSet<()>>> {
+	match tasks.lock() {
+		| Ok(guard) => guard,
+		| Err(poisoned) => poisoned.into_inner(),
+	}
+}
+
+/// Takes the finished tasks out of the set without waiting for anything.
+///
+/// Args:
+///     set: the tracked connection tasks
+fn reap_finished(set: &mut JoinSet<()>) {
+	while let Some(joined) = set.try_join_next() {
+		log_if_abnormal(joined);
+	}
+}
+
+/// One place for this message, so reaping a finished task reports a panic the
+/// same way shutdown does — 🚨 a reap that swallowed it would turn a connection
+/// task's panic into silence, and this is the only thing that speaks for it.
+///
+/// Args:
+///     joined: what the `JoinSet` handed back for one finished task
+fn log_if_abnormal(joined: Result<(), tokio::task::JoinError>) {
+	if let Err(e) = joined {
+		error!(?e, "A connection task ended abnormally.");
 	}
 }
 
@@ -148,7 +209,7 @@ impl Connections {
 	#[must_use]
 	pub fn new() -> Self {
 		Self {
-			tasks: Mutex::new(Some(JoinSet::new())),
+			tasks: Arc::new(Mutex::new(Some(JoinSet::new()))),
 			slots: Arc::new(Mutex::new(HashMap::new())),
 			addresses: Arc::new(Mutex::new(HashMap::new())),
 		}
@@ -260,20 +321,59 @@ impl Connections {
 	where
 		F: Future<Output = ()> + Send + 'static,
 	{
-		// A poisoned lock must not take the process down: refusing every new
-		// connection for the server's life is worse than the panic that poisoned
-		// it (CLAUDE.md P).
-		let mut tasks = match self.tasks.lock() {
-			| Ok(tasks) => tasks,
-			| Err(poisoned) => poisoned.into_inner(),
-		};
+		let mut tasks = lock_tasks(&self.tasks);
 		match tasks.as_mut() {
 			| Some(set) => {
-				set.spawn(task);
+				// 🚨 A `JoinSet` keeps an entry for every task it ever started until
+				// someone joins it, and the only join used to be at shutdown — so a
+				// server that had served a million connections carried a million
+				// entries for its whole life. The entry is small, but `len()` is the
+				// number shutdown prints — and prints again beside `JOIN_TIMEOUT`
+				// when it gives up — so it was reporting a million open connections
+				// when three were open (external review 2026-09-29 #7).
+				//
+				// Reaped in two places, and the second is what bounds it:
+				//   - here, so a burst of new connections clears the last burst;
+				//   - at the end of every task (below), so connections closing
+				//     clear each other even while nothing new arrives.
+				// ⚠️ A task cannot take out *its own* entry — it is still running, so
+				// `try_join_next` will not return it. One stale entry can therefore
+				// remain, belonging to whichever task finished last. Getting to zero
+				// would mean not using `JoinSet`, and `JoinSet` is what makes
+				// shutdown able to wait for the connections at all.
+				reap_finished(set);
+
+				let tasks: WeakTaskSet = Arc::downgrade(&self.tasks);
+				set.spawn(async move {
+					task.await;
+
+					// The task's own last act. Its entry stays until someone else
+					// comes along; everything that finished before it goes now.
+					// Gone means `Connections` was dropped while this ran — there is
+					// no set left to tidy, and nothing to say about it.
+					let Some(tasks) = tasks.upgrade() else {
+						return;
+					};
+					if let Some(set) = lock_tasks(&tasks).as_mut() {
+						reap_finished(set);
+					}
+				});
 				true
 			},
 			| None => false,
 		}
+	}
+
+	/// Return:
+	///     usize  how many connection tasks are tracked right now —— the live
+	///     ones plus the finished entries nobody has reaped yet (normally at
+	///     most one, since tasks reap each other; ones that panicked pile up
+	///     until the next `spawn`); 0 once shutdown has taken the set.
+	#[must_use]
+	pub fn count_tracked_tasks(&self) -> usize {
+		lock_tasks(&self.tasks)
+			.as_ref()
+			.map_or(0, JoinSet::len)
 	}
 
 	/// Refuses new connections from now on and waits for the running ones to
@@ -286,10 +386,7 @@ impl Connections {
 		// follows is awaited. Poisoned here would mean shutdown never waits for
 		// the open connections — the one path where panicking helps least
 		// (CLAUDE.md P).
-		let taken = match self.tasks.lock() {
-			| Ok(mut tasks) => tasks.take(),
-			| Err(poisoned) => poisoned.into_inner().take(),
-		};
+		let taken = lock_tasks(&self.tasks).take();
 		let Some(mut set) = taken else {
 			return;
 		};
@@ -303,9 +400,7 @@ impl Connections {
 		}
 		let drain = async {
 			while let Some(joined) = set.join_next().await {
-				if let Err(e) = joined {
-					error!(?e, "A connection task ended abnormally.");
-				}
+				log_if_abnormal(joined);
 			}
 		};
 		if tokio::time::timeout(JOIN_TIMEOUT, drain).await.is_err() {
@@ -477,5 +572,157 @@ mod address_tests {
 			);
 		}
 		assert_eq!(connections.count_for_address(address), 0);
+	}
+
+}
+
+#[cfg(test)]
+mod task_tracking_tests {
+	use super::*;
+
+	/// 🚨 The leak this guards: a `JoinSet` keeps an entry for every task it ever
+	/// started until someone joins it, and the only join is at shutdown — so
+	/// without reaping, the count here would be one per connection the server has
+	/// ever served, for its whole life.
+	///
+	/// ⭐ The promise is **at most one stale entry**, and it does not depend on new
+	/// connections arriving: every task reaps as its last act, so the ones closing
+	/// clear each other. The one that can remain belongs to whichever task
+	/// finished last — it was still running when it looked, so it could not take
+	/// out its own entry.
+	#[tokio::test]
+	async fn tasks_that_finished_stop_being_tracked_without_a_new_connection() {
+		let connections = Connections::new();
+
+		// Started together, so nothing after this is a `spawn` that could reap.
+		for _ in 0..8 {
+			assert!(connections.spawn(async {}), "the set is open");
+		}
+
+		// Let them all run to their end, where each one reaps.
+		for _ in 0..8 {
+			tokio::task::yield_now().await;
+		}
+
+		let tracked = connections.count_tracked_tasks();
+
+		assert!(
+			tracked <= 1,
+			"eight finished tasks left {tracked} entries; at most the last one should remain",
+		);
+	}
+
+	/// 🚨 Why the reap in `spawn` is not redundant with the one at the end of a
+	/// task: **a task that panics never reaches its own last step.** It leaves its
+	/// entry and it does not clear anyone else's, so a run of panicking
+	/// connections would pile up with nothing to collect them — until the next
+	/// connection arrives and `spawn` does.
+	#[tokio::test]
+	async fn a_new_connection_clears_tasks_that_panicked_and_so_never_reaped() {
+		let connections = Connections::new();
+
+		// Started together: a `spawn` in between would reap, which is the very
+		// thing being shown to be necessary.
+		for _ in 0..8 {
+			assert!(connections.spawn(async { panic!("a connection task that fails") }));
+		}
+		for _ in 0..8 {
+			tokio::task::yield_now().await;
+		}
+
+		let piled_up = connections.count_tracked_tasks();
+
+		assert_eq!(piled_up, 8, "a panicking task cannot reap: all eight entries are still here");
+
+		// The next connection is what clears them.
+		assert!(connections.spawn(async {}));
+
+		assert_eq!(
+			connections.count_tracked_tasks(),
+			1,
+			"only the connection just started should be tracked",
+		);
+	}
+
+	/// ⚠️ The other direction, so the reap cannot be "join everything": a task
+	/// still running must stay tracked, or shutdown would not wait for it.
+	#[tokio::test]
+	async fn a_task_still_running_stays_tracked() {
+		let connections = Connections::new();
+		let (release, held) = tokio::sync::oneshot::channel::<()>();
+
+		assert!(connections.spawn(async move {
+			let _waited = held.await;
+		}));
+		assert!(connections.spawn(async {}));
+		tokio::task::yield_now().await;
+		assert!(connections.spawn(async {}));
+
+		assert_eq!(
+			connections.count_tracked_tasks(),
+			2,
+			"the one waiting on the channel and the one just spawned",
+		);
+
+		let _released = release.send(());
+	}
+
+	/// 🚨 **Dropping `Connections` must still abort the tasks still running.**
+	///
+	/// That is `JoinSet`'s own `Drop`, and it is the mechanical half of this
+	/// module's safety argument — a handler borrows `Services` through a raw
+	/// pointer, so a task polled after `Services` is gone is a use-after-free.
+	/// ⚠️ Holding the set by `Arc` from inside a task silently removes it: the set
+	/// owns the future, the future owns the set, and nothing can ever be dropped
+	/// (cirno, PR #101). The task reaches back with a `Weak` for exactly this.
+	#[tokio::test]
+	async fn dropping_connections_aborts_what_was_still_running() {
+		let ran_past_the_await = Arc::new(Mutex::new(false));
+		let flag = ran_past_the_await.clone();
+		let (release, held) = tokio::sync::oneshot::channel::<()>();
+
+		let connections = Connections::new();
+		assert!(connections.spawn(async move {
+			let _waited = held.await;
+			if let Ok(mut flag) = flag.lock() {
+				*flag = true;
+			}
+		}));
+		tokio::task::yield_now().await;
+
+		drop(connections);
+
+		// ⚠️ An abort is a request, not an event: the task is dropped the next time
+		// the runtime looks at it. Asserting straight after the drop would be
+		// asserting that cancellation is synchronous, which it is not.
+		for _ in 0..4 {
+			tokio::task::yield_now().await;
+		}
+
+		// Its future is gone and with it the receiver — a send that finds nobody
+		// home is the proof, and it does not depend on the task running anything.
+		assert!(release.send(()).is_err(), "the task should have been aborted with the set");
+
+		tokio::task::yield_now().await;
+
+		assert!(
+			!*ran_past_the_await
+				.lock()
+				.expect("a test-local lock"),
+			"the task kept running after `Connections` was dropped",
+		);
+	}
+
+	/// And the count says 0 once shutdown has taken the set, rather than panicking
+	/// or reporting the tasks it already waited for.
+	#[tokio::test]
+	async fn the_count_is_zero_after_shutdown_took_the_set() {
+		let connections = Connections::new();
+
+		assert!(connections.spawn(async {}));
+		connections.close_and_join().await;
+
+		assert_eq!(connections.count_tracked_tasks(), 0);
+		assert!(!connections.spawn(async {}), "and nothing new is started");
 	}
 }
