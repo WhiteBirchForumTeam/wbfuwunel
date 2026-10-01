@@ -29,6 +29,7 @@
 | [/docs/design/wire/wire-format.md](wire/wire-format.md) | **現行契約**：pack 的每一個 byte、kind／subtype 分配表、flags、`id` 的型別 byte |
 | [/docs/design/wire/pack-pipeline.md](wire/pack-pipeline.md) | 連線就是佇列、handler 的契約、連線上限與 client 位址怎麼解析（§2.1／§2.2） |
 | [/docs/design/wire/api-bridge.md](wire/api-bridge.md) | 常用 Matrix API 走通道的那座橋：怎麼搬、搬的順序、每一支的成本 |
+| [/docs/design/wire/hide-server-version.md](wire/hide-server-version.md) | 📄 **提案**：預設不說自己的版本（六個洩漏點、`publish_server_version`、哪些**不能**藏）|
 | [/docs/design/wire/wbf-vectors.json](wire/wbf-vectors.json) | 黃金向量。⚠️ `src/core/wbf/vectors.rs` 用 `include_str!` 讀它、client repo 也複製一份對著測 —— **改路徑要連程式一起改** |
 
 📎 每個 kind 的逐支對照表在 [/docs/bridge-specs/index.md](../bridge-specs/index.md)（那是**分配結果**，設計理由在 `wire/api-bridge.md`）。

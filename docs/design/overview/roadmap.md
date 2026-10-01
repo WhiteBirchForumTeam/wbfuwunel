@@ -190,8 +190,8 @@ client 側的三條契約在 [/docs/design/events/event-push.md](../events/event
 | 2 | `Holder::Avatar` 只用 `localpart()`，查一次遠端 profile 就刪掉本地同名帳號的頭像 | ✅ PR #93 |
 | 5 | 房間版本號取最大值，re-invite 會倒退 → 金鑰發給已離開的人 | ✅ PR #94 |
 | 4 | to-device **單則沒有上限** → 一則 20 MiB 讓受害裝置的佇列永久卡死 | ✅ PR #99 —— 存進佇列前就擋、回 413（維護者 2026-09-29 定）|
-| 6 | 橋的 `fill_path` 沒擋 `.` / `..`：`session_id: "."` 讓 `/room_keys/keys/{id}` 變成 `/room_keys/keys`（刪一個 session 變成刪整個備份）| ✅ PR #100（待審）|
-| 7 | `service/connections.rs` 的 `JoinSet` 只在 `close_and_join()` 回收 → 每條歷來連線留一筆到程序結束 | 🔲 |
+| 6 | 橋的 `fill_path` 沒擋 `.` / `..`：`session_id: "."` 讓 `/room_keys/keys/{id}` 變成 `/room_keys/keys`（刪一個 session 變成刪整個備份）| ✅ PR #100 —— 三層防線：拒 `.`／`..`、拒 `\t\n\r`（它們被**丟掉**不是被編碼，會繞過前者）、執行期比對段數 |
+| 7 | `service/connections.rs` 的 `JoinSet` 只在 `close_and_join()` 回收 → 每條歷來連線留一筆到程序結束 | ✅ 分支 `fix/connections-joinset-reap`（待審）—— 回收放在 `spawn` 與**每個 task 的最後一步**，界限 ≤ 1 筆。⭐ 真正難查的後果不是記憶體，是 `set.len()`（關機 log 與 `JOIN_TIMEOUT` 用它）把死掉的也算進去 |
 | 8 | `wbf/ws.rs` 的 `Ping(_) \| Pong(_) => continue` 在 revalidate **之前** | 🔲 前半（控制框也 revalidate）；**後半另開設計提案**（登出／刪裝置／鎖帳號要拆掉訂閱）|
 | 3 | `timeline/purge.rs` 的 `release_range` 無條件放掉整段，而迴圈接著**保留** state 與本地事件 → **釋放的集合 ≠ 刪除的集合** | 🔲 **另開一支，動手前先寫設計說明**（現在是先釋放後刪除，那是**不可逆遺失**的方向）|
 

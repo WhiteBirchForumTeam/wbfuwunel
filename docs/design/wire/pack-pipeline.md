@@ -249,6 +249,18 @@ struct Queued { outgoing: Outgoing, _room: Option<OwnedSemaphorePermit> }  // �
   （`JoinSet` 裡 `serve` 用 `tokio::join!` 等發送 task）。15 秒的 `JOIN_TIMEOUT` 不變。
   📎 實作：`serve` 結束時 drop 掉所有 sender，再等發送 task 最多 `DRAIN_TIMEOUT`（5 秒）把佇列寫完；對端不讀就 abort 它、socket 隨之關掉。
   發送 task 只持有 socket 的 sink，不借 `Services`，所以它比 `serve` 晚一點結束也不會懸空。
+- 🚨 **`JoinSet` 要主動回收，不然它會記著每一條開過的連線**（外部審查 2026-09-29 #7）：`JoinSet` 的語意是
+  「幫你記著每一個 task，直到你來問結果」，而原本只有關機時才問 —— 於是一台服務過一百萬條連線的 server
+  在它的生命週期裡帶著一百萬筆帳。⚠️ **task 本身是真的結束了**（future 被 drop、buffer 與 `Services` 的借用都釋放），
+  漏的只有那一筆帳；但 **`set.len()` 把死掉的也算進去**，而那正是關機那行 log 印的數字、也是跟 `JOIN_TIMEOUT`
+  比對的數字 —— ⭐ 所以真正難查的後果不是記憶體，是**一個會騙人的觀測值**。
+  - **回收在兩個地方**，第二個才是讓它有界的那個：
+    1. `spawn` 時 —— 一批新連線湧入，把上一批清掉。
+    2. **每個 task 結束前的最後一步** —— 連線陸續關掉、而沒有新連線進來時，它們互相清。
+  - ⚠️ **一個 task 清不掉自己那一筆**（它還在跑，`try_join_next` 不會回傳它），所以最後結束的那個會留一筆。
+    界限是 **≤ 1**。要到 0 就得不用 `JoinSet`，而 `JoinSet` 正是「關機真的等完所有連線」的依據。
+  - 🚨 **`spawn` 那一道不是多餘的**：**panic 的 task 跑不到自己的最後一步**，所以它既留下自己那筆、也不幫別人收。
+    一連串 panic 的連線會堆著，直到下一條連線進來。這條有測試釘住（`connections.rs` 的 `task_tracking_tests`）。
   📎 Close frame 入隊也有同一個上限（`enqueue_close`，PR #33 review，rumia）：佇列滿且對端不讀時，接收 loop 不會為了送 Close 永遠等，5 秒後直接結束、socket drop。
   最壞的記憶體界：一條連線 **`wbf_ws_send_queue_bytes`（預設 16 MiB）**，加上正在寫的那個與正在收的那個。
   ⚠️ **原本這個界是「幾個 pack」而不是「幾 bytes」**（`wbf_ws_send_queue_len × wbf_data_max_bytes` ＝ 32 × 16 MiB ＝ **512 MiB**，而且這行字就這樣寫著、沒有人把它乘出來）——
