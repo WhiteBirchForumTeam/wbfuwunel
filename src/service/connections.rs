@@ -221,9 +221,10 @@ impl Drop for ConnectionSlot {
 	}
 }
 
-/// One serving connection's entry in its device's list, so that ending that
-/// device's session can reach it. Dropping it takes the entry out, so the list
-/// holds only connections that are still being served.
+/// One serving connection's entry in its device's list.
+///
+/// Ending that device's session reaches it through this; dropping it takes the
+/// entry out, so the list holds only connections that are still being served.
 ///
 /// ⭐ Separate from `ConnectionSlot` because the two begin at different
 /// moments: the place is reserved during the upgrade, the connection can only
@@ -818,7 +819,7 @@ mod teardown_tests {
 		let cancel = Arc::new(Notify::new());
 		let first = connections.register_device_connection(alice, phone, 9, cancel.clone());
 		drop(first);
-		let _second = connections.register_device_connection(alice, desk, 9, cancel.clone());
+		let _second = connections.register_device_connection(alice, desk, 9, cancel);
 
 		assert!(
 			connections.end_device_sessions(alice, phone).is_empty(),

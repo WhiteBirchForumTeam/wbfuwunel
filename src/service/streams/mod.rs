@@ -478,7 +478,7 @@ mod tests {
 		let (tx, _rx) = PackQueue::new(4, 1024 * 1024);
 		let connection = streams.next_connection_id();
 		let guard = streams.connection_guard(connection);
-		streams.subscribe(connection, alice, tx, 1, &[a.clone(), b.clone()], true);
+		streams.subscribe(connection, alice, tx, 1, &[a.clone(), b.clone()], true).expect("the session has not ended");
 		assert!(streams.is_listened(&a) && streams.is_listened(&b));
 
 		drop(guard);
@@ -502,8 +502,8 @@ mod tests {
 		let room = room_id!("!a:localhost").to_owned();
 		let (tx, _rx) = PackQueue::new(4, 1024 * 1024);
 		let connection = streams.next_connection_id();
-		streams.subscribe(connection, alice, tx.clone(), 1, &[room.clone()], true);
-		streams.subscribe_device(connection, alice, phone, tx, 2);
+		streams.subscribe(connection, alice, tx.clone(), 1, &[room.clone()], true).expect("the session has not ended");
+		streams.subscribe_device(connection, alice, phone, tx, 2).expect("the session has not ended");
 		assert_eq!(streams.device_holder(alice, phone), Some(connection));
 
 		streams.remove_connection(connection);
@@ -526,8 +526,8 @@ mod tests {
 		let room = room_id!("!a:localhost").to_owned();
 		let (tx, _rx) = PackQueue::new(4, 1024 * 1024);
 		let connection = streams.next_connection_id();
-		streams.subscribe(connection, alice, tx.clone(), 1, &[room.clone()], true);
-		streams.subscribe_device(connection, alice, phone, tx, 2);
+		streams.subscribe(connection, alice, tx.clone(), 1, &[room.clone()], true).expect("the session has not ended");
+		streams.subscribe_device(connection, alice, phone, tx, 2).expect("the session has not ended");
 
 		streams.unsubscribe_all_rooms(connection);
 

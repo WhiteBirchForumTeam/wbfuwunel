@@ -285,8 +285,13 @@ $buf = New-Object byte[] 4096
 $null = Api Post '/_matrix/client/v3/logout' '{}' $tokB
 $t = $wsB.ReceiveAsync([ArraySegment[byte]]$buf, [Threading.CancellationToken]::None)
 if ($t.Wait(5000)) { Log "[3.2b] after HTTP logout, without sending anything -> server sent $($t.Result.MessageType) code=$($t.Result.CloseStatus) state=$($wsB.State)  (expect Close, PolicyViolation: torn down, not waiting for a frame)" } else { Log "[3.2b] no close within 5 s, state=$($wsB.State)  (expect Close: FAIL)" }
-try { $null = Ws-Call $wsB $ping; Log "[3.2c] a pack after the teardown still got an answer?! state=$($wsB.State)  (expect the socket to be gone: FAIL)" }
-catch { Log "[3.2c] and a pack sent after that gets nothing back, the socket is gone  state=$($wsB.State)  (expect CloseReceived or Aborted)" }
+# ⚠️ Send only, with a bound, and never `Ws-Call`: this suite's `Ws-Recv` waits on `.Result` with no
+# timeout, so reading from a socket the server has closed hangs the whole run — which is exactly what
+# a first draft of this line did.
+# ⚠️ A statement, not `$x = try { … }`: that form is PowerShell 7 and a parse error on 5.1.
+$sent = $false
+try { $sent = $wsB.SendAsync([ArraySegment[byte]]$ping, [System.Net.WebSockets.WebSocketMessageType]::Binary, $true, [Threading.CancellationToken]::None).Wait(3000) } catch { $sent = $false }
+Log "[3.2c] and sending a pack after the teardown does not get through  sent=$sent state=$($wsB.State)  (expect False, and CloseReceived or Aborted)"
 
 # [3.2d] external review 2026-09-29 #8: a session that is no longer valid and sends only WebSocket
 # control frames must be closed too. Before the fix, Ping/Pong `continue`d before `revalidate` and

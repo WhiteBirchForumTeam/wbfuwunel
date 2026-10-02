@@ -282,16 +282,6 @@ where
 		registry.ended.remove(&connection);
 	}
 
-	/// Whether `connection` was ended here; for tests.
-	#[cfg(test)]
-	pub(super) fn is_ended(&self, connection: ConnectionId) -> bool {
-		self.registry
-			.read()
-			.expect("stream lock poisoned")
-			.ended
-			.contains(&connection)
-	}
-
 	/// Whether anyone listens to `topic`: the cheap check before anything is
 	/// serialized for pushing.
 	pub(super) fn is_listened(&self, topic: &Topic) -> bool {

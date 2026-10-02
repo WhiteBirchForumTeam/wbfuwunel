@@ -492,7 +492,7 @@ mod tests {
 
 		streams.end_connection(1);
 
-		let refused = streams.subscribe(1, alice, tx.clone(), 7, &[room.clone()], false);
+		let refused = streams.subscribe(1, alice, tx.clone(), 7, std::slice::from_ref(&room), false);
 		assert!(refused.is_err(), "the registry refuses a connection whose session ended");
 		assert!(
 			!streams.is_listened(&room),
@@ -505,7 +505,7 @@ mod tests {
 		// connection lives, and forgetting it is what the guard does at the end.
 		streams.forget_connection(1);
 		assert!(
-			streams.subscribe(1, alice, tx, 7, &[room], false).is_ok(),
+			streams.subscribe(1, alice, tx, 7, std::slice::from_ref(&room), false).is_ok(),
 			"a forgotten connection leaves no mark behind"
 		);
 	}
