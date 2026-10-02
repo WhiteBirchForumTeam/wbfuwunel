@@ -1,7 +1,11 @@
 # 登出要把連線拆掉（外部審查 2026-09-29 #8 後半）
 
-> 📄 **提案，還沒實作。** 維護者 2026-09-29 定：#8 切兩半，前半（控制框也 revalidate）走 PR #103，
-> 這一半另開提案。⏳ §7 有四件要維護者決定的事；決定之前 🚫 不動 `src/`。
+> 📄 **提案，還沒實作。** 維護者 2026-09-29 定：#8 切兩半，前半（控制框也 revalidate）走 **PR #103（已合併）**，
+> 這一半另開提案。
+>
+> ✅ **維護者 2026-10-02 定了 §7 的四件**，結論寫在 §7，影響到的章節就地改掉了：
+> **掛進 `remove_device`**（§4.2）、**拆訂閱＋關連線**（§4.2）、**鎖帳號不另走一條、靠重驗＋逾時**（§4.3 整節因此刪掉）、
+> **取消訊號要做**（§5 的 B 案）。
 >
 > 前半是 [/docs/design/wire/pack-pipeline.md](pack-pipeline.md) §3.1。
 
@@ -131,40 +135,83 @@ type SlotTable = Arc<Mutex<HashMap<(OwnedUserId, OwnedDeviceId), HashMap<Connect
 （升級時 `take_slot`，連線死掉時 `ConnectionSlot` 的 `Drop` 還回去）、**也已經處理過「同一裝置重新登入不該多佔一個位子」**
 （e2e7 `[5.5a]`）。計數本來就是 `len()`，所以上限邏輯不變。
 
+#### ⭐ 「怎麼知道要關哪一條」—— 這件事程式裡已經有答案了
+
+維護者 2026-10-02 問的就是這個，而答案不是「要新建一個對照」：
+
+```rust
+// service/connections.rs
+impl ConnectionSlot {
+    pub fn is_for(&self, user: &UserId, device: &DeviceId) -> bool { … }
+}
+```
+
+**`ConnectionSlot` 自己就記著它是哪個 `(user, device)` 的位子**，而那個 slot **放在連線的 `Session` 裡**
+（`wbf/mod.rs` 的 `Session { user, device, token, slot }`）。所以：
+
+- **身份換了，位子跟著換** —— `reserve_connection_slot` 在升級與**每次 `Login`** 都跑；同裝置重新登入由
+  `Session::inherit_slot` 把舊位子接過去（`slot.is_for(&self.user, &self.device)` 就是那個判斷）。
+  ⇒ ⚠️ §3.3 說的「session 可變」**已經被現有程式處理好了**，不是這支要新解的問題。
+- **`remove_device(user, device)` 拿到的正是那把鍵。** 不需要反查、不需要猜：那張表就是以它為鍵。
+- **「terminate device」就是同一條路** —— `DELETE /_matrix/client/v3/devices/{id}`、admin 刪裝置、MAS
+  同步刪裝置，全部走 `remove_device`（§3.1 的 20 幾個呼叫點），所以它不是另一個情境，是同一個漏斗。
+- **`/logout/all`** 走 `end_session(user, device, all_devices=true)`，它**逐一** `remove_device` ⇒ 每個裝置各自被關，
+  不需要「關掉這個人全部連線」這種特殊動作。
+
 ⚠️ 代價：`SlotTable` 從「一個數字」變成「握著每條連線的送出端」。那讓 `connections` 這個模組同時回答
 「這個裝置開了幾條」與「怎麼對其中一條說話」—— 兩個問題，但同一份生命週期，我認為值得（否則第二張表遲早漂）。
 
-### 4.2 在 `remove_device` 裡掛一行
+### 4.2 在 `remove_device` 裡掛一行（✅ 維護者 2026-10-02 定）
+
+> 「`remove_device` 我建議直接掛進去，既然這是 remove session 語意，沒理由不關連線。」
+> 「session 被 kill 我建議就關連線。」
 
 ```rust
 // users/device.rs::remove_device，拿掉 token 之後
-self.services.connections.end_device_sessions(user_id, device_id).await;
+self.services.connections.end_device_sessions(user_id, device_id);
 ```
 
-📎 `users::Service` 已經持有 `Arc<OnceServices>`，所以**不需要新的接線** —— 但這是一條新的
-**`users` → `connections` 依賴方向**，要維護者認可（§7.4）。
+📎 `users::Service` 已經持有 `Arc<OnceServices>`，所以**不需要新的接線**。
+**這條依賴方向是幹嘛用的**：結束 session 的程式在 `users`，socket 在 `connections` —— 總得有一邊去告訴另一邊。
+反方向（`connections` 去監看 token 表）要輪詢或資料庫通知，都比一行呼叫差，而**不叫**就是現在這個狀況：
+socket 只能靠自己下一次 `revalidate` 才知道，也就是那個「最壞一個 `wbf_ws_idle_timeout`」的路徑。
 
-`end_device_sessions` 做兩件事：
+`end_device_sessions` 做兩件事（維護者定「拆訂閱 ＋ 關連線」都做）：
 
 1. **拆訂閱** —— `streams` 的 `remove_connection(id)`（兩個登記簿各一次）。推送立刻停。
-2. **叫它關** —— 對每條連線 `try_send(Outgoing::Close { 1008, "session ended" })`。
+2. **關連線** —— `try_send(Outgoing::Close { 1008, "session ended" })` ＋ §5 的取消訊號。
 
-### 4.3 鎖帳號走自己那條
+⚠️ 兩件都不 `await`（拆訂閱是同步的、`try_send` 不等）⇒ 這個方法可以是同步的。
 
-`set_locked(user)` 之後對**那個使用者的每一個裝置**做同一件事。
-⚠️ 它是同步函式（不 `await`），而 `end_device_sessions` 要 `await` 嗎？拆訂閱與 `try_send` 都不需要 ——
-所以這條可以是同步的，不改 `set_locked` 的簽名。
+### 4.3 鎖帳號**不**走這條（✅ 維護者 2026-10-02 定）
 
-## 5. 🚨 惡意 client 那一半：要不要給取消訊號
+> 「lock_account 即使放給他 timeout 應該也可以。這個場景在哪? 既然沒有天然走 remove session，這是不是嚴格定義不是破口。」
+
+⭐ **對，嚴格講它不是破口** —— 因為 `revalidate` 本來就擋它：`check_token` 會呼叫 `locked_check`
+（`wbf/mod.rs`），所以被鎖的帳號**在它的下一個 frame 就被關連線**，e2e7 `[3.1a]`／`[3.1b]`／`[4.8a]` 都在守這件事。
+它跟登出的差別只有一個：**沒有事件可以掛勾**，所以靠的是「問」而不是「被通知」。
+
+| | 誰接住它 | 最壞延遲 |
+|---|---|---|
+| 登出／刪裝置／撤 token | `remove_device` 主動拆（這支）| **立刻** |
+| **鎖帳號** | `revalidate` 每個 frame 問一次 | **一個 `wbf_ws_idle_timeout`（預設 60 秒）** |
+| token **過期** | 同上（🚨 **連事件都不可能有**，它是一個時間）| 同上 |
+
+📎 **場景**：`set_locked` 的呼叫點全部是 **admin 路徑**（`/_synapse/admin/v2/users/{id}` 的 `locked:true`、
+`api/client/admin/lock_user.rs`、MAS 的 provision／create_or_modify）—— 不是使用者自己能觸發的動作。
+而要立刻的話，admin 本來就可以順手刪那個裝置（走 `remove_device`，立刻）。
+⇒ ⭐ **所以這裡不加第二條路**：少一個漏斗、少一份會漂的實作。
+
+## 5. 🚨 惡意 client 那一半：取消訊號（✅ 維護者 2026-10-02 定要做）
 
 §3.4 的結論是「不給就只能靠 idle timeout」。兩個選項：
 
 | | 做法 | 代價 |
 |---|---|---|
-| **A** | 只推 Close（上面 4.2 的第 2 步）。惡意 client 撐到 `wbf_ws_idle_timeout`（預設 60 秒）| 零新機制。⚠️ 但「立刻終止」對最該管的那個情境**不成立** |
-| **B** | 每條連線多一個 `tokio::sync::Notify`（或 oneshot），接收迴圈的 `select!` 多一個分支 —— 跟現有的 `shutdown` 分支同形 | 多一個欄位、多一個分支。⭐ 形狀是現成的，`shutdown` 已經證明這個做法在這個迴圈裡可行 |
+| A | 只推 Close（上面 4.2 的第 2 步）。惡意 client 撐到 `wbf_ws_idle_timeout`（預設 60 秒）| 零新機制。⚠️ 但「立刻終止」對最該管的那個情境**不成立** |
+| ✅ **B（定案）** | 每條連線多一個 `tokio::sync::Notify`（或 oneshot），接收迴圈的 `select!` 多一個分支 —— 跟現有的 `shutdown` 分支同形 | 多一個欄位、多一個分支。⭐ 形狀是現成的，`shutdown` 已經證明這個做法在這個迴圈裡可行 |
 
-📌 **我建議 B**，理由是 §1.1：這條防線存在的理由就是「裝置在別人手上」，而那個人不會合作。
+理由是 §1.1：這條防線存在的理由就是「裝置在別人手上」，而那個人不會合作。
 ⚠️ 而 B 要小心一件事：取消訊號**不能讓 task 跳過收攤**（`ConnectionSlot` 要還、`JoinSet` 的帳要收）——
 它應該讓迴圈 `break`，走跟 `shutdown` 完全一樣的出口，🚫 不是 `abort()`。
 📎 `abort()` 會繞過收攤，而 PR #101 剛好證明過這個模組的收攤路是安全性論證的一部分
@@ -176,15 +223,18 @@ self.services.connections.end_device_sessions(user_id, device_id).await;
 - 🚫 **不給 server 端「清掉已經卡住的佇列」的逃生口** —— 那是 #88 明確決定過不給的事，與這支無關。
 - 🚫 **不碰 HTTP**：HTTP 的每個 pack 都重新認證，沒有「留著的連線」這個概念。
 - 🚫 **不處理聯邦**：對端的連線不是我們的。
+- 🚫 **鎖帳號不另走一條**（§4.3，維護者 2026-10-02 定）。
+- 🚫 **`Refresh` 換 token 不斷線**（下表 7.1）。
 
-## 7. ⏳ 等維護者決定的四件
+## 7. ✅ 維護者 2026-10-02 的決定
 
-| | 問題 | 我的建議 |
+| | 問題 | 決定 |
 |---|---|---|
-| **7.1** | **哪些事件算？** `remove_device` 的 20 幾個呼叫點一次全包（§3.1），還是要挑？ | **全包** —— 它們全都是「這個裝置的 session 結束了」，挑反而會留下不一致。⚠️ 但 `Refresh` 換 token **不算**（它不走 `remove_device`），而現行行為是連線照舊活著（e2e7 `[4.3c]` 守著）—— 我建議**維持不斷**：換 token 的是合法持有者 |
-| **7.2** | **只拆訂閱，還是也關連線？** | **兩個都做**。拆訂閱就不洩漏了，但關連線才是 client 期待的訊號（它才知道要重新登入，而不是以為自己還連著卻收不到東西）|
-| **7.3** | **要不要 §5 的取消訊號（B）？** | **要**，理由見 §5。若維護者選 A，那就要接受「最壞 60 秒」並把它寫進文件，🚫 不要宣稱「立刻」|
-| **7.4** | **`users` → `connections` 這條依賴方向可以嗎？** | 可以，而且我想不出更好的 —— 另一個方向（`connections` 去監看 token 表）要靠輪詢或資料庫通知，兩個都比一行呼叫差。📎 接線已經有（`users::Service` 持有 `Arc<OnceServices>`）|
+| **7.1** | 哪些事件算？`remove_device` 的 20 幾個呼叫點一次全包，還是要挑？ | ✅ **全包，直接掛進 `remove_device`** ——「既然這是 remove session 語意，沒理由不關連線」。<br>⚠️ **`Refresh` 換 token 不算**（它不走 `remove_device`，走 `set_access_token`）：換 token 的是合法持有者，連線照舊活著（e2e7 `[4.3c]` 守著這個行為）|
+| **7.2** | 只拆訂閱，還是也關連線？ | ✅ **兩個都做** ——「session 被 kill 我建議就關連線」。拆訂閱就不洩漏了，但關連線才是 client 期待的訊號（它才知道要重新登入，而不是以為自己還連著卻收不到東西）|
+| **7.3** | 要不要 §5 的取消訊號？ | ✅ **要（B 案）** |
+| **7.4** | `users` → `connections` 這條依賴方向可以嗎？「你怎麼知道要關哪個？」 | ✅ 可以。**而「怎麼知道」程式裡已經有答案**：`ConnectionSlot::is_for(user, device)`，slot 放在連線的 `Session` 裡、`Login` 時跟著換 —— 詳見 §4.1 那一小節。「terminate device」走的就是 `remove_device` 這同一個漏斗 |
+| **7.5** | 鎖帳號？ | ✅ **不另走一條，靠 `revalidate` ＋ 逾時** —— 維護者判「嚴格定義不是破口」，§4.3 驗過成立（`locked_check` 在 `revalidate` 裡） |
 
 ## 8. 測試計畫
 
@@ -193,9 +243,10 @@ self.services.connections.end_device_sessions(user_id, device_id).await;
 | **登出之後推送真的停了** | e2e：bob 訂房間 → HTTP 登出 → 另一個人在那個房間發言 → bob 那條連線**收不到** Push（而登出前收得到）|
 | **只斷那個裝置** | 🚨 同一個人兩個裝置都連著、都訂同一個房間 → 登出其中一個 → **另一個照樣收得到**（§3.2 的 `by_user` 陷阱就是這條在守）|
 | **合作的 client 立刻斷** | e2e：登出後**不送任何 pack**，斷言幾秒內收到 Close 1008（對照 PR #103 的 `[3.2d]`，那條等的是 keep-alive 觸發）|
-| **惡意 client 也立刻斷**（若選 B）| ⚠️ PowerShell 的 `ClientWebSocket` 不給「收到 Close 卻不回」的控制 —— 這條可能只能用 server 端的 log／`count_tracked_tasks()` 間接驗，或寫成 Rust 整合測試。**實作時要先確認測得到，再宣稱它成立** |
+| **惡意 client 也立刻斷**（B 已定案）| ⚠️ PowerShell 的 `ClientWebSocket` 不給「收到 Close 卻不回」的控制 —— 這條可能只能用 server 端的 log／`count_tracked_tasks()` 間接驗，或寫成 Rust 整合測試。**實作時要先確認測得到，再宣稱它成立** |
 | **收攤沒被繞過** | 取消之後 `ConnectionSlot` 還回去了：登出後立刻用同一個裝置開滿名額（e2e7 `[5.6]` 的同形）|
-| **鎖帳號** | 鎖 → 該使用者**每個**裝置的連線都斷 |
+| **鎖帳號**（§4.3：**不**主動拆）| 🚨 要測的是**反向**：鎖之後那條連線**在它下一個 frame** 被關，而不是立刻 —— 等於釘住「這條靠 `revalidate` 不靠通知」這個決定。e2e7 `[3.1a]`／`[4.8a]` 已經守住拒絕那半 |
+| **`Refresh` 不斷線**（§7.1）| e2e7 `[4.3c]` 已經在守，實作後要確認它還是綠的 —— ⭐ 那條現在是「換 token 不該觸發拆除」的反向證據 |
 
 ## 9. 風險
 
