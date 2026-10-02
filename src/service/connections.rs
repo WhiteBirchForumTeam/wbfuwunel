@@ -27,8 +27,10 @@ use std::{
 };
 
 use ruma::{DeviceId, OwnedDeviceId, OwnedUserId, UserId};
-use tokio::task::JoinSet;
-use tuwunel_core::{error, info, warn};
+use tokio::{sync::Notify, task::JoinSet};
+use tuwunel_core::{debug, error, info, warn};
+
+use crate::streams::ConnectionId;
 
 /// How long `close_and_join` waits for connections to end on their own
 /// before aborting the rest. Each connection's loop returns as soon as it
@@ -38,7 +40,28 @@ use tuwunel_core::{error, info, warn};
 pub const JOIN_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// One device's open connections, keyed by who the connection is.
-type SlotTable = Arc<Mutex<HashMap<(OwnedUserId, OwnedDeviceId), u32>>>;
+type SlotTable = Arc<Mutex<HashMap<(OwnedUserId, OwnedDeviceId), DeviceConnections>>>;
+
+/// What one device has here: the places reserved for its connections, and the
+/// ones that are serving and can be told to end.
+///
+/// ⚠️ **`reserved` is not `live.len()`.** A place is taken before the
+/// connection exists (`take_slot` runs during the upgrade, so that a refusal
+/// never mints a token) and a connection registers itself only once it is
+/// being served and has a send queue. The count is what the limit is about;
+/// the map is what `end_device_sessions` can reach.
+#[derive(Default)]
+struct DeviceConnections {
+	/// Places held by live `ConnectionSlot`s.
+	reserved: u32,
+	/// Serving connections, each with the handle that asks it to end.
+	live: HashMap<ConnectionId, Arc<Notify>>,
+}
+
+impl DeviceConnections {
+	/// Whether nothing is left for this device, so its entry can go.
+	fn is_empty(&self) -> bool { self.reserved == 0 && self.live.is_empty() }
+}
 
 /// Open connections per source address, keyed by `to_address_group`.
 type AddressTable = Arc<Mutex<HashMap<IpAddr, u32>>>;
@@ -188,16 +211,51 @@ impl Drop for ConnectionSlot {
 	fn drop(&mut self) {
 		// Same reasoning as `AddressSlot::drop`: a panic elsewhere must not cost
 		// this device a place for the rest of the server's life (CLAUDE.md P).
-		let mut table = match self.table.lock() {
-			| Ok(table) => table,
-			| Err(poisoned) => poisoned.into_inner(),
-		};
-		match table.get_mut(&self.key) {
-			| Some(count) if *count > 1 => *count -= 1,
-			| _ => {
+		let mut table = lock_slots(&self.table);
+		if let Some(device) = table.get_mut(&self.key) {
+			device.reserved = device.reserved.saturating_sub(1);
+			if device.is_empty() {
 				table.remove(&self.key);
-			},
+			}
 		}
+	}
+}
+
+/// One serving connection's entry in its device's list, so that ending that
+/// device's session can reach it. Dropping it takes the entry out, so the list
+/// holds only connections that are still being served.
+///
+/// ⭐ Separate from `ConnectionSlot` because the two begin at different
+/// moments: the place is reserved during the upgrade, the connection can only
+/// be reached once it is serving. A `Login` moves this registration to the new
+/// identity (`Connections::register_device_connection` again), exactly as
+/// `Session::inherit_slot` moves the place.
+pub struct DeviceConnectionGuard {
+	table: SlotTable,
+	key: (OwnedUserId, OwnedDeviceId),
+	connection: ConnectionId,
+}
+
+impl Drop for DeviceConnectionGuard {
+	fn drop(&mut self) {
+		let mut table = lock_slots(&self.table);
+		if let Some(device) = table.get_mut(&self.key) {
+			device.live.remove(&self.connection);
+			if device.is_empty() {
+				table.remove(&self.key);
+			}
+		}
+	}
+}
+
+/// The slot table's lock, usable even when a panic elsewhere poisoned it.
+///
+/// A poisoned lock still holds a usable table, and refusing to look would cost
+/// every device its places for the rest of the server's life (CLAUDE.md P).
+fn lock_slots(table: &SlotTable) -> MutexGuard<'_, HashMap<(OwnedUserId, OwnedDeviceId), DeviceConnections>> {
+	match table.lock() {
+		| Ok(table) => table,
+		| Err(poisoned) => poisoned.into_inner(),
 	}
 }
 
@@ -232,18 +290,105 @@ impl Connections {
 		}
 
 		let key = (user.to_owned(), device.to_owned());
-		let mut table = match self.slots.lock() {
-			| Ok(table) => table,
-			| Err(poisoned) => poisoned.into_inner(),
-		};
-		let count = table.entry(key.clone()).or_insert(0);
-		if *count >= max {
+		let mut table = lock_slots(&self.slots);
+		let device_connections = table.entry(key.clone()).or_default();
+		if device_connections.reserved >= max {
 			return None;
 		}
-		*count += 1;
+		device_connections.reserved = device_connections.reserved.saturating_add(1);
 		drop(table);
 
 		Some(Some(ConnectionSlot { table: Arc::clone(&self.slots), key }))
+	}
+
+	/// Lists `connection` under `user`'s `device`, so that ending that device's
+	/// session can ask it to stop.
+	///
+	/// Args:
+	///     user: who the connection is now, example: @alice:localhost
+	///     device: example: RJYKSTBOIE
+	///     connection: the id `next_connection_id` handed out, example: 7
+	///     cancel: notified once when this connection should end; the
+	///         connection awaits it in its own loop
+	/// Return:
+	///     DeviceConnectionGuard  hold it for as long as the connection serves
+	///     this identity; dropping it takes the entry out again.
+	///
+	/// ⚠️ Registering does **not** take a place in the count — `take_slot` did
+	/// that before the socket was accepted, and a connection that logs in as
+	/// another device re-registers without being counted twice.
+	#[must_use]
+	pub fn register_device_connection(
+		&self,
+		user: &UserId,
+		device: &DeviceId,
+		connection: ConnectionId,
+		cancel: Arc<Notify>,
+	) -> DeviceConnectionGuard {
+		let key = (user.to_owned(), device.to_owned());
+		let mut table = lock_slots(&self.slots);
+		table
+			.entry(key.clone())
+			.or_default()
+			.live
+			.insert(connection, cancel);
+		drop(table);
+
+		DeviceConnectionGuard { table: Arc::clone(&self.slots), key, connection }
+	}
+
+	/// Asks every connection serving `user`'s `device` to end, because that
+	/// session is over (`/docs/design/wire/session-teardown.md` §4.2).
+	///
+	/// Args:
+	///     user: example: @alice:localhost
+	///     device: the device whose session ended, example: RJYKSTBOIE
+	/// Return:
+	///     Vec<ConnectionId>  the connections asked to end, for the caller to
+	///     take out of the streams; empty when that device has none here.
+	///
+	/// 🚨 **This only asks.** The connection ends itself, through the same exit
+	/// as a shutdown, so its place, its subscriptions and the `JoinSet`'s entry
+	/// are given back the way they always are — ⭐ a teardown that skipped that
+	/// path would be a teardown that leaks what the path cleans up, and this
+	/// module's safety argument rests on it (see the module docs).
+	/// ⚠️ Which is also why the caller unsubscribes the returned connections
+	/// itself: a connection busy inside a handler will not look at this for as
+	/// long as that handler runs, and pushes must stop now, not then.
+	pub fn end_device_sessions(&self, user: &UserId, device: &DeviceId) -> Vec<ConnectionId> {
+		let key = (user.to_owned(), device.to_owned());
+		let table = lock_slots(&self.slots);
+		let Some(device_connections) = table.get(&key) else {
+			return Vec::new();
+		};
+		let ending: Vec<ConnectionId> = device_connections
+			.live
+			.iter()
+			.map(|(connection, cancel)| {
+				// `notify_one` stores a permit, so a connection that is between
+				// two turns of its loop still sees this; `notify_waiters` would
+				// be lost on exactly that connection.
+				cancel.notify_one();
+				*connection
+			})
+			.collect();
+		drop(table);
+
+		if !ending.is_empty() {
+			debug!(%user, %device, ?ending, "Ending this device's wbf connections: its session is over.");
+		}
+		ending
+	}
+
+	/// Return:
+	///     usize  how many connections are listed for `user`'s `device` right
+	///     now; 0 when none are. For tests and for `end_device_sessions`'
+	///     callers to check their work.
+	#[must_use]
+	pub fn count_device_connections(&self, user: &UserId, device: &DeviceId) -> usize {
+		lock_slots(&self.slots)
+			.get(&(user.to_owned(), device.to_owned()))
+			.map_or(0, |device_connections| device_connections.live.len())
 	}
 
 	/// Takes one place in `address`'s count, if there is one left.
@@ -295,17 +440,16 @@ impl Connections {
 		.unwrap_or(0)
 	}
 
-	/// How many connections `user`'s `device` holds right now; for tests and
-	/// the admin room.
+	/// How many places `user`'s `device` holds right now; for tests and the
+	/// admin room.
+	///
+	/// ⚠️ Places, not serving connections — see `DeviceConnections`. The other
+	/// number is `count_device_connections`.
 	#[must_use]
 	pub fn count_for(&self, user: &UserId, device: &DeviceId) -> u32 {
-		match self.slots.lock() {
-			| Ok(table) => table,
-			| Err(poisoned) => poisoned.into_inner(),
-		}
+		lock_slots(&self.slots)
 			.get(&(user.to_owned(), device.to_owned()))
-			.copied()
-			.unwrap_or(0)
+			.map_or(0, |device_connections| device_connections.reserved)
 	}
 
 	/// Starts `task` as a tracked connection.
@@ -574,6 +718,114 @@ mod address_tests {
 		assert_eq!(connections.count_for_address(address), 0);
 	}
 
+}
+
+/// Ending a device's session has to reach that device's connections, and only
+/// those (/docs/design/wire/session-teardown.md §8).
+#[cfg(test)]
+mod teardown_tests {
+	use futures::FutureExt;
+	use ruma::{device_id, user_id};
+
+	use super::{Arc, Connections, Notify};
+
+	#[test]
+	fn ending_a_session_notifies_that_device_and_no_other() {
+		let connections = Connections::new();
+		let alice = user_id!("@alice:localhost");
+		let bob = user_id!("@bob:localhost");
+		let phone = device_id!("PHONE");
+		let desk = device_id!("DESK");
+
+		let phone_cancel = Arc::new(Notify::new());
+		let desk_cancel = Arc::new(Notify::new());
+		let bob_cancel = Arc::new(Notify::new());
+		let _phone = connections.register_device_connection(alice, phone, 1, phone_cancel.clone());
+		let _phone_too = connections.register_device_connection(alice, phone, 2, phone_cancel.clone());
+		let _desk = connections.register_device_connection(alice, desk, 3, desk_cancel.clone());
+		// 🚨 Same device id under another user: the key is the pair, and a
+		// device id is only meaningful under its user.
+		let _bob = connections.register_device_connection(bob, phone, 4, bob_cancel.clone());
+
+		let mut ended = connections.end_device_sessions(alice, phone);
+		ended.sort_unstable();
+		assert_eq!(ended, vec![1, 2], "both of that device's connections, and only those");
+
+		// A notification is stored, so this says whether each was told.
+		assert!(phone_cancel.notified().now_or_never().is_some(), "PHONE was told");
+		assert!(desk_cancel.notified().now_or_never().is_none(), "alice's other device was not");
+		assert!(bob_cancel.notified().now_or_never().is_none(), "bob's device of the same name was not");
+	}
+
+	#[test]
+	fn a_device_with_nothing_registered_ends_nothing() {
+		let connections = Connections::new();
+		let alice = user_id!("@alice:localhost");
+		let phone = device_id!("PHONE");
+
+		assert!(connections.end_device_sessions(alice, phone).is_empty());
+		// ⚠️ And asking must not leave an entry behind: a logout for a device
+		// that never connected would otherwise grow the table for good.
+		assert_eq!(connections.count_device_connections(alice, phone), 0);
+	}
+
+	#[test]
+	fn a_connection_that_ended_is_no_longer_reachable() {
+		let connections = Connections::new();
+		let alice = user_id!("@alice:localhost");
+		let phone = device_id!("PHONE");
+
+		let registration = connections.register_device_connection(alice, phone, 1, Arc::new(Notify::new()));
+		assert_eq!(connections.count_device_connections(alice, phone), 1);
+		drop(registration);
+		assert_eq!(connections.count_device_connections(alice, phone), 0);
+		assert!(connections.end_device_sessions(alice, phone).is_empty());
+	}
+
+	#[test]
+	fn a_place_and_a_registration_are_counted_separately() {
+		let connections = Connections::new();
+		let alice = user_id!("@alice:localhost");
+		let phone = device_id!("PHONE");
+
+		// ⚠️ The place is taken during the upgrade, before the connection can be
+		// reached: `count_for` must not start counting registrations, or the
+		// per-device limit would change meaning.
+		let slot = connections.take_slot(alice, phone, 2).expect("fits").expect("a slot");
+		assert_eq!(connections.count_for(alice, phone), 1);
+		assert_eq!(connections.count_device_connections(alice, phone), 0, "not serving yet");
+
+		let registration = connections.register_device_connection(alice, phone, 7, Arc::new(Notify::new()));
+		assert_eq!(connections.count_for(alice, phone), 1, "registering took no second place");
+		assert_eq!(connections.count_device_connections(alice, phone), 1);
+
+		// Either one alone keeps the device's entry alive; both gone forgets it.
+		drop(slot);
+		assert_eq!(connections.count_device_connections(alice, phone), 1, "the entry survives its place");
+		drop(registration);
+		assert_eq!(connections.count_for(alice, phone), 0);
+		assert_eq!(connections.count_device_connections(alice, phone), 0);
+	}
+
+	#[test]
+	fn logging_in_as_another_device_moves_what_a_logout_reaches() {
+		let connections = Connections::new();
+		let alice = user_id!("@alice:localhost");
+		let phone = device_id!("PHONE");
+		let desk = device_id!("DESK");
+
+		// One connection, re-registered as another identity — what `Login` does.
+		let cancel = Arc::new(Notify::new());
+		let first = connections.register_device_connection(alice, phone, 9, cancel.clone());
+		drop(first);
+		let _second = connections.register_device_connection(alice, desk, 9, cancel.clone());
+
+		assert!(
+			connections.end_device_sessions(alice, phone).is_empty(),
+			"the identity it left behind no longer reaches it"
+		);
+		assert_eq!(connections.end_device_sessions(alice, desk), vec![9], "the one it is now does");
+	}
 }
 
 #[cfg(test)]

@@ -33,7 +33,7 @@
 //! could disagree with the row after an idempotent resend or a chunk sent
 //! over another transport, and refuse chunks the row would take.)
 
-use std::{net::IpAddr, time::Duration};
+use std::{net::IpAddr, sync::Arc, time::Duration};
 
 use axum::{
 	Extension,
@@ -45,7 +45,10 @@ use axum::{
 	response::Response,
 };
 use futures::{SinkExt, StreamExt};
-use tokio::{sync::mpsc, time::Instant};
+use tokio::{
+	sync::{Notify, mpsc},
+	time::Instant,
+};
 use tuwunel_core::{
 	debug,
 	wbf::{HEADER_LEN, PackError, RejectCode, decode},
@@ -205,6 +208,19 @@ async fn serve(
 	let connection: ConnectionId = services.streams.next_connection_id();
 	let _streams_guard = services.streams.connection_guard(connection);
 
+	// 🚨 How ending a session reaches this connection: `end_device_sessions`
+	// notifies this, the loop below sees it and leaves through the same exit as
+	// a shutdown (`/docs/design/wire/session-teardown.md` §4.2). Held by the
+	// connection, listed under its identity while `registration` lives — ⭐ a
+	// `Login` moves the listing, so what is reached is always who the
+	// connection is *now*, not who it was when it opened.
+	let cancel = Arc::new(Notify::new());
+	let mut registration = session.as_ref().map(|current| {
+		services
+			.connections
+			.register_device_connection(&current.user, &current.device, connection, cancel.clone())
+	});
+
 	// The send queue and its task. Bounded twice: by how many packs may wait
 	// and by how many bytes they may add up to. A handler that produces
 	// faster than the peer reads waits in `Reply::send`, and with it the
@@ -240,6 +256,20 @@ async fn serve(
 			() = tokio::time::sleep_until(login_deadline), if session.is_none() => {
 				debug!("wbf WebSocket connection did not log in in time; closing");
 				enqueue_close(&queue, close(close_code::POLICY, "not logged in in time")).await;
+				break;
+			},
+			// 🚨 The session this connection serves is over (logged out, the
+			// device deleted, the token revoked): stop, now, rather than at the
+			// next frame it happens to send — a client that sends nothing is
+			// otherwise reachable for a whole `wbf_ws_idle_timeout`, and the
+			// case this exists for is a device in somebody else's hands
+			// (/docs/design/wire/session-teardown.md §1.1, external review #8).
+			// ⭐ `break`, not `abort`: the place, the subscriptions and the
+			// `JoinSet` entry are given back by the ordinary exit.
+			() = cancel.notified() => {
+				debug!(user = user_label(session.as_ref()), "wbf WebSocket connection closing: its session ended");
+				services.streams.remove_connection(connection);
+				enqueue_close(&queue, close(close_code::POLICY, "session ended")).await;
 				break;
 			},
 			() = &mut shutdown => {
@@ -384,6 +414,18 @@ async fn serve(
 						services.streams.remove_connection(connection);
 					}
 				}
+				// 🚨 Listed under who this connection is **now**. Dropping the
+				// old registration first is what makes that true: otherwise
+				// logging in as somebody else would leave this connection
+				// reachable by the previous device's logout, and unreachable by
+				// its own (/docs/design/wire/session-teardown.md §4.1).
+				drop(registration.take());
+				registration = Some(services.connections.register_device_connection(
+					&new_session.user,
+					&new_session.device,
+					connection,
+					cancel.clone(),
+				));
 				session = Some(new_session);
 			},
 			| SessionChange::Close(reason) => {
