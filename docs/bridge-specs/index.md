@@ -33,7 +33,7 @@ offset  bytes              意思
 
 `id`、`seq` 抄請求。
 
-⚠️ **有一種拒絕比橋還早**：WebSocket 在**每個 frame 之前**（控制框也算，見 [/docs/design/wire/pack-pipeline.md](../design/wire/pack-pipeline.md) §3.1）、也在**解碼之前**先問 session 還算不算數（登出、裝置被撤、token 過期、帳號被鎖，`ws.rs` 的 `revalidate`）。不算數就回通道自己的 `Error`（`01 01 03 04`：**沒有** `IS_BRIDGED`，因為那時 pack 還沒解；data 是空的）然後**關連線**。meta 一樣帶 Matrix 的欄位，例：`{"code":"Unauthorized","code_id":1301,"errcode":"M_USER_LOCKED","message":"M_USER_LOCKED: This account has been locked.","soft_logout":true,"status":401}`（向量 `error_session_locked`）。這條不分走不走橋，e2e13 [1.27] 驗過；欄位規則見 [/docs/design/wire/wire-format.md §3.4](../design/wire/wire-format.md)。
+⚠️ **有一種拒絕比橋還早**：WebSocket 在**每個 frame 之前**（控制框也算；只有 Close 與傳輸錯誤比它更前面，見 [/docs/design/wire/pack-pipeline.md](../design/wire/pack-pipeline.md) §3.1）、也在**解碼之前**先問 session 還算不算數（登出、裝置被撤、token 過期、帳號被鎖，`ws.rs` 的 `revalidate`）。不算數就回通道自己的 `Error`（`01 01 03 04`：**沒有** `IS_BRIDGED`，因為那時 pack 還沒解；data 是空的）然後**關連線**。meta 一樣帶 Matrix 的欄位，例：`{"code":"Unauthorized","code_id":1301,"errcode":"M_USER_LOCKED","message":"M_USER_LOCKED: This account has been locked.","soft_logout":true,"status":401}`（向量 `error_session_locked`）。這條不分走不走橋，e2e13 [1.27] 驗過；欄位規則見 [/docs/design/wire/wire-format.md §3.4](../design/wire/wire-format.md)。
 
 ### 1.3 meta 的變數
 

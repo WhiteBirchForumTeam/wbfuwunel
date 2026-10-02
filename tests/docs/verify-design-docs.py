@@ -20,6 +20,7 @@ because a stale name in a link or a comment never fails the build -- this is it.
 import io
 import os
 import re
+import subprocess
 import sys
 
 SKIP_DIRS = {".git", "target", "node_modules", "scratchpad"}
@@ -44,6 +45,37 @@ STALE_PATHS = [
 problems = []
 
 
+def list_indexed_symlinks():
+    """
+    Return:
+        set[str]  normalised paths git records as symlinks (mode 120000);
+        empty when git cannot be asked, and the caller falls back to guessing.
+
+    ⭐ The index is the authoritative answer and it is the same on every
+    platform, which is the whole point: the shape on disk is not (see
+    `is_symlink_stub`). Asking it is also the lesson of how this check came to
+    be wrong in the first place — the author measured the symlink's own blob
+    (18 bytes of `../CONTRIBUTING.md`) and read it as the file's content
+    (PR #103).
+    """
+    try:
+        listing = subprocess.check_output(["git", "ls-files", "-s", "-z"], stderr=subprocess.PIPE)
+    except (OSError, subprocess.CalledProcessError):
+        return set()
+    found = set()
+    for entry in listing.decode("utf-8", "replace").split("\0"):
+        if not entry.startswith("120000 "):
+            continue
+        # `<mode> <object> <stage>\t<path>`
+        parts = entry.split("\t", 1)
+        if len(parts) == 2:
+            found.add(os.path.normpath(parts[1]))
+    return found
+
+
+INDEXED_SYMLINKS = list_indexed_symlinks()
+
+
 def is_symlink_stub(path):
     """
     Args:
@@ -62,9 +94,17 @@ def is_symlink_stub(path):
     differently per platform is a lying observable: it reported ALL CLEAR to
     the author and two dead links to review (cirno, PR #103).
     """
+    if path in INDEXED_SYMLINKS:
+        return True
     if os.path.islink(path):
         return True
-    # The `core.symlinks=false` shape: the whole file is one relative path.
+    # Last resort, when there is no git to ask: the `core.symlinks=false` shape,
+    # where the whole file is one relative path. ⚠️ A real document whose entire
+    # content is a path would be skipped too (review, rumia) — it cannot hold a
+    # markdown link, so the link check loses nothing, but a stale name in it
+    # would go unseen. That is why the index is asked first.
+    if INDEXED_SYMLINKS:
+        return False
     try:
         with io.open(path, "r", encoding="utf-8") as handle:
             body = handle.read(512)
