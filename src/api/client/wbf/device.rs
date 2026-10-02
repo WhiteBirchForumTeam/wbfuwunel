@@ -127,9 +127,23 @@ pub(super) async fn handle_device_subscribe(
 	// registry (`Superseded`, 1505). There is no refusal to handle here: the
 	// rule is the registry's, enforced in the same transaction as the entry,
 	// so no `if` at this call site can be right or wrong about it.
-	services
+	//
+	// 🚨 One refusal there is: the awaits above mean this can still be in flight
+	// when its session is logged out, and taking the device queue then would push
+	// a dead session its to-device items — the Megolm keys
+	// (/docs/design/wire/session-teardown.md §4.4). The registry decides, under
+	// the lock that orders it against the teardown.
+	if services
 		.streams
-		.subscribe_device(ctx.connection, &session.user, &device, queue, view.header.id);
+		.subscribe_device(ctx.connection, &session.user, &device, queue, view.header.id)
+		.is_err()
+	{
+		return Err(Reject::code(
+			RejectCode::Unauthorized,
+			"this session ended while the Subscribe was in flight",
+		)
+		.into());
+	}
 
 	// Read before the window, like `Recent`: a client that stores it never
 	// misses an item added while the window was being read.

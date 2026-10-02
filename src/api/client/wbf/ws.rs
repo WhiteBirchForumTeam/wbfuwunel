@@ -268,7 +268,7 @@ async fn serve(
 			// `JoinSet` entry are given back by the ordinary exit.
 			() = cancel.notified() => {
 				debug!(user = user_label(session.as_ref()), "wbf WebSocket connection closing: its session ended");
-				services.streams.remove_connection(connection);
+				services.streams.end_connection(connection);
 				enqueue_close(&queue, close(close_code::POLICY, "session ended")).await;
 				break;
 			},

@@ -26,7 +26,7 @@ use tuwunel_core::{
 	},
 };
 
-use super::{ConnectionId, Outgoing, PackQueue, Streams};
+use super::{ConnectionId, Outgoing, PackQueue, SessionEnded, Streams};
 
 /// `Device/Push`, server to client only.
 pub const DEVICE_PUSH_SUBTYPE: u8 = 0x06;
@@ -102,11 +102,14 @@ impl Streams {
 		device: &DeviceId,
 		queue: PackQueue,
 		id: u64,
-	) -> Option<ConnectionId> {
+	) -> Result<Option<ConnectionId>, SessionEnded> {
 		let topic = DeviceTopic::new(user, device);
-		let entered = self
+		let Some(entered) = self
 			.devices
-			.subscribe(connection, user, queue, id, &[topic]);
+			.subscribe(connection, user, queue, id, &[topic])
+		else {
+			return Err(SessionEnded);
+		};
 
 		// The registry took them out of the topic; ending their conversation
 		// is this layer's job, because the pack is this kind's.
@@ -127,7 +130,7 @@ impl Streams {
 			}
 			superseded = Some(loser.connection);
 		}
-		superseded
+		Ok(superseded)
 	}
 
 	/// Releases this connection's hold on its device queue, if it has one.
@@ -342,8 +345,8 @@ mod tests {
 		let (first, mut first_rx) = queue(4);
 		let (second, _second_rx) = queue(4);
 
-		assert_eq!(streams.subscribe_device(1, alice, phone, first, 10), None, "nobody held it");
-		let displaced = streams.subscribe_device(2, alice, phone, second, 11);
+		assert_eq!(streams.subscribe_device(1, alice, phone, first, 10).expect("the session has not ended"), None, "nobody held it");
+		let displaced = streams.subscribe_device(2, alice, phone, second, 11).expect("the session has not ended");
 
 		assert_eq!(displaced, Some(1), "the later connection wins");
 		assert_eq!(streams.device_holder(alice, phone), Some(2));
@@ -370,9 +373,9 @@ mod tests {
 		let (again, _rx2) = queue(4);
 		let (other, _rx3) = queue(4);
 
-		assert_eq!(streams.subscribe_device(1, alice, phone, tx, 10), None);
+		assert_eq!(streams.subscribe_device(1, alice, phone, tx, 10).expect("the session has not ended"), None);
 		assert_eq!(
-			streams.subscribe_device(1, alice, phone, again, 12),
+			streams.subscribe_device(1, alice, phone, again, 12).expect("the session has not ended"),
 			None,
 			"a connection is not somebody else"
 		);
@@ -382,7 +385,7 @@ mod tests {
 
 		assert_eq!(streams.device_holder(alice, phone), None);
 		assert_eq!(
-			streams.subscribe_device(2, alice, phone, other, 13),
+			streams.subscribe_device(2, alice, phone, other, 13).expect("the session has not ended"),
 			None,
 			"a freed queue displaces nobody"
 		);
@@ -394,7 +397,7 @@ mod tests {
 		let alice = user_id!("@alice:localhost");
 		let phone = device_id!("PHONE");
 		let (tx, mut rx) = queue(4);
-		streams.subscribe_device(1, alice, phone, tx, 42);
+		streams.subscribe_device(1, alice, phone, tx, 42).expect("the session has not ended");
 
 		let items = [
 			PushedItem { count: 500, json: b"{\"a\":1}" },
@@ -428,7 +431,7 @@ mod tests {
 		let alice = user_id!("@alice:localhost");
 		let phone = device_id!("PHONE");
 		let (tx, mut rx) = queue(4);
-		streams.subscribe_device(1, alice, phone, tx, 42);
+		streams.subscribe_device(1, alice, phone, tx, 42).expect("the session has not ended");
 		let items: Vec<PushedItem<'_>> = (0..3).map(|n| PushedItem { count: 500 + n, json: b"{}" }).collect();
 
 		streams.push_device_window(alice, phone, &items, true, 2, 1024);
@@ -452,7 +455,7 @@ mod tests {
 		let alice = user_id!("@alice:localhost");
 		let phone = device_id!("PHONE");
 		let (tx, mut rx) = queue(4);
-		streams.subscribe_device(1, alice, phone, tx, 42);
+		streams.subscribe_device(1, alice, phone, tx, 42).expect("the session has not ended");
 
 		let counts = serde_json::json!({});
 		streams.push_crypto_state(alice, phone, &CryptoState { otk_counts: &counts, unused_fallback_key_types: &[] });
@@ -476,7 +479,7 @@ mod tests {
 		let alice = user_id!("@alice:localhost");
 		let phone = device_id!("PHONE");
 		let (tx, mut rx) = queue(8);
-		streams.subscribe_device(1, alice, phone, tx, 42);
+		streams.subscribe_device(1, alice, phone, tx, 42).expect("the session has not ended");
 
 		let counts = serde_json::json!({"signed_curve25519": 3});
 		let state = CryptoState { otk_counts: &counts, unused_fallback_key_types: &[] };

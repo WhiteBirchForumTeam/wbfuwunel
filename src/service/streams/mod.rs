@@ -52,6 +52,15 @@ use self::{
 /// process, meaningless outside it.
 pub type ConnectionId = u64;
 
+/// Why a subscribe did not happen: this connection's session ended while the
+/// request was in flight, so nothing may enter a topic for it any more
+/// (/docs/design/wire/session-teardown.md §4.4).
+///
+/// ⭐ A type rather than an empty success, because the two are opposites: the
+/// caller owes the client a refusal, and must not send a catch-up window.
+#[derive(Clone, Copy, Debug)]
+pub struct SessionEnded;
+
 /// What a client names in `Hello.features` to take part in device versions:
 /// sends it makes are checked against the room's version, and (later) it is
 /// told when a member's devices change.
@@ -251,7 +260,7 @@ pub struct ConnectionGuard {
 }
 
 impl Drop for ConnectionGuard {
-	fn drop(&mut self) { self.streams.remove_connection(self.connection); }
+	fn drop(&mut self) { self.streams.forget_connection(self.connection); }
 }
 
 impl Default for Streams {
@@ -333,12 +342,37 @@ impl Streams {
 		ConnectionGuard { streams: self.clone(), connection }
 	}
 
-	/// Takes `connection` out of **every** stream and forgets it. One place,
-	/// so a new stream cannot be added without its cleanup: the guard calls
-	/// only this.
+	/// Takes `connection` out of **every** stream. One place, so a new stream
+	/// cannot be added without its cleanup.
+	///
+	/// ⚠️ The connection may subscribe again afterwards — that is what a `Login`
+	/// to another identity needs. To stop it for good use `end_connection`, and
+	/// when the connection itself is over, `forget_connection`.
 	pub fn remove_connection(&self, connection: ConnectionId) {
 		self.rooms.remove_connection(connection);
 		self.devices.remove_connection(connection);
+		self.set_device_versions_declared(connection, false);
+	}
+
+	/// `remove_connection`, and nothing may put it back: this connection's
+	/// session is over (`Connections::end_device_sessions`).
+	///
+	/// 🚨 A `Subscribe` already in flight has passed its membership checks and
+	/// is about to register — the only thing that can stop it is the registry's
+	/// own lock, so this marks rather than merely removes
+	/// (/docs/design/wire/session-teardown.md §4.4).
+	pub fn end_connection(&self, connection: ConnectionId) {
+		self.rooms.end_connection(connection);
+		self.devices.end_connection(connection);
+		self.set_device_versions_declared(connection, false);
+	}
+
+	/// `remove_connection`, and the connection is gone: its id is never handed
+	/// out again, so what `end_connection` marked is dropped with it. What the
+	/// guard calls when the task ends.
+	pub fn forget_connection(&self, connection: ConnectionId) {
+		self.rooms.forget_connection(connection);
+		self.devices.forget_connection(connection);
 		self.set_device_versions_declared(connection, false);
 	}
 

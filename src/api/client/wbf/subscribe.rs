@@ -19,7 +19,10 @@ use tuwunel_core::{
 	matrix::pdu::PduCount,
 	wbf::{PackView, RejectCode},
 };
-use tuwunel_service::{Services, streams::PushedEvent};
+use tuwunel_service::{
+	Services,
+	streams::{PushedEvent, SessionEnded},
+};
 
 use super::{Failure, PackContext, Reject, Reply, ack, parse_meta, recent};
 
@@ -89,14 +92,30 @@ pub(super) async fn handle_subscribe(
 
 	// Registered before the catch-up window is read (event-push 3): a join
 	// or an append during the read reaches the channel, at worst twice.
-	let subscribed = services.streams.subscribe(
+	//
+	// 🚨 And it can be refused: the awaits above mean this request can still be
+	// in flight when its session is logged out, and then entering the channel
+	// would put a dead session back in and push it a catch-up window
+	// (/docs/design/wire/session-teardown.md §4.4, found by rumia in review of
+	// PR #105). ⭐ The registry decides, under the one lock that can order it
+	// against the teardown — not a check here, which the registration could
+	// slip past.
+	let subscribed = match services.streams.subscribe(
 		ctx.connection,
 		user,
 		queue,
 		view.header.id,
 		&rooms,
 		account_wide,
-	);
+	) {
+		| Ok(subscribed) => subscribed,
+		| Err(SessionEnded) =>
+			return Err(Reject::code(
+				RejectCode::Unauthorized,
+				"this session ended while the Subscribe was in flight",
+			)
+			.into()),
+	};
 
 	// Registered, so a leave from here on finds a subscriber to evict — but
 	// one that landed between the membership check above and that

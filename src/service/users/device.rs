@@ -101,12 +101,19 @@ pub async fn remove_device(&self, user_id: &UserId, device_id: &DeviceId) {
 	// the streams is the caller's half, because a connection busy inside a
 	// handler will not look at the first for as long as that handler runs —
 	// and what must stop immediately is the pushing, not the socket.
+	//
+	// 🚨 `end_connection`, not `remove_connection`: a `Subscribe` of that same
+	// connection can be in flight, past its membership checks and about to
+	// register, and merely taking it out now would let it put itself back in and
+	// be pushed a catch-up window after its session is gone
+	// (/docs/design/wire/session-teardown.md §4.4, found by rumia in review of
+	// PR #105).
 	for connection in self
 		.services
 		.connections
 		.end_device_sessions(user_id, device_id)
 	{
-		self.services.streams.remove_connection(connection);
+		self.services.streams.end_connection(connection);
 	}
 
 	// Remove todevice events

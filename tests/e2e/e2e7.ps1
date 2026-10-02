@@ -272,22 +272,34 @@ $null = Api Put "/_synapse/admin/v2/users/$([uri]::EscapeDataString('@bob:localh
 $r = Send-Pack $ping $tokB
 Log "[3.1c] unlocked bob, HTTP Ping -> $(Describe $r)  (expect http=200 Pong)"
 
-# [3.2] logout while connected: the next frame is refused and the server closes the connection
+# [3.2] logout while connected: the server closes the connection by itself.
+# 🚨 Since #8's back half (/docs/design/wire/session-teardown.md) the logout tears this connection
+# down from the other side, so there is no "next pack is refused" any more — the connection never
+# gets to send one. ⭐ The old shape of this check (Ping -> Error(Unauthorized), then Close) is what
+# `revalidate` does, and the trigger that still reaches `revalidate` is locking or an expiry, not a
+# logout: that is what [3.2d] uses now (review of PR #105).
 $wsB = Ws-Open $tokB
 $r = Ws-Call $wsB $ping
 Log "[3.2a] bob connected, Ping -> $(Describe $r)  (expect Pong)"
-$null = Api Post '/_matrix/client/v3/logout' '{}' $tokB
-$r = Ws-Call $wsB $ping
-Log "[3.2b] after HTTP logout, Ping -> $(Describe $r)  (expect Error Unauthorized)"
 $buf = New-Object byte[] 4096
+$null = Api Post '/_matrix/client/v3/logout' '{}' $tokB
 $t = $wsB.ReceiveAsync([ArraySegment[byte]]$buf, [Threading.CancellationToken]::None)
-if ($t.Wait(5000)) { Log "[3.2c] then server sent $($t.Result.MessageType) code=$($t.Result.CloseStatus) state=$($wsB.State)  (expect Close, PolicyViolation)" } else { Log "[3.2c] no close within 5 s, state=$($wsB.State)  (expect Close: FAIL)" }
+if ($t.Wait(5000)) { Log "[3.2b] after HTTP logout, without sending anything -> server sent $($t.Result.MessageType) code=$($t.Result.CloseStatus) state=$($wsB.State)  (expect Close, PolicyViolation: torn down, not waiting for a frame)" } else { Log "[3.2b] no close within 5 s, state=$($wsB.State)  (expect Close: FAIL)" }
+try { $null = Ws-Call $wsB $ping; Log "[3.2c] a pack after the teardown still got an answer?! state=$($wsB.State)  (expect the socket to be gone: FAIL)" }
+catch { Log "[3.2c] and a pack sent after that gets nothing back, the socket is gone  state=$($wsB.State)  (expect CloseReceived or Aborted)" }
 
-# [3.2d] external review 2026-09-29 #8: a logged-out session that sends only WebSocket control
-# frames must be closed too. Before the fix, Ping/Pong `continue`d before `revalidate` and still
-# reset wbf_ws_idle_timeout (60 s in this config), so the connection stayed open indefinitely and
-# kept receiving whatever its subscriptions pushed. The client sends nothing after the logout here:
-# the only traffic is .NET's own keep-alive control frame, once a second.
+# [3.2d] external review 2026-09-29 #8: a session that is no longer valid and sends only WebSocket
+# control frames must be closed too. Before the fix, Ping/Pong `continue`d before `revalidate` and
+# still reset wbf_ws_idle_timeout (60 s in this config), so the connection stayed open indefinitely
+# and kept receiving whatever its subscriptions pushed. The client sends nothing here: the only
+# traffic is .NET's own keep-alive control frame, once a second.
+#
+# 🚨 The trigger is **locking the account**, not a logout, and that matters: since #8's back half
+# (/docs/design/wire/session-teardown.md) a logout tears the connection down from the other side, so
+# it never reaches `revalidate` and never produces a refusal pack. Locking has no teardown path by
+# design (§4.3) — and neither does a token expiring — so it is the trigger that still exercises
+# *this* gate. ⭐ The logout half is e2e11 [5.2]/[5.3]; what this block guards is the control frame
+# being revalidated at all, which is PR #103 (rumia and cirno, review of PR #105).
 #
 # 🚨 This block is the only one in this suite whose result reaches the exit code (see the end of
 # the file). The older scenarios print `FAIL` and exit 0, which is how an edit of mine broke the
@@ -300,7 +312,7 @@ $tokC = $regC.access_token
 $wsC = Ws-Open $tokC 1
 $r = Ws-Call $wsC $ping
 Log "[3.2d-i] carol connected with keep-alive, Ping -> $(Describe $r)  (expect Pong)"
-$null = Api Post '/_matrix/client/v3/logout' '{}' $tokC
+$null = Api Put "/_synapse/admin/v2/users/$([uri]::EscapeDataString('@carol:localhost'))" '{"locked":true}' $tokA
 $t = $wsC.ReceiveAsync([ArraySegment[byte]]$buf, [Threading.CancellationToken]::None)
 try {
   if ($t.Wait(20000)) {
@@ -316,7 +328,7 @@ try {
       # whose meta merely contains that word, which is not what this claims to guard
       # (rumia, PR #103 review). kind 1 = Control, subtype 3 = Error.
       $addressed = if ($refusal.kind -eq 1 -and $refusal.subtype -eq 3 -and $refusal.meta.code -eq 'Unauthorized' -and $refusal.id -eq 0 -and $refusal.seq -eq 0) { 'ok' } else { $script:TeardownFail = $true; 'FAIL' }
-      Log "[3.2d] logged out, NOT sending any pack -> server answered the keep-alive frame: $(Describe $refusal)  (${addressed}: expect Error Unauthorized id=0 seq=0)"
+      Log "[3.2d] locked, NOT sending any pack -> server answered the keep-alive frame: $(Describe $refusal)  (${addressed}: expect Error Unauthorized id=0 seq=0)"
       $t2 = $wsC.ReceiveAsync([ArraySegment[byte]]$buf, [Threading.CancellationToken]::None)
       if ($t2.Wait(5000)) {
         $closed = if ($t2.Result.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close -and $t2.Result.CloseStatus -eq [System.Net.WebSockets.WebSocketCloseStatus]::PolicyViolation) { 'ok' } else { $script:TeardownFail = $true; 'FAIL' }
@@ -324,7 +336,7 @@ try {
       } else { $script:TeardownFail = $true; Log "[3.2d-ii] no close within 5 s, state=$($wsC.State)  (FAIL: expect Close)" }
     } else {
       $script:TeardownFail = $true
-      Log "[3.2d] logged out, NOT sending any pack -> server sent $($m.MessageType) code=$($m.CloseStatus) state=$($wsC.State)  (FAIL: expect the refusal pack first, then Close)"
+      Log "[3.2d] locked, NOT sending any pack -> server sent $($m.MessageType) code=$($m.CloseStatus) state=$($wsC.State)  (FAIL: expect the refusal pack first, then Close)"
     }
   }
   else { $script:TeardownFail = $true; Log "[3.2d] nothing within 20 s while only control frames were sent, state=$($wsC.State)  (FAIL: the frame kind decided whether the session was checked)" }
