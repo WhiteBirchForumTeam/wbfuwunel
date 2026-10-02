@@ -138,7 +138,7 @@ client 那邊「開幾條、哪條走什麼、pending → sending → sent」是
   │                                                                     │
   └─ 帶 Bearer ───────────────────────────────────────────────────────────┘
 
-結束的原因：client 關、idle 300 秒、匿名逾時（1008）、session 重驗失敗（1008）、Logout（1000）、
+結束的原因：client 關、idle `wbf_ws_idle_timeout`（預設 60 秒）、匿名逾時（1008）、session 重驗失敗（1008）、Logout（1000）、
             名額不足（1008）、server 關機（1001）、發送佇列的對端死了。
 ```
 
@@ -151,8 +151,8 @@ client 那邊「開幾條、哪條走什麼、pending → sending → sent」是
 | # | 關卡 | 不過怎麼辦 | 為什麼在這個位置 |
 |---|---|---|---|
 | 1 | frame 大小（WebSocket 層，`max_message_size`） | WebSocket 層拒收 | 還沒進記憶體就擋，最便宜 |
-| 2 | 是 binary 嗎 | Text → `Error(Corrupt)`；Ping/Pong 由 WS 層答；Close → 結束 | 不是 pack 的東西不往下走 |
-| 3 | **session 還有效嗎**（`revalidate`：token 仍在、同一人、未到期、未鎖定） | `Error(Unauthorized)` ＋ Close 1008 | 在 decode **之前**：死掉的 session 連送壞封包續命都不行 |
+| 2 | **session 還有效嗎**（`revalidate`：token 仍在、同一人、未到期、未鎖定） | `Error(Unauthorized)` ＋ Close 1008（控制框沒有 header 可抄，`id`／`seq` 給 `0`／`0`）| 🚨 **在「這是不是 pack」之前**，而且 **Close 與傳輸錯誤比它更前面**（連線要收了，問什麼都沒意義）—— 理由見 §3.1 |
+| 3 | 是 binary 嗎 | Text → `Error(Corrupt)`；Ping/Pong 由 WS 層答 | 不是 pack 的東西不往下走 |
 | 4 | decode（版本、旗標、長度、兩個 CRC） | `Error(<PackError 對應碼>)`，`id`/`seq` 只在 DataCrc 錯時從 header 抄 | 到這裡才碰 bytes 內容 |
 | 5 | meta／data 不超過設定上限 | `Error(TooLarge)` | decode 之後才知道長度是真的 |
 | 6 | **這個 kind 在這個狀態、這個傳輸上准不准** | 匿名連線送非白名單 → `Error(Unauthorized)`；HTTP 送只准 WS 的 kind → `Error(Unsupported)`；沒人認得的 kind → `Error(UnknownKind)` | 一張表回答，不散在 handler 裡 |
@@ -175,6 +175,49 @@ fn admission(kind: Kind, subtype: u8) -> Option<Admission>
 
 HTTP 傳輸走同一條路，只是第 1～3 關換成 HTTP 的（body 大小、Bearer 驗一次），第 8 關的「發送佇列」是一個只裝得下**一個** pack 的 body：
 handler 送第二個 pack 就是 bug，由 `Reply` 型別在 HTTP 模式下拒絕（§4.2）。
+
+### 3.1 🚨 為什麼第 2 關在第 3 關前面：控制框也要 `revalidate`（外部審查 2026-09-29 #8）
+
+原本的順序是**先分辨 frame 種類、再問 session**，而 **Ping／Pong 在那個分辨裡就 `continue` 掉了** ——
+於是控制框**從來沒有經過這道閘**，可是它**照樣把 `wbf_ws_idle_timeout` 的計時歸零**。
+後果：一個已經**登出、被撤、過期或帳號被鎖**的 session，只要持續 ping，連線就能無限期開著，
+而 ⚠️ **訂閱推給它的東西照樣送得到它**（🚨 那半是 #8 的後半：登出要拆訂閱，另一支設計提案）。
+
+🚨 **這一半買到的界限要說清楚，免得被當成「修好了」**：Ping 是 **client 驅動**的，所以
+一個**什麼都不送**（連 keep-alive 都關掉）的 client，連線還是活到 `wbf_ws_idle_timeout`
+才被關 —— 這一半把洩漏從**無限期**變成**至多一個 idle timeout**，
+⏳ 要變成「立刻」只有 #8 後半（登出時主動拆訂閱、主動關連線）。
+
+📌 **所以 `wbf_ws_idle_timeout` 的預設從 300 降到 60 秒**（維護者 2026-10-01 定）：在後半做完之前，
+那個數字**就是**「遠端登出一個被偷的裝置」最壞要等多久。⚠️ **這對 client 是一條契約**：
+它必須比這個間隔更頻繁地送東西（`Control/Ping` pack 或 WebSocket ping），否則會一直在重連。
+🚨 **而「既有的 e2e 全部自己寫死這個設定」是錯的**（cirno 在 PR #103 複審抓到，原本這裡這樣寫）：
+只有 e2e7（2／60）、e2e11／e2e12（120）、e2e17（60）寫死；**e2e8／9／13／15／16 吃的正是這個預設**，
+而改預設那一輪只重跑了 e2e7。⚠️ **同型事故這個 repo 已經記過一次**（§2.14 的
+`wbf_ws_max_connections_per_device` 4→8，e2e13 `[2.7]` 靠預設值撞上限）。
+📌 修法是**把它寫進共用的 `Write-Config`**（`tests/e2e/wbf-helpers.ps1`）與 e2e9 自己那份：
+⭐ **一支靠預設值的測試，就是一支會在預設改動時無聲改行為的測試。**
+⭐ 而 **後半不能取代這一半**：token **過期**是一個時間（`check_token` 比對 `expires_at`），
+**沒有任何事件可以掛勾** —— 只有「每個 frame 問一次」接得住它。兩半是互補，不是二選一。
+
+⭐ **一個死掉的 session 不准送的不是「pack」，是「任何 frame」。** 所以這道閘的位置只能在
+「讀到一個 frame」之後、「這是什麼 frame」之前；唯一比它更前面的是 Close 與傳輸錯誤 ——
+那兩個的結論跟 session 無關（都是結束）。
+
+📎 **Text frame 原本也繞過它**，但那條是有界的：`health.record_undecodable_frame()` 數到上限就關連線。
+控制框沒有任何計數器，所以它是無界的那個。
+
+📎 代價是**每個 frame 一次點讀**（含控制框）。⚠️ **那個「同一個數量級」只在飽和時成立**
+（cirno 在 PR #103 複審補的）：一個**有效** session 猛送 ping 的讀取量跟它猛送 pack 一樣，
+而一個**無效**的 session **在第一個 ping 就被關掉**、製造不出第二次 —— 🚨 **但常態不是飽和**：
+一條**閒置**連線的 keep-alive 原本**一次都不讀**，現在每次都要 `find_from_token` ＋ `locked_check`
+（`wbf/mod.rs` 的 `check_token`，🚫 沒有快取，見 [/docs/design/wire/wire-format.md](wire-format.md) §6.1
+「不做每 N 秒才驗的快取」）。那是**資源**不是正確性，而維護者定的 60 秒契約讓它有界（每條連線每 60 秒至少一次）。
+⚠️ 匿名（還沒登入）的連線沒有 session 可問，它靠的是 `wbf_ws_unauthenticated_timeout`。
+
+📎 **控制框被拒時 `Error(Unauthorized)` 的 `id`／`seq` 是 `0`／`0`** —— 控制框沒有 header 可以抄。
+那是這個迴圈本來就有的慣例（Text frame 的 `Error(Corrupt)` 也是 `0`／`0`）：⭐ **「這個拒絕不屬於任何會話」。**
+pack 照樣送（說明比沉默有用），Close 1008 緊接在後。
 
 ## 4. handler 的契約
 

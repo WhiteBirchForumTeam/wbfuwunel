@@ -55,7 +55,7 @@
 
 **會怎麼被拒**：密碼錯 → 還是 401，meta `{"code":"Unauthorized","code_id":1301,"errcode":"M_FORBIDDEN","message":"Invalid username or password.","status":401}`，data `{"flows":[{"stages":["m.login.password"]}],"params":{},"session":"lhcDfLGqNIz9OWTHt8X1SiuUce88tpVU","errcode":"M_FORBIDDEN","error":"Invalid username or password."}` —— `session` 不變，可以再試。
 
-⚠️ **刪掉這條連線自己的裝置**：回覆照樣先到，**下一個 pack** 在橋之前被拒 —— `{"code":"Unauthorized","code_id":1301,"errcode":"M_UNKNOWN_TOKEN",…}`、沒有 bit4、關連線（index §1.2；e2e13 [2.13]）。
+⚠️ **刪掉這條連線自己的裝置**：回覆照樣先到，**下一個 frame**（Ping／Pong 也算）在橋之前被拒 —— `{"code":"Unauthorized","code_id":1301,"errcode":"M_UNKNOWN_TOKEN",…}`、沒有 bit4、關連線（index §1.2；e2e13 [2.13]）。
 
 ## `0x24` DeleteDevices —— 一次刪好幾個裝置（批 2，要 UIAA）
 

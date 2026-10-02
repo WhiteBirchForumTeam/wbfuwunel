@@ -252,8 +252,12 @@ async fn authenticate(services: &Services, headers: &HeaderMap) -> Result<Sessio
 
 /// Checks that `session` is still what its token resolves to: same user and
 /// device, not expired, account not locked. A WebSocket calls this before
-/// every pack, so a logout, a revoked device, an expiry or a lock ends the
-/// connection's authority at the next message instead of never.
+/// **every frame, control frames included**, so a logout, a revoked device, an
+/// expiry or a lock ends the connection's authority at the next frame instead
+/// of never — 🚨 not "at the next pack": a Ping resets the idle timer just as
+/// well as a pack does, so a gate the control frames skip is a gate a dead
+/// session can hold a connection open behind
+/// (/docs/design/wire/pack-pipeline.md §3.1).
 pub(super) async fn revalidate(services: &Services, session: &Session) -> Result {
 	let current = check_token(services, &session.token).await?;
 	if !current.is_same_device(session) {

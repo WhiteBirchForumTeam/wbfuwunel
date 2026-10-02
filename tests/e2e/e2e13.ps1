@@ -289,7 +289,7 @@ $lock = Http PUT "/_matrix/client/v1/admin/lock/$(Enc $bob)" @{ locked = $true }
 $lockedWhoAmI = Bridge $wsB 0x11 0x20 $null $null
 $hlockedWhoAmI = Http GET '/_matrix/client/v3/account/whoami' $null $tokB
 $null = Http PUT "/_matrix/client/v1/admin/lock/$(Enc $bob)" @{ locked = $false } $tok
-# Refused one step earlier than the bridge: the WebSocket asks before every pack whether its session is still good
+# Refused one step earlier than the bridge: the WebSocket asks before every frame whether its session is still good
 # (ws.rs `revalidate`), so a locked account never reaches the table. That refusal is the channel's own Unauthorized,
 # not the endpoint's reply: no IS_BRIDGED and no data, but the same Matrix fields (errcode, soft_logout, status).
 Check '[1.27] a locked account is refused on a bridged pack before the bridge runs, with the errcode and soft_logout HTTP gives' `

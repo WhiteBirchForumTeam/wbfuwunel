@@ -9,7 +9,9 @@ function Write-Config9([string]$db, [int]$sweep) {
   $cfg = "$S\e2e9.toml"
   @('[global]','server_name = "localhost"',('database_path = "' + ($db -replace '\\','/') + '"'),'port = 8015','address = ["127.0.0.1"]',
     'allow_registration = true','yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse = true','allow_federation = false',
-    'save_unredacted_events = false',('media_gc_sweep_interval = ' + $sweep),'log = "info"') -join "`n" | Set-Content -Path $cfg -Encoding ascii
+    'save_unredacted_events = false',('media_gc_sweep_interval = ' + $sweep),
+    # Pinned, not defaulted: see the note on `Write-Config` in wbf-helpers.ps1.
+    'wbf_ws_idle_timeout = 120','log = "info"') -join "`n" | Set-Content -Path $cfg -Encoding ascii
   $cfg
 }
 function Room-Messages($room, $tok, $dir = 'b', $limit = 100) {

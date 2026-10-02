@@ -170,7 +170,7 @@ app 自己存在 server 上的東西（通知偏好、置頂清單…），`even
 | 第一輪回覆 | `Error`，`status` 401；data `{"flows":[{"stages":["m.login.password"]}],"params":{},"session":"…"}` |
 | 成功回覆 data | `{"id_server_unbind_result":"no-support"}` |
 
-⚠️ **停用之後這條連線就不算數了**：回覆照樣先到，**下一個 pack** 在橋之前被拒 —— `{"code":"Unauthorized","code_id":1301,"errcode":"M_UNKNOWN_TOKEN",…}`、沒有 bit4、關連線（index §1.2；e2e13 [2.14]）。
+⚠️ **停用之後這條連線就不算數了**：回覆照樣先到，**下一個 frame**（Ping／Pong 也算）在橋之前被拒 —— `{"code":"Unauthorized","code_id":1301,"errcode":"M_UNKNOWN_TOKEN",…}`、沒有 bit4、關連線（index §1.2；e2e13 [2.14]）。
 
 ## 這個 kind 共通的拒絕
 
