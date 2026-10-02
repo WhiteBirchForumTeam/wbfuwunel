@@ -294,7 +294,7 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 📌 **從 Matrix 錯誤來的 `Error` 都多帶 Matrix 的欄位**（`wbf/mod.rs` 的 `matrix_error_fields`，走橋的回覆、原生 handler 的 `Reject::from(Error)`、session 閘門的拒絕共用這一份規則）：`status`（Matrix 的 HTTP 狀態碼，一定有）、`errcode`、`retry_after_ms`、`soft_logout` —— 後三個 Matrix 的 body 裡有才有，沒有就**不出現**，不填空字串。原生的錯誤是把 `Error` 照 HTTP 會回的樣子轉成 body 再讀，所以同一個錯誤，走橋與不走橋的 `errcode` 一樣。
 - `message` 不變：原生的仍是 `"M_USER_LOCKED: This account has been locked."` 這種帶前綴的字串；走橋的是 body 的 `error`。
 - **走橋的另外把 data 放 Matrix 錯誤回應的 body 原樣**（../bridge-specs/index.md §1.2），UIAA 的 `flows`／`session` 也在裡面；原生的 data 是空的。
-- ⭐ **session 閘門的拒絕**（token 缺、錯、過期、被撤、帳號被鎖；HTTP pack 的認證、WS 升級時的認證、WS 每個 pack 之前的 `revalidate`）一律是 `Unauthorized`，不管 Matrix 的狀態碼是幾 —— 帶的 `errcode` 讓 client 分得出被鎖（`M_USER_LOCKED`，`soft_logout: true`）、過期（`M_UNKNOWN_TOKEN`，`soft_logout: true`）、被登出或撤銷（`M_UNKNOWN_TOKEN`，**沒有** `soft_logout`：要重新登入，不是 refresh）、沒帶 token（`M_MISSING_TOKEN`）。向量 `error_session_locked`。
+- ⭐ **session 閘門的拒絕**（token 缺、錯、過期、被撤、帳號被鎖；HTTP pack 的認證、WS 升級時的認證、WS **每個 frame**（含 Ping／Pong）之前的 `revalidate`，見 /docs/design/wire/pack-pipeline.md §3.1）一律是 `Unauthorized`，不管 Matrix 的狀態碼是幾 —— 帶的 `errcode` 讓 client 分得出被鎖（`M_USER_LOCKED`，`soft_logout: true`）、過期（`M_UNKNOWN_TOKEN`，`soft_logout: true`）、被登出或撤銷（`M_UNKNOWN_TOKEN`，**沒有** `soft_logout`：要重新登入，不是 refresh）、沒帶 token（`M_MISSING_TOKEN`）。向量 `error_session_locked`。
 - 📌 跟 Matrix 的 body 一樣，`soft_logout` 只會是 `true` 或不出現。之前 `Session` 的拒絕會寫 `"soft_logout": false`、限速不知道要等多久時寫 `"retry_after_ms": null`，現在兩者都是**不出現**（向量 `error_rate_limited` 也多了 `errcode`、`status`）。
 - 📎 這是原生 kind 也看得見的**加欄位**（維護者 2026-09-14 同意）；舊的 client 不認得就略過，不破壞。
 
@@ -425,14 +425,14 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 
 `GET /_wbf/v1/ws`（維護者 2026-09-03 定：自己的前綴，照 `/_名字/版本/功能` 的慣例；端點本身就跟上游切開了，不用借 `/_tuwunel/`），`Authorization: Bearer <access token>`，Upgrade，只接受 TLS。每個 binary message = 一個 pack。
 一條連線同時跑很多 upload 與 stream，靠 `id` 分流；斷線後上傳進度在 DB（重連續傳）、流進入 abandoned 計時。
-伺服器：axum `ws` feature，落點 `src/api/client/wbf/ws.rs`（B 支）。升級時驗 Bearer（錯了回 401，body 仍是 Error pack）；之後每個 binary message 一個 pack，依到達順序一個一個處理、回應依同一順序送回（client 可以連發不等 Ack）；字串 frame 回 `Error(Corrupt)`；到達的 pack 超過 `wbf_meta_max_bytes + wbf_data_max_bytes + 外框` 由 WebSocket 層拒收。連線**不保存任何上傳狀態**：`OutOfOrder` 一律由上傳服務判定，用的是 service 層**跨連線共用**的記憶體狀態（每個上傳一把鎖，DB 列為真相、txn 執行後才推進記憶體，見 [/docs/design/media/chunked-upload.md](../media/chunked-upload.md) §3.1），不論塊從哪條連線或 HTTP 來；重連從 `Status` 接。（第一版曾放一張每連線的 `id → 下一塊` 表當捷徑，審查指出它在冪等重送後會倒退、在跨傳輸時會過期，先於 DB 否決合法的塊，整張拿掉。）沉默超過 `wbf_ws_idle_timeout`（預設 300 秒）server 關連線，上傳進度不受影響。「只接受 TLS」由前置代理保證，server 本身不檢查。
+伺服器：axum `ws` feature，落點 `src/api/client/wbf/ws.rs`（B 支）。升級時驗 Bearer（錯了回 401，body 仍是 Error pack）；之後每個 binary message 一個 pack，依到達順序一個一個處理、回應依同一順序送回（client 可以連發不等 Ack）；字串 frame 回 `Error(Corrupt)`；到達的 pack 超過 `wbf_meta_max_bytes + wbf_data_max_bytes + 外框` 由 WebSocket 層拒收。連線**不保存任何上傳狀態**：`OutOfOrder` 一律由上傳服務判定，用的是 service 層**跨連線共用**的記憶體狀態（每個上傳一把鎖，DB 列為真相、txn 執行後才推進記憶體，見 [/docs/design/media/chunked-upload.md](../media/chunked-upload.md) §3.1），不論塊從哪條連線或 HTTP 來；重連從 `Status` 接。（第一版曾放一張每連線的 `id → 下一塊` 表當捷徑，審查指出它在冪等重送後會倒退、在跨傳輸時會過期，先於 DB 否決合法的塊，整張拿掉。）沉默超過 `wbf_ws_idle_timeout`（預設 60 秒）server 關連線，上傳進度不受影響。「只接受 TLS」由前置代理保證，server 本身不檢查。
 
 **連線背後的 session（2026-09-06，`wbf/auth-and-ws-lifetime`，[/docs/design/history/review-followups-2026-09-06.md](../history/review-followups-2026-09-06.md) §2.3／§2.4）**：
 
 - 升級時的驗證跟標準 client 路由一樣多：token 存在、沒到期、**帳號沒被鎖**（MSC3939，`M_USER_LOCKED` 401）。`POST /_wbf/v1/pack` 同一套。
-- 升級時驗過的不算永久：server 記住 `Session { user, device, token }`，**每個 binary message 處理前重驗一次**（token 仍解到同一個 user 與 device、沒到期、沒被鎖），而且在**解碼之前**：已失效的 session 不能靠送壞封包讓連線活着（review，rumia）。
-  登出、撤 device、到期、鎖帳號都在**下一個 pack** 生效：回 `Error(Unauthorized)`（帶那個 pack 的 `id`／`seq`），接著 server 送 Close `1008`（policy）關線。
-  代價是每個 pack 多一次 token 點讀與一次鎖定讀，跟一個 HTTP 請求本來就付的一樣；🚫 不做「每 N 秒才驗」的快取，那是一份會過期的真相。
+- 升級時驗過的不算永久：server 記住 `Session { user, device, token }`，**每個 frame 處理前重驗一次**（token 仍解到同一個 user 與 device、沒到期、沒被鎖），而且在**解碼之前**、也在**分辨這是什麼 frame 之前**：⭐ 一個死掉的 session 不准送的不是「pack」是**任何 frame** —— 控制框原本在分流裡就 `continue` 掉、卻照樣把 idle 計時歸零（外部審查 #8，見 [/docs/design/wire/pack-pipeline.md](pack-pipeline.md) §3.1）。已失效的 session 也不能靠送壞封包讓連線活着（review，rumia）。
+  登出、撤 device、到期、鎖帳號都在**下一個 frame** 生效：回 `Error(Unauthorized)`（pack 觸發時帶那個 pack 的 `id`／`seq`；⚠️ **控制框沒有 header 可抄，`id`／`seq` 是 `0`／`0`**），接著 server 送 Close `1008`（policy）關線。
+  代價是每個 frame 多一次 token 點讀與一次鎖定讀（⚠️ 含控制框：一條閒置連線的 keep-alive 原本 0 次讀，現在每次都讀），跟一個 HTTP 請求本來就付的一樣；🚫 不做「每 N 秒才驗」的快取，那是一份會過期的真相。
 - 關機：server 進入 stopping 就對每條連線送 Close `1001`（going away；不用 IANA 的 `1012` service restart，.NET 的 `ClientWebSocket` 會把 1012 當協定錯誤斷線）並結束它的 task；`Services::stop` **等所有連線的 task 結束**才往下走
   （`Services.connections`），因為 handler 拿的 `State` 是 `Services` 的裸指標，升級後的 socket 活得比 request 久，不等就是 use-after-free。
   等最多 `JOIN_TIMEOUT`（15 秒）：連線的 loop 看到 stopping 就自己結束，會等到超時的只有卡在某個永不返回的呼叫裡的 task，那時 abort 它（drop future 連帶 drop 對 `Services` 的借用），不讓一條連線卡整個關機（review，rumia）。
@@ -456,7 +456,7 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 ### 6.3 `Login`／`Refresh`／`Logout` —— 在通道上取得與放掉 session
 
 > 狀態：✅ 已實作，PR #30 2026-09-07 合併（提案 #29，§6.3.9 的點維護者都定了）。起因：維護者 2026-09-06 提出「登入應該有 WS 專用的 pack 格式；升級帶 Bearer 可以留著」。
-> 建在 PR #28 的 `Session` 上（§6.1「連線背後的 session」）：Login 就是**換掉這條連線的 Session**，其餘機制（每個 message 重驗、關機 join）不變。
+> 建在 PR #28 的 `Session` 上（§6.1「連線背後的 session」）：Login 就是**換掉這條連線的 Session**，其餘機制（每個 frame 重驗、關機 join）不變。
 
 #### 6.3.1 為什麼要有
 
@@ -496,18 +496,18 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
   帶 Bearer 升級照 §6.1 不變，直接是已登入。兩條路都在，client 自己選。
 - **未登入的連線最多活 30 秒**：新 config `wbf_ws_unauthenticated_timeout`（預設 30 秒），**從升級起算，不是 idle**：送 Ping 不延長。到時還沒登入送 Close 1008。
   理由（維護者）：連上但沒授權的連線不能佔著什麼都不做；帳密本來就是先打好才開連線送的，30 秒夠（註冊也一樣）；斷了 client 重連就好，自動重連是 client 的事。
-  已登入的連線照舊用 `wbf_ws_idle_timeout`（300 秒）。
-- **Login 成功後這條連線的 Session 換成新的**，之後每個 message 的重驗用新 token。同一條連線再送 Login：允許，換成另一個 session（舊 token 不撤，
+  已登入的連線照舊用 `wbf_ws_idle_timeout`（預設 60 秒）。
+- **Login 成功後這條連線的 Session 換成新的**，之後每個 frame 的重驗用新 token。同一條連線再送 Login：允許，換成另一個 session（舊 token 不撤，
   那是 Logout 的事）。切帳號用這條，不需要先 Logout。
 - **Refresh 成功後 Session 的 token 換新**，user／device 不變；舊 access token 照 Matrix 語意失效。
 - **Logout 成功後 server 送 Ack、再送 Close 1000 關線**（維護者定：換帳號重開一條 WS 就好）。`all: true` 撤全部 device，
-  同一個 user 的**其他** WS 連線在下一個 message 的重驗就被關（§6.1 的機制，不用另外通知）。
-- **重驗照舊每個 message 一次**；未登入狀態沒有 token，跳過重驗（沒東西可驗），只做 kind 白名單。
+  同一個 user 的**其他** WS 連線在下一個 frame 的重驗就被關（§6.1 的機制，不用另外通知）。
+- **重驗照舊每個 frame 一次**（§6.1：控制框也算）；未登入狀態沒有 token，跳過重驗（沒東西可驗），只做 kind 白名單。
 - **server 的責任只有即時回應**。client 的登入重試（維護者建議：3 秒沒回應重送、連續 3 次算伺服器無回應）是 client 的事，這裡不規定。
 
 #### 6.3.4 限速（這條是必做，不是加分）
 
-HTTP `/login` 現在**沒有**限速（只有 OIDC 端點有 `oidc_rc_per_second`／`oidc_rc_burst_count`）。開了 WS Login 等於多一個入口，而 WS 的每個 message 比一個 HTTP 請求便宜，
+HTTP `/login` 現在**沒有**限速（只有 OIDC 端點有 `oidc_rc_per_second`／`oidc_rc_burst_count`）。開了 WS Login 等於多一個入口，而 WS 的每個 frame 比一個 HTTP 請求便宜，
 不限速就是給暴力破解開快車道。提案：
 
 - 新 config `login_rc_per_second`／`login_rc_burst_count`，**同一個 token bucket 同時管 HTTP `/login`、`/refresh` 與 WS `Login`／`Refresh`**，key 是 client IP

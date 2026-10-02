@@ -11,9 +11,11 @@
 //! from the start and takes its device's connection slot before the upgrade)
 //! or without one (then it has `wbf_ws_unauthenticated_timeout` seconds to
 //! `Login`, and until it does only `Hello`, `Ping`, `Login` and `Refresh` are
-//! answered). A logged-in session is checked again before every message
-//! (`revalidate`): a token that was logged out, revoked, expired or whose
-//! account was locked stops working at the next message, not never. `Login`
+//! answered). A logged-in session is checked again before **every frame**,
+//! control frames included (`revalidate`): a token that was logged out,
+//! revoked, expired or whose account was locked stops working at the next
+//! frame, not never — ⭐ and not "at the next pack", because a Ping resets
+//! the idle timer just as well as a pack does. `Login`
 //! and `Refresh` replace the connection's session; `Logout` ends it and the
 //! connection is closed. See `/docs/design/wire/wire-format.md` §6.1 and §6.3.
 //!
@@ -251,10 +253,52 @@ async fn serve(
 			},
 		};
 
+		// A close frame or a broken transport ends the connection whatever the
+		// session says, so it is answered before anything is asked about it.
+		if matches!(message, Ok(Message::Close(_)) | Err(_)) {
+			break;
+		}
+
+		// The token was good when this session began; is it still? Asked for
+		// *every* frame that arrives, and that is the whole point:
+		// 🚨 Ping and Pong used to be answered by the WebSocket layer and
+		// `continue` from here without ever reaching this check, while still
+		// resetting `wbf_ws_idle_timeout` — so a session that had been logged
+		// out, revoked, expired or locked could hold its connection open for as
+		// long as it kept pinging, and keep receiving everything its
+		// subscriptions pushed at it (external review 2026-09-29 #8).
+		// ⭐ What a dead session may not send is not "a pack" but *any frame*.
+		// Asked before the bytes are even decoded, so a malformed
+		// pack buys nothing either. One point read per frame, the same order of
+		// cost as the frame itself. Not cached by time: a cache would be one
+		// more copy of the truth that can go stale. An unauthenticated
+		// connection has nothing to check; the admission table in `handle_pack`
+		// is its whole guard.
+		if let Some(current) = &session
+			&& let Err(error) = revalidate(&services, current).await
+		{
+			debug!(user = %current.user, ?error, "wbf WebSocket session no longer valid; closing");
+			// Header fields read without any CRC check: they only address the
+			// refusal, they decide nothing. A control or text frame has no
+			// header to address, and the close frame is the answer there.
+			let (id, seq) = match &message {
+				| Ok(Message::Binary(bytes)) => header_id_seq(bytes),
+				| _ => (0, 0),
+			};
+			let refused = refuse_session(error).into_pack(id, seq);
+			if queue.try_send(Outgoing::Pack(refused)).is_err() {
+				// A full queue means a peer that is not reading; the close
+				// frame matters more than the explanation.
+				debug!("wbf WebSocket send queue full; the Unauthorized reply is dropped");
+			}
+			enqueue_close(&queue, close(close_code::POLICY, "session no longer valid")).await;
+			break;
+		}
+
 		let mut bytes = match message {
 			| Ok(Message::Binary(bytes)) => bytes.to_vec(),
-			| Ok(Message::Close(_)) | Err(_) => break,
-			// Control frames are answered by the WebSocket layer itself.
+			// Control frames are answered by the WebSocket layer itself. They
+			// reach this far only to be revalidated above.
 			| Ok(Message::Ping(_) | Message::Pong(_)) => continue,
 			| Ok(Message::Text(_)) => {
 				let refused = error_pack(0, 0, RejectCode::Corrupt, "text frames are not packs; send one pack per binary frame");
@@ -268,31 +312,9 @@ async fn serve(
 				}
 				continue;
 			},
+			// Taken above, before the session was asked about.
+			| Ok(Message::Close(_)) | Err(_) => break,
 		};
-
-		// The token was good when this session began; is it still? Asked
-		// before the bytes are even decoded, so a session that is gone cannot
-		// keep the connection alive by sending malformed packs either. One
-		// point read per message, the same order of cost as the message
-		// itself. Not cached by time: a cache would be one more copy of the
-		// truth that can go stale. An unauthenticated connection has nothing
-		// to check; the admission table in `handle_pack` is its whole guard.
-		if let Some(current) = &session
-			&& let Err(error) = revalidate(&services, current).await
-		{
-			debug!(user = %current.user, ?error, "wbf WebSocket session no longer valid; closing");
-			// Header fields read without any CRC check: they only address the
-			// refusal, they decide nothing.
-			let (id, seq) = header_id_seq(&bytes);
-			let refused = refuse_session(error).into_pack(id, seq);
-			if queue.try_send(Outgoing::Pack(refused)).is_err() {
-				// A full queue means a peer that is not reading; the close
-				// frame matters more than the explanation.
-				debug!("wbf WebSocket send queue full; the Unauthorized reply is dropped");
-			}
-			enqueue_close(&queue, close(close_code::POLICY, "session no longer valid")).await;
-			break;
-		}
 
 		let view = match decode(&mut bytes) {
 			| Ok(view) => view,

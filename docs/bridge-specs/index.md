@@ -33,7 +33,7 @@ offset  bytes              意思
 
 `id`、`seq` 抄請求。
 
-⚠️ **有一種拒絕比橋還早**：WebSocket 在**每個 pack 解碼之前**先問 session 還算不算數（登出、裝置被撤、token 過期、帳號被鎖，`ws.rs` 的 `revalidate`）。不算數就回通道自己的 `Error`（`01 01 03 04`：**沒有** `IS_BRIDGED`，因為那時 pack 還沒解；data 是空的）然後**關連線**。meta 一樣帶 Matrix 的欄位，例：`{"code":"Unauthorized","code_id":1301,"errcode":"M_USER_LOCKED","message":"M_USER_LOCKED: This account has been locked.","soft_logout":true,"status":401}`（向量 `error_session_locked`）。這條不分走不走橋，e2e13 [1.27] 驗過；欄位規則見 [/docs/design/wire/wire-format.md §3.4](../design/wire/wire-format.md)。
+⚠️ **有一種拒絕比橋還早**：WebSocket 在**每個 frame 之前**（控制框也算；只有 Close 與傳輸錯誤比它更前面，見 [/docs/design/wire/pack-pipeline.md](../design/wire/pack-pipeline.md) §3.1）、也在**解碼之前**先問 session 還算不算數（登出、裝置被撤、token 過期、帳號被鎖，`ws.rs` 的 `revalidate`）。不算數就回通道自己的 `Error`（`01 01 03 04`：**沒有** `IS_BRIDGED`，因為那時 pack 還沒解；data 是空的）然後**關連線**。meta 一樣帶 Matrix 的欄位，例：`{"code":"Unauthorized","code_id":1301,"errcode":"M_USER_LOCKED","message":"M_USER_LOCKED: This account has been locked.","soft_logout":true,"status":401}`（向量 `error_session_locked`）。這條不分走不走橋，e2e13 [1.27] 驗過；欄位規則見 [/docs/design/wire/wire-format.md §3.4](../design/wire/wire-format.md)。
 
 ### 1.3 meta 的變數
 
@@ -66,7 +66,7 @@ offset  bytes              意思
 
 - **怎麼認出「要 UIAA」**：走橋的回覆（bit4）、`status` 401、data 有 `flows`。沒登入的 401 帶 `errcode` `M_MISSING_TOKEN`／`M_UNKNOWN_TOKEN`、沒有 `flows`。（維護者 2026-09-15 定：不另加 meta 欄位）
 - `session` 存在 server。註冊的 `session` 跟連線無關，**沒登入的連線只活 `wbf_ws_unauthenticated_timeout`（預設 30 秒）**，來不及就重連一條、帶同一個 `session` 接著送。
-- **做完之後這條連線還算不算數**：刪掉自己這個裝置、停用帳號之後，回覆照樣先到，**下一個 pack** 在橋之前被拒（§1.2 那一道：`Unauthorized`、沒有 bit4、關連線）。改密碼的 `logout_devices` 保留發請求的裝置，這條連線不受影響。
+- **做完之後這條連線還算不算數**：刪掉自己這個裝置、停用帳號之後，回覆照樣先到，**下一個 frame**（Ping／Pong 也算）在橋之前被拒（§1.2 那一道：`Unauthorized`、沒有 bit4、關連線）。改密碼的 `logout_devices` 保留發請求的裝置，這條連線不受影響。
 
 ## 2. 總表（批 1、批 2、E2EE (A)(C)）
 

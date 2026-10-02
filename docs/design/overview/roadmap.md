@@ -6,7 +6,7 @@
 > 狀態標記：✅ 已合併 · 🔧 進行中 · 📄 有提案待同意 · 🔲 下一步 · 💭 候選（還沒決定要不要做）· 🚫 明確不做。
 > 每一項改狀態時順手改這裡；這裡的狀態如果跟 [`CHANGELOG-fork.md`](../../../CHANGELOG-fork.md) 對不上，以 CHANGELOG 為準。
 >
-> 最後更新：2026-09-30（PR #94 合併後）。⚙️ 等維護者決定的：§2.9 末尾那件（連線死掉後名額 ~5 秒才回來）；§3 的候選；分支 `docs/room-version-prev` 上的提案（每次告知房間版本號時同時帶「變動前的那一個」，讓 client 只查變動的那一個人）。🔲 手上的工作在 §2.15。
+> 最後更新：2026-10-01（PR #101 合併後）。⚙️ 等維護者決定的：§2.9 末尾那件（連線死掉後名額 ~5 秒才回來）；§3 的候選；分支 `docs/room-version-prev` 上的提案（每次告知房間版本號時同時帶「變動前的那一個」，讓 client 只查變動的那一個人）。🔲 手上的工作在 §2.15。
 
 ## 0. 目標，一句話
 
@@ -180,7 +180,7 @@ client 側的三條契約在 [/docs/design/events/event-push.md](../events/event
 ⚠️ **行為改變，部署要看**：兩項設定**改名**，舊名字留在設定裡**拒絕啟動**（忽略對這兩個設定是 fail open）；`localhost_ip` 的語意跟舊名**相反**（舊的是「這個 peer 跳過安全解析」，新的是「這個 peer 可以指名 client」）。同機代理與 unix socket 因此零設定就是 per-client；⚠️ 但**分開的容器不算 loopback**，那種部署要指名 header。
 📎 這一支自己弄壞過一個測試：預設 4→8 之後 e2e13 `[2.7]` 靠預設值撞上限，期望被拒的 login 其實成功了，而那支從改預設之後沒重跑過 —— 現在數字寫死在該測試自己的 config 裡。
 
-### 2.15 🔲 外部審查 2026-09-29 的修補（五條已合併，其餘照嚴重度排）
+### 2.15 🔲 外部審查 2026-09-29 的修補（六條已合併，其餘照嚴重度排）
 
 維護者 2026-09-29 拿來一份對 `main`（`d0f60ee`）的外部 code review：**八條 🔴 我逐條回原始碼驗，認七條、一條描述要修正**，⭐ 其中四條踩在我自己寫的程式上。維護者定的處理方式是**照嚴重度切成幾支**，不是一支全包。
 
@@ -191,8 +191,8 @@ client 側的三條契約在 [/docs/design/events/event-push.md](../events/event
 | 5 | 房間版本號取最大值，re-invite 會倒退 → 金鑰發給已離開的人 | ✅ PR #94 |
 | 4 | to-device **單則沒有上限** → 一則 20 MiB 讓受害裝置的佇列永久卡死 | ✅ PR #99 —— 存進佇列前就擋、回 413（維護者 2026-09-29 定）|
 | 6 | 橋的 `fill_path` 沒擋 `.` / `..`：`session_id: "."` 讓 `/room_keys/keys/{id}` 變成 `/room_keys/keys`（刪一個 session 變成刪整個備份）| ✅ PR #100 —— 三層防線：拒 `.`／`..`、拒 `\t\n\r`（它們被**丟掉**不是被編碼，會繞過前者）、執行期比對段數 |
-| 7 | `service/connections.rs` 的 `JoinSet` 只在 `close_and_join()` 回收 → 每條歷來連線留一筆到程序結束 | ✅ PR #101（待審）—— 回收放在 `spawn` 與**每個 task 的最後一步**，正常結束的界限 ≤ 1 筆（panic 的要等下一條連線）。⭐ 真正難查的後果不是記憶體，是關機那行 log 印的 `set.len()` 把死掉的也算進去。⚠️ 審查又抓到一條：第一版用 `Arc` 讓 task 伸回來，那是**參照環**，並且拿掉了 `JoinSet` 掉落即 abort 那道機械層防線（改成 `Weak`）|
-| 8 | `wbf/ws.rs` 的 `Ping(_) \| Pong(_) => continue` 在 revalidate **之前** | 🔲 前半（控制框也 revalidate）；**後半另開設計提案**（登出／刪裝置／鎖帳號要拆掉訂閱）|
+| 7 | `service/connections.rs` 的 `JoinSet` 只在 `close_and_join()` 回收 → 每條歷來連線留一筆到程序結束 | ✅ PR #101 —— 回收放在 `spawn` 與**每個 task 的最後一步**，正常結束的界限 ≤ 1 筆（panic 的要等下一條連線）。⭐ 真正難查的後果不是記憶體，是關機那行 log 印的 `set.len()` 把死掉的也算進去。⚠️ 審查又抓到一條：第一版用 `Arc` 讓 task 伸回來，那是**參照環**，並且拿掉了 `JoinSet` 掉落即 abort 那道機械層防線（改成 `Weak`）|
+| 8 | `wbf/ws.rs` 的 `Ping(_) \| Pong(_) => continue` 在 revalidate **之前** | ✅ 前半：PR #103 —— ⭐ 一個死掉的 session 不准送的不是「pack」，是**任何 frame**；閘門移到「這是什麼 frame」之前，只有 Close 與傳輸錯誤比它更前面（[/docs/design/wire/pack-pipeline.md](../wire/pack-pipeline.md) §3.1）。⚠️ 原本控制框照樣把 `wbf_ws_idle_timeout` 歸零，所以失效的 session 只要持續 ping 就無限期開著。<br>⚠️ **行為改變**：同一支把 `wbf_ws_idle_timeout` 預設 **300 → 60 秒**（維護者 2026-10-01 定）—— Ping 是 client 驅動的，所以一個什麼都不送的 client 的洩漏窗口就是這個值，而那是「遠端登出一個被偷的裝置」最壞要等多久。🚨 **client 必須比這個間隔更頻繁地送東西**。<br>🔲 **後半另開設計提案**（登出／刪裝置／鎖帳號要拆掉訂閱）|
 | 3 | `timeline/purge.rs` 的 `release_range` 無條件放掉整段，而迴圈接著**保留** state 與本地事件 → **釋放的集合 ≠ 刪除的集合** | 🔲 **另開一支，動手前先寫設計說明**（現在是先釋放後刪除，那是**不可逆遺失**的方向）|
 
 🚨 **#1 順帶暴露一件比它本身更重要的事**：我的「全套測試」指令 `--workspace --exclude tuwunel` 把 `src/main/tests` 整組排除，而那個 bug 又只在 debug build 發作 —— **唯一看得到它的那組測試，正好是唯一沒跑的那組**。兩個盲點互相遮蔽，所以「全套綠」被我當成事實報出去很多次。兩套測試怎麼跑寫在 [/docs/design/build/windows-build.md](../build/windows-build.md)。

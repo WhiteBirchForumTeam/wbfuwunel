@@ -111,9 +111,13 @@ function Exec([string]$cfg, [string[]]$cmds, [string]$tag) {
 }
 
 # ---------- WebSocket ----------
-function Ws-Open($tok) {
+function Ws-Open($tok, [int]$keepAliveSeconds = 0) {
   $ws = New-Object System.Net.WebSockets.ClientWebSocket
   if ($tok) { $ws.Options.SetRequestHeader('Authorization', "Bearer $tok") }
+  # Only [3.2d] passes this. It is the only way to make .NET emit a WebSocket
+  # control frame: the API has no SendPing, so the keep-alive timer is it.
+  # Must be set before ConnectAsync.
+  if ($keepAliveSeconds -gt 0) { $ws.Options.KeepAliveInterval = [TimeSpan]::FromSeconds($keepAliveSeconds) }
   $ws.ConnectAsync([Uri]'ws://127.0.0.1:8015/_wbf/v1/ws', [Threading.CancellationToken]::None).Wait()
   $ws
 }
@@ -244,7 +248,7 @@ Log "[2.3] fresh connection, Status of sealed D -> $(Describe $r)  (expect NotFo
 try { $ws2.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, 'bye', [Threading.CancellationToken]::None).Wait(3000) | Out-Null } catch {}
 Stop-Server $p
 # ================= Scenario 3: the session behind the connection (review-followups 2.3 / 2.4) =================
-# A locked account is refused on both transports; a logged-out token stops working at the next pack, not never;
+# A locked account is refused on both transports; a logged-out token stops working at the next frame, not never (control frames included, [3.2d]);
 # a connection still open at shutdown is closed by the server and the process exits without dangling references.
 Log '################ Scenario 3: locked account, logout mid-connection, shutdown with a connection open ################'
 $db3 = "$S\e2e7db-3"; Remove-Item -Recurse -Force $db3 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db3 | Out-Null
@@ -268,7 +272,7 @@ $null = Api Put "/_synapse/admin/v2/users/$([uri]::EscapeDataString('@bob:localh
 $r = Send-Pack $ping $tokB
 Log "[3.1c] unlocked bob, HTTP Ping -> $(Describe $r)  (expect http=200 Pong)"
 
-# [3.2] logout while connected: the next pack is refused and the server closes the connection
+# [3.2] logout while connected: the next frame is refused and the server closes the connection
 $wsB = Ws-Open $tokB
 $r = Ws-Call $wsB $ping
 Log "[3.2a] bob connected, Ping -> $(Describe $r)  (expect Pong)"
@@ -278,6 +282,53 @@ Log "[3.2b] after HTTP logout, Ping -> $(Describe $r)  (expect Error Unauthorize
 $buf = New-Object byte[] 4096
 $t = $wsB.ReceiveAsync([ArraySegment[byte]]$buf, [Threading.CancellationToken]::None)
 if ($t.Wait(5000)) { Log "[3.2c] then server sent $($t.Result.MessageType) code=$($t.Result.CloseStatus) state=$($wsB.State)  (expect Close, PolicyViolation)" } else { Log "[3.2c] no close within 5 s, state=$($wsB.State)  (expect Close: FAIL)" }
+
+# [3.2d] external review 2026-09-29 #8: a logged-out session that sends only WebSocket control
+# frames must be closed too. Before the fix, Ping/Pong `continue`d before `revalidate` and still
+# reset wbf_ws_idle_timeout (60 s in this config), so the connection stayed open indefinitely and
+# kept receiving whatever its subscriptions pushed. The client sends nothing after the logout here:
+# the only traffic is .NET's own keep-alive control frame, once a second.
+#
+# 🚨 This block is the only one in this suite whose result reaches the exit code (see the end of
+# the file). The older scenarios print `FAIL` and exit 0, which is how an edit of mine broke the
+# whole script while my check — counting `FAIL` lines — still reported green: a script that never
+# ran has no FAIL lines. ⭐ Count the good evidence, not the absence of bad (rumia and cirno,
+# PR #103 review). Only this block is wired up; converting the rest is its own change.
+$script:TeardownFail = $false
+$regC = Api Post '/_matrix/client/v3/register' '{"username":"carol","password":"correct-horse-battery","auth":{"type":"m.login.dummy"}}' $null
+$tokC = $regC.access_token
+$wsC = Ws-Open $tokC 1
+$r = Ws-Call $wsC $ping
+Log "[3.2d-i] carol connected with keep-alive, Ping -> $(Describe $r)  (expect Pong)"
+$null = Api Post '/_matrix/client/v3/logout' '{}' $tokC
+$t = $wsC.ReceiveAsync([ArraySegment[byte]]$buf, [Threading.CancellationToken]::None)
+try {
+  if ($t.Wait(20000)) {
+    $m = $t.Result
+    if ($m.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Binary) {
+      # The refusal is addressed to no session: a control frame carries no header to copy id/seq from.
+      # 🚨 Not `$p`: that name holds this script's server process, and [3.3c] still needs it.
+      $refusal = Read-Pack ([byte[]]$buf[0..($m.Count - 1)])
+      # 🚨 The only assertion in this suite, because §3.1 of pack-pipeline.md writes
+      # `id`/`seq` = 0/0 down as the contract for a control-frame refusal: a control
+      # frame has no header to copy them from (cirno, PR #103 review).
+      # ⚠️ Every field, not the meta text: `-match 'Unauthorized'` passes on any pack
+      # whose meta merely contains that word, which is not what this claims to guard
+      # (rumia, PR #103 review). kind 1 = Control, subtype 3 = Error.
+      $addressed = if ($refusal.kind -eq 1 -and $refusal.subtype -eq 3 -and $refusal.meta.code -eq 'Unauthorized' -and $refusal.id -eq 0 -and $refusal.seq -eq 0) { 'ok' } else { $script:TeardownFail = $true; 'FAIL' }
+      Log "[3.2d] logged out, NOT sending any pack -> server answered the keep-alive frame: $(Describe $refusal)  (${addressed}: expect Error Unauthorized id=0 seq=0)"
+      $t2 = $wsC.ReceiveAsync([ArraySegment[byte]]$buf, [Threading.CancellationToken]::None)
+      if ($t2.Wait(5000)) {
+        $closed = if ($t2.Result.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close -and $t2.Result.CloseStatus -eq [System.Net.WebSockets.WebSocketCloseStatus]::PolicyViolation) { 'ok' } else { $script:TeardownFail = $true; 'FAIL' }
+        Log "[3.2d-ii] then server sent $($t2.Result.MessageType) code=$($t2.Result.CloseStatus) state=$($wsC.State)  (${closed}: expect Close, PolicyViolation)"
+      } else { $script:TeardownFail = $true; Log "[3.2d-ii] no close within 5 s, state=$($wsC.State)  (FAIL: expect Close)" }
+    } else {
+      $script:TeardownFail = $true
+      Log "[3.2d] logged out, NOT sending any pack -> server sent $($m.MessageType) code=$($m.CloseStatus) state=$($wsC.State)  (FAIL: expect the refusal pack first, then Close)"
+    }
+  }
+  else { $script:TeardownFail = $true; Log "[3.2d] nothing within 20 s while only control frames were sent, state=$($wsC.State)  (FAIL: the frame kind decided whether the session was checked)" }
+} catch { $script:TeardownFail = $true; $inner = $_.Exception; while ($inner.InnerException) { $inner = $inner.InnerException }; Log "[3.2d] receive failed: $($inner.GetType().Name): $($inner.Message) state=$($wsC.State)  (FAIL: expect a refusal and a Close, not a failure)" }
 
 # [3.3] shutdown with a connection open: the server closes it, the process exits, nothing dangles
 $wsA = Ws-Open $tokA
@@ -521,4 +572,9 @@ Log ''; Log 'DONE'
 
 # Leave on purpose: a pending ReceiveAsync or an undisposed socket can keep this process alive
 # long after DONE is written, which makes a finished run look like a hang.
+#
+# ⚠️ Only [3.2d] reaches this code: the older scenarios print their expected value and leave the
+# reading to a person (README §「舊式」). A non-zero exit here therefore means *that* block failed,
+# never "this suite is green" — ⭐ so read `DONE` plus this code, not one of them (PR #103 review).
+if ($script:TeardownFail) { Log '[3.2d] FAILED -> exit 1'; exit 1 }
 exit 0
