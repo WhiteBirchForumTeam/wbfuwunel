@@ -11,6 +11,7 @@ use tuwunel_core::{
 };
 
 use super::{ExtractBody, RawPduId, bias_count};
+use crate::media_refs::Holder;
 
 /// Selectively purges room history strictly before `until` in stream order,
 /// returning the number of events removed. State events are always preserved,
@@ -37,19 +38,23 @@ pub async fn purge_history(
 
 	let prefix = start.shortroomid();
 
-	// The purged range's media holders go first, from the reverse index:
-	// every Event and Backup holder of this room below `until`, in one
-	// batch, without reading a single event. Doing it twice is a no-op.
-	{
-		let mut txn = self.db.db.txn();
-		let released = self
-			.services
-			.media_refs
-			.release_range(&mut txn, room_id, until.into_signed())
-			.await;
-		txn.execute();
-		trace!(?room_id, ?until, released, "Released media holders of the purged range");
-	}
+	// 🚨 **No batch release of the range.** It used to release every Event and
+	// Backup holder below `until` in one go, "without reading a single event" —
+	// and that was exactly why it could not be right: the loop below *keeps*
+	// state events, and keeps locally-sent ones unless `delete_local_events`, so
+	// the released set was a superset of the deleted set and a kept, live event
+	// lost its media. The room avatar was the plainest case: `m.room.avatar` is
+	// a state event, `url` is a media reference, and purging history deleted the
+	// picture the room still points at
+	// (/docs/design/media/purge-release-set.md, external review 2026-09-29 #3).
+	//
+	// ⭐ So a holder is released by the one place that knows the event is going:
+	// the deleting transaction itself, below. The two sets are then equal by
+	// construction rather than by two separate pieces of code agreeing.
+	// 📎 It also fixes a second case nobody had noticed: backfilled holders have
+	// a negative `g_seq`, which is below *any* positive `until`, so every purge
+	// released the whole backfilled history's holders regardless of the
+	// boundary.
 
 	self.db
 		.pduid_pdu
@@ -81,7 +86,20 @@ pub async fn purge_history(
 			let room_id_ts_id = (room_id, ts, bias_count(raw_id.count()));
 			txn.del(&self.db.roomid_tscount_pducount, room_id_ts_id);
 
+			// This event is going, so its media holder goes with it — in the same
+			// transaction, so there is no moment where the row is gone and the
+			// holder is not (or the other way round).
+			let released = self
+				.services
+				.media_refs
+				.release_all_of(&mut txn, &Holder::event(room_id, count.into_signed()))
+				.await;
+
 			txn.execute();
+
+			if !released.is_empty() {
+				trace!(?event_id, ?room_id, ?released, "Released the media of a purged event");
+			}
 
 			if pdu.kind == TimelineEventType::RoomMessage
 				&& let Ok(ExtractBody { body: Some(body) }) = pdu.get_content()
@@ -96,9 +114,9 @@ pub async fn purge_history(
 				.purge_event_relations(shortroomid, count, room_id, &event_id)
 				.await;
 
-			// Dropping the retained original removes it as a holder too; its
-			// holder was already taken by `release_range`, so this is a no-op
-			// for media and still drops the original itself.
+			// Dropping the retained original removes its `Backup` holder too, and
+			// ⚠️ since the range is no longer released in one batch this is where
+			// that actually happens — it used to be a no-op for media.
 			self.services
 				.retention
 				.purge_original(&event_id)

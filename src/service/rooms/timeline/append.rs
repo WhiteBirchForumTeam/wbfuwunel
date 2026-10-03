@@ -455,10 +455,44 @@ async fn append_member_effects(&self, pdu: &PduEvent, count: PduCount) -> Result
 		return Ok(());
 	};
 
-	let user_id = UserId::parse(state_key).expect("This state_key was previously validated");
+	// 🚫 Not `expect`: this runs on the append path of every membership change,
+	// so a state_key that does not parse would take the whole task down —
+	// "it was validated earlier" is not a reason (issue #83, CLAUDE.md P). A
+	// member event nobody can name is one we record and otherwise ignore.
+	let Ok(user_id) = UserId::parse(state_key) else {
+		error!(?state_key, room_id = %pdu.room_id(), "Member event has an unparseable state key; no membership effects.");
+		return Ok(());
+	};
 	let content: RoomMemberEventContent = pdu.get_content()?;
 	let is_invite = content.membership == MembershipState::Invite;
 	let is_direct = content.is_direct;
+
+	// 🚨 This member event carries the user's avatar **in this room**
+	// (`avatar_url`), and that picture has no other holder: the media reference
+	// scanner reads `url`, `file.url` and the thumbnails, never `avatar_url`, so
+	// until this existed a per-room avatar was swept seven days after upload
+	// with nobody having done anything (/docs/design/media/purge-release-set.md §9).
+	//
+	// ⭐ The holder follows the **state**, so only the event that is now current
+	// state may move it. `count` is negative exactly for a backfilled event, by
+	// construction (`PduCount::Backfilled`), and a backfilled event is older
+	// history: letting it through would release the avatar on display.
+	// 📎 Today backfill cannot reach here at all — `backfill_pdu` handles only
+	// `RoomMessage` — so this is the guard for whoever adds a member branch
+	// there later, not something the current code relies on.
+	if count.into_signed() > 0 {
+		let mut txn = self.db.db.txn();
+		self.services
+			.media_refs
+			.set_room_avatar_ref(
+				&mut txn,
+				pdu.room_id(),
+				&user_id,
+				content.avatar_url.as_deref().map(ruma::MxcUri::as_str),
+			)
+			.await;
+		txn.execute();
+	}
 
 	let stripped_state = match content.membership {
 		| MembershipState::Invite | MembershipState::Knock => self

@@ -35,7 +35,7 @@ use std::sync::{Arc, RwLock as StdRwLock};
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use ruma::{CanonicalJsonObject, CanonicalJsonValue, OwnedRoomId, RoomId, UserId};
+use ruma::{CanonicalJsonObject, CanonicalJsonValue, OwnedRoomId, OwnedUserId, RoomId, UserId};
 use tokio::sync::mpsc;
 use tuwunel_core::{
 	Result, debug, implement,
@@ -46,7 +46,7 @@ use tuwunel_database::{Ignore, Interfix, Map, Txn};
 
 pub use self::{
 	attachments::AttachmentError,
-	holder::{Holder, KIND_AVATAR, KIND_BACKUP, KIND_EVENT, bias_g_seq, unbias_g_seq},
+	holder::{Holder, KIND_AVATAR, KIND_BACKUP, KIND_EVENT, KIND_ROOM_AVATAR, bias_g_seq, unbias_g_seq},
 };
 
 /// Holds one media's lock; dropping it releases the media.
@@ -287,6 +287,16 @@ pub async fn list_mxcs_of(&self, holder: &Holder) -> Vec<String> {
 				.collect()
 				.await
 		},
+		| Holder::RoomAvatar { room, user } => {
+			let prefix = (holder.kind(), room.as_str(), user.as_str());
+			self.db
+				.holder_mxc
+				.keys_prefix(&prefix)
+				.ignore_err()
+				.map(|(_, _, _, mxc): (Ignore, Ignore, Ignore, &str)| mxc.to_owned())
+				.collect()
+				.await
+		},
 	}
 }
 
@@ -400,6 +410,25 @@ pub async fn release_room(&self, txn: &mut Txn, room: &RoomId) -> usize {
 				self.del_holder_rows(txn, mxc, &holder);
 			}
 		}
+
+		// ⚠️ The per-room avatars too, or deleting a room would leave a holder
+		// nothing can ever remove: this kind is keyed by (room, user) and the
+		// only thing that releases it is a later member event in a room that no
+		// longer exists.
+		let members: Vec<OwnedUserId> = self
+			.db
+			.mxc_holder
+			.keys_prefix(&(mxc.as_str(), KIND_ROOM_AVATAR, room.as_str()))
+			.ignore_err()
+			.filter_map(|(_, _, _, user): (Ignore, Ignore, Ignore, &str)| {
+				let parsed = UserId::parse(user).ok();
+				async move { parsed }
+			})
+			.collect()
+			.await;
+		for user in members {
+			self.del_holder_rows(txn, mxc, &Holder::room_avatar(room, &user));
+		}
 		txn.del(&self.db.room_mxc, (room, mxc.as_str()));
 		txn.del(&self.db.mxc_room, (mxc.as_str(), room));
 	}
@@ -437,6 +466,45 @@ pub async fn set_avatar_ref(&self, txn: &mut Txn, user_id: &UserId, new_mxc: Opt
 	}
 
 	let holder = Holder::avatar(user_id);
+	let held = self.list_mxcs_of(&holder).await;
+
+	let released: Vec<String> = held
+		.into_iter()
+		.filter(|mxc| Some(mxc.as_str()) != new_mxc)
+		.collect();
+	for mxc in &released {
+		self.del_holder_rows(txn, mxc, &holder);
+	}
+	self.hand_to_collector(txn, released);
+
+	if let Some(new_mxc) = new_mxc {
+		self.hold(txn, new_mxc, &holder);
+	}
+}
+
+/// Sets what `user` holds as their avatar **in `room`**, releasing whatever
+/// they held there before, in `txn`.
+///
+/// Args:
+///     room: example: "!r:localhost"
+///     user: the member whose own event this is, example: "@alice:localhost"
+///     new_mxc: the `avatar_url` of their current `m.room.member` content, or
+///         None when it carries none (including a `leave`)
+///
+/// ⚠️ **Call this only for an event that became current state.** The holder
+/// follows the state, so an older member event (a backfill, a state resolution
+/// that looked back) must not reach here: it would release the avatar that is
+/// on display. ⭐ Failing that way round is the irreversible one — "media held
+/// too long is recoverable, media released too early is not"
+/// (/docs/design/media/purge-release-set.md §9).
+///
+/// 📎 Unlike `set_avatar_ref` this counts remote members too: the media they
+/// name is usually another server's and the collector never touches that, but a
+/// remote member may name media of this server, and then the holder is the only
+/// thing keeping it.
+#[implement(Service)]
+pub async fn set_room_avatar_ref(&self, txn: &mut Txn, room: &RoomId, user: &UserId, new_mxc: Option<&str>) {
+	let holder = Holder::room_avatar(room, user);
 	let held = self.list_mxcs_of(&holder).await;
 
 	let released: Vec<String> = held
@@ -494,6 +562,25 @@ pub async fn list_holders(&self, mxc: &str) -> Vec<Holder> {
 		avatars
 			.into_iter()
 			.map(|localpart| Holder::Avatar { localpart }),
+	);
+
+	let room_avatars: Vec<(OwnedRoomId, OwnedUserId)> = self
+		.db
+		.mxc_holder
+		.keys_prefix(&(mxc, KIND_ROOM_AVATAR))
+		.ignore_err()
+		.filter_map(|(_, _, room, user): (Ignore, Ignore, &str, &str)| {
+			let parsed = RoomId::parse(room)
+				.ok()
+				.zip(UserId::parse(user).ok());
+			async move { parsed }
+		})
+		.collect()
+		.await;
+	holders.extend(
+		room_avatars
+			.into_iter()
+			.map(|(room, user)| Holder::RoomAvatar { room, user }),
 	);
 
 	holders
