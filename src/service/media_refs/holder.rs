@@ -109,8 +109,7 @@ impl Holder {
 	#[must_use]
 	pub fn room(&self) -> Option<&RoomId> {
 		match self {
-			| Self::Event { room, .. } | Self::Backup { room, .. } => Some(room),
-			| Self::RoomAvatar { room, .. } => Some(room),
+			| Self::Event { room, .. } | Self::Backup { room, .. } | Self::RoomAvatar { room, .. } => Some(room),
 			| Self::Avatar { .. } => None,
 		}
 	}

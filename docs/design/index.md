@@ -43,7 +43,7 @@
 | [/docs/design/media/chunked-upload-spec.md](media/chunked-upload-spec.md) | **給 client 開發者的線上規格**：byte 怎麼排、每個訊息、錯誤碼、流程 |
 | [/docs/design/media/media-holders.md](media/media-holders.md) | **現行做法**：持有者集合（外鍵）取代引用計數，誰加、誰拿掉、什麼時候刪 |
 | [/docs/design/media/media-attachments.md](media/media-attachments.md) | E2EE 房間裡 server 讀不到內容，所以附件由送訊息的請求**宣告** |
-| [/docs/design/media/purge-release-set.md](media/purge-release-set.md) | 📄 **說明，還沒實作**：清歷史時「釋放的集合」是「刪除的集合」的超集 —— 🚨 被保留的事件（房間頭像、本地圖片）的媒體會被刪掉（外部審查 #3）|
+| [/docs/design/media/purge-release-set.md](media/purge-release-set.md) | 清歷史**只釋放它真的刪掉的**（外部審查 #3：原本被保留的事件 —— 房間頭像、本地圖片 —— 媒體會被刪掉）。§9：**每房成員頭像**有自己的 `RoomAvatar{room,user}` 持有者，否則上傳滿 7 天就被掃掉 |
 | [/docs/design/media/media-gc.md](media/media-gc.md) | 📕 **歷史**：精確計數、哨兵、收集器、墓碑、`migrate-references`（計數與哨兵已退場） |
 | [/docs/design/media/media-refcount.md](media/media-refcount.md) | 📕 **歷史**：最早的列式索引，已被計數取代、計數又被持有者集合取代 |
 
