@@ -22,7 +22,7 @@ use tuwunel_core::{
 	},
 };
 
-use super::{ConnectionId, PackQueue, Streams};
+use super::{ConnectionId, PackQueue, SessionEnded, Streams};
 
 /// `Event/Push`, server to client only.
 pub const EVENT_PUSH_SUBTYPE: u8 = 0x06;
@@ -72,7 +72,10 @@ impl Streams {
 	///     account_wide: true when the client named no rooms, so rooms joined
 	///         later are entered by the join hook
 	/// Return:
-	///     Subscribed  how many channels were newly entered.
+	///     Result<Subscribed, SessionEnded>  how many channels were newly
+	///     entered; Err when this connection's session ended while this request
+	///     was in flight, and the caller owes the client a refusal instead of a
+	///     catch-up (/docs/design/wire/session-teardown.md §4.4).
 	pub fn subscribe(
 		&self,
 		connection: ConnectionId,
@@ -81,7 +84,7 @@ impl Streams {
 		id: u64,
 		rooms: &[OwnedRoomId],
 		account_wide: bool,
-	) -> Subscribed {
+	) -> Result<Subscribed, SessionEnded> {
 		let mut topics: Vec<RoomTopic> = rooms
 			.iter()
 			.map(|room| RoomTopic::Room(room.clone()))
@@ -90,9 +93,12 @@ impl Streams {
 			topics.push(RoomTopic::FollowsJoins(user.to_owned()));
 		}
 
-		let entered = self
+		let Some(entered) = self
 			.rooms
-			.subscribe(connection, user, queue, id, &topics);
+			.subscribe(connection, user, queue, id, &topics)
+		else {
+			return Err(SessionEnded);
+		};
 
 		// ⚠️ Count the rooms, do not count topics and subtract: following
 		// joins is a topic too, and on a re-`Subscribe` it is already
@@ -105,7 +111,7 @@ impl Streams {
 			.filter(|topic| matches!(topic, RoomTopic::Room(_)))
 			.count();
 
-		Subscribed { joined }
+		Ok(Subscribed { joined })
 	}
 
 	/// Takes `connection` out of the channels of `rooms`; rooms it is not in
@@ -376,9 +382,9 @@ mod tests {
 		let (both_tx, mut both_rx) = queue(8);
 		let (one_tx, mut one_rx) = queue(8);
 		let (undeclared_tx, mut undeclared_rx) = queue(8);
-		streams.subscribe(1, alice, both_tx, 7, &[r1.clone(), r2.clone()], false);
-		streams.subscribe(2, alice, one_tx, 7, &[r1.clone()], false);
-		streams.subscribe(3, alice, undeclared_tx, 7, &[r1.clone(), r2.clone()], false);
+		streams.subscribe(1, alice, both_tx, 7, &[r1.clone(), r2.clone()], false).expect("the session has not ended");
+		streams.subscribe(2, alice, one_tx, 7, &[r1.clone()], false).expect("the session has not ended");
+		streams.subscribe(3, alice, undeclared_tx, 7, &[r1.clone(), r2.clone()], false).expect("the session has not ended");
 		streams.set_device_versions_declared(1, true);
 		streams.set_device_versions_declared(2, true);
 
@@ -404,7 +410,7 @@ mod tests {
 		let alice = user_id!("@alice:localhost");
 		let room = room_id!("!r:localhost").to_owned();
 		let (tx, mut rx) = queue(8);
-		streams.subscribe(1, alice, tx, 42, &[room.clone()], false);
+		streams.subscribe(1, alice, tx, 42, &[room.clone()], false).expect("the session has not ended");
 		streams.set_device_versions_declared(1, true);
 
 		streams.push(&[1], &[PushedEvent { g_seq: 10, json: b"{\"e\":1}" }]);
@@ -428,7 +434,7 @@ mod tests {
 		let alice = user_id!("@alice:localhost");
 		let room = room_id!("!r:localhost").to_owned();
 		let (tx, _rx) = queue(4);
-		streams.subscribe(1, alice, tx, 1, &[room.clone()], false);
+		streams.subscribe(1, alice, tx, 1, &[room.clone()], false).expect("the session has not ended");
 
 		assert!(!streams.is_listened_by_device_versions(&room));
 		streams.set_device_versions_declared(1, true);
@@ -470,6 +476,40 @@ mod tests {
 		assert_eq!(built, documented);
 	}
 
+	/// 🚨 A `Subscribe` that was already in flight when its session ended must
+	/// not be able to put the connection back in
+	/// (/docs/design/wire/session-teardown.md §4.4, rumia in review of PR #105).
+	///
+	/// What the race looks like: the handler awaits its membership checks, the
+	/// logout ends the connection, the handler resumes and registers. Here the
+	/// two halves are simply called in that order.
+	#[test]
+	fn a_subscribe_in_flight_when_the_session_ended_is_refused_and_pushes_nothing() {
+		let streams = Streams::new();
+		let alice = user_id!("@alice:localhost");
+		let room = room_id!("!r:localhost").to_owned();
+		let (tx, mut rx) = PackQueue::new(8, 1 << 20);
+
+		streams.end_connection(1);
+
+		let refused = streams.subscribe(1, alice, tx.clone(), 7, std::slice::from_ref(&room), false);
+		assert!(refused.is_err(), "the registry refuses a connection whose session ended");
+		assert!(
+			!streams.is_listened(&room),
+			"and nobody is listening, so a later append has nowhere to push"
+		);
+		streams.push_to_room(&room, &[1], &[PushedEvent { g_seq: 1, json: b"{\"e\":1}" }]);
+		assert!(rx.try_recv().is_err(), "nothing was pushed at it");
+
+		// ⚠️ The mark is not forever: the id is only unusable while this
+		// connection lives, and forgetting it is what the guard does at the end.
+		streams.forget_connection(1);
+		assert!(
+			streams.subscribe(1, alice, tx, 7, std::slice::from_ref(&room), false).is_ok(),
+			"a forgotten connection leaves no mark behind"
+		);
+	}
+
 	#[test]
 	fn subscribe_is_idempotent_and_unsubscribe_of_a_stranger_is_a_no_op() {
 		let streams = Streams::new();
@@ -477,8 +517,8 @@ mod tests {
 		let room = room_id!("!r:localhost").to_owned();
 		let (tx, _rx) = queue(4);
 
-		let first = streams.subscribe(1, alice, tx.clone(), 9, &[room.clone()], false);
-		let again = streams.subscribe(1, alice, tx, 9, &[room.clone()], false);
+		let first = streams.subscribe(1, alice, tx.clone(), 9, &[room.clone()], false).expect("the session has not ended");
+		let again = streams.subscribe(1, alice, tx, 9, &[room.clone()], false).expect("the session has not ended");
 		assert_eq!(first.joined, 1);
 		assert_eq!(again.joined, 0, "the second subscribe entered nothing new");
 		assert_eq!(streams.listener_count(&room), 1);
@@ -499,8 +539,8 @@ mod tests {
 		let old = room_id!("!old:localhost").to_owned();
 		let new = room_id!("!new:localhost").to_owned();
 		let (tx, _rx) = queue(4);
-		streams.subscribe(1, alice, tx.clone(), 1, &[old.clone()], true);
-		streams.subscribe(2, alice, tx, 1, &[old.clone()], false);
+		streams.subscribe(1, alice, tx.clone(), 1, &[old.clone()], true).expect("the session has not ended");
+		streams.subscribe(2, alice, tx, 1, &[old.clone()], false).expect("the session has not ended");
 
 		streams.follow(alice, &new);
 		assert_eq!(streams.listener_count(&new), 1, "only the account-wide connection followed");
@@ -517,7 +557,7 @@ mod tests {
 		let alice = user_id!("@alice:localhost");
 		let room = room_id!("!r:localhost").to_owned();
 		let (tx, mut rx) = queue(1);
-		streams.subscribe(1, alice, tx, 42, &[room.clone()], false);
+		streams.subscribe(1, alice, tx, 42, &[room.clone()], false).expect("the session has not ended");
 		let listeners: Vec<u64> = streams.listeners(&room).into_iter().map(|(c, _)| c).collect();
 
 		streams.push(&listeners, &[PushedEvent { g_seq: 10, json: b"{\"e\":1}" }]);
@@ -555,7 +595,7 @@ mod tests {
 		let alice = user_id!("@alice:localhost");
 		let room = room_id!("!r:localhost").to_owned();
 		let (tx, mut rx) = queue(8);
-		streams.subscribe(1, alice, tx, 1, &[room], false);
+		streams.subscribe(1, alice, tx, 1, &[room], false).expect("the session has not ended");
 		let events: Vec<PushedEvent<'_>> = (0..5).map(|n| PushedEvent { g_seq: 100 - n, json: b"{}" }).collect();
 
 		streams.push_window(1, &events, false, 2, 1024);
@@ -579,7 +619,7 @@ mod tests {
 		let alice = user_id!("@alice:localhost");
 		let room = room_id!("!r:localhost").to_owned();
 		let (tx, mut rx) = queue(8);
-		streams.subscribe(1, alice, tx, 1, &[room], false);
+		streams.subscribe(1, alice, tx, 1, &[room], false).expect("the session has not ended");
 		let events: Vec<PushedEvent<'_>> = (0..3).map(|n| PushedEvent { g_seq: 100 - n, json: b"{}" }).collect();
 
 		streams.push_window(1, &events, true, 2, 1024);
@@ -607,15 +647,15 @@ mod tests {
 		let new = room_id!("!new:localhost").to_owned();
 		let (tx, _rx) = queue(4);
 
-		let first = streams.subscribe(1, alice, tx.clone(), 1, &[old.clone()], true);
+		let first = streams.subscribe(1, alice, tx.clone(), 1, &[old.clone()], true).expect("the session has not ended");
 		assert_eq!(first.joined, 1, "the room it named");
 
 		// The user joined another room; the client subscribes again.
-		let second = streams.subscribe(1, alice, tx.clone(), 1, &[old.clone(), new.clone()], true);
+		let second = streams.subscribe(1, alice, tx.clone(), 1, &[old.clone(), new.clone()], true).expect("the session has not ended");
 		assert_eq!(second.joined, 1, "one room is new, and following joins was already entered");
 
 		// Nothing new at all is nothing joined.
-		let third = streams.subscribe(1, alice, tx, 1, &[old, new], true);
+		let third = streams.subscribe(1, alice, tx, 1, &[old, new], true).expect("the session has not ended");
 		assert_eq!(third.joined, 0);
 	}
 
@@ -634,7 +674,7 @@ mod tests {
 		let alice = user_id!("@alice:localhost");
 		let later = room_id!("!later:localhost");
 		let (tx, _rx) = queue(4);
-		streams.subscribe(1, alice, tx, 1, &[], true);
+		streams.subscribe(1, alice, tx, 1, &[], true).expect("the session has not ended");
 		streams.unsubscribe_all_rooms(1);
 
 		streams.follow(alice, later);
@@ -651,10 +691,10 @@ mod tests {
 		let hers = room_id!("!hers:localhost").to_owned();
 		let his = room_id!("!his:localhost").to_owned();
 		let (tx, _rx) = queue(4);
-		streams.subscribe(1, alice, tx.clone(), 1, &[hers.clone()], true);
+		streams.subscribe(1, alice, tx.clone(), 1, &[hers.clone()], true).expect("the session has not ended");
 
 		// The same connection, now logged in as bob.
-		streams.subscribe(1, bob, tx, 2, &[his.clone()], false);
+		streams.subscribe(1, bob, tx, 2, &[his.clone()], false).expect("the session has not ended");
 
 		assert_eq!(streams.listener_count(&hers), 0, "alice's channel let the connection go");
 		assert_eq!(streams.listener_count(&his), 1);
@@ -670,7 +710,7 @@ mod tests {
 		let alice = user_id!("@alice:localhost");
 		let room = room_id!("!r:localhost").to_owned();
 		let (tx, mut rx) = queue(4);
-		streams.subscribe(1, alice, tx, 7, &[room.clone()], false);
+		streams.subscribe(1, alice, tx, 7, &[room.clone()], false).expect("the session has not ended");
 		let listeners: Vec<u64> = streams.listeners(&room).into_iter().map(|(c, _)| c).collect();
 
 		// What a kick during the caller's ignore lookup does to the snapshot.
@@ -692,7 +732,7 @@ mod tests {
 		let alice = user_id!("@alice:localhost");
 		let room = room_id!("!r:localhost").to_owned();
 		let (tx, mut rx) = queue(8);
-		streams.subscribe(1, alice, tx, 1, &[room], false);
+		streams.subscribe(1, alice, tx, 1, &[room], false).expect("the session has not ended");
 		let body = vec![b'x'; 200];
 		let events: Vec<PushedEvent<'_>> = (0..4).map(|n| PushedEvent { g_seq: 100 - n, json: &body }).collect();
 
@@ -724,8 +764,8 @@ mod tests {
 		let room = room_id!("!r:localhost").to_owned();
 		let (tx_a, mut rx_a) = queue(4);
 		let (tx_b, mut rx_b) = queue(4);
-		streams.subscribe(1, alice, tx_a, 1, &[room.clone()], false);
-		streams.subscribe(2, bob, tx_b, 1, &[room.clone()], false);
+		streams.subscribe(1, alice, tx_a, 1, &[room.clone()], false).expect("the session has not ended");
+		streams.subscribe(2, bob, tx_b, 1, &[room.clone()], false).expect("the session has not ended");
 
 		streams.relay_to(&room, &[2], b"pack");
 		assert!(rx_a.try_recv().is_err(), "a connection the caller left out gets nothing");

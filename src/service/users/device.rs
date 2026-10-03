@@ -77,11 +77,44 @@ pub(super) fn resolve_device_id(device_id: Option<&DeviceId>) -> OwnedDeviceId {
 }
 
 /// Removes a device from a user.
+///
+/// 🚨 **This is the one place a session ends**, and every way of ending one
+/// comes through it: `/logout` and `/logout/all` (through `end_session`),
+/// deleting a device, a password change with `logout_devices`, OIDC revoke and
+/// session-end, a reused refresh token when `refresh_token_reuse_revoke` is on,
+/// the admin and MAS paths, and replacing a dehydrated device. ⭐ So the wbf
+/// connections of that device are ended here rather than at each of those
+/// twenty-odd call sites (/docs/design/wire/session-teardown.md §3.1, §4.2).
+///
+/// ⚠️ Locking an account does **not** come through here and deliberately gets
+/// no path of its own: `revalidate` already asks `locked_check` before every
+/// frame, so a locked account's connection goes at its next frame — bounded by
+/// `wbf_ws_idle_timeout`, not immediate (§4.3, 維護者 2026-10-02).
 #[implement(super::Service)]
 #[tracing::instrument(level = "info", skip(self))]
 pub async fn remove_device(&self, user_id: &UserId, device_id: &DeviceId) {
 	// Remove access tokens
 	self.remove_tokens(user_id, device_id).await;
+
+	// This device's connections are now somebody holding a socket with no
+	// session behind it. Asking them to end is one call; taking them out of
+	// the streams is the caller's half, because a connection busy inside a
+	// handler will not look at the first for as long as that handler runs —
+	// and what must stop immediately is the pushing, not the socket.
+	//
+	// 🚨 `end_connection`, not `remove_connection`: a `Subscribe` of that same
+	// connection can be in flight, past its membership checks and about to
+	// register, and merely taking it out now would let it put itself back in and
+	// be pushed a catch-up window after its session is gone
+	// (/docs/design/wire/session-teardown.md §4.4, found by rumia in review of
+	// PR #105).
+	for connection in self
+		.services
+		.connections
+		.end_device_sessions(user_id, device_id)
+	{
+		self.services.streams.end_connection(connection);
+	}
 
 	// Remove todevice events
 	let prefix = (user_id, device_id, Interfix);

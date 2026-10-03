@@ -123,6 +123,19 @@ struct Registry<Topic> {
 	subscribers: HashMap<ConnectionId, Subscriber>,
 	/// A user's subscribed connections, for hooks that work by user.
 	by_user: HashMap<OwnedUserId, HashSet<ConnectionId>>,
+	/// Connections whose session ended, so that nothing may enter a topic for
+	/// them again (`end_connection`), until they are forgotten for good.
+	///
+	/// 🚨 **This lives here, inside the registry, because this is the only lock
+	/// that can order it.** Ending a session takes connections out of their
+	/// topics, but a `Subscribe` already in flight awaits membership checks
+	/// before it registers — so a check kept anywhere else is a check the
+	/// registration can slip past, and the connection re-enters its topics
+	/// after its session is gone and is pushed a catch-up window
+	/// (/docs/design/wire/session-teardown.md §4.4, found by rumia in review
+	/// of PR #105). Marked and read under the same write lock as `topics`,
+	/// there is no such moment.
+	ended: HashSet<ConnectionId>,
 }
 
 impl<Topic> Subscribers<Topic>
@@ -135,6 +148,7 @@ where
 				topics: HashMap::new(),
 				subscribers: HashMap::new(),
 				by_user: HashMap::new(),
+				ended: HashSet::new(),
 			}),
 			occupancy,
 		}
@@ -162,8 +176,15 @@ where
 		queue: PackQueue,
 		id: u64,
 		topics: &[Topic],
-	) -> Entered<Topic> {
+	) -> Option<Entered<Topic>> {
 		let mut registry = self.registry.write().expect("stream lock poisoned");
+
+		// 🚨 Refused, not ignored: this connection's session ended while this
+		// request was in flight, and entering a topic now would push to a
+		// session that is gone. See `Registry::ended`.
+		if registry.ended.contains(&connection) {
+			return None;
+		}
 
 		// A connection subscribing as somebody else (a `Login` that kept the
 		// connection) starts over: the hooks find subscribers through
@@ -219,7 +240,7 @@ where
 			}
 		}
 
-		Entered { topics: entered, displaced }
+		Some(Entered { topics: entered, displaced })
 	}
 
 	/// Takes `connection` out of `topics`; ones it is not in are no-ops. The
@@ -233,10 +254,32 @@ where
 	}
 
 	/// Takes `connection` out of every topic and forgets it. Idempotent, and
-	/// what a connection's guard calls for each stream when it ends.
+	/// what a `Login` to another identity calls: the connection stays, so it
+	/// may subscribe again as whoever it now is.
 	pub(super) fn remove_connection(&self, connection: ConnectionId) {
 		let mut registry = self.registry.write().expect("stream lock poisoned");
 		registry.remove_connection(connection);
+	}
+
+	/// `remove_connection`, and nothing may put `connection` back: its session
+	/// is over (`end_device_sessions`). Idempotent.
+	///
+	/// ⚠️ The pair with `forget_connection`, which is the only way back — a mark
+	/// left behind would make the id unusable, and ids are handed out once per
+	/// connection, so that would be a leak with no symptom but silence.
+	pub(super) fn end_connection(&self, connection: ConnectionId) {
+		let mut registry = self.registry.write().expect("stream lock poisoned");
+		registry.remove_connection(connection);
+		registry.ended.insert(connection);
+	}
+
+	/// `remove_connection`, and the connection is gone for good: its id will
+	/// never be handed out again, so the mark goes with it. What a connection's
+	/// guard calls for each stream when its task ends.
+	pub(super) fn forget_connection(&self, connection: ConnectionId) {
+		let mut registry = self.registry.write().expect("stream lock poisoned");
+		registry.remove_connection(connection);
+		registry.ended.remove(&connection);
 	}
 
 	/// Whether anyone listens to `topic`: the cheap check before anything is

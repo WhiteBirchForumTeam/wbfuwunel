@@ -1,11 +1,21 @@
 # 登出要把連線拆掉（外部審查 2026-09-29 #8 後半）
 
-> 📄 **提案，還沒實作。** 維護者 2026-09-29 定：#8 切兩半，前半（控制框也 revalidate）走 **PR #103（已合併）**，
+> ✅ **已實作：PR #105。** 維護者 2026-09-29 定：#8 切兩半，前半（控制框也 revalidate）走 **PR #103（已合併）**，
 > 這一半另開提案。
 >
 > ✅ **維護者 2026-10-02 定了 §7 的四件**，結論寫在 §7，影響到的章節就地改掉了：
 > **掛進 `remove_device`**（§4.2）、**拆訂閱＋關連線**（§4.2）、**鎖帳號不另走一條、靠重驗＋逾時**（§4.3 整節因此刪掉）、
 > **取消訊號要做**（§5 的 B 案）。
+>
+> 📎 **實作時發現這份提案兩處估錯**（PR #105 寫明）：① §4.1 說把 `SlotTable` 的值換成連線的佇列 ——
+> 實際上**位子與登記不是同一個數字**（位子在升級時就拿、連線要有佇列才叫得動），所以值是
+> `DeviceConnections { reserved, live }` 兩個欄位，`count_for` 的語意才不會變。
+> ② §3.3 把「session 可變」列為要新解的問題 —— **現有程式已經處理好了**（`ConnectionSlot::is_for`
+> ＋ `Session::inherit_slot`），這支只是讓登記跟著位子走。
+> ③ §4.2 原本寫「`end_device_sessions` 做兩件事（拆訂閱＋`try_send` Close）」—— **兩件都不在它裡面**
+> （salvia 複審指出）。已改成實際的三方分工。
+> ④ 🚨 **提案整份漏掉一個競態**：取消訊號只包住外層的讀取，而 in-flight 的 `Subscribe` 會在
+> 拆除之後把自己**重新掛回** streams 並推 catch-up（rumia 複審抓到）。修法與理由新增在 §4.4。
 >
 > 前半是 [/docs/design/wire/pack-pipeline.md](pack-pipeline.md) §3.1。
 
@@ -168,7 +178,9 @@ impl ConnectionSlot {
 
 ```rust
 // users/device.rs::remove_device，拿掉 token 之後
-self.services.connections.end_device_sessions(user_id, device_id);
+for connection in self.services.connections.end_device_sessions(user_id, device_id) {
+    self.services.streams.end_connection(connection);
+}
 ```
 
 📎 `users::Service` 已經持有 `Arc<OnceServices>`，所以**不需要新的接線**。
@@ -176,12 +188,17 @@ self.services.connections.end_device_sessions(user_id, device_id);
 反方向（`connections` 去監看 token 表）要輪詢或資料庫通知，都比一行呼叫差，而**不叫**就是現在這個狀況：
 socket 只能靠自己下一次 `revalidate` 才知道，也就是那個「最壞一個 `wbf_ws_idle_timeout`」的路徑。
 
-`end_device_sessions` 做兩件事（維護者定「拆訂閱 ＋ 關連線」都做）：
+維護者定「拆訂閱 ＋ 關連線」都要做，而 ⚠️ **它們不在同一個函式裡，這一節原本寫錯了**
+（salvia 在 PR #105 複審指出 —— 📎 這是本文件第三處估錯，見頁首）。實際的分工：
 
-1. **拆訂閱** —— `streams` 的 `remove_connection(id)`（兩個登記簿各一次）。推送立刻停。
-2. **關連線** —— `try_send(Outgoing::Close { 1008, "session ended" })` ＋ §5 的取消訊號。
+| 誰 | 做什麼 |
+|---|---|
+| `Connections::end_device_sessions(user, device)` | **只「叫」**：對那個裝置每條連線 `notify_one`，回傳連線清單。🚫 它不碰 streams、不組 pack |
+| `remove_device`（呼叫端）| 拿那份清單 `streams.end_connection(id)` —— ⭐ **停推送必須立刻**，而一條卡在 handler 裡的連線不會馬上看訊號 |
+| 連線自己的取消分支（`ws.rs`）| `end_connection`（冪等）→ `enqueue_close(1008 "session ended")` → `break`。Close 走**發送佇列**，所以排在已經排好的回覆後面 |
 
-⚠️ 兩件都不 `await`（拆訂閱是同步的、`try_send` 不等）⇒ 這個方法可以是同步的。
+⚠️ 兩邊都不 `await`（標記是同步的、`notify_one` 不等），所以 `end_device_sessions` 是同步函式。
+🚨 **Close 不是 `try_send`** 而是 `enqueue_close`（有 `DRAIN_TIMEOUT` 上界）：對端不讀時不能讓收攤永遠等。
 
 ### 4.3 鎖帳號**不**走這條（✅ 維護者 2026-10-02 定）
 
@@ -201,6 +218,44 @@ socket 只能靠自己下一次 `revalidate` 才知道，也就是那個「最�
 `api/client/admin/lock_user.rs`、MAS 的 provision／create_or_modify）—— 不是使用者自己能觸發的動作。
 而要立刻的話，admin 本來就可以順手刪那個裝置（走 `remove_device`，立刻）。
 ⇒ ⭐ **所以這裡不加第二條路**：少一個漏斗、少一份會漂的實作。
+
+### 4.4 🚨 拆除擋不住一個**已經在飛**的 `Subscribe`（rumia 在 PR #105 複審抓到）
+
+取消訊號只包住**外層的讀取**（`stream.next()`）。frame 收進來之後，handler 是 `await` 到底的 ——
+而 `Event/Subscribe` 的 handler **先 `await` 成員資格檢查，才註冊進 streams**。於是：
+
+```
+handler: 檢查成員資格 …………………… await ……………………→ 註冊進 streams → 推 catch-up
+teardown:              刪 token → notify → remove_connection
+```
+
+⇒ ⚠️ **`remove_connection` 清掉的東西被那個 handler 重新掛回去**，接著 catch-up 照推 —— 撤銷之後仍然推資料，
+正是這份文件要消滅的那件事。📎 不是回退（基線是「直到下一個 frame 全都照推」），而且資料是同一使用者
+自己房間的內容，但它讓「要立刻停的是推送」這句話有例外。
+
+**🚫 不能修在 handler 裡加一個檢查**：檢查與註冊之間還有空隙，註冊照樣鑽得過去 —— ⭐ **那只是把窗口縮小，
+不是關掉它。**
+
+**修在唯一能定序的那一層**：`ended: HashSet<ConnectionId>` 放進 `Registry`**裡面**，跟 `topics`
+共用同一把 write lock ⇒「標記」與「檢查後註冊」互相排斥，沒有那個瞬間。
+
+於是 `Streams` 的三個動作必須分清楚：
+
+| | 意思 | 誰用 |
+|---|---|---|
+| `remove_connection` | 離開所有串流，**之後還能再訂** | `Login` 換身份（那是新 session，它有權再訂）|
+| `end_connection` | 離開 ＋ **標記**，誰都放不回去 | session 結束 |
+| `forget_connection` | 離開 ＋ **清標記** | 連線的 guard（task 結束）|
+
+🚨 **標記留著不清，就是把那個 `ConnectionId` 永久廢掉** —— 而 id 只發一次、不重用，所以那會是一個
+**只有沉默當症狀**的洩漏。`forget_connection` 是唯一的回頭路，而它掛在 RAII 上（guard 的 `Drop`），
+不是掛在某條記得要做的路徑上。
+
+⭐ 兩個包裝（`subscribe`／`subscribe_device`）因此回 `Result<_, SessionEnded>` —— **用型別，不用「空的成功」**：
+被拒時呼叫端**欠 client 一個拒絕**，而且**不能送 catch-up**，那跟「訂到了但是零個房間」是相反的事。
+
+📎 **為什麼不是把 handler 也放進 `select!` 一起取消**：那會在任意 `await` 點丟掉一個正在跑的 handler，
+而 handler 中途被丟掉的安全性是另一件事（寫了一半的狀態）—— 🚫 這支不買那個風險。
 
 ## 5. 🚨 惡意 client 那一半：取消訊號（✅ 維護者 2026-10-02 定要做）
 

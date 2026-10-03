@@ -402,10 +402,15 @@ Check '[2.12] ChangePassword with logout_devices: other devices logged out, this
 
 $own1 = Bridge $wsE 0x16 0x23 @{ device_id = $regE.device_id } @{}
 $ownOk = Bridge $wsE 0x16 0x23 @{ device_id = $regE.device_id } @{ auth = (Password-Auth 'erin' 'pw-erin-2' $own1.body.session) }
+# 🚨 Since #8's back half (/docs/design/wire/session-teardown.md) deleting this device **tears this
+# connection down**: the Ack is queued inside the handler and still arrives, then the loop sees the
+# cancellation and closes. So there is no "next pack refused" to read any more — `Bridge` reports
+# subtype -1 because `Recv-Or-Null` saw the Close (review of PR #105). ⭐ The refusal-before-the-bridge
+# path is still covered by [1.27] (a locked account), which has no teardown by design.
 $afterOwn = Bridge $wsE 0x11 0x20 $null $null
-Check '[2.13] deleting this connection''s own device: the reply arrives, the next pack is refused before the bridge' `
-  ((Is-Ack $ownOk) -and $afterOwn.subtype -eq 3 -and ($afterOwn.flags -band $IS_BRIDGED) -eq 0 -and $afterOwn.meta.errcode -eq 'M_UNKNOWN_TOKEN') `
-  "delete=$($ownOk.status) next=$($afterOwn.metaText)"
+Check '[2.13] deleting this connection''s own device: the reply arrives, then the connection is torn down' `
+  ((Is-Ack $ownOk) -and $afterOwn.subtype -eq -1 -and $wsE.State -ne 'Open') `
+  "delete=$($ownOk.status) next=$($afterOwn.subtype) state=$($wsE.State)"
 $wsE.Dispose()
 
 $regF = Api Post '/_matrix/client/v3/register' '{"username":"frank","password":"pw-frank-1","auth":{"type":"m.login.dummy"}}' $null
@@ -413,11 +418,12 @@ $wsF = Ws-Open $regF.access_token
 $de1 = Bridge $wsF 0x11 0x2D $null @{}
 $hde1 = Http POST '/_matrix/client/v3/account/deactivate' @{} $regF.access_token
 $deOk = Bridge $wsF 0x11 0x2D $null @{ auth = (Password-Auth 'frank' 'pw-frank-1' $de1.body.session) }
+# Deactivate removes every device, so the same teardown as [2.13] applies to this connection.
 $afterDe = Bridge $wsF 0x11 0x20 $null $null
 $frankLogin = Login-Http-Device 'frank' 'pw-frank-1'
-Check '[2.14] Deactivate: the same challenge as HTTP, then the account is gone: the next pack refused, no login' `
-  ((Is-Uiaa-Challenge $de1) -and (Canon $de1.body.flows) -eq (Canon $hde1.json.flows) -and (Is-Ack $deOk) -and $afterDe.subtype -eq 3 -and ($afterDe.flags -band $IS_BRIDGED) -eq 0 -and $frankLogin.status -ne 200) `
-  "deactivate=$($deOk.status) $($deOk.text) next=$($afterDe.metaText) login=$($frankLogin.status) $($frankLogin.text)"
+Check '[2.14] Deactivate: the same challenge as HTTP, then the account is gone: the connection is torn down, no login' `
+  ((Is-Uiaa-Challenge $de1) -and (Canon $de1.body.flows) -eq (Canon $hde1.json.flows) -and (Is-Ack $deOk) -and $afterDe.subtype -eq -1 -and $wsF.State -ne 'Open' -and $frankLogin.status -ne 200) `
+  "deactivate=$($deOk.status) $($deOk.text) next=$($afterDe.subtype) state=$($wsF.State) login=$($frankLogin.status) $($frankLogin.text)"
 $wsF.Dispose()
 Stop-Server $server
 

@@ -576,6 +576,58 @@ $byeSuspended = Call $wsB3 (Stream-Pack 0x02 $room2 $bobId 301 $null)
 Check '[4.11k] ... but may still abandon its own draft' ($byeSuspended.subtype -eq 2 -and $byeSuspended.meta.redaction_event_id) (Describe $byeSuspended)
 
 $wsA3.Dispose(); $wsB3.Dispose()
+
+# ================= Scenario 5: a logged-out device's connection is torn down (external review #8 back half) =================
+# /docs/design/wire/session-teardown.md: subscriptions hang off the *connection*, and logging out only
+# deleted the token — so events and to-device items kept being pushed at a connection whose session was
+# gone, until it happened to send a frame (at most wbf_ws_idle_timeout, and that is what the attacker
+# who holds a stolen device simply does not do).
+Log '################ Scenario 5: logging out ends that device''s connections ################'
+function Login-Device($name) {
+  Api Post '/_matrix/client/v3/login' (@{ type = 'm.login.password'; identifier = @{ type = 'm.id.user'; user = $name }; password = 'pw-pw-pw-pw' } | ConvertTo-Json -Compress) $null
+}
+$roomT = Create-Room $tokA 'teardown'
+$regD = Register 'dana'; Invite $roomT $regD.user_id $tokA; Join $roomT $regD.access_token
+$danaOne = Login-Device 'dana'
+$danaTwo = Login-Device 'dana'
+Check '[5.0] dana has two devices, each with its own token' ($danaOne.device_id -ne $danaTwo.device_id -and $danaOne.access_token -ne $danaTwo.access_token) "one=$($danaOne.device_id) two=$($danaTwo.device_id)"
+
+$wsOne = Ws-Open $danaOne.access_token
+$wsTwo = Ws-Open $danaTwo.access_token
+$null = Subscribe $wsOne 70 @($roomT) $null
+$null = Subscribe $wsTwo 71 @($roomT) $null
+$before = Send-Msg $roomT 'both devices should see this' $tokA
+$gotOne = @(Drain-Pushes $wsOne)
+$gotTwo = @(Drain-Pushes $wsTwo)
+Check '[5.1] both of dana''s devices are pushed the event while both sessions live' ((Ids $gotOne) -contains $before -and (Ids $gotTwo) -contains $before) "one=$(Ids $gotOne) two=$(Ids $gotTwo)"
+
+# The logout is an HTTP call on another connection entirely; device one sends NOTHING after it.
+$null = Api Post '/_matrix/client/v3/logout' '{}' $danaOne.access_token
+$closing = Recv-Or-Null $wsOne 5000
+Check '[5.2] device one is closed without having sent anything, and long before the idle timeout (120 s here)' ($null -ne $closing -and $closing.closed -and "$($closing.code)" -eq 'PolicyViolation') "frame=$(if ($null -eq $closing) { 'nothing within 5 s' } else { "closed=$($closing.closed) code=$($closing.code)" })"
+
+# 🚨 The point of the whole change: the push stops. Before it, this event reached a connection whose
+# token no longer existed.
+$after = Send-Msg $roomT 'only the device still logged in should see this' $tokA
+$leaked = @(Drain-Pushes $wsOne 1200)
+$stillThere = @(Drain-Pushes $wsTwo)
+Check '[5.3] nothing is pushed at the logged-out connection any more' (-not ((Ids $leaked) -contains $after)) "leaked=$(Ids $leaked)"
+Check '[5.4] and dana''s other device, which did not log out, still gets it' ((Ids $stillThere) -contains $after) "two=$(Ids $stillThere)"
+
+# ⚠️ The reverse of [5.2]: locking an account deliberately has no teardown path of its own
+# (session-teardown.md §4.3) — revalidate catches it at the connection's next frame, so a client that
+# sends nothing is still there. This pins that decision rather than the absence of a feature.
+$lockTarget = Register 'edith'
+$wsLocked = Ws-Open $lockTarget.access_token
+$null = Call $wsLocked (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e11-lock'; features = @() } $null)
+$null = Api Put "/_synapse/admin/v2/users/$([uri]::EscapeDataString($lockTarget.user_id))" '{"locked":true}' $tokA
+$quiet = Recv-Or-Null $wsLocked 2500
+Check '[5.5] a locked account''s connection is NOT torn down: it has to send something first' ($null -eq $quiet) "frame=$(if ($null -eq $quiet) { 'silence, as designed' } else { "closed=$($quiet.closed) code=$($quiet.code) $(Describe $quiet)" })"
+Ws-Send $wsLocked (New-Pack 1 4 0 0 1 @() @())
+$refused = Recv-Or-Null $wsLocked 5000
+Check '[5.6] ... and its next frame is refused with M_USER_LOCKED' ($null -ne $refused -and -not $refused.closed -and $refused.subtype -eq 3 -and $refused.meta.errcode -eq 'M_USER_LOCKED') "$(if ($null -eq $refused) { 'nothing' } else { Describe $refused })"
+
+$wsOne.Dispose(); $wsTwo.Dispose(); $wsLocked.Dispose()
 Stop-Server $server
 
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"
