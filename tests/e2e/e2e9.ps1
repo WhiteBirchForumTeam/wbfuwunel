@@ -201,6 +201,54 @@ $afterPurge2 = Download-Status $upA.mxc $tokA
 Check '[2.3] purging the last holder (its original dropped) frees the media exactly then (410)' ($purge2.purge_id -and $afterPurge2 -eq 410) "status=$afterPurge2"
 $log2 = (Get-Content "$OUT\s2.out" -Raw) -replace "`e\[[0-9;]*m", ''
 Check '[2.4] no negative count was ever logged' (-not ($log2 -match 'reference count is negative')) ''
+
+# ================= Scenario 2b: what a purge must NOT release (external review #3) =================
+# /docs/design/media/purge-release-set.md: the released set used to be every Event and Backup holder
+# below the boundary, while the loop keeps state events and (without delete_local_events) locally-sent
+# ones. 🚨 So the room's own avatar — `m.room.avatar` is a state event and `url` is a media reference —
+# was deleted while the room still pointed at it.
+Log '################ Scenario 2b: a purge releases only what it deletes ################'
+$rK = Create-Room $tokA $false 'keeps-its-media'
+
+# ① The room avatar: a state event, so the purge keeps the event. The picture must stay with it.
+$upAvatar = Upload-Legacy $tokA $payload 'room-avatar.bin'
+$null = Api Put "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($rK))/state/m.room.avatar/" (@{ url = $upAvatar.mxc } | ConvertTo-Json -Compress) $tokA
+
+# ② A local user's image, kept because delete_local_events is false below.
+$upLocal = Upload-Legacy $tokA $payload 'local-image.bin'
+$eLocal = Send-Raw $rK 'm.room.message' @{ msgtype = 'm.image'; body = 'mine'; url = $upLocal.mxc } $tokA $null
+
+# ③ Alice's avatar *in this room* — `m.room.member`'s avatar_url, which until now was no holder at all.
+$upMember = Upload-Legacy $tokA $payload 'member-avatar.bin'
+$null = Api Put "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($rK))/state/m.room.member/$([uri]::EscapeDataString($regA.user_id))" (@{ membership = 'join'; avatar_url = $upMember.mxc } | ConvertTo-Json -Compress) $tokA
+
+$eMarker = Send-Raw $rK 'm.room.message' @{ msgtype = 'm.text'; body = 'boundary' } $tokA $null
+function Purge-Keeping-Local($room, $eid, $tok) {
+  $r = Api Post "/_synapse/admin/v1/purge_history/$([uri]::EscapeDataString($room))" (@{ purge_up_to_event_id = $eid; delete_local_events = $false } | ConvertTo-Json -Compress) $tok
+  Start-Sleep -Seconds 3
+  $r
+}
+$purgeK = Purge-Keeping-Local $rK $eMarker.event_id $tokA
+Check '[2b.1] the room avatar survives a purge: the state event is kept, so its picture must be too' ((Download-Status $upAvatar.mxc $tokA) -eq 200) "status=$(Download-Status $upAvatar.mxc $tokA) purge_id=$($purgeK.purge_id)"
+Check '[2b.2] a kept local image survives it too (delete_local_events=false)' ((Download-Status $upLocal.mxc $tokA) -eq 200) "status=$(Download-Status $upLocal.mxc $tokA)"
+Check '[2b.3] and so does the member''s own avatar in this room' ((Download-Status $upMember.mxc $tokA) -eq 200) "status=$(Download-Status $upMember.mxc $tokA)"
+Check '[2b.4] the message itself was kept, so the picture is still on display' (@((Room-Messages $rK $tokA 'b' 50).chunk | ForEach-Object { $_.event_id }) -contains $eLocal.event_id) ''
+
+# 🚨 The other direction, or a fix that releases nothing would pass everything above.
+$upGone = Upload-Legacy $tokA $payload 'goes-away.bin'
+$eGone = Send-Raw $rK 'm.room.message' @{ msgtype = 'm.image'; body = 'doomed'; url = $upGone.mxc } $tokA $null
+$eGoneMarker = Send-Raw $rK 'm.room.message' @{ msgtype = 'm.text'; body = 'boundary two' } $tokA $null
+$purgeG = Purge-Before $rK $eGoneMarker.event_id $tokA
+Check '[2b.5] an event the purge really deletes does lose its media (410)' ((Download-Status $upGone.mxc $tokA) -eq 410) "status=$(Download-Status $upGone.mxc $tokA) purge_id=$($purgeG.purge_id)"
+Check '[2b.6] ... while everything the purge kept is still there' (((Download-Status $upAvatar.mxc $tokA) -eq 200) -and ((Download-Status $upMember.mxc $tokA) -eq 200)) "avatar=$(Download-Status $upAvatar.mxc $tokA) member=$(Download-Status $upMember.mxc $tokA)"
+
+# ⭐ The swap: only the *current* member event holds the per-room avatar, so changing it releases the
+# one before (that is the whole reason this holder is keyed by (room, user) and not by event).
+$upMember2 = Upload-Legacy $tokA $payload 'member-avatar-2.bin'
+$null = Api Put "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($rK))/state/m.room.member/$([uri]::EscapeDataString($regA.user_id))" (@{ membership = 'join'; avatar_url = $upMember2.mxc } | ConvertTo-Json -Compress) $tokA
+Start-Sleep -Seconds 2
+Check '[2b.7] changing the per-room avatar releases the old one and holds the new' (((Download-Status $upMember.mxc $tokA) -eq 410) -and ((Download-Status $upMember2.mxc $tokA) -eq 200)) "old=$(Download-Status $upMember.mxc $tokA) new=$(Download-Status $upMember2.mxc $tokA)"
+
 Stop-Server $p
 
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"
