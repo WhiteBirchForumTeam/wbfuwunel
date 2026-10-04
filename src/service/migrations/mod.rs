@@ -21,7 +21,6 @@ use tuwunel_database::Deserialized;
 
 use self::{
 	account_status::migrate_account_status,
-	backfill_room_avatar_refs::backfill_room_avatar_refs,
 	backfill_room_seq::backfill_room_seq,
 	clear_servername_status::clear_servername_status,
 	email_bindings::migrate_email_bindings,
@@ -42,7 +41,6 @@ use self::{
 use crate::Services;
 
 mod account_status;
-mod backfill_room_avatar_refs;
 mod backfill_room_seq;
 mod clear_servername_status;
 mod conduit;
@@ -225,7 +223,6 @@ async fn fresh(services: &Services) -> Result {
 	db["global"].insert(b"remove_remote_media_userid", []);
 	db["global"].insert(b"rebuild_roomid_tscount_pducount", []);
 	db["global"].insert(b"backfill_room_seq", []);
-	db["global"].insert(b"backfill_room_avatar_refs", []);
 	db["global"].insert(b"rebuild_relatesto_typed", []);
 	db["global"].insert(b"migrate_profile_keys_to_useridprofilekey", []);
 	db["global"].insert(b"rebuild_thread_activity", []);
@@ -361,14 +358,6 @@ async fn migrate(services: &Services, foreign_lineage: bool) -> Result {
 		.is_not_found()
 	{
 		backfill_room_seq(services).await?;
-	}
-
-	if db["global"]
-		.get(b"backfill_room_avatar_refs")
-		.await
-		.is_not_found()
-	{
-		backfill_room_avatar_refs(services).await?;
 	}
 
 	if db["global"]

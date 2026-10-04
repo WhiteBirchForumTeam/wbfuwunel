@@ -180,7 +180,7 @@ release_range → txn.execute()      ← 先提交「放掉」
 |---|---|---|---|---|
 | **A** | 每個 member 事件各自持有（`avatar_url` 進 `MXC_CONTENT_PATHS`）| 全部留著（member 是 state 事件）| 🚫 **永不** —— 換幾次累積幾份 | ⚠️ **重建事件引用索引**（走全部歷史）|
 | **B1** | 同 A，但被取代時主動放掉 | 當前的留著 | ✅ 會 | ⚠️ 同上 |
-| ✅ **B2（定案）** | **新的 `RoomAvatar{room, user}`** | 當前的留著 | ✅ 會 | ⚠️ 不需要重建「事件引用索引」，但需要一支**走當前成員狀態**的遷移 —— 見 §9.6 |
+| ✅ **B2（定案）** | **新的 `RoomAvatar{room, user}`** | 當前的留著 | ✅ 會 | ✅ 不需要遷移 —— ⚠️ 不是因為索引沒變，是因為**沒有 `mxc_managed` 的媒體不會被刪**，見 §9.6 |
 
 ⭐ **B2 的關鍵理由：它保護的是一個「狀態」，不是一個「事件」。** 載著 `avatar_url` 的 member 事件
 每次成員或 profile 變動就被取代，而只有當前那個會被當成「現在的頭像」顯示。鍵在事件上，就得在「被取代」
@@ -230,30 +230,41 @@ release_range → txn.execute()      ← 先提交「放掉」
 ⭐ 而**那句話就寫在 [/docs/design/media/media-holders.md](media-holders.md) §5**（「7 天後的掃描刪除在 e2e 用環境變數觸發」）——
 也就是 cirno 在 PR #107 指出我沒掃的那份文件。
 ⚠️ **一份沒讀的權威文件，代價不只是文件過期 —— 我憑它宣稱了一件假的事。**
-### 9.6 ✅ 既有資料：加一支遷移（維護者 2026-10-05 定）
 
-`RoomAvatar` 只在**下一次**那個 `(room, user)` 的 member 事件被 append 時才出現，而 `src/service/migrations/`
-裡原本**沒有任何** walk 會替既有的當前成員狀態補上它。所以 cirno 在 PR #107 問得對：**部署前就設好的每房頭像呢？**
-⇒ 🚨 它們在下一次掃描時照樣被刪掉 —— ⭐ 而那**正是 §9 要消滅的那個症狀**（沒有人做任何事，一週後壞掉）。
+### 9.6 ✅ 不需要遷移，而理由不是「從沒上線」—— 是 `mxc_managed`（維護者 2026-10-05）
 
-維護者 2026-10-05 的決定有兩層：
+`RoomAvatar` 只在那個 `(room, user)` 的**下一則** member 事件被 append 時才出現，而 `src/service/migrations/`
+裡沒有任何 walk 會替既有的當前成員狀態補上它。所以 cirno 在 PR #107 問得對：**部署前就設好的每房頭像呢？**
 
-1. **這個 fork 從來沒有上線過**，所以今天沒有任何需要繼承的資料；
-2. ⭐ **但還是把它加進 migrate** —— 📎 遷移是寫給「資料比程式老」那個情形的，而那個情形**遲早會到**
-   （第一台跑起來的 server 的下一次升級就是）。寫在它還是 no-op 的時候最便宜，也最不會寫錯。
+⭐ **決定性的事實是刪除那一端，不是持有者那一端** —— [/docs/design/media/media-holders.md](media-holders.md) §5 的判斷：
 
-**做法** —— `src/service/migrations/backfill_room_avatar_refs.rs`，照這個資料夾的既有形狀
-（`global` 裡一把標記鍵 ＋ `fresh()` 裡一行 ＋ `migrate()` 裡一道 `is_not_found` 閘）：
+```rust
+/// The one decision: local, managed by this model, and held by nothing.
+/// Unknown (not managed) is "no", never "yes".
+if self.managed_since(mxc).await.is_none() { return false; }   // collect.rs
+```
 
-| | |
-|---|---|
-| 走什麼 | **當前成員狀態**：每個房間 × `room_state_keys(room, m.room.member)`，取 `get_member` 的 `avatar_url` |
-| 🚫 不走什麼 | **歷史事件**。⭐ 一個 `(room, member)` 一筆，不是一次成員變動一筆 —— 比「重建事件引用索引」便宜一整個量級 |
-| 產生的集合 | ⭐ **由構造等於 append 路徑會持有的那一個**：兩邊讀的都是「當前那一則 member 事件的 `avatar_url`」|
-| 沒有 `avatar_url` | 跳過。📎 從沒設過的人、以及 `leave`／`ban` 把它丟掉的人，本來就該是「沒有持有者」|
-| 鎖 | 跟 append 路徑同形：`hold_media` → `txn.execute()` → `drop` |
-| state_key 解析不出來 | ⚠️ 記一筆 `warn!` 然後跳過，🚫 不是 `expect` —— 一支遷移因為一個壞 key 把 server 帶走，會留下**走了一半而標記沒寫**的資料庫（CLAUDE.md P） |
-| 新資料庫 | `fresh()` 裡一起蓋上標記 ⇒ 🚫 不會為了一個空資料庫走一次狀態 |
+而掃描那半**只走 `mxc_managed`**。`mxc_managed` 只由 `create_file_metadata(…, FileOrigin::NewMedia)` 寫
+⇒ ⭐ **只有「這個持有者模型上線之後、在這個 fork 上傳的」媒體有那一列。**
 
-📎 §9.2 那句「不需要重建**事件引用索引**」照舊成立，而且**跟這一節不衝突**：這支遷移不重建索引，
-它只是替已經存在的當前狀態補上它本來就該有的持有者。
+⇒ 於是「哪一種既有資料庫的每房頭像真的有危險」只剩一種：
+
+| 既有資料庫 | 有 `mxc_managed` 嗎 | 每房頭像有危險嗎 |
+|---|---|---|
+| 從 Conduit／conduwuit／上游 tuwunel **匯入** | 🚫 **一列都沒有** | ✅ **沒有** —— 它的媒體**永遠不會被自動刪**，有沒有持有者都一樣 |
+| 本 fork 自己寫的，**有** `mxc_managed` 但**還沒有** `RoomAvatar` 的那個版本區間 | ✅ 有 | 🚨 有 —— ⭐ **而這一類不存在：這個 fork 從來沒有上線過** |
+
+⭐ **而 `migrations/` 這個資料夾主要服務的正是第一列**（`import_conduit_knocks`、`split_conduit_highlight_counts`、
+`fix_bad_double_separator_in_state_cache`…）—— 維護者 2026-10-05 指出的就是這件事：
+這些遷移是**原生 Matrix 實作 → 這個 fork**，不是**這個 fork 的舊版 → 新版**。
+
+⇒ 🚫 **不寫那支 walk。** 它對唯一會發生的那種資料庫（匯入的）是 **no-op**，而它要救的那種資料庫不存在。
+
+⚠️ **我先寫了它，再拿掉**（`3bf066c38` 加，它的下一個 commit 拿掉）。留下這段是因為當時的理由錯在哪很值得記：
+我寫的是「遷移是寫給『資料比程式老』那個情形的，而那個情形遲早會到」—— ⭐ **那句話本身沒錯，錯在我沒去看
+刪除那一端**。「資料比程式老」確實遲早會到，但到的時候那些媒體**沒有 `mxc_managed`**，所以不在刪除的範圍裡。
+📎 這跟 §9.5 是同一個形狀：**我憑一個沒查的機制宣稱了一件假的事**（那次是說掃描測不到，這次是說舊頭像會被掃掉）。
+
+📎 真的有一天需要它（第一台 server 跑起來、再升級到更後面的版本），那時的做法記在這裡：
+走每個房間的**當前成員狀態**（`room_state_keys(room, m.room.member)` → `get_member` 的 `avatar_url`），
+🚫 不走歷史事件，鎖與 append 路徑同形（`hold_media` → `txn.execute()` → `drop`）。
