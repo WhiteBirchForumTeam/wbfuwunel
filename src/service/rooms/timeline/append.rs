@@ -481,17 +481,27 @@ async fn append_member_effects(&self, pdu: &PduEvent, count: PduCount) -> Result
 	// `RoomMessage` — so this is the guard for whoever adds a member branch
 	// there later, not something the current code relies on.
 	if count.into_signed() > 0 {
+		let new_avatar = content.avatar_url.as_deref().map(ruma::MxcUri::as_str);
+
+		// ⚠️ Hold the incoming picture until its holder has committed, the way
+		// `profile::set_profile_values` does: the collector decides between a look
+		// at who holds a media and the removal, and that decision is only safe
+		// while whoever is adding a holder waits on the same lock (`hold()`'s
+		// contract, and `media_refs::collect`'s). 🚨 Without it the holder can land
+		// in that gap, and the room is left pointing at a tombstone
+		// (review of PR #107, cirno).
+		let media_held = match new_avatar {
+			| Some(mxc) => Some(self.services.media_refs.hold_media(mxc).await),
+			| None => None,
+		};
+
 		let mut txn = self.db.db.txn();
 		self.services
 			.media_refs
-			.set_room_avatar_ref(
-				&mut txn,
-				pdu.room_id(),
-				&user_id,
-				content.avatar_url.as_deref().map(ruma::MxcUri::as_str),
-			)
+			.set_room_avatar_ref(&mut txn, pdu.room_id(), &user_id, new_avatar)
 			.await;
 		txn.execute();
+		drop(media_held);
 	}
 
 	let stripped_state = match content.membership {

@@ -22,15 +22,20 @@
 
 ## 2. 模型
 
-### 2.1 持有者的三種外鍵
+### 2.1 持有者的四種外鍵
 
 | kind | id | 誰加 | 誰拿掉 |
 |---|---|---|---|
-| `Event` | `(room_id, g_seq)` | `append_pdu`（宣告 ∪ 明文 content 讀到的） | redact（不留備份時）、purge_history、刪房 |
+| `Event` | `(room_id, g_seq)` | `append_pdu`（宣告 ∪ 明文 content 讀到的） | redact（不留備份時）、purge_history（⚠️ **只釋放它真的刪掉的那些事件**，見 §4）、刪房 |
 | `Backup` | `(room_id, g_seq)` | redact 而原文備份保留時，**用 `Backup` 換掉 `Event`**（同交易） | 備份到期（retention reap）、`purge_original`、刪房 |
-| `Avatar` | 本站使用者的 **localpart**（不帶 domain：domain 可能會變，外站的頭像本來就計不到） | 設頭像 | 換頭像／清頭像（拿掉舊的、加新的，同交易）、刪使用者 |
+| `Avatar` | 本站使用者的 **localpart**（不帶 domain：domain 可能會變，外站的頭像本來就計不到） | 設 **profile** 頭像 | 換頭像／清頭像（拿掉舊的、加新的，同交易）、刪使用者 |
+| `RoomAvatar` | **`(room_id, user_id)`** —— ⚠️ **完整 user id**，因為房間有遠端成員，而 localpart 當鍵正是外部審查 #2 那個洞 | 成為當前狀態的 `m.room.member`（它的 `avatar_url`），`append_member_effects` | 同一對的下一個 member 事件（swap）、刪房（`release_room`）|
 
-房間頭像（`m.room.avatar` state 事件）就是一個 `Event` 持有者，不另立種類。聯邦來的使用者頭像不記（那是別站的媒體或別站的人）。
+房間頭像（`m.room.avatar` state 事件）就是一個 `Event` 持有者，不另立種類。
+**profile** 的頭像不記遠端使用者（那是別站的媒體或別站的人）—— ⚠️ 但 `RoomAvatar` **記**：房間的成員包含遠端的人，
+而他們的 member 事件可能指著**本站**的媒體，那時這個持有者就是唯一留住它的東西（/docs/design/media/purge-release-set.md §9.2）。
+🚨 **每房成員頭像（`m.room.member` 的 `avatar_url`）需要自己的種類**，因為媒體引用掃描器（`MXC_CONTENT_PATHS`）讀的是
+`url`／`file.url`／兩個 thumbnail，**從來不讀 `avatar_url`** —— 在 `RoomAvatar` 之前它完全沒有持有者，上傳滿寬限期就被掃掉。
 g_seq 用有號值（backfill 的歷史是負的）。
 
 ### 2.2 為什麼外鍵是 `g_seq` 而不是 `event_id`
@@ -86,7 +91,7 @@ list_holders(mxc) -> Vec<Holder>    admin 印用
 is_removable(mxc) -> bool           收集器與掃描共用的決策
 ```
 
-`holder` 是一個 enum（`Event{room, g_seq}`、`Backup{room, g_seq}`、`Avatar{localpart}`），編碼只在這個模組裡。
+`holder` 是一個 enum（`Event{room, g_seq}`、`Backup{room, g_seq}`、`Avatar{localpart}`、`RoomAvatar{room, user}`），編碼只在這個模組裡。
 呼叫點清單寫在這份文件 §4，新的路徑出現時加一列、叫一次 `hold`／`release`，不用理解表。
 
 ## 4. 每條路徑做什麼（全部是集合操作，全部冪等）
@@ -98,9 +103,10 @@ is_removable(mxc) -> bool           收集器與掃描共用的決策
 | redact，備份**不**保留 | 反向索引找這則的媒體；每個：`del Event`；commit 後交收集器 |
 | redact，備份保留 | 每個：`del Event`、`put Backup`（同一交易換掉）。媒體不會空 |
 | 備份到期／`purge_original` | 反向索引 `(room, Backup, g_seq)` 找媒體；每個 `del Backup`；交收集器 |
-| `purge_history(room, until)` | `release_range(room, Event, until)` ＋ `release_range(room, Backup, until)`：走 `holder_mxc` 範圍；每個 `del`；交收集器。**不讀事件內容** |
-| 刪房 | `release_room(room)`：走 `room_mxc`，每個媒體前綴刪它在這個 room 的 Event／Backup 外鍵；交收集器。**不走事件** |
-| 設頭像 | 從反向索引列出 `(Avatar, localpart)` 現在持有的全部，除了新的以外全 `del`，再 `put` 新的；拿掉的交收集器。🚫 不用呼叫者讀到的「舊頭像」：兩個並行更新讀到同一個舊值，輸的那個新頭像會成為永不釋放的幽靈持有者；讀索引則下次更新自癒（/docs/design/history/review-followups-2026-09-06.md §2.7） |
+| `purge_history(room, until)` | 🚨 **逐事件，不是整段**：只有迴圈**真的刪掉**的那些事件，在**刪它的那同一筆交易裡** `release_all_of(Holder::event(room, g_seq))`；`Backup` 由同一條路上的 `purge_original` 收。<br>⚠️ 原本是 `release_range` 一批清掉、「不讀事件內容」—— 而那正是它不可能對的原因：迴圈會保留 state 事件與（`delete_local_events=false` 時）本地事件，於是釋放的是刪除的**超集**（外部審查 #3，/docs/design/media/purge-release-set.md）|
+| 刪房 | `release_room(room)`：走 `room_mxc`，每個媒體前綴刪它在這個 room 的 Event／Backup／**RoomAvatar** 外鍵；交收集器。**不走事件**。⚠️ `RoomAvatar` 一定要在這裡清：唯一會 swap 掉它的是「那個房間的下一個 member 事件」，而房間已經不在了 |
+| 設每房頭像（成員自己的 `m.room.member`）| `set_room_avatar_ref`：從反向索引列出 `(RoomAvatar, room, user)` 現在持有的，除了新的以外全 `del`，再 `put` 新的（同交易）。⚠️ **只有 `g_seq > 0` 的事件可以做這件事** —— backfilled 是舊歷史，拿它 swap 等於提早釋放 |
+| 設 profile 頭像 | 從反向索引列出 `(Avatar, localpart)` 現在持有的全部，除了新的以外全 `del`，再 `put` 新的；拿掉的交收集器。🚫 不用呼叫者讀到的「舊頭像」：兩個並行更新讀到同一個舊值，輸的那個新頭像會成為永不釋放的幽靈持有者；讀索引則下次更新自癒（/docs/design/history/review-followups-2026-09-06.md §2.7） |
 | 刪使用者 | `del (Avatar, localpart)` |
 
 「交收集器」= 交易 commit 後把 mxc 丟給收集器（既有的 `on_execute` 掛鉤）。任何一條路徑重跑一次，結果一樣。
@@ -159,7 +165,7 @@ is_removable(mxc) -> bool           收集器與掃描共用的決策
   **紅燈驗過**：把 `create_file_metadata` 暫時改回「任何列都寫 `mxc_managed`」重建，同一情境 [4.2] 變成 `held=410 free=410 thumb=410`
   —— 連被引用的那張都被掃掉，就是 /docs/design/history/review-followups-2026-09-06.md §2.1 描述的破壞。
 - 反覆執行：同一則 redact 兩次、同一 purge 跑兩次、備份到期後再 purge —— 集合狀態與第一次相同，log 無錯。
-- 單元：三種外鍵的編碼／前綴、`g_seq` 偏移編碼保序（`holder.rs`）。「可刪」決策（本地 ∧ 有 `mxc_managed` ∧ 無持有者）要 `Services`，
+- 單元：四種外鍵的編碼／前綴（含 `RoomAvatar` 用完整 user id、每種 kind 字串互不相同）、`g_seq` 偏移編碼保序（`holder.rs`）。「可刪」決策（本地 ∧ 有 `mxc_managed` ∧ 無持有者）要 `Services`，
   由 e2e 涵蓋。7 天後的掃描刪除在 e2e 用環境變數觸發（下條）。
 - **保護期的環境變數**（維護者 2026-09-06）：`WBFUWUNEL_MEDIA_GRACE_SECONDS`，設了就用它、**不夾底線**；沒設就 config 值且至少 7 天。
   只給測試用，啟動時若設了會 warn。e2e 用它壓到幾秒，驗「沒被指的上傳過期被掃、被持有的不動、既存（無 `mxc_managed`）不動」。

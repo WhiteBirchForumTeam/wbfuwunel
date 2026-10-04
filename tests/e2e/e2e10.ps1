@@ -149,6 +149,25 @@ $stu = Download-Status $U $tokA; $sth = Download-Status $Hd $tokA
 Check '[3.1] after the 3 s grace the unheld upload is swept (410); the held one stays (200)' ($stu -eq 410 -and $sth -eq 200) "unheld=$stu held=$sth"
 $log3 = (Get-Content "$OUT\s3.out" -Raw) -replace "`e\[[0-9;]*m", ''
 Check '[3.2] startup warned about the override and the sweep logged a removal' (($log3 -match 'WBFUWUNEL_MEDIA_GRACE_SECONDS') -and ($log3 -match 'Unreferenced media sweep finished')) ''
+
+# 🚨 A per-room avatar (`m.room.member`'s `avatar_url`) is the one picture the reference scanner
+# never reads — `MXC_CONTENT_PATHS` has `url` and the thumbnails, not `avatar_url`. Until
+# `Holder::RoomAvatar` existed it therefore had **no holder at all**, and this is the sweep that took
+# it away: no purge, no redaction, nobody doing anything
+# (/docs/design/media/purge-release-set.md §9).
+# ⭐ This is the direct test of that half. The PR first claimed it could not be tested because the
+# seven-day floor cannot be lowered — wrong: the env var above returns before the floor is applied,
+# and /docs/design/media/media-holders.md §5 says so in as many words (review of PR #107, cirno,
+# whose point was that I had not read that file).
+$roomAvatar = (Upload-Legacy $tokA $payload 'per-room-avatar.bin').mxc
+$null = Api Put "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($rD))/state/m.room.member/$([uri]::EscapeDataString($regA.user_id))" (@{ membership = 'join'; avatar_url = $roomAvatar } | ConvertTo-Json -Compress) $tokA
+$plainUnheld = (Upload-Legacy $tokA $payload 'nobody-holds-this.bin').mxc
+Start-Sleep -Seconds 8
+$stAvatar = Download-Status $roomAvatar $tokA
+$stPlain = Download-Status $plainUnheld $tokA
+Check '[3.3] a per-room avatar survives the sweep: its member event holds it' ($stAvatar -eq 200) "avatar=$stAvatar"
+Check '[3.4] ... and an upload nobody holds, in the same sweep, is still taken (so [3.3] is not a sweep that stopped working)' ($stPlain -eq 410) "unheld=$stPlain"
+
 Stop-Server $script:p
 Remove-Item Env:WBFUWUNEL_MEDIA_GRACE_SECONDS -ErrorAction SilentlyContinue
 

@@ -326,53 +326,6 @@ pub async fn swap_all_of(&self, txn: &mut Txn, from: &Holder, to: &Holder) -> us
 	mxc_uris.len()
 }
 
-/// Removes every `Event` and `Backup` holder of `room` with `g_seq < until`,
-/// in `txn`: what `purge_history` purges. Reads the reverse index, never the
-/// events. The media are handed to the collector once `txn` commits.
-///
-/// Return:
-///     usize  holders removed.
-#[implement(Service)]
-pub async fn release_range(&self, txn: &mut Txn, room: &RoomId, until_g_seq: i64) -> usize {
-	let until = bias_g_seq(until_g_seq);
-	let mut released: Vec<String> = Vec::new();
-	let mut removed: usize = 0;
-
-	for kind in [KIND_EVENT, KIND_BACKUP] {
-		let prefix = (kind, room.as_str());
-		// Keys are ordered by g_seq, so the scan stops at the boundary rather
-		// than walking the whole room.
-		let mut rows: Vec<(u64, String)> = Vec::new();
-		{
-			let keys = self
-				.db
-				.holder_mxc
-				.keys_prefix::<(Ignore, Ignore, u64, &str), _>(&prefix)
-				.ignore_err();
-			futures::pin_mut!(keys);
-			while let Some((_, _, biased, mxc)) = keys.next().await {
-				if biased >= until {
-					break;
-				}
-				rows.push((biased, mxc.to_owned()));
-			}
-		}
-
-		for (biased, mxc) in rows {
-			let g_seq = unbias_g_seq(biased);
-			let holder = if kind == KIND_EVENT { Holder::event(room, g_seq) } else { Holder::backup(room, g_seq) };
-			self.del_holder_rows(txn, &mxc, &holder);
-			removed = removed.saturating_add(1);
-			released.push(mxc);
-		}
-	}
-
-	released.sort_unstable();
-	released.dedup();
-	self.hand_to_collector(txn, released);
-	removed
-}
-
 /// Removes every holder `room` ever had on any media, in `txn`: room
 /// deletion. Walks `room_mxc` (one row per media the room ever held) and,
 /// for each media, its holders of this room; never the events. The media
@@ -497,6 +450,11 @@ pub async fn set_avatar_ref(&self, txn: &mut Txn, user_id: &UserId, new_mxc: Opt
 /// on display. ⭐ Failing that way round is the irreversible one — "media held
 /// too long is recoverable, media released too early is not"
 /// (/docs/design/media/purge-release-set.md §9).
+///
+/// ⚠️ The caller holds `new_mxc` (`hold_media`) until `txn` has committed — the
+/// same contract as `hold()` and `set_avatar_ref`. The collector decides between
+/// a look at a media's holders and its removal, and that decision only holds
+/// while whoever adds a holder waits on the same lock.
 ///
 /// 📎 Unlike `set_avatar_ref` this counts remote members too: the media they
 /// name is usually another server's and the collector never touches that, but a

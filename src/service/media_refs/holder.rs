@@ -3,7 +3,7 @@
 //!
 //! Keys are built here and nowhere else. `mxc_holder` answers "who holds M"
 //! (prefix `M`); `holder_mxc` answers "what does this holder hold" (prefix
-//! `kind, room[, g_seq]` or `a, localpart`); `room_mxc` is the deletion
+//! `kind, room[, g_seq]`, `a, localpart`, or `r, room, user`); `room_mxc` is the deletion
 //! accelerator for a whole room. Values are empty: the key is the fact.
 
 use std::fmt;
@@ -105,7 +105,8 @@ impl Holder {
 		}
 	}
 
-	/// The room this holder lives in, for `room_mxc`; avatars have none.
+	/// The room this holder lives in, for `room_mxc`; a profile avatar has none
+	/// (a per-room one does — it is keyed by its room).
 	#[must_use]
 	pub fn room(&self) -> Option<&RoomId> {
 		match self {
