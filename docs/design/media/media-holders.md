@@ -106,6 +106,7 @@ is_removable(mxc) -> bool           收集器與掃描共用的決策
 | `purge_history(room, until)` | 🚨 **逐事件，不是整段**：只有迴圈**真的刪掉**的那些事件，在**刪它的那同一筆交易裡** `release_all_of(Holder::event(room, g_seq))`；`Backup` 由同一條路上的 `purge_original` 收。<br>⚠️ 原本是 `release_range` 一批清掉、「不讀事件內容」—— 而那正是它不可能對的原因：迴圈會保留 state 事件與（`delete_local_events=false` 時）本地事件，於是釋放的是刪除的**超集**（外部審查 #3，/docs/design/media/purge-release-set.md）|
 | 刪房 | `release_room(room)`：走 `room_mxc`，每個媒體前綴刪它在這個 room 的 Event／Backup／**RoomAvatar** 外鍵；交收集器。**不走事件**。⚠️ `RoomAvatar` 一定要在這裡清：唯一會 swap 掉它的是「那個房間的下一個 member 事件」，而房間已經不在了 |
 | 設每房頭像（成員自己的 `m.room.member`）| `set_room_avatar_ref`：從反向索引列出 `(RoomAvatar, room, user)` 現在持有的，除了新的以外全 `del`，再 `put` 新的（同交易）。⚠️ **只有 `g_seq > 0` 的事件可以做這件事** —— backfilled 是舊歷史，拿它 swap 等於提早釋放 |
+| 遷移：補既有的每房頭像 | `backfill_room_avatar_refs`（一次性，`global` 裡一把標記鍵）：走每個房間的**當前成員狀態**，有 `avatar_url` 就照上一列那條路 `set_room_avatar_ref`。📎 走狀態不走歷史 ⇒ 一個 `(room, member)` 一筆；🚫 新資料庫由 `fresh()` 蓋標記，不會白走一次（/docs/design/media/purge-release-set.md §9.6）|
 | 設 profile 頭像 | 從反向索引列出 `(Avatar, localpart)` 現在持有的全部，除了新的以外全 `del`，再 `put` 新的；拿掉的交收集器。🚫 不用呼叫者讀到的「舊頭像」：兩個並行更新讀到同一個舊值，輸的那個新頭像會成為永不釋放的幽靈持有者；讀索引則下次更新自癒（/docs/design/history/review-followups-2026-09-06.md §2.7） |
 | 刪使用者 | `del (Avatar, localpart)` |
 
