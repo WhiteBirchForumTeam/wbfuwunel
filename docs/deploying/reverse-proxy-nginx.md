@@ -69,8 +69,14 @@ server {
   reaches Tuwunel over loopback (`proxy_pass http://127.0.0.1:6167`, the
   arrangement above), which is what the default `localhost_ip` covers: Tuwunel
   then reads the first of `X-Forwarded-For` (rightmost), `X-Real-IP`,
-  `X-Client-IP`, `Client-IP` that is present — so the usual
-  `proxy_set_header X-Real-IP $remote_addr;` is enough on its own.
+  `X-Client-IP`, `Client-IP` that is present.
+  🚨 **Whichever of those you use, overwrite it** — the `proxy_set_header
+  X-Forwarded-For $remote_addr;` in the `location /` block above is doing
+  exactly that.
+  Nginx passes a header it does not set through from the client unchanged, and
+  `X-Forwarded-For` is read first: a config that sets only `X-Real-IP` lets a
+  client send its own `X-Forwarded-For` and name itself, taking with it that
+  address's rate-limit bucket and connection quota.
   ⚠️ A separate container or host is **not**
   loopback — set `reverse_proxy_ip_header = "rightmost_x_forwarded_for"` there,
   and make sure clients cannot reach Tuwunel around Nginx

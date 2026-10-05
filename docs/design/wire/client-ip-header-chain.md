@@ -13,6 +13,9 @@
 
 ## 1. 閘不動 —— 先把這件事釘住，因為 ② 的安全性全靠它
 
+⚠️ **以下是提案當時的程式**（這一支把函數改名成 `find_headers_to_believe`、回傳型別換成
+`HeadersToBelieve`，但⭐ **閘的判斷一個字沒動**，那才是這一節要釘的東西）：
+
 ```rust
 fn header_to_believe(extensions: &Extensions) -> Option<ReverseProxyIpHeader> {
     if let Some(&ConfiguredIpHeader(source)) = extensions.get::<ConfiguredIpHeader>() {
@@ -41,7 +44,7 @@ client(1.2.3.4) → nginx → tuwunel        X-Forwarded-For: 1.2.3.4
 ⚠️ **左邊的每一格都是 client 寫得出來的**：client 連線時先送 `X-Forwarded-For: 8.8.8.8`，
 nginx 不刪、只 append ⇒ server 收到 `8.8.8.8, 1.2.3.4`。所以只有**最右邊**那一格有人為它負責。
 
-現在的程式：
+**原本**的程式（這一支換掉的就是它）：
 
 ```rust
 .filter_map(|v| v.to_str().ok())                   // 讀不懂的整個 header 值跳過
@@ -193,6 +196,12 @@ enum HeaderOutcome {
 
 ⚠️ **而「停下來」換到了什麼？幾乎沒有**：同一個 client 只要送 **`X-Forwarded-For: 1.2.3.4`**（解得開的），
 第一格就直接被採用了 —— 兩種語意下都一樣。⇒ 「停下來」防不住會偽造的人，只罰得到設定沒寫全的運維。
+
+📎 **同一個形狀還有一種更常見的觸發**（cirno 與 rumia 在 PR #108 各自點到）：
+`proxy_set_header X-Forwarded-For "";` 或任何讓 XFF **存在但是空的**設定 ——
+那是 `Unusable` 不是 `Absent`（header 在），所以也會停在第一格。
+⇒ 📌 這一條跟上面那段是**同一個決定**，不是另一個題目；`an_empty_x_forwarded_for_is_present_and_unusable`
+把現行語意釘住了（`""`、`","`、`"1.2.3.4,"` 三種都落到 peer）。
 
 📎 **為什麼現在還是按「停下來」實作**：它是維護者同意的那一版文字，而且是較保守的那一端。
 📌 要改成「往下走」只動一行（`Unusable => return None` → `Unusable => continue`）＋那條測試的期望值。

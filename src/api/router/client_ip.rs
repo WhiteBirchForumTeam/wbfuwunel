@@ -709,6 +709,61 @@ mod tests {
 		assert_eq!(ip, LOOPBACK.ip(), "a proxy that wrote nonsense does not hand over to a later header");
 	}
 
+	/// A header that is there and empty is "there": `proxy_set_header
+	/// X-Forwarded-For "";` says nothing about the client, and that is not the
+	/// same as the proxy having written nobody (review of PR #108, rumia).
+	#[tokio::test]
+	async fn an_empty_x_forwarded_for_is_present_and_unusable() {
+		for value in ["", ",", "1.2.3.4,"] {
+			let mut parts = parts_from(
+				Some(LOOPBACK),
+				None,
+				Some(default_ranges()),
+				[("X-Forwarded-For", value)],
+			);
+			let ClientIp(ip) = extract_client_ip(&mut parts)
+				.await
+				.expect("a peer address is present");
+			assert_eq!(ip, LOOPBACK.ip(), "{value:?} names nobody");
+		}
+	}
+
+	/// Two separate header lines are one list, so the rightmost element is the
+	/// last element of the **last** line.
+	#[tokio::test]
+	async fn two_x_forwarded_for_lines_are_read_from_the_last_one() {
+		let mut parts = parts_from(
+			Some(LOOPBACK),
+			None,
+			Some(default_ranges()),
+			[("X-Forwarded-For", "1.1.1.1"), ("X-Forwarded-For", "2.2.2.2, 3.3.3.3")],
+		);
+		let ClientIp(ip) = extract_client_ip(&mut parts)
+			.await
+			.expect("a peer address is present");
+		assert_eq!(ip.to_string(), "3.3.3.3");
+	}
+
+	/// 🚫 RFC 7239 `Forwarded` and the vendor headers are deliberately not links
+	/// in the chain: a deployment behind one of those names it, and naming is
+	/// exact where a guess is not (review of PR #108, rumia).
+	#[tokio::test]
+	async fn headers_outside_the_chain_are_not_read_for_a_local_peer() {
+		for header in [
+			("Forwarded", "for=1.2.3.4"),
+			("CF-Connecting-IP", "1.2.3.4"),
+			("True-Client-IP", "1.2.3.4"),
+			("Fly-Client-IP", "1.2.3.4"),
+			("CloudFront-Viewer-Address", "1.2.3.4:443"),
+		] {
+			let mut parts = parts_from(Some(LOOPBACK), None, Some(default_ranges()), [header]);
+			let ClientIp(ip) = extract_client_ip(&mut parts)
+				.await
+				.expect("a peer address is present");
+			assert_eq!(ip, LOOPBACK.ip(), "{} is not in the chain", header.0);
+		}
+	}
+
 	/// 🔴 The chain exists only inside the gate. Naming a header is how an
 	/// operator says "only this one", so the links are not tried behind it.
 	#[tokio::test]
