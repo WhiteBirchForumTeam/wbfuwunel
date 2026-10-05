@@ -130,6 +130,8 @@ fn reverse_proxy_ip_header_issue_427_values_parse() {
 		("rightmost_x_forwarded_for", ReverseProxyIpHeader::RightmostXForwardedFor),
 		("rightmost_forwarded", ReverseProxyIpHeader::RightmostForwarded),
 		("x_real_ip", ReverseProxyIpHeader::XRealIp),
+		("x_client_ip", ReverseProxyIpHeader::XClientIp),
+		("client_ip", ReverseProxyIpHeader::ClientIp),
 		("cf_connecting_ip", ReverseProxyIpHeader::CfConnectingIp),
 		("true_client_ip", ReverseProxyIpHeader::TrueClientIp),
 		("fly_client_ip", ReverseProxyIpHeader::FlyClientIp),

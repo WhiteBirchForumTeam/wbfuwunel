@@ -27,6 +27,12 @@ pub enum ReverseProxyIpHeader {
 	/// `X-Real-IP` header (nginx).
 	XRealIp,
 
+	/// `X-Client-IP` header.
+	XClientIp,
+
+	/// `Client-IP` header.
+	ClientIp,
+
 	/// `CF-Connecting-IP` (Cloudflare / cloudflared).
 	CfConnectingIp,
 

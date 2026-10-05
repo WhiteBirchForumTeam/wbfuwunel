@@ -9,11 +9,13 @@
 //!
 //! - `reverse_proxy_ip_header` says "a proxy in front of me writes the client
 //!   into *this* header". It is believed whoever the peer is, because the
-//!   operator has promised nobody reaches the server another way.
+//!   operator has promised nobody reaches the server another way. ⭐ Naming one
+//!   header does not open the others: that is how an operator says "only this".
 //! - `localhost_ip` says "a peer here is not a client, it is something running
 //!   beside me" — a proxy on the same host, or the Unix socket, whose peer
 //!   address is a synthesised `127.0.0.1` (`router/serve/unix.rs`). There is no
-//!   configured header to read, so the default one is used.
+//!   configured header to read, so [`LOCAL_PEER_CHAIN`] is walked in order
+//!   (維護者 2026-10-05).
 //!
 //! 🚨 Why the second one exists at all: without it every request from those
 //! deployments carries the same address, and every limit keyed on the address —
@@ -40,11 +42,30 @@ use http::{Extensions, HeaderMap, StatusCode, request::Parts};
 use ipnet::IpNet;
 use tuwunel_core::config::ReverseProxyIpHeader;
 
-/// What a local peer's forwarded address is read from when the operator has
-/// not named a header. `X-Forwarded-For` is what every proxy writes without
-/// being asked; rightmost because only the hop that talked to us can append
-/// there.
-const LOCAL_PEER_DEFAULT: ReverseProxyIpHeader = ReverseProxyIpHeader::RightmostXForwardedFor;
+/// What a local peer's forwarded address is read from when the operator has not
+/// named a header: the first of these that is there, in this order.
+///
+/// `X-Forwarded-For` leads because every proxy writes it without being asked,
+/// and rightmost because only the hop that talked to us can append there.
+/// `X-Real-IP` follows because `proxy_set_header X-Real-IP $remote_addr;` is the
+/// single most common line in an nginx config; the other two are what the rest
+/// write (維護者 2026-10-05).
+///
+/// ⭐ A chain is safe here and only here: reaching it at all means the peer is
+/// this machine, so an operator has already said nobody arrives another way, and
+/// stripping what a client sent is the proxy's job. 🚫 A header named in
+/// `reverse_proxy_ip_header` does **not** fall through to this.
+///
+/// 🚫 Vendor headers (`CF-Connecting-IP`, `True-Client-IP`, `Fly-Client-IP`,
+/// `CloudFront-Viewer-Address`) and RFC 7239 `Forwarded` are deliberately absent:
+/// a deployment behind one of those names it, and naming is exact where a guess
+/// is not.
+const LOCAL_PEER_CHAIN: [ReverseProxyIpHeader; 4] = [
+	ReverseProxyIpHeader::RightmostXForwardedFor,
+	ReverseProxyIpHeader::XRealIp,
+	ReverseProxyIpHeader::XClientIp,
+	ReverseProxyIpHeader::ClientIp,
+];
 
 /// Tuwunel client-IP extractor. See module docs.
 #[derive(Clone, Copy, Debug)]
@@ -75,8 +96,8 @@ where
 		// A header that is there is believed; one that is missing means this
 		// request did not come through the proxy (a health check straight at
 		// the socket, say), and then the peer is the honest answer.
-		if let Some(source) = header_to_believe(&parts.extensions)
-			&& let Some(address) = secure_extract(source, &parts.headers, &parts.extensions)
+		if let Some(believed) = find_headers_to_believe(&parts.extensions)
+			&& let Some(address) = believed.find_address(&parts.headers, &parts.extensions)
 		{
 			return Ok(Self(address));
 		}
@@ -91,20 +112,101 @@ impl fmt::Display for ClientIp {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::Display::fmt(&self.0, f) }
 }
 
+/// Which headers may be believed about this request.
+#[derive(Clone, Copy, Debug)]
+enum HeadersToBelieve {
+	/// The one the operator named, and only that one.
+	Named(ReverseProxyIpHeader),
+
+	/// The peer is this machine, so [`LOCAL_PEER_CHAIN`] applies in order.
+	LocalChain,
+}
+
+impl HeadersToBelieve {
+	/// Args:
+	///     headers: the request's headers, example: the ones a local proxy wrote
+	///     extensions: the request's extensions, example: the ones carrying
+	///         `ConnectInfo`
+	/// Return:
+	///     Option<IpAddr>  the address these headers name, or None when none of
+	///     them says anything usable — and then the caller keeps the peer.
+	fn find_address(self, headers: &HeaderMap, extensions: &Extensions) -> Option<IpAddr> {
+		match self {
+			| Self::Named(source) => secure_extract(source, headers, extensions).find_address(),
+			| Self::LocalChain => {
+				for source in LOCAL_PEER_CHAIN {
+					match secure_extract(source, headers, extensions) {
+						| HeaderOutcome::Absent => continue,
+						| HeaderOutcome::Address(address) => return Some(address),
+						// 🚨 The chain's one hard edge: the next link is for a
+						// header that is **absent**, not for one that was there
+						// and said nothing usable. A proxy that wrote nonsense is
+						// a reason to keep the peer, not to go looking for a
+						// header the client may have sent.
+						| HeaderOutcome::Unusable => return None,
+					}
+				}
+
+				None
+			},
+		}
+	}
+}
+
+/// What one forwarding header had to say. ⭐ "Not there" and "there but
+/// unusable" are different answers: only the first may hand over to the next
+/// link of [`LOCAL_PEER_CHAIN`].
+#[derive(Clone, Copy, Debug)]
+enum HeaderOutcome {
+	/// This request does not carry the header at all.
+	Absent,
+
+	/// The header is there and names this address.
+	Address(IpAddr),
+
+	/// The header is there and says nothing an address can be read from.
+	Unusable,
+}
+
+impl HeaderOutcome {
+	/// Args:
+	///     address: what the header parsed to, example: None when its rightmost
+	///         element was `garbage`
+	/// Return:
+	///     HeaderOutcome  Address when it parsed, Unusable otherwise — 🚫 never
+	///     Absent, which is for a header that is not in the request.
+	fn from_present(address: Option<IpAddr>) -> Self {
+		match address {
+			| Some(address) => Self::Address(address),
+			| None => Self::Unusable,
+		}
+	}
+
+	/// Return:
+	///     Option<IpAddr>  the address, or None for both Absent and Unusable —
+	///     and then the caller keeps the peer address.
+	fn find_address(self) -> Option<IpAddr> {
+		match self {
+			| Self::Address(address) => Some(address),
+			| Self::Absent | Self::Unusable => None,
+		}
+	}
+}
+
 /// Args:
 ///     extensions: the request's extensions, example: the ones the outer
 ///         router's layers fill from config
 /// Return:
-///     Option<ReverseProxyIpHeader>  the source to read, or None when no
-///     header may be believed for this request.
-fn header_to_believe(extensions: &Extensions) -> Option<ReverseProxyIpHeader> {
+///     Option<HeadersToBelieve>  what to read, or None when no header may be
+///     believed for this request.
+fn find_headers_to_believe(extensions: &Extensions) -> Option<HeadersToBelieve> {
 	// Configured wins outright: naming one header does not open the others,
 	// and it does not matter who the peer is.
 	if let Some(&ConfiguredIpHeader(source)) = extensions.get::<ConfiguredIpHeader>() {
-		return Some(source);
+		return Some(HeadersToBelieve::Named(source));
 	}
 
-	is_peer_local(extensions).then_some(LOCAL_PEER_DEFAULT)
+	is_peer_local(extensions).then_some(HeadersToBelieve::LocalChain)
 }
 
 /// Args:
@@ -147,12 +249,19 @@ fn secure_extract(
 	source: ReverseProxyIpHeader,
 	headers: &HeaderMap,
 	extensions: &Extensions,
-) -> Option<IpAddr> {
+) -> HeaderOutcome {
 	match source {
-		| ReverseProxyIpHeader::ConnectInfo => peer_address(extensions),
+		// Names no header, so it is never "there but unusable": either the
+		// transport gave us a peer or this request has no address at all.
+		| ReverseProxyIpHeader::ConnectInfo => match peer_address(extensions) {
+			| Some(address) => HeaderOutcome::Address(address),
+			| None => HeaderOutcome::Absent,
+		},
 		| ReverseProxyIpHeader::RightmostXForwardedFor => rightmost_x_forwarded_for(headers),
 		| ReverseProxyIpHeader::RightmostForwarded => rightmost_forwarded(headers),
 		| ReverseProxyIpHeader::XRealIp => single_ip_header(headers, "x-real-ip"),
+		| ReverseProxyIpHeader::XClientIp => single_ip_header(headers, "x-client-ip"),
+		| ReverseProxyIpHeader::ClientIp => single_ip_header(headers, "client-ip"),
 		| ReverseProxyIpHeader::CfConnectingIp => single_ip_header(headers, "cf-connecting-ip"),
 		| ReverseProxyIpHeader::TrueClientIp => single_ip_header(headers, "true-client-ip"),
 		| ReverseProxyIpHeader::FlyClientIp => single_ip_header(headers, "fly-client-ip"),
@@ -160,24 +269,51 @@ fn secure_extract(
 	}
 }
 
-fn rightmost_x_forwarded_for(headers: &HeaderMap) -> Option<IpAddr> {
-	headers
+/// 🚨 The **last** element of the **last** header value, parseable or not.
+///
+/// `X-Forwarded-For` is a list, and each hop appends what it saw to the right,
+/// so only the last element was written by someone we have a promise about —
+/// every element left of it came from further out, and the leftmost ones from
+/// the client itself (`8.8.8.8` prepended before connecting stays in the list;
+/// a proxy appends, it does not strip).
+///
+/// ⚠️ So anything unreadable at that position is "no answer" — which leaves the
+/// peer address — and 🚫 never a reason to look one element to the left. This
+/// used to be `filter_map(parse).next_back()`, i.e. the rightmost **parseable**
+/// element, and `8.8.8.8, garbage` therefore resolved to a value the client had
+/// chosen: failing open (external review 2026-09-29).
+fn rightmost_x_forwarded_for(headers: &HeaderMap) -> HeaderOutcome {
+	let Some(last_value) = headers
 		.get_all("x-forwarded-for")
 		.iter()
-		.filter_map(|v| v.to_str().ok())
-		.flat_map(|s| s.split(','))
-		.filter_map(|s| s.trim().parse::<IpAddr>().ok())
 		.next_back()
+	else {
+		return HeaderOutcome::Absent;
+	};
+
+	HeaderOutcome::from_present(
+		last_value
+			.to_str()
+			.ok()
+			.and_then(|value| value.rsplit(',').next())
+			.and_then(|element| element.trim().parse().ok()),
+	)
 }
 
-fn rightmost_forwarded(headers: &HeaderMap) -> Option<IpAddr> {
-	headers
-		.get_all("forwarded")
-		.iter()
-		.filter_map(|v| v.to_str().ok())
-		.flat_map(|s| s.split(','))
-		.filter_map(parse_forwarded_for)
-		.next_back()
+/// The last stanza of the last `Forwarded` value, parseable or not — the same
+/// rule and the same reason as [`rightmost_x_forwarded_for`].
+fn rightmost_forwarded(headers: &HeaderMap) -> HeaderOutcome {
+	let Some(last_value) = headers.get_all("forwarded").iter().next_back() else {
+		return HeaderOutcome::Absent;
+	};
+
+	HeaderOutcome::from_present(
+		last_value
+			.to_str()
+			.ok()
+			.and_then(|value| value.rsplit(',').next())
+			.and_then(parse_forwarded_for),
+	)
 }
 
 fn parse_forwarded_for(stanza: &str) -> Option<IpAddr> {
@@ -203,19 +339,35 @@ fn parse_forwarded_for(stanza: &str) -> Option<IpAddr> {
 	candidate.trim().parse::<IpAddr>().ok()
 }
 
-fn single_ip_header(headers: &HeaderMap, name: &'static str) -> Option<IpAddr> {
-	headers
-		.get(name)
-		.and_then(|v| v.to_str().ok())
-		.and_then(|s| s.trim().parse::<IpAddr>().ok())
+/// A header a proxy overwrites rather than appends to, so the whole value is
+/// the address. 📎 `get` takes the first value: these are single-valued by
+/// convention, and a proxy that appends instead of overwriting is a
+/// misconfiguration we cannot tell from a legitimate value anyway.
+fn single_ip_header(headers: &HeaderMap, name: &'static str) -> HeaderOutcome {
+	let Some(value) = headers.get(name) else {
+		return HeaderOutcome::Absent;
+	};
+
+	HeaderOutcome::from_present(
+		value
+			.to_str()
+			.ok()
+			.and_then(|value| value.trim().parse().ok()),
+	)
 }
 
-fn cloudfront_viewer_address(headers: &HeaderMap) -> Option<IpAddr> {
-	headers
-		.get("cloudfront-viewer-address")
-		.and_then(|v| v.to_str().ok())
-		.and_then(|s| s.rsplit_once(':').map(|(ip, _port)| ip))
-		.and_then(|s| s.trim().parse::<IpAddr>().ok())
+fn cloudfront_viewer_address(headers: &HeaderMap) -> HeaderOutcome {
+	let Some(value) = headers.get("cloudfront-viewer-address") else {
+		return HeaderOutcome::Absent;
+	};
+
+	HeaderOutcome::from_present(
+		value
+			.to_str()
+			.ok()
+			.and_then(|value| value.rsplit_once(':').map(|(ip, _port)| ip))
+			.and_then(|ip| ip.trim().parse().ok()),
+	)
 }
 
 #[cfg(test)]
@@ -290,6 +442,8 @@ mod tests {
 		for header in [
 			("X-Forwarded-For", "9.9.9.9"),
 			("X-Real-Ip", "9.9.9.9"),
+			("X-Client-IP", "9.9.9.9"),
+			("Client-IP", "9.9.9.9"),
 			("Forwarded", "for=9.9.9.9"),
 			("CF-Connecting-IP", "9.9.9.9"),
 			("True-Client-IP", "9.9.9.9"),
@@ -464,6 +618,125 @@ mod tests {
 			.await
 			.expect("a peer address is present");
 		assert_eq!(ip.to_string(), "198.51.100.4");
+	}
+
+	/// 🚨 The external review's 🟡 (2026-09-29), and the reason the reader takes
+	/// the last element rather than the last parseable one: `garbage` sits where
+	/// the local proxy writes, so the only honest answers are "the peer" — never
+	/// `8.8.8.8`, which the client put there itself.
+	#[tokio::test]
+	async fn a_garbage_rightmost_hop_leaves_the_peer_rather_than_walking_left() {
+		let mut parts = parts_from(
+			Some(LOOPBACK),
+			None,
+			Some(default_ranges()),
+			[("X-Forwarded-For", "8.8.8.8, garbage")],
+		);
+		let ClientIp(ip) = extract_client_ip(&mut parts)
+			.await
+			.expect("a peer address is present");
+		assert_eq!(ip, LOOPBACK.ip(), "the client's own leftmost value must not be reachable");
+	}
+
+	/// The same rule one layer out: a header value that is not even text cannot
+	/// send the reader back to an earlier value of the same header.
+	#[tokio::test]
+	async fn a_non_text_last_header_value_leaves_the_peer() {
+		let request = Request::builder()
+			.uri("/")
+			.header("X-Forwarded-For", "8.8.8.8")
+			.header(
+				"X-Forwarded-For",
+				http::HeaderValue::from_bytes(&[0xff, 0xfe]).expect("bytes are a legal value"),
+			);
+		let (mut parts, ()) = request
+			.body(())
+			.expect("a well-formed request in a test")
+			.into_parts();
+		parts.extensions.insert(ConnectInfo(LOOPBACK));
+		parts.extensions.insert(default_ranges());
+
+		let ClientIp(ip) = extract_client_ip(&mut parts)
+			.await
+			.expect("a peer address is present");
+		assert_eq!(ip, LOOPBACK.ip());
+	}
+
+	/// The chain a local peer gets (維護者 2026-10-05): the first header that is
+	/// **there** answers, so a proxy that writes only one of them is read
+	/// correctly instead of collapsing every request onto the proxy's address.
+	#[tokio::test]
+	async fn a_local_peer_walks_the_chain_until_a_header_is_present() {
+		for header in [("X-Real-IP", "1.2.3.4"), ("X-Client-IP", "1.2.3.4"), ("Client-IP", "1.2.3.4")] {
+			let mut parts = parts_from(Some(LOOPBACK), None, Some(default_ranges()), [header]);
+			let ClientIp(ip) = extract_client_ip(&mut parts)
+				.await
+				.expect("a peer address is present");
+			assert_eq!(ip.to_string(), "1.2.3.4", "{} should have answered", header.0);
+		}
+	}
+
+	/// Earlier links win while they say something usable.
+	#[tokio::test]
+	async fn the_chain_prefers_x_forwarded_for_over_the_later_links() {
+		let mut parts = parts_from(
+			Some(LOOPBACK),
+			None,
+			Some(default_ranges()),
+			[("X-Forwarded-For", "1.1.1.1, 2.2.2.2"), ("X-Real-IP", "3.3.3.3")],
+		);
+		let ClientIp(ip) = extract_client_ip(&mut parts)
+			.await
+			.expect("a peer address is present");
+		assert_eq!(ip.to_string(), "2.2.2.2");
+	}
+
+	/// 🚨 The chain's one hard edge: the next link is for a header that is
+	/// **absent**, not for one that held something unreadable. A proxy writing
+	/// nonsense into `X-Forwarded-For` is a reason to keep the peer — walking on
+	/// would read a header the client may have sent.
+	#[tokio::test]
+	async fn an_unreadable_earlier_link_stops_the_chain_instead_of_falling_through() {
+		let mut parts = parts_from(
+			Some(LOOPBACK),
+			None,
+			Some(default_ranges()),
+			[("X-Forwarded-For", "garbage"), ("X-Client-IP", "1.2.3.4")],
+		);
+		let ClientIp(ip) = extract_client_ip(&mut parts)
+			.await
+			.expect("a peer address is present");
+		assert_eq!(ip, LOOPBACK.ip(), "a proxy that wrote nonsense does not hand over to a later header");
+	}
+
+	/// 🔴 The chain exists only inside the gate. Naming a header is how an
+	/// operator says "only this one", so the links are not tried behind it.
+	#[tokio::test]
+	async fn a_configured_header_does_not_fall_through_to_the_chain() {
+		let mut parts = parts_from(
+			Some(LOOPBACK),
+			Some(ReverseProxyIpHeader::XRealIp),
+			Some(default_ranges()),
+			[("X-Client-IP", "9.9.9.9"), ("Client-IP", "9.9.9.9")],
+		);
+		let ClientIp(ip) = extract_client_ip(&mut parts)
+			.await
+			.expect("a peer address is present");
+		assert_eq!(ip, LOOPBACK.ip());
+	}
+
+	#[tokio::test]
+	async fn the_two_new_headers_can_be_named_outright() {
+		for (source, header) in [
+			(ReverseProxyIpHeader::XClientIp, ("X-Client-IP", "1.2.3.4")),
+			(ReverseProxyIpHeader::ClientIp, ("Client-IP", "1.2.3.4")),
+		] {
+			let mut parts = parts_from(Some(PEER), Some(source), None, [header]);
+			let ClientIp(ip) = extract_client_ip(&mut parts)
+				.await
+				.expect("a peer address is present");
+			assert_eq!(ip.to_string(), "1.2.3.4", "{source:?}");
+		}
 	}
 
 	/// Nothing to report at all. `router/serve/unix.rs` makes sure this does

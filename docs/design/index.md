@@ -30,6 +30,7 @@
 | [/docs/design/wire/pack-pipeline.md](wire/pack-pipeline.md) | 連線就是佇列、handler 的契約、連線上限與 client 位址怎麼解析（§2.1／§2.2） |
 | [/docs/design/wire/api-bridge.md](wire/api-bridge.md) | 常用 Matrix API 走通道的那座橋：怎麼搬、搬的順序、每一支的成本 |
 | [/docs/design/wire/hide-server-version.md](wire/hide-server-version.md) | 📄 **提案，等維護者同意**：預設不說自己的版本（六個洩漏點、`publish_server_version`、哪些**不能**藏）|
+| [/docs/design/wire/client-ip-header-chain.md](wire/client-ip-header-chain.md) | client 位址讀一條寫死的 header 鏈（XFF 最右邊 → `X-Real-IP` → `X-Client-IP` → `Client-IP`），而「最右邊」要是真的最右邊（外部審查的 🟡：現在是「最右邊**解得開的**」，會退到 client 可控的值）|
 | [/docs/design/wire/session-teardown.md](wire/session-teardown.md) | 登出／刪裝置／撤 token 要把**那個裝置**的連線拆掉（外部審查 #8 後半）。⚠️ 鎖帳號刻意**不**走這條（§4.3）|
 | [/docs/design/wire/wbf-vectors.json](wire/wbf-vectors.json) | 黃金向量。⚠️ `src/core/wbf/vectors.rs` 用 `include_str!` 讀它、client repo 也複製一份對著測 —— **改路徑要連程式一起改** |
 

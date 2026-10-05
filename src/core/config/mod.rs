@@ -901,16 +901,23 @@ pub struct Config {
 	/// - "rightmost_x_forwarded_for" - nginx, Caddy
 	/// - "rightmost_forwarded" - RFC 7239 proxies
 	/// - "x_real_ip" - nginx `X-Real-IP`
+	/// - "x_client_ip" - `X-Client-IP`
+	/// - "client_ip" - `Client-IP`
 	/// - "cf_connecting_ip" - Cloudflare / cloudflared
 	/// - "true_client_ip" - Akamai, Cloudflare Enterprise
 	/// - "fly_client_ip" - Fly.io
 	/// - "cloudfront_viewer_address" - AWS CloudFront
 	///
-	/// When unset, a header is read only from a peer that is in
-	/// `localhost_ip`, and then it is `X-Forwarded-For` (rightmost).
-	/// Everyone else is their peer address and no header can move it.
-	/// That covers the two deployments where the peer is not the
-	/// client: a proxy on the same host, and a Unix socket.
+	/// Naming one header does not open the others: it is how you say
+	/// "only this one", and anything else is ignored.
+	///
+	/// When unset, headers are read only from a peer that is in
+	/// `localhost_ip`, and then these are tried in order until one is
+	/// present: `X-Forwarded-For` (rightmost), `X-Real-IP`,
+	/// `X-Client-IP`, `Client-IP`. Everyone else is their peer address
+	/// and no header can move it. That covers the two deployments where
+	/// the peer is not the client: a proxy on the same host, and a Unix
+	/// socket.
 	///
 	/// ⚠️ A header-based value is believed no matter who the peer is,
 	/// so a client that can reach the server without going through the
