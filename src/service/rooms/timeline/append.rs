@@ -455,10 +455,54 @@ async fn append_member_effects(&self, pdu: &PduEvent, count: PduCount) -> Result
 		return Ok(());
 	};
 
-	let user_id = UserId::parse(state_key).expect("This state_key was previously validated");
+	// 🚫 Not `expect`: this runs on the append path of every membership change,
+	// so a state_key that does not parse would take the whole task down —
+	// "it was validated earlier" is not a reason (issue #83, CLAUDE.md P). A
+	// member event nobody can name is one we record and otherwise ignore.
+	let Ok(user_id) = UserId::parse(state_key) else {
+		error!(?state_key, room_id = %pdu.room_id(), "Member event has an unparseable state key; no membership effects.");
+		return Ok(());
+	};
 	let content: RoomMemberEventContent = pdu.get_content()?;
 	let is_invite = content.membership == MembershipState::Invite;
 	let is_direct = content.is_direct;
+
+	// 🚨 This member event carries the user's avatar **in this room**
+	// (`avatar_url`), and that picture has no other holder: the media reference
+	// scanner reads `url`, `file.url` and the thumbnails, never `avatar_url`, so
+	// until this existed a per-room avatar was swept seven days after upload
+	// with nobody having done anything (/docs/design/media/purge-release-set.md §9).
+	//
+	// ⭐ The holder follows the **state**, so only the event that is now current
+	// state may move it. `count` is negative exactly for a backfilled event, by
+	// construction (`PduCount::Backfilled`), and a backfilled event is older
+	// history: letting it through would release the avatar on display.
+	// 📎 Today backfill cannot reach here at all — `backfill_pdu` handles only
+	// `RoomMessage` — so this is the guard for whoever adds a member branch
+	// there later, not something the current code relies on.
+	if count.into_signed() > 0 {
+		let new_avatar = content.avatar_url.as_deref().map(ruma::MxcUri::as_str);
+
+		// ⚠️ Hold the incoming picture until its holder has committed, the way
+		// `profile::set_profile_values` does: the collector decides between a look
+		// at who holds a media and the removal, and that decision is only safe
+		// while whoever is adding a holder waits on the same lock (`hold()`'s
+		// contract, and `media_refs::collect`'s). 🚨 Without it the holder can land
+		// in that gap, and the room is left pointing at a tombstone
+		// (review of PR #107, cirno).
+		let media_held = match new_avatar {
+			| Some(mxc) => Some(self.services.media_refs.hold_media(mxc).await),
+			| None => None,
+		};
+
+		let mut txn = self.db.db.txn();
+		self.services
+			.media_refs
+			.set_room_avatar_ref(&mut txn, pdu.room_id(), &user_id, new_avatar)
+			.await;
+		txn.execute();
+		drop(media_held);
+	}
 
 	let stripped_state = match content.membership {
 		| MembershipState::Invite | MembershipState::Knock => self

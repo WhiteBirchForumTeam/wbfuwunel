@@ -3,12 +3,12 @@
 //!
 //! Keys are built here and nowhere else. `mxc_holder` answers "who holds M"
 //! (prefix `M`); `holder_mxc` answers "what does this holder hold" (prefix
-//! `kind, room[, g_seq]` or `a, localpart`); `room_mxc` is the deletion
+//! `kind, room[, g_seq]`, `a, localpart`, or `r, room, user`); `room_mxc` is the deletion
 //! accelerator for a whole room. Values are empty: the key is the fact.
 
 use std::fmt;
 
-use ruma::{OwnedRoomId, RoomId, UserId};
+use ruma::{OwnedRoomId, OwnedUserId, RoomId, UserId};
 
 /// Who holds a media item.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,12 +20,24 @@ pub enum Holder {
 	/// A local user's avatar, by localpart: the domain may change, and
 	/// avatars of other servers' users are never counted.
 	Avatar { localpart: String },
+	/// One user's avatar **within one room**, from the `avatar_url` of the
+	/// `m.room.member` event that is current state there.
+	///
+	/// ⭐ Keyed by the pair, not by an event, because what it protects is a
+	/// *state*: the member event that carries it is replaced on every
+	/// membership or profile change, and only the current one is displayed. A
+	/// holder keyed by event would have to be released when superseded, which
+	/// is a race against backfill and state resolution; keyed by the pair it is
+	/// one swap with no ordering to get wrong
+	/// (/docs/design/media/purge-release-set.md §9, 維護者 2026-10-04).
+	RoomAvatar { room: OwnedRoomId, user: OwnedUserId },
 }
 
 /// The kind byte-string in keys; short so a prefix stays cheap.
 pub const KIND_EVENT: &str = "e";
 pub const KIND_BACKUP: &str = "b";
 pub const KIND_AVATAR: &str = "a";
+pub const KIND_ROOM_AVATAR: &str = "r";
 
 impl Holder {
 	#[must_use]
@@ -37,12 +49,21 @@ impl Holder {
 	#[must_use]
 	pub fn avatar(user: &UserId) -> Self { Self::Avatar { localpart: user.localpart().to_owned() } }
 
+	/// ⚠️ The whole user id, not the localpart: unlike a profile avatar this one
+	/// belongs to whoever the room says it belongs to, and a room holds remote
+	/// members too.
+	#[must_use]
+	pub fn room_avatar(room: &RoomId, user: &UserId) -> Self {
+		Self::RoomAvatar { room: room.to_owned(), user: user.to_owned() }
+	}
+
 	#[must_use]
 	pub fn kind(&self) -> &'static str {
 		match self {
 			| Self::Event { .. } => KIND_EVENT,
 			| Self::Backup { .. } => KIND_BACKUP,
 			| Self::Avatar { .. } => KIND_AVATAR,
+			| Self::RoomAvatar { .. } => KIND_ROOM_AVATAR,
 		}
 	}
 
@@ -58,6 +79,10 @@ impl Holder {
 			| Self::Avatar { localpart } => tuwunel_database::serialize_key((mxc, self.kind(), localpart.as_str()))
 				.expect("holder key serializes")
 				.to_vec(),
+			| Self::RoomAvatar { room, user } =>
+				tuwunel_database::serialize_key((mxc, self.kind(), room.as_str(), user.as_str()))
+					.expect("holder key serializes")
+					.to_vec(),
 		}
 	}
 
@@ -73,14 +98,19 @@ impl Holder {
 			| Self::Avatar { localpart } => tuwunel_database::serialize_key((self.kind(), localpart.as_str(), mxc))
 				.expect("holder key serializes")
 				.to_vec(),
+			| Self::RoomAvatar { room, user } =>
+				tuwunel_database::serialize_key((self.kind(), room.as_str(), user.as_str(), mxc))
+					.expect("holder key serializes")
+					.to_vec(),
 		}
 	}
 
-	/// The room this holder lives in, for `room_mxc`; avatars have none.
+	/// The room this holder lives in, for `room_mxc`; a profile avatar has none
+	/// (a per-room one does — it is keyed by its room).
 	#[must_use]
 	pub fn room(&self) -> Option<&RoomId> {
 		match self {
-			| Self::Event { room, .. } | Self::Backup { room, .. } => Some(room),
+			| Self::Event { room, .. } | Self::Backup { room, .. } | Self::RoomAvatar { room, .. } => Some(room),
 			| Self::Avatar { .. } => None,
 		}
 	}
@@ -92,6 +122,7 @@ impl fmt::Display for Holder {
 			| Self::Event { room, g_seq } => write!(f, "event g_seq {g_seq} in {room}"),
 			| Self::Backup { room, g_seq } => write!(f, "retained original of g_seq {g_seq} in {room}"),
 			| Self::Avatar { localpart } => write!(f, "avatar of @{localpart}"),
+			| Self::RoomAvatar { room, user } => write!(f, "avatar of {user} in {room}"),
 		}
 	}
 }
@@ -137,6 +168,41 @@ mod tests {
 		assert_eq!(avatar, Holder::Avatar { localpart: "alice".into() });
 		assert_eq!(avatar.room(), None);
 		assert_eq!(avatar.kind(), KIND_AVATAR);
+	}
+
+	/// 🚨 A per-room avatar is keyed by the **whole user id** and belongs to a
+	/// room, unlike `Avatar` — a room holds remote members too, and deleting
+	/// the room has to be able to find this holder (`release_room`).
+	#[test]
+	fn a_room_avatar_belongs_to_its_room_and_keeps_the_whole_user_id() {
+		let room = room_id!("!r:localhost");
+		let mine = Holder::room_avatar(room, user_id!("@alice:localhost"));
+		let theirs = Holder::room_avatar(room, user_id!("@alice:other.org"));
+
+		assert_eq!(mine.kind(), KIND_ROOM_AVATAR);
+		assert_eq!(mine.room(), Some(room), "deleting the room must reach it");
+		assert_ne!(mine, theirs, "the localpart alone would merge two different people");
+		assert_ne!(
+			mine.holder_mxc_key("mxc://localhost/abc"),
+			theirs.holder_mxc_key("mxc://localhost/abc")
+		);
+
+		// The same prefix shape the lookups use: (kind, room, user).
+		let prefix =
+			tuwunel_database::serialize_key((KIND_ROOM_AVATAR, room.as_str(), "@alice:localhost")).unwrap();
+		assert!(mine.holder_mxc_key("mxc://localhost/abc").starts_with(&prefix));
+		assert!(!theirs.holder_mxc_key("mxc://localhost/abc").starts_with(&prefix));
+	}
+
+	/// ⚠️ Every kind must have its own byte-string: two kinds sharing one would
+	/// make `release_room` or a sweep reach the wrong holders.
+	#[test]
+	fn every_holder_kind_has_its_own_prefix() {
+		let kinds = [KIND_EVENT, KIND_BACKUP, KIND_AVATAR, KIND_ROOM_AVATAR];
+		let mut seen = kinds.to_vec();
+		seen.sort_unstable();
+		seen.dedup();
+		assert_eq!(seen.len(), kinds.len(), "a kind byte-string is used twice: {kinds:?}");
 	}
 
 	#[test]
