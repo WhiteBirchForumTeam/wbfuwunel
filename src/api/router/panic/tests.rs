@@ -90,4 +90,18 @@ async fn a_panicking_handler_under_this_layer_answers_instead_of_unwinding() {
 		.expect("the layer answers, so the call cannot fail");
 
 	assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+	// ⭐ Through the layer, not just from `to_panic_response`: these are the
+	// fields the bridge reads off the body, so a layer that answered with
+	// something else would still be a broken bridge (review of PR #109, cirno).
+	let body = response
+		.into_body()
+		.collect()
+		.await
+		.expect("the caught panic's body is in memory")
+		.to_bytes();
+	let body: serde_json::Value = serde_json::from_slice(&body).expect("the body is JSON");
+
+	assert_eq!(body["errcode"], "M_UNKNOWN");
+	assert_eq!(body["details"], "boom");
 }

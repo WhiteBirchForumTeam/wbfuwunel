@@ -60,7 +60,9 @@ pub fn build(router: Router<State>, server: &Server) -> Router<State> {
 
 /// The routing table the wbf bridge hands its internal requests to
 /// (`/docs/design/wire/api-bridge.md` §2.1): the same `build` as the served
-/// router, without the HTTP middleware an internal call has no use for.
+/// router, without the HTTP middleware an internal call has no use for —
+/// ⚠️ with one exception, the panic layer, for the reason on
+/// `build_bridge_router` below.
 ///
 /// ⚠️ It travels as an extension of the served router rather than a global:
 /// it holds the same `State`, a pointer to `Services`, and a module reload
