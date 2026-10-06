@@ -2,9 +2,12 @@ mod args;
 mod auth;
 mod client_ip;
 mod handler;
+mod panic;
 mod request;
 mod response;
 pub mod state;
+
+use std::sync::Arc;
 
 use axum::{
 	Router,
@@ -12,9 +15,11 @@ use axum::{
 	routing::{any, get, post},
 };
 pub use client_ip::{ConfiguredIpHeader, LocalPeerRanges};
+pub use panic::catch_panic;
 use http::{HeaderValue, header};
-use tower_http::set_header::SetResponseHeaderLayer;
+use tower_http::{catch_panic::CatchPanicLayer, set_header::SetResponseHeaderLayer};
 use tuwunel_core::{Server, err};
+use tuwunel_service::Services;
 
 use self::handler::RouterExt;
 pub(super) use self::{
@@ -67,10 +72,30 @@ pub struct BridgeRouter(pub(crate) Router);
 /// Args:
 ///     state: the `State` the served router was built with
 ///     server: for the configuration `build` reads
+///     services: for the panic layer's metric
 /// Return:
 ///     BridgeRouter  to install with `Extension` on the served router
-pub fn build_bridge_router(state: State, server: &Server) -> BridgeRouter {
-	BridgeRouter(build(Router::new(), server).with_state(state))
+///
+/// 🚨 The panic layer is applied **here**, not by the caller: a handler that
+/// unwinds under `oneshot` would otherwise travel up the WebSocket task that
+/// called the bridge and take the whole connection with it, outside every
+/// teardown path we wrote (CLAUDE.md P,
+/// `/docs/design/wire/bridge-catch-panic.md`). ⭐ Making it part of building the
+/// router is what stops a future caller from forgetting it; the bridge turns the
+/// 500 into one `Error(Internal)` pack by itself.
+pub fn build_bridge_router(
+	state: State,
+	server: &Server,
+	services: &Arc<Services>,
+) -> BridgeRouter {
+	let services = services.clone();
+	BridgeRouter(
+		build(Router::new(), server)
+			.with_state(state)
+			.layer(CatchPanicLayer::custom(move |panic| {
+				catch_panic(panic, services.clone())
+			})),
+	)
 }
 
 fn register_client_auth_routes(router: Router<State>) -> Router<State> {
