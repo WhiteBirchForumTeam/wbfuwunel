@@ -177,6 +177,11 @@ client 側的三條契約在 [/docs/design/events/event-push.md](../events/event
 
 > 有設 `reverse_proxy_ip_header` 就讀那個 header，**OR** peer 落在 `localhost_ip` 裡就讀 `X-Forwarded-For`（最右邊）；兩條都不成立就只信傳輸層 peer、完全不碰 header。
 
+⚠️ **這段引文的後半在 2026-10-05 被改過**（PR #108）：閘沒動，但閘之內不再只讀 `X-Forwarded-For`，
+而是依序試 `X-Forwarded-For`（最右）→ `X-Real-IP` → `X-Client-IP` → `Client-IP`，都沒有才用 peer；
+指名了一個就只讀那一個、不走鏈。而「最右邊」原本的實作是「最右邊**解得開的**」，那是 fail open，
+同一支修掉。⇒ [/docs/design/wire/client-ip-header-chain.md](../wire/client-ip-header-chain.md)
+
 ⚠️ **行為改變，部署要看**：兩項設定**改名**，舊名字留在設定裡**拒絕啟動**（忽略對這兩個設定是 fail open）；`localhost_ip` 的語意跟舊名**相反**（舊的是「這個 peer 跳過安全解析」，新的是「這個 peer 可以指名 client」）。同機代理與 unix socket 因此零設定就是 per-client；⚠️ 但**分開的容器不算 loopback**，那種部署要指名 header。
 📎 這一支自己弄壞過一個測試：預設 4→8 之後 e2e13 `[2.7]` 靠預設值撞上限，期望被拒的 login 其實成功了，而那支從改預設之後沒重跑過 —— 現在數字寫死在該測試自己的 config 裡。
 
@@ -197,7 +202,13 @@ client 側的三條契約在 [/docs/design/events/event-push.md](../events/event
 
 🚨 **#1 順帶暴露一件比它本身更重要的事**：我的「全套測試」指令 `--workspace --exclude tuwunel` 把 `src/main/tests` 整組排除，而那個 bug 又只在 debug build 發作 —— **唯一看得到它的那組測試，正好是唯一沒跑的那組**。兩個盲點互相遮蔽，所以「全套綠」被我當成事實報出去很多次。兩套測試怎麼跑寫在 [/docs/design/build/windows-build.md](../build/windows-build.md)。
 
-📎 值得做的 🟡（未做）：`client_ip.rs` 的 `rightmost_x_forwarded_for` 是「最右邊**解得開的**」而不是「最右邊」（壞的方向是 fail open）、bridge router 缺 `CatchPanicLayer`、`m.room.member` 的 `avatar_url` 不算持有者。
+📎 值得做的 🟡：
+
+| 是什麼 | 狀態 |
+|---|---|
+| `client_ip.rs` 的 `rightmost_x_forwarded_for` 是「最右邊**解得開的**」而不是「最右邊」（壞的方向是 fail open）| ✅ **PR #108** —— 最後一格就是答案，讀不出來就落到傳輸層 peer。➕ 同一支加了維護者 2026-10-05 指定的**寫死 header 鏈**（見 §2.14 的引文與 [/docs/design/wire/client-ip-header-chain.md](../wire/client-ip-header-chain.md)）|
+| bridge router 缺 `CatchPanicLayer`（一個 handler panic 拖垮整條 WS 連線，CLAUDE.md P）| 🔲 未做 |
+| `m.room.member` 的 `avatar_url` 不算持有者 | ✅ PR #107（§2.15 第 3 列的 ➕ 那半）—— 📎 這一行在 #107 合併後就過期了，而 #107 自己沒掃到它（cirno 在 PR #108 指出）|
 
 
 ## 3. 候選（要不要做，由維護者決定）

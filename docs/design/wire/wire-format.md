@@ -444,7 +444,7 @@ meta 只在 handler 真的需要時才解析，而且 `Control/Ack` 這種熱路
 - **每個來源位址最多 `wbf_ws_max_connections_per_address` 條 WS**（預設 40；[pack-pipeline](pack-pipeline.md) §2.2，維護者 2026-09-24 定）：⭐ 跟上一條不同，**匿名連線也算**，而且在**認證之前**就檢查 ——
   上一條按身份算，所以擋不到還沒有身份的連線；這一條按位址算，是唯一擋得到匿名連線的那道。超過 → **不升級**（舊的照常跑），429 ＋ `Error(TooManyConnectionsFromAddress)`。HTTP 不算。
   **IPv6 按 `/64` 算**，不按確切位址：家用 IPv6 本來就拿一整個 `/64`，換位址零成本，按確切位址算等於沒有上限。
-  ⚠️ 位址取自 `ClientIp`，而它的規則是（維護者 2026-09-25）：**有設 `reverse_proxy_ip_header` 就讀那個 header，OR peer 落在 `localhost_ip`（預設 loopback）就讀 `X-Forwarded-For`；兩條都不成立就只信傳輸層 peer、完全不碰 header**。所以**代理在另一台、又沒設 `reverse_proxy_ip_header` 的話，全部連線會算成代理那一個位址**（啟動時有 warning）；同機代理與 unix socket 不必設定，peer 就是 loopback。
+  ⚠️ 位址取自 `ClientIp`，而它的規則是（維護者 2026-09-25，鏈那半 2026-10-05 補）：**有設 `reverse_proxy_ip_header` 就讀那個 header、而且只讀那一個，OR peer 落在 `localhost_ip`（預設 loopback）就走寫死的鏈（`X-Forwarded-For` 最右 → `X-Real-IP` → `X-Client-IP` → `Client-IP`，見 [/docs/design/wire/client-ip-header-chain.md](client-ip-header-chain.md)）；兩條都不成立就只信傳輸層 peer、完全不碰 header**。所以**代理在另一台、又沒設 `reverse_proxy_ip_header` 的話，全部連線會算成代理那一個位址**（啟動時有 warning）；同機代理與 unix socket 不必設定，peer 就是 loopback。
 
 ### 6.2 HTTP（選用，測試與腳本用）
 

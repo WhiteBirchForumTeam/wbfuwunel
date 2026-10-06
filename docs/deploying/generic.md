@@ -205,10 +205,13 @@ Regardless of which reverse proxy you choose, you will need to:
 Tuwunel takes the client address from the transport peer. A forwarding header
 is read in exactly two cases:
 
-- `reverse_proxy_ip_header` names it — then it is believed for every request,
-  whoever the peer is;
-- the peer is in `localhost_ip` (by default the loopback ranges) — then
-  `X-Forwarded-For` is read, rightmost value.
+- `reverse_proxy_ip_header` names it — then that one header, and only that one,
+  is believed for every request, whoever the peer is;
+- the peer is in `localhost_ip` (by default the loopback ranges) — then the
+  first of these that **names an address** is used: `X-Forwarded-For`
+  (rightmost value), `X-Real-IP`, `X-Client-IP`, `Client-IP`. A header that is
+  missing and one whose value is not an address are passed over alike; if none
+  of them names one, the peer address is used.
 
 Nothing else can move the address. That address keys the login and refresh rate
 limiter, the OIDC ones, and `wbf_ws_max_connections_per_address`, so getting it
@@ -220,9 +223,13 @@ wrong costs availability in both directions:
   anything untrusted can connect from loopback on this host, set
   `localhost_ip = []` as well.
 - **Reverse proxy reaching Tuwunel over loopback or a Unix socket:** nothing to
-  configure, as long as the proxy sends `X-Forwarded-For`. The peer is loopback
-  (a Unix socket has no peer address, so Tuwunel synthesises `127.0.0.1`),
-  which is in the default `localhost_ip`, so the forwarded address is used.
+  configure, as long as the proxy sends one of `X-Forwarded-For`, `X-Real-IP`,
+  `X-Client-IP` or `Client-IP`. The peer is loopback (a Unix socket has no peer
+  address, so Tuwunel synthesises `127.0.0.1`), which is in the default
+  `localhost_ip`, so the forwarded address is used.
+  Strip whatever the client sent in those headers — Tuwunel reads the hop
+  nearest to it, but a proxy that passes a client's header through unchanged is
+  letting the client name itself.
 - **Reverse proxy reaching Tuwunel any other way:** set
   `reverse_proxy_ip_header` to the header that proxy controls — Caddy, Nginx
   and Traefik usually `"rightmost_x_forwarded_for"`; Cloudflare and cloudflared
