@@ -96,7 +96,8 @@ client 那邊「開幾條、哪條走什麼、pending → sending → sent」是
 名額在 `ws_route` 裡拿，**放進 `on_upgrade` 的 closure**，所以連線怎麼結束都會還；升級沒成（token 壞、§2.1 擋下、關機中）時它在 `ws_route` 結束就 drop，不會漏。
 
 **位址從哪來**：`ws_route` 已經收 `ClientIp(client)`，而 `ClientIp` 的規則是（維護者 2026-09-25）：**有設 `reverse_proxy_ip_header` 就讀那個 header、而且只讀那一個，OR peer 落在 `localhost_ip` 裡就走寫死的那條鏈；兩條都不成立就只信傳輸層 peer、完全不碰 header。** header 有就信、沒有就退回 peer。⭐ 這一節不自己解析任何 header —— 解析點只有一個，在那裡（A4）。
-📎 鏈的順序、以及「最右邊」為什麼是**最後一格而不是最後一格解得開的**，在 [/docs/design/wire/client-ip-header-chain.md](client-ip-header-chain.md)（維護者 2026-10-05）。
+📎 鏈的順序（第一個**說得出位址**的就是答案 —— 沒設的與值無效的都往下一個，全沒有就落到 peer）、
+以及「最右邊」為什麼是**最後一格而不是最後一格解得開的**，在 [/docs/design/wire/client-ip-header-chain.md](client-ip-header-chain.md)（維護者 2026-10-05、2026-10-06）。
 
 🚨 **這條規則是 PR #85 審查改出來的，不是本來就長這樣**：舊的 `ClientIp` 對**每一個** peer 都掃轉發 header，而且**優先**取 leftmost `X-Forwarded-For`，peer 只是最後手段 —— 位址因此預設就是 **client 可控**的，這道閘門對「故意的人」等於不存在（三位審查都指出）。
 

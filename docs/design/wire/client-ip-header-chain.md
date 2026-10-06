@@ -1,7 +1,7 @@
 # client 位址讀一條寫死的 header 鏈，而每一個 header 自己 fail closed
 
-✅ **維護者 2026-10-05 同意**（含 §3.1 的 `X-Real-IP`、§3.2 的「指名了就不走鏈」、§3.3）。
-📎 實作時發現的一件事寫在 §8。現行做法在
+✅ **維護者 2026-10-05 同意**（含 §3.1 的 `X-Real-IP`、§3.2 的「指名了就不走鏈」、§3.3），
+**2026-10-06 改了一條**：header 的值無效時跟「沒設」走同一條路（往下一個），⇒ §8。現行做法在
 [/docs/design/wire/pack-pipeline.md](pack-pipeline.md) §2.2，程式在 `src/api/router/client_ip.rs`。
 
 兩件事放在一支裡，因為它們改的是同一個函數家族，但**彼此獨立**：
@@ -84,15 +84,21 @@ fn rightmost_x_forwarded_for(headers: &HeaderMap) -> Option<IpAddr> {
 維護者 2026-10-05：「我建議你 header 直接寫死，就是只抓 x-forwarded-for 沒有就抓 x-client-ip
 再找不到 就是 client-ip 逐級下來。」
 
-### 3.1 鏈的順序（草案）
+### 3.1 鏈的順序
+
+**規則一句話**（維護者 2026-10-06 定）：**第一個「說得出一個位址」的 header 就是答案；
+沒設的、以及設了但值無效的，都往下一個；全部都無效或都沒設 ⇒ 落到傳輸層 peer。**
 
 | 順序 | header | 讀法 | 為什麼在這裡 |
 |---|---|---|---|
 | 1 | `X-Forwarded-For` | **最右邊**一格 | 唯一有「串」結構的，而且每個代理都寫 |
-| 2 | `X-Real-IP` | 整個值 | ⭐ **我加的** —— nginx 最常見的那一行就是 `proxy_set_header X-Real-IP $remote_addr;`，比 `X-Client-IP` 常見得多。📌 要維護者確認要不要收 |
+| 2 | `X-Real-IP` | 整個值 | ⭐ 我提議補的 —— nginx 最常見的那一行就是 `proxy_set_header X-Real-IP $remote_addr;`，比 `X-Client-IP` 常見得多（維護者 2026-10-05 同意）|
 | 3 | `X-Client-IP` | 整個值 | 維護者指定 |
 | 4 | `Client-IP` | 整個值 | 維護者指定 |
-| — | 都沒有 | → **peer 位址** | 落點永遠是傳輸層看到的東西 |
+| — | 都沒有、或都無效 | → **peer 位址** | 落點永遠是傳輸層看到的東西 |
+
+⚠️ **「無效」跟「沒設」同一條路**（這一條 2026-10-06 改過，原本是「無效就停下來」，見 §8）：
+`X-Forwarded-For: garbage`、`X-Forwarded-For: `（空）、`1.2.3.4,`（尾巴是空格）都算無效 ⇒ 往下試。
 
 🚫 **不在鏈裡**：`CF-Connecting-IP`、`True-Client-IP`、`Fly-Client-IP`、`CloudFront-Viewer-Address`、
 RFC 7239 `Forwarded`。理由：它們是**特定供應商**的，而鏈是給「一般代理」的預設。
@@ -104,8 +110,8 @@ RFC 7239 `Forwarded`。理由：它們是**特定供應商**的，而鏈是給�
 指名是一句精確的話：「我前面那台代理把 client 寫在**這個** header」。
 ⇒ 讀不到就落到 peer，🚫 不往下試別的 —— 📎 這也讓運維可以**關掉**鏈（指名 XFF 就只有 XFF）。
 
-📌 **這一條要維護者確認**：另一種做法是「指名的排第一、然後接著走鏈」。
-我建議不要 —— 它讓「我只信這個」變成無法表達的意思。
+✅ **維護者 2026-10-05 同意。** 另一種做法是「指名的排第一、然後接著走鏈」，🚫 不採 ——
+它讓「我只信這個」變成無法表達的意思。
 
 ### 3.3 新增兩個可指名的 variant
 
@@ -135,7 +141,8 @@ RFC 7239 `Forwarded`。理由：它們是**特定供應商**的，而鏈是給�
 | ① 正常 | `8.8.8.8, 1.2.3.4` | `1.2.3.4` |
 | ② 鏈：XFF 不在 | 只有 `X-Real-IP: 1.2.3.4` | `1.2.3.4` |
 | ② 鏈：逐級 | 只有 `Client-IP: 1.2.3.4` | `1.2.3.4` |
-| ② 鏈：XFF 在但垃圾 | `X-Forwarded-For: garbage` ＋ `X-Client-IP: 1.2.3.4` | 🚨 **peer** —— ⭐ 鏈往下走是「不在」，不是「有垃圾」 |
+| ② 鏈：XFF 在但無效 | `X-Forwarded-For: garbage` ＋ `X-Client-IP: 9.1.2.3` | **`9.1.2.3`** —— ⭐ 無效跟沒設同一條路（§8.2，維護者 2026-10-06 改過；初版這一列寫的是 peer）|
+| 🔴 ② 鏈：全部無效 | 四個 header 都在、值都無效，而 XFF 的**左邊**有 `1.2.3.4` | **peer** —— 🚫 永遠不是 client 寫在左邊那個值 |
 | 🔴 閘：非本機 peer | 上面每一種 header，peer 在公網 | **peer**，一律 |
 | 🔴 指名了一個 | 指名 `x_real_ip`，只送 `Client-IP` | **peer**，🚫 不走鏈 |
 
@@ -160,49 +167,48 @@ RFC 7239 `Forwarded`。理由：它們是**特定供應商**的，而鏈是給�
   要不要改成「只看最後一個值」是另一個題目，不在這支。
 - **bridge router 的 `CatchPanicLayer`**（外部審查的另一條 🟡）—— 另一支。
 
-## 8. 實作時發現的：`Option` 說不出「不在」跟「有垃圾」的差別
+## 8. 「值無效」怎麼辦 —— 改過一次，最後是「跟沒設一樣，往下走」
 
-第一版的鏈是一行 `find_map`：
+⭐ **這一節留著是因為它被推翻過一次，而推翻它的理由比原來的規則好。**
 
-```rust
-LOCAL_PEER_CHAIN.iter().find_map(|source| secure_extract(*source, headers, extensions))
-```
+### 8.1 原本的規則：無效就停下來
 
-🚨 **而它跟 §3.1 最後一列寫的規則相反** —— `secure_extract` 回 `Option<IpAddr>`，
-所以「這個 header 不在」跟「這個 header 在、但裡面是垃圾」都是 `None`，`find_map` 兩種都往下走。
-📎 抓到它的是我自己照 §5 寫的那條測試（`an_unreadable_earlier_link_stops_the_chain_instead_of_falling_through`）——
-⭐ **先把規則寫成測試、再實作，所以矛盾在第一次跑測試時就浮出來，而不是留給審查或使用者。**
+提案（§3.1 的初版）寫的是「鏈往下走的條件是**這個 header 不在**，不是**在、但裡面是垃圾**」，
+理由是「代理寫出垃圾就該退回 peer，不該去讀一個 client 可能送的 header」。
 
-修法是把那個區別放進型別，而不是放進註解：
+🚨 **第一版實作跟那句話相反**：鏈是一行 `find_map`，而 `secure_extract` 回 `Option<IpAddr>` ——
+「不在」跟「在、但是垃圾」都是 `None`，兩種都往下走。
+📎 抓到它的是我照 §5 先寫好的那條測試，⭐ **所以矛盾在第一次跑測試時就浮出來，不是留給審查或使用者。**
+當時的修法是把區別放進型別：`enum HeaderOutcome { Absent, Address(IpAddr), Unusable }`，鏈上
+`Absent => continue`、`Unusable => return None`。
 
-```rust
-enum HeaderOutcome {
-	Absent,            // 這個請求沒有這個 header
-	Address(IpAddr),   // 有，而且指向這個位址
-	Unusable,          // 有，但讀不出位址
-}
-```
+### 8.2 ✅ 最後的規則（維護者 2026-10-06 定）：無效跟沒設走同一條路
 
-鏈：`Absent => continue`、`Address => return`、**`Unusable => return None`（⇒ 落到 peer）**。
-指名那一條把三態收成 `Option`（`Absent` 與 `Unusable` 都是 `None`），語意跟改之前一樣。
+> 「如果 header 值無效，就跳下一個 header，全部都無效或沒設 就 fallback 到 tcp ip」
 
-### 8.1 ⏳ 一個我自己在實作後才想到的疑點（等維護者決定要不要改）
+**為什麼這個比較好，而且不是把安全性讓掉**：
 
-「`Unusable` 停下來」在**一種真實部署**上比「往下走」差：
+| | |
+|---|---|
+| ⭐ **它救得到一種真實部署** | 代理只寫 `X-Real-IP`，而 client 送來的 XFF 被原封轉過來（nginx 沒設 `proxy_set_header X-Forwarded-For` 時就是透傳）。「停下來」會讓每個請求都變成代理的 peer ⇒ 🚨 **全站共用一個限流桶**，正是這整條規則要消滅的症狀 |
+| 🚨 **它沒有多開任何門** | client 只能靠「讓前一格無效」把讀取推到後面的 header —— 但⭐ **寫得出前一格的 client，直接在那裡放一個解得開的位址就會被第一格採用**。⇒ 「停下來」防不住會偽造的人，只罰得到設定沒寫全的運維 |
+| 📎 **它更常被觸發** | `proxy_set_header X-Forwarded-For "";`、尾巴是逗號、空值 —— 都是「header 在、值無效」（cirno 與 rumia 在 PR #108 各自點到）|
 
-代理只寫 `X-Real-IP`、而**把 client 送來的 `X-Forwarded-For` 原封轉過來**（nginx 不設 XFF 時的預設行為就是透傳）。
-那麼 client 送 `X-Forwarded-For: garbage` ⇒ 鏈停在第一格 ⇒ 位址變成代理的 peer
-⇒ 🚨 **全站共用一個限流桶**，正是 §2.2 要修的那個症狀。而「往下走」會讀到代理真的寫的 `X-Real-IP`，答案是對的。
+⇒ 🚫 **`HeaderOutcome` 三態一起拆掉。** `Absent` 與 `Unusable` 現在行為完全相同，留著那個 enum 就是
+**純儀式**（CLAUDE.md A2）：沒有第二種行為的型別不值得讀者多跳一層。鏈回到一行 `find_map`，
+而 ① 的修法**完全不受影響** —— `rightmost_x_forwarded_for` 仍然是「最後一格，解不開就 `None`」，
+改掉的只是 `None` 之後往哪裡去。
 
-⚠️ **而「停下來」換到了什麼？幾乎沒有**：同一個 client 只要送 **`X-Forwarded-For: 1.2.3.4`**（解得開的），
-第一格就直接被採用了 —— 兩種語意下都一樣。⇒ 「停下來」防不住會偽造的人，只罰得到設定沒寫全的運維。
+| | 之前（8.1）| 現在（8.2）|
+|---|---|---|
+| 指名一個 header，值無效 | peer | **peer**（不變）|
+| 鏈，第一格無效、後面有有效的 | peer | **用後面那個** |
+| 鏈，全部無效或都沒設 | peer | **peer**（不變）|
+| XFF `8.8.8.8, garbage` | peer | **peer**（不變 —— 🚫 永遠不往左退）|
 
-📎 **同一個形狀還有一種更常見的觸發**（cirno 與 rumia 在 PR #108 各自點到）：
-`proxy_set_header X-Forwarded-For "";` 或任何讓 XFF **存在但是空的**設定 ——
-那是 `Unusable` 不是 `Absent`（header 在），所以也會停在第一格。
-⇒ 📌 這一條跟上面那段是**同一個決定**，不是另一個題目；`an_empty_x_forwarded_for_is_present_and_unusable`
-把現行語意釘住了（`""`、`","`、`"1.2.3.4,"` 三種都落到 peer）。
+⭐ **最後一列是重點**：這兩版語意都**不影響 §2 那個 bug 修**，因為「往下走」是往**後面的 header**走，
+🚫 不是往 XFF 串的**左邊**走 —— 左邊離我們更遠，而夠左邊就是 client 自己。
 
-📎 **為什麼現在還是按「停下來」實作**：它是維護者同意的那一版文字，而且是較保守的那一端。
-📌 要改成「往下走」只動一行（`Unusable => return None` → `Unusable => continue`）＋那條測試的期望值。
-⭐ 另外提醒：這兩種語意**都不影響 §2 那個 bug 修**——指名單一 header 時，垃圾一律落到 peer。
+測試：`an_unusable_earlier_link_hands_over_to_the_next_one`（四種無效值都跳到 `X-Client-IP`）、
+`every_link_unusable_leaves_the_peer`（🔴 四格全無效 ⇒ peer，而且**不是** client 寫在 XFF 左邊的那個值）、
+`an_empty_rightmost_element_names_nobody`。

@@ -68,8 +68,8 @@ server {
   whether Nginx runs on the same machine. Nothing to configure when Nginx
   reaches Tuwunel over loopback (`proxy_pass http://127.0.0.1:6167`, the
   arrangement above), which is what the default `localhost_ip` covers: Tuwunel
-  then reads the first of `X-Forwarded-For` (rightmost), `X-Real-IP`,
-  `X-Client-IP`, `Client-IP` that is present.
+  then uses the first of `X-Forwarded-For` (rightmost), `X-Real-IP`,
+  `X-Client-IP`, `Client-IP` that names an address.
   🚨 **Whichever of those you use, overwrite it** — the `proxy_set_header
   X-Forwarded-For $remote_addr;` in the `location /` block above is doing
   exactly that.

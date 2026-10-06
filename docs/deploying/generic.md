@@ -208,8 +208,10 @@ is read in exactly two cases:
 - `reverse_proxy_ip_header` names it — then that one header, and only that one,
   is believed for every request, whoever the peer is;
 - the peer is in `localhost_ip` (by default the loopback ranges) — then the
-  first of these that is present is read: `X-Forwarded-For` (rightmost value),
-  `X-Real-IP`, `X-Client-IP`, `Client-IP`.
+  first of these that **names an address** is used: `X-Forwarded-For`
+  (rightmost value), `X-Real-IP`, `X-Client-IP`, `Client-IP`. A header that is
+  missing and one whose value is not an address are passed over alike; if none
+  of them names one, the peer address is used.
 
 Nothing else can move the address. That address keys the login and refresh rate
 limiter, the OIDC ones, and `wbf_ws_max_connections_per_address`, so getting it

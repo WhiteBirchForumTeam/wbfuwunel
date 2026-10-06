@@ -689,9 +689,12 @@
 # "only this one", and anything else is ignored.
 #
 # When unset, headers are read only from a peer that is in
-# `localhost_ip`, and then these are tried in order until one is
-# present: `X-Forwarded-For` (rightmost), `X-Real-IP`,
-# `X-Client-IP`, `Client-IP`. Everyone else is their peer address
+# `localhost_ip`, and then these are tried in order until one of
+# them names an address: `X-Forwarded-For` (rightmost), `X-Real-IP`,
+# `X-Client-IP`, `Client-IP`. A header that is missing and one
+# whose value is not an address are passed over alike, and if none
+# of them names one the peer address is used.
+# Everyone else is their peer address
 # and no header can move it. That covers the two deployments where
 # the peer is not the client: a proxy on the same host, and a Unix
 # socket.
