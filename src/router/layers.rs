@@ -2,7 +2,6 @@
 mod tests;
 
 use std::{
-	any::Any,
 	convert::Infallible,
 	mem::replace,
 	sync::Arc,
@@ -39,9 +38,9 @@ use tower_http::{
 	trace::{DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer},
 };
 use tracing::Level;
-use tuwunel_api::router::{ConfiguredIpHeader, LocalPeerRanges, state::Guard};
+use tuwunel_api::router::{ConfiguredIpHeader, LocalPeerRanges, catch_panic, state::Guard};
 use tuwunel_core::{
-	Result, Server, config::ReverseProxyIpHeader, debug, error,
+	Result, Server, config::ReverseProxyIpHeader, debug,
 	utils::content_disposition::content_type_is,
 };
 use tuwunel_service::Services;
@@ -291,40 +290,6 @@ fn set_html_headers<T>(mut response: http::Response<T>) -> http::Response<T> {
 	}
 
 	response
-}
-
-#[tracing::instrument(name = "panic", level = "error", skip_all)]
-#[expect(clippy::needless_pass_by_value)]
-fn catch_panic(
-	err: Box<dyn Any + Send + 'static>,
-	services: Arc<Services>,
-) -> http::Response<http_body_util::Full<bytes::Bytes>> {
-	services
-		.server
-		.metrics
-		.requests_panic
-		.fetch_add(1, std::sync::atomic::Ordering::Release);
-
-	let details = match err.downcast_ref::<String>() {
-		| Some(s) => s.clone(),
-		| _ => match err.downcast_ref::<&str>() {
-			| Some(s) => (*s).to_owned(),
-			| _ => "Unknown internal server error occurred.".to_owned(),
-		},
-	};
-
-	error!("{details:#}");
-	let body = serde_json::json!({
-		"errcode": "M_UNKNOWN",
-		"error": "M_UNKNOWN: Internal server error occurred",
-		"details": details,
-	});
-
-	http::Response::builder()
-		.status(StatusCode::INTERNAL_SERVER_ERROR)
-		.header(CONTENT_TYPE, "application/json")
-		.body(http_body_util::Full::from(body.to_string()))
-		.expect("Failed to create response for our panic catcher?")
 }
 
 fn tracing_span<T>(request: &http::Request<T>) -> tracing::Span {

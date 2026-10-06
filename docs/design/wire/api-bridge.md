@@ -87,10 +87,18 @@ pack（kind＝領域、subtype＝操作；meta＝變數；data＝body 的 bytes�
 | 要動的上游檔案 | `router/args.rs` | ✅ **零**（下面那個 seam 是 fork 自己的檔案） |
 | 每支端點的成本 | 分配表一列（型別 ＋ route 函式） | 分配表一列（只要型別） |
 
-📎 **層級沒有問題**：Matrix 的路由表是 **`api` crate 自己的** `tuwunel_api::router::build()` 組的（`router` crate 只是接上 fallback、掛 middleware、`with_state`）。所以橋可以在 `api` 裡組一份自己的 `Router<State>`，不必反過來依賴 `router` crate。**唯一的 seam**：`State` 裡那個 Services 指標是 `router` crate 建的，所以由它建橋的 Router（`tuwunel_api::router::build_bridge_router(state, server)`），**用 axum 的 `Extension` 掛在對外的 Router 上**；WebSocket 與 HTTP pack 兩個入口從請求裡取出來、放進 `PackContext`。方向還是 `api ← router`。
+📎 **層級沒有問題**：Matrix 的路由表是 **`api` crate 自己的** `tuwunel_api::router::build()` 組的（`router` crate 只是接上 fallback、掛 middleware、`with_state`）。所以橋可以在 `api` 裡組一份自己的 `Router<State>`，不必反過來依賴 `router` crate。**唯一的 seam**：`State` 裡那個 Services 指標是 `router` crate 建的，所以由它建橋的 Router（`tuwunel_api::router::build_bridge_router(state, server, services)` —— 第三個參數是 PR #109 加的，見下一段），**用 axum 的 `Extension` 掛在對外的 Router 上**；WebSocket 與 HTTP pack 兩個入口從請求裡取出來、放進 `PackContext`。方向還是 `api ← router`。
 🚨 **為什麼不是「啟動時存進一個全域變數」**（提案原本這樣寫，實作時改掉）：橋的 Router 持有 `State`，而 `State` 是指向 `Services` 的裸指標。tuwunel 支援在**同一個 process 裡重載模組**（`src/main/mods.rs`），`Services` 會被重建；全域那一份會繼續指著已經丟掉的 `Services`。掛在對外的 Router 上，它就跟那個 Router 同生同死，永遠不會活得比它指著的 `Services` 久。
 
 📎 **橋用的是自己組的那份 Router，不是對外服務的那份** —— 對外那份掛著 CORS、壓縮、逾時這些 HTTP 的 middleware，對一個內部呼叫沒有意義（壓縮還要再解一次）。
+⚠️ **但有一層是例外，它必須在：`CatchPanicLayer`**（外部審查 2026-09-29 的 🟡）。
+🚨 橋是 `router.oneshot(request).await`，而那個 `.await` 在 **WS 的 task 上** —— 一個 handler panic 會沿著它往上傳，
+**把整條連線帶走，而且不走我們寫的收攤路**（跟外部審查 #7 同一個形狀，CLAUDE.md P）。
+⭐ 那一層套在 `build_bridge_router` **裡面**，不是由呼叫者套上去：橋自己保證它有，而不是靠每個呼叫者記得。
+📎 橋這一端**不用為它改任何東西** —— `catch_panic` 回 500 ＋ `M_UNKNOWN` 的 JSON，而 §2.3 的
+`build_reply_pack` 對非 2xx 本來就走 `Error`、`reject_code_for_status(500)` → `Internal`
+⇒ 一個 panic 自然變成一則 `Error(Internal)` 回給 client。設計與測試界限在
+[/docs/design/wire/bridge-catch-panic.md](bridge-catch-panic.md)。
 
 🚨 **分配表是白名單，pack 不帶自由的 path**。client 送的是 kind ＋ subtype，method 與 path 由 server 這邊的表決定。反過來做（pack 裡直接寫 method 與 path）等於把**每一個** HTTP 端點都開到通道上 —— 包括 `/sync`（會佔住這條連線的 handler 幾十秒）、舊的媒體上傳、以及規格裡刻意標成「HTTP 不可」的那幾個（`Recent`、`Stream`）。認不得的 subtype 一律拒絕（fail closed）。
 

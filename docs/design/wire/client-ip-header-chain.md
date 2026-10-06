@@ -166,6 +166,7 @@ RFC 7239 `Forwarded`。理由：它們是**特定供應商**的，而鏈是給�
   📌 鏈裡新加的三個（`X-Real-IP`／`X-Client-IP`／`Client-IP`）會沿用同一個讀法。
   要不要改成「只看最後一個值」是另一個題目，不在這支。
 - **bridge router 的 `CatchPanicLayer`**（外部審查的另一條 🟡）—— 另一支。
+  ✅ 那一支是 **PR #109**（[/docs/design/wire/bridge-catch-panic.md](bridge-catch-panic.md)）。
 
 ## 8. 「值無效」怎麼辦 —— 改過一次，最後是「跟沒設一樣，往下走」
 
