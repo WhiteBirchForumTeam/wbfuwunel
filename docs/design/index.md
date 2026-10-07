@@ -1,4 +1,4 @@
-# 設計文件索引
+﻿# 設計文件索引
 
 一個資料夾回答一類問題。**接下來做什麼**在 [/docs/design/overview/roadmap.md](overview/roadmap.md)，
 **做過什麼、為什麼**在 [/CHANGELOG-fork.md](../../CHANGELOG-fork.md)，都不在這裡。
@@ -42,6 +42,7 @@
 |---|---|
 | [/docs/design/media/chunked-upload.md](media/chunked-upload.md) | 分塊上傳的設計與取捨（模型被重定三次的紀錄） |
 | [/docs/design/media/chunked-upload-spec.md](media/chunked-upload-spec.md) | **給 client 開發者的線上規格**：byte 怎麼排、每個訊息、錯誤碼、流程 |
+| [/docs/design/media/legacy-upload-concurrency.md](media/legacy-upload-concurrency.md) | 📄 **提案**：傳統 `/upload` 整檔進記憶體 ⇒ 一個全站的 **byte 預算**（permit ＝ byte，預設 1 GiB；維護者 2026-10-07）。🚫 §2.2 寫明**為什麼不是量 process 的 RAM**、§3 寫明**為什麼不能靠把 `max_request_size` 設 0** |
 | [/docs/design/media/media-holders.md](media/media-holders.md) | **現行做法**：持有者集合（外鍵）取代引用計數，誰加、誰拿掉、什麼時候刪 |
 | [/docs/design/media/media-attachments.md](media/media-attachments.md) | E2EE 房間裡 server 讀不到內容，所以附件由送訊息的請求**宣告** |
 | [/docs/design/media/purge-release-set.md](media/purge-release-set.md) | ✅ PR #106＋#107 —— **只留「為什麼」**：A 語意（兩個集合由構造相等）、每房頭像的鍵為什麼是 `(room, user)` 而不是事件、以及為什麼不需要遷移（§4：`mxc_managed`）|
@@ -54,6 +55,7 @@
 |---|---|
 | [/docs/design/events/room-seq-and-recent.md](events/room-seq-and-recent.md) | 每房連續序號 `r_seq`、全域 `g_seq`、跨房間的「最近 N 則」（`Event/Recent`） |
 | [/docs/design/events/event-push.md](events/event-push.md) | 連線訂閱自己的帳號，server 把新事件推過來 |
+| [/docs/design/events/invites-on-the-wire.md](events/invites-on-the-wire.md) | 📄 **提案，等維護者同意**：邀請走訂閱線（`Event/Invited`／`InviteGone`）＋ `Room/InvitedRooms` 補拿（issue #111，維護者要求優先）|
 | [/docs/design/events/streaming-messages.md](events/streaming-messages.md) | Draft Message：草稿一開始就是一則真的佔位訊息，之後的變化只廣播不進庫 |
 
 ## `keys/`：E2EE
@@ -63,6 +65,7 @@
 | [/docs/design/keys/e2ee-over-channel.md](keys/e2ee-over-channel.md) | E2EE 完全不靠 `/sync`：金鑰端點上橋、發 to-device、自己的金鑰存量 |
 | [/docs/design/keys/to-device.md](keys/to-device.md) | `0x16 Device` 的訂閱、推送與銷毀。🚨 §2：水位是**佇列頭**，`Fetch` 不要帶 `cd_seq` |
 | [/docs/design/keys/room-device-version.md](keys/room-device-version.md) | 裝置版本號、房間版本號、送出時比對（`1506`）、裝置變動廣播 |
+| [/docs/design/keys/invite-key-scope.md](keys/invite-key-scope.md) | 📄 **提案，等維護者同意**：被邀請者算不算進房間版本號／裝置清單，看 `history_visibility`（維護者 2026-10-07）。🚨 §3 有兩個會**靜默**失效的接點 |
 | [/docs/design/keys/e2ee-send-guard-problem.md](keys/e2ee-send-guard-problem.md) | ⚠️ **問題書不是提案**：上一份要回答的題目與達標條件 |
 
 ## `accounts/`：server 自己擁有的帳號
@@ -81,3 +84,4 @@
 
 📕 **標成歷史的文件不要照著實作** —— 它們留下來是因為「為什麼換掉」比「換成什麼」更難重建。
 每一份的抬頭都寫著它被什麼取代了。
+
