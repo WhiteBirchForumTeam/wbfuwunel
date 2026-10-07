@@ -31,6 +31,14 @@ pub const EVENT_PUSH_SUBTYPE: u8 = 0x06;
 /// declared device versions (/docs/design/keys/room-device-version.md §6).
 pub const EVENT_DEVICE_CHANGED_SUBTYPE: u8 = 0x07;
 
+/// `Event/Invited`, server to client only
+/// (/docs/design/events/invites-on-the-wire.md §3.1).
+pub const EVENT_INVITED_SUBTYPE: u8 = 0x08;
+
+/// `Event/InviteGone`, server to client only
+/// (/docs/design/events/invites-on-the-wire.md §3.2).
+pub const EVENT_INVITE_GONE_SUBTYPE: u8 = 0x09;
+
 /// One event as it goes on the wire: its global position and its JSON as
 /// served to clients.
 pub struct PushedEvent<'a> {
@@ -313,6 +321,127 @@ impl Streams {
 				});
 		}
 	}
+
+	/// Tells the user's **account-wide** subscriptions that they were invited to
+	/// `room`, with the stripped state the client needs to name it.
+	///
+	/// ⚠️ The recipients are `RoomTopic::FollowsJoins(user)` and nothing else:
+	/// that topic **is** "subscribed to the account" (see the enum's own docs), and
+	/// an invite is a room that is not in a named subscription's list, so pushing it
+	/// to one would break what that subscription asked for. 🚨 And it cannot be
+	/// `listeners(room)`: the invited user has not joined, so they are not in the
+	/// room's topic at all (/docs/design/events/invites-on-the-wire.md §4).
+	///
+	/// Args:
+	///     user: who was invited, example: "@bob:localhost"
+	///     room: example: "!r:localhost"
+	///     inviter: who sent it, example: "@alice:localhost"
+	///     is_direct: the invite's `is_direct`, example: true
+	///     reason: the invite's `reason`, example: Some("來吃飯")
+	///     state: the room's stripped state as `invite_state` stored it, each item
+	///         already serialized
+	///
+	/// 🚨 A state too large to frame is sent as **no state** rather than not sent
+	/// at all: "somebody invited you" matters more than the room's name, and the
+	/// client can still ask `Room/InvitedRooms`
+	/// (/docs/design/events/invites-on-the-wire.md §3.1).
+	pub fn push_invited(
+		&self,
+		user: &UserId,
+		room: &RoomId,
+		inviter: Option<&UserId>,
+		is_direct: bool,
+		reason: Option<&str>,
+		state: &[Vec<u8>],
+	) {
+		let topic = RoomTopic::FollowsJoins(user.to_owned());
+		let connections: Vec<ConnectionId> = self
+			.rooms
+			.listeners(&topic)
+			.into_iter()
+			.map(|(connection, _)| connection)
+			.collect();
+
+		if connections.is_empty() {
+			return;
+		}
+
+		let data = length_prefixed(state.iter().map(Vec::as_slice)).unwrap_or_else(|_| {
+			debug!(%user, %room, "wbf invite push: the stripped state does not fit a length prefix; sending none");
+			Vec::new()
+		});
+		let count = if data.is_empty() { 0 } else { state.len() };
+
+		self.rooms
+			.push_with(Some(&topic), &connections, |id, seq, gap| {
+				invited_pack(id, seq, &invited_meta(room, inviter, is_direct, reason, count, gap), &data)
+			});
+	}
+
+	/// Tells the user's account-wide subscriptions that an invite to `room` is no
+	/// longer pending, and what replaced it.
+	///
+	/// Args:
+	///     user: who was invited, example: "@bob:localhost"
+	///     room: example: "!r:localhost"
+	///     membership: the state that ended it, example: "leave" (withdrawn or
+	///         declined), "ban", or "join" (accepted)
+	pub fn push_invite_gone(&self, user: &UserId, room: &RoomId, membership: &str) {
+		let topic = RoomTopic::FollowsJoins(user.to_owned());
+		let connections: Vec<ConnectionId> = self
+			.rooms
+			.listeners(&topic)
+			.into_iter()
+			.map(|(connection, _)| connection)
+			.collect();
+
+		if connections.is_empty() {
+			return;
+		}
+
+		self.rooms
+			.push_with(Some(&topic), &connections, |id, seq, gap| {
+				invite_gone_pack(id, seq, &json!({ "room_id": room, "membership": membership, "gap": gap }))
+			});
+	}
+}
+
+/// The meta of `Event/Invited`. `inviter` and `reason` are left out when the
+/// invite carried none, rather than sent as null.
+fn invited_meta(
+	room: &RoomId,
+	inviter: Option<&UserId>,
+	is_direct: bool,
+	reason: Option<&str>,
+	state_count: usize,
+	gap: bool,
+) -> Value {
+	let mut meta = Map::new();
+	meta.insert("room_id".into(), json!(room));
+	if let Some(inviter) = inviter {
+		meta.insert("inviter".into(), json!(inviter));
+	}
+	meta.insert("is_direct".into(), json!(is_direct));
+	if let Some(reason) = reason {
+		meta.insert("reason".into(), json!(reason));
+	}
+	meta.insert("sc".into(), json!(state_count));
+	meta.insert("gap".into(), json!(gap));
+
+	Value::Object(meta)
+}
+
+fn invited_pack(id: u64, seq: u32, meta: &Value, data: &[u8]) -> Result<Vec<u8>, PackError> {
+	Ok(PackBuilder::new(Kind::Event, EVENT_INVITED_SUBTYPE, Flags::IS_RESPONSE, id, seq)
+		.json_meta(meta)?
+		.data(data)?
+		.finish())
+}
+
+fn invite_gone_pack(id: u64, seq: u32, meta: &Value) -> Result<Vec<u8>, PackError> {
+	Ok(PackBuilder::new(Kind::Event, EVENT_INVITE_GONE_SUBTYPE, Flags::IS_RESPONSE, id, seq)
+		.json_meta(meta)?
+		.finish())
 }
 
 /// The meta of `Event/DeviceChanged`, every field present.

@@ -89,12 +89,18 @@ issue 的草圖把整包塞進一個 JSON（`{ "invite": { …, "state": [...] }
 ⭐ **跟 `event-push.md` §3 接點 2 同一個做法**：掛在**寫入點**而不是在 handler 裡 ——
 邀請可能來自 client API、來自聯邦、來自 admin，而寫入點只有一個。
 
-**推給誰**：`subscribers.rs` 的 `by_user`（user → 連線集合）就是答案 ——
-🚨 **不能用 `listeners(room)`**（那是 room-keyed，而被邀請的人**還沒加入**那個房，所以不在裡面）。
+**推給誰**：⭐ **`RoomTopic::FollowsJoins(user)`** —— 那**就是**帳號層訂閱的 topic
+（`Event/Subscribe` 沒點名 `rooms` 時進的那一個），而 `listeners(&topic)` ＋
+`push_with(Some(&topic), …)` 兩個原語已經在那裡。
+
+🚨 **不能用 `listeners(room)`**：那是 room-keyed，而被邀請的人**還沒加入**那個房、不在裡面。
 📎 那正是這一支跟 `Push`／`DeviceChanged` 唯一不同的地方。
 
-⚠️ **只推給帳號層訂閱**（`Event/Subscribe` 沒點名 `rooms`）：點名了房間的訂閱是「我只要這幾間」，
-而邀請是**還不在清單裡的房** —— 推給它等於違反它自己說的範圍。
+⚠️ **也不是 `by_user`** —— 提案初版寫的是它，**那是錯的**（實作時讀程式發現）：
+`by_user` 含**點名了房間**的連線，而點名房間的訂閱是「我只要這幾間」，邀請是**還不在清單裡的房**
+⇒ 推給它等於違反它自己說的範圍。⭐ 而 `FollowsJoins(user)` 這個 topic 的定義**就是**「帳號層」，
+所以用它不但正確，還不需要額外的過濾（`rooms.rs` 那個 enum 的註解寫著它存在的理由正是這個：
+「that is a topic of its own rather than a flag on the subscriber」）。
 
 ## 5. 不做什麼
 
