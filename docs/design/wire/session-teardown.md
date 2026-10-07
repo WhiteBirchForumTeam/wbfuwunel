@@ -10,7 +10,7 @@
 > 📎 **實作時發現這份提案兩處估錯**（PR #105 寫明）：① §4.1 說把 `SlotTable` 的值換成連線的佇列 ——
 > 實際上**位子與登記不是同一個數字**（位子在升級時就拿、連線要有佇列才叫得動），所以值是
 > `DeviceConnections { reserved, live }` 兩個欄位，`count_for` 的語意才不會變。
-> ② §3.3 把「session 可變」列為要新解的問題 —— **現有程式已經處理好了**（`ConnectionSlot::is_for`
+> ② 原本把「session 可變」列為要新解的問題 —— **現有程式已經處理好了**（`ConnectionSlot::is_for`
 > ＋ `Session::inherit_slot`），這支只是讓登記跟著位子走。
 > ③ §4.2 原本寫「`end_device_sessions` 做兩件事（拆訂閱＋`try_send` Close）」—— **兩件都不在它裡面**
 > （salvia 複審指出）。已改成實際的三方分工。
@@ -56,26 +56,19 @@ client acks and later destroys by」），而一條失效的連線**一送 ack p
 
 ⇒ **後果是「讀取洩漏 ＋ 一段時間的佔用」，不是「資料遺失」。**
 
-## 2. 前半買到多少，以及為什麼兩半互補
+## 2. 為什麼兩半互補（前半＝PR #103）
 
-PR #103 之後 session 在**每一個 frame**（含 Ping／Pong）之前都重驗一次。但 **Ping 是 client 驅動的**：
+PR #103 之後 session 在**每一個 frame**（含 Ping／Pong）之前都重驗一次，所以洩漏窗口從「無限期」
+（只要持續 ping）縮到「到它送出任何一個 frame 為止」，上限 ＝ `wbf_ws_idle_timeout`
+（維護者 2026-10-01 把預設從 300 降到 **60 秒**，就是為了這個）。這一半把它縮到**立刻**。
 
-| | 洩漏窗口 |
-|---|---|
-| #103 之前 | **無限期**（只要持續 ping）|
-| **#103 之後** | 到它送出任何一個 frame 為止，上限 ＝ `wbf_ws_idle_timeout`（維護者 2026-10-01 把預設從 300 降到 **60 秒**，就是為了這個）|
-| **這一半做完** | 立刻 |
-
-⭐ **而這一半取代不了前半**：token **過期**是一個時間（`wbf/mod.rs` 的 `check_token` 比對 `expires_at`），
+⭐ **而這一半取代不了前半**：token **過期**是一個時間（`check_token` 比對 `expires_at`），
 **沒有任何事件可以掛勾** —— 只有「每個 frame 問一次」接得住它。
-📎 soft logout（`refresh_token_hard_logout = false`）也是這一類：裝置還在、只有 refresh token 被拿掉，
-沒有任何「拆掉它」的事件。
+📎 soft logout（`refresh_token_hard_logout = false`）同理：裝置還在、只有 refresh token 被拿掉。
 
-## 3. 現有零件盤點：缺的比想像少
+## 3. 🚨 掛鉤點只有一個 —— `remove_device`
 
-### 3.1 🚨 掛鉤點只有一個 —— `remove_device`
-
-這是這份提案最重要的發現。**每一條「硬性結束 session」的路都走 `users::Service::remove_device(user, device)`**
+**每一條「硬性結束 session」的路都走 `users::Service::remove_device(user, device)`**
 （`src/service/users/device.rs:82`），它自己再呼叫 `remove_tokens`：
 
 | 來源 | 進入點 |
@@ -94,20 +87,8 @@ PR #103 之後 session 在**每一個 frame**（含 Ping／Pong）之前都重�
 ⚠️ **唯一的例外是鎖帳號**：`set_locked(user)` 是另一個漏斗（`users/mod.rs:333`，4 個呼叫點），
 而且它是**使用者**粒度、不碰裝置 —— 它要自己一條路。
 
-### 3.2 ⚠️ 對照表是三張半成品，沒有一張夠用
 
-| 哪張表 | 鍵 | 有什麼 | 少什麼 |
-|---|---|---|---|
-| `connections.rs` 的 `SlotTable` | **`(user, device)`** ✅ | 一個 `u32` **計數** | 🚫 沒有 id、沒有 handle |
-| `subscribers.rs` 的 `by_user` | `user` | ConnectionId 的集合 | 🚫 **沒有 device**（登出一個裝置會砍掉同一人其他裝置）、只含**訂閱過**東西的連線 |
-| device 串流的 topic | **`(user, device)`** ✅ | `device_holder()` 直接回 ConnectionId | 🚫 只含**訂了自己 to-device 佇列**的那一條 |
-
-### 3.3 ⚠️ session 是可變的
-
-同一條連線可以**先登入成 alice、再登入成 carol**（通道上的 `Login`，e2e7 `[4.5a]` 守著這個行為）。
-所以任何索引**不能只在升級時寫一次**，`Login`／`Refresh`／`Logout` 每一次都要更新它。
-
-### 3.4 🚨 真正的機械缺口：socket 要死，得由接收迴圈放手
+### 3.1 🚨 機械上的缺口：socket 要死，得由接收迴圈放手
 
 送出端（`ws.rs` 的 `send_queued`）只握著 sink：
 
@@ -128,7 +109,7 @@ PR #103 之後 session 在**每一個 frame**（含 Ping／Pong）之前都重�
 ⇒ ⭐ **「推一個 Close 進佇列」對偷裝置的人不夠。** 要對它也立刻斷，接收迴圈需要一個**從外面叫得動的取消訊號**
 （跟現在的 `shutdown` 一樣，多一個 `select!` 分支）。
 
-## 4. 提案
+## 4. 現在的做法（PR #105）
 
 ### 4.1 讓 `SlotTable` 存有用的東西
 
@@ -161,10 +142,11 @@ impl ConnectionSlot {
 
 - **身份換了，位子跟著換** —— `reserve_connection_slot` 在升級與**每次 `Login`** 都跑；同裝置重新登入由
   `Session::inherit_slot` 把舊位子接過去（`slot.is_for(&self.user, &self.device)` 就是那個判斷）。
-  ⇒ ⚠️ §3.3 說的「session 可變」**已經被現有程式處理好了**，不是這支要新解的問題。
+  ⇒ ⚠️ 「session 可變」（同一條連線先登入成 alice、再登入成 carol，e2e7 `[4.5a]` 守著）
+  **已經被現有程式處理好了**，不是這支要新解的問題。
 - **`remove_device(user, device)` 拿到的正是那把鍵。** 不需要反查、不需要猜：那張表就是以它為鍵。
 - **「terminate device」就是同一條路** —— `DELETE /_matrix/client/v3/devices/{id}`、admin 刪裝置、MAS
-  同步刪裝置，全部走 `remove_device`（§3.1 的 20 幾個呼叫點），所以它不是另一個情境，是同一個漏斗。
+  同步刪裝置，全部走 `remove_device`（§3 的 20 幾個呼叫點），所以它不是另一個情境，是同一個漏斗。
 - **`/logout/all`** 走 `end_session(user, device, all_devices=true)`，它**逐一** `remove_device` ⇒ 每個裝置各自被關，
   不需要「關掉這個人全部連線」這種特殊動作。
 
@@ -291,24 +273,3 @@ teardown:              刪 token → notify → remove_connection
 | **7.4** | `users` → `connections` 這條依賴方向可以嗎？「你怎麼知道要關哪個？」 | ✅ 可以。**而「怎麼知道」程式裡已經有答案**：`ConnectionSlot::is_for(user, device)`，slot 放在連線的 `Session` 裡、`Login` 時跟著換 —— 詳見 §4.1 那一小節。「terminate device」走的就是 `remove_device` 這同一個漏斗 |
 | **7.5** | 鎖帳號？ | ✅ **不另走一條，靠 `revalidate` ＋ 逾時** —— 維護者判「嚴格定義不是破口」，§4.3 驗過成立（`locked_check` 在 `revalidate` 裡） |
 
-## 8. 測試計畫
-
-| 測什麼 | 怎麼測 |
-|---|---|
-| **登出之後推送真的停了** | e2e：bob 訂房間 → HTTP 登出 → 另一個人在那個房間發言 → bob 那條連線**收不到** Push（而登出前收得到）|
-| **只斷那個裝置** | 🚨 同一個人兩個裝置都連著、都訂同一個房間 → 登出其中一個 → **另一個照樣收得到**（§3.2 的 `by_user` 陷阱就是這條在守）|
-| **合作的 client 立刻斷** | e2e：登出後**不送任何 pack**，斷言幾秒內收到 Close 1008（對照 PR #103 的 `[3.2d]`，那條等的是 keep-alive 觸發）|
-| **惡意 client 也立刻斷**（B 已定案）| ⚠️ PowerShell 的 `ClientWebSocket` 不給「收到 Close 卻不回」的控制 —— 這條可能只能用 server 端的 log／`count_tracked_tasks()` 間接驗，或寫成 Rust 整合測試。**實作時要先確認測得到，再宣稱它成立** |
-| **收攤沒被繞過** | 取消之後 `ConnectionSlot` 還回去了：登出後立刻用同一個裝置開滿名額（e2e7 `[5.6]` 的同形）|
-| **鎖帳號**（§4.3：**不**主動拆）| 🚨 要測的是**反向**：鎖之後那條連線**在它下一個 frame** 被關，而不是立刻 —— 等於釘住「這條靠 `revalidate` 不靠通知」這個決定。e2e7 `[3.1a]`／`[4.8a]` 已經守住拒絕那半 |
-| **`Refresh` 不斷線**（§7.1）| e2e7 `[4.3c]` 已經在守，實作後要確認它還是綠的 —— ⭐ 那條現在是「換 token 不該觸發拆除」的反向證據 |
-
-## 9. 風險
-
-- ⚠️ **`SlotTable` 的鎖持有時間變長**：值從 `u32` 變成一張小表。🚫 鎖裡面不要 `await`（`connections.rs`
-  的 `lock_tasks` docstring 已經寫過這條規則，同一個理由）。
-- ⚠️ **`PackQueue` 的所有權**：表裡握著 sender 的複本，所以「所有 sender 都掉了」這個條件變了 ——
-  送出 task 的結束條件靠的正是那個（`send_queued` 的 `while let Some(item) = outgoing.recv()`）。
-  🚨 **連線死掉時表裡那份一定要跟著拿掉**，否則送出 task 永遠不結束。
-  ⭐ `ConnectionSlot` 的 `Drop` 本來就在做「還位子」，這件事掛在同一個地方 —— 但這是這支最容易寫錯的一行。
-- 📎 **惡意 client 的最壞情況取決於 §7.3**：選 A 就是 `wbf_ws_idle_timeout`，不是「立刻」。

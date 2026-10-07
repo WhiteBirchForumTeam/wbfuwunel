@@ -40,7 +40,7 @@ pub async fn delete_pdus(&self, room_id: &RoomId) -> Result {
 	// events: every Event, Backup and RoomAvatar holder of this room, in one
 	// batch. ⭐ Unlike `purge_history` this may be a batch, because here *every*
 	// event goes — the released set and the deleted set are equal by the shape
-	// of the operation (/docs/design/media/purge-release-set.md §8).
+	// of the operation (/docs/design/media/purge-release-set.md §2).
 	{
 		let mut txn = self.db.db.txn();
 		let media = self

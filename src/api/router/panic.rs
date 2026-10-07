@@ -2,7 +2,7 @@
 //!
 //! ⭐ It lives here rather than beside the served router's layers because the
 //! **bridge's** router needs it too, and `tuwunel_api` is the crate both can
-//! reach (`/docs/design/wire/bridge-catch-panic.md` §3). One copy, so the two
+//! reach (`/docs/design/wire/api-bridge.md` §2.1). One copy, so the two
 //! routers cannot drift apart on what a panic looks like.
 
 #[cfg(test)]

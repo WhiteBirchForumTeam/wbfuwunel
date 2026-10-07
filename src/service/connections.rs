@@ -722,7 +722,7 @@ mod address_tests {
 }
 
 /// Ending a device's session has to reach that device's connections, and only
-/// those (/docs/design/wire/session-teardown.md §8).
+/// those (/docs/design/wire/session-teardown.md §4.2).
 #[cfg(test)]
 mod teardown_tests {
 	use futures::FutureExt;

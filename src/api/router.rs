@@ -82,7 +82,7 @@ pub struct BridgeRouter(pub(crate) Router);
 /// unwinds under `oneshot` would otherwise travel up the WebSocket task that
 /// called the bridge and take the whole connection with it, outside every
 /// teardown path we wrote (CLAUDE.md P,
-/// `/docs/design/wire/bridge-catch-panic.md`). ⭐ Making it part of building the
+/// `/docs/design/wire/api-bridge.md` §2.1). ⭐ Making it part of building the
 /// router is what stops a future caller from forgetting it; the bridge turns the
 /// 500 into one `Error(Internal)` pack by itself.
 pub fn build_bridge_router(

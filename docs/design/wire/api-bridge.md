@@ -97,8 +97,18 @@ pack（kind＝領域、subtype＝操作；meta＝變數；data＝body 的 bytes�
 ⭐ 那一層套在 `build_bridge_router` **裡面**，不是由呼叫者套上去：橋自己保證它有，而不是靠每個呼叫者記得。
 📎 橋這一端**不用為它改任何東西** —— `catch_panic` 回 500 ＋ `M_UNKNOWN` 的 JSON，而 §2.3 的
 `build_reply_pack` 對非 2xx 本來就走 `Error`、`reject_code_for_status(500)` → `Internal`
-⇒ 一個 panic 自然變成一則 `Error(Internal)` 回給 client。設計與測試界限在
-[/docs/design/wire/bridge-catch-panic.md](bridge-catch-panic.md)。
+⇒ 一個 panic 自然變成一則 `Error(Internal)` 回給 client。
+📎 `catch_panic` 住在 `src/api/router/panic.rs`（**不是** `router` crate）：兩個 router 共用一份，
+而 `tuwunel` 依賴 `tuwunel_api` 不能反向。⚠️ 它拆成三個函數（`get_panic_details`／`to_panic_response`／
+`catch_panic`）的理由是**可測** —— 前兩個不需要 `Services`。
+⚠️ **測試界限**：正式路由裡沒有任何會 panic 的 handler（那是好事），所以**端到端測不到** ——
+驗的是 layer 本身與回應的形狀，「`build_bridge_router` 真的套上了它」只能讀碼；
+`requests_panic` 那一行 metric 也沒有測試跑到（要一個完整的 `Services`，＝一整個資料庫）。
+✅ **PR #109。** 🚫 **WS handler 自己的** panic（不經過任何 HTTP router）**不在那一支** ——
+要包的是 task 不是一層 middleware，而且要先決定 panic 之後連線是關掉還是回一則 `Error` 繼續
+（維護者 2026-10-06：「那個另外處理，先小的完成再說吧」）。
+📎 服務用的 router 那邊的層序有個反直覺的地方（最後加的是**最內層**，所以外層自己的 panic 仍無去處），
+寫在 `src/router/layers.rs` 的 `build` 上面。
 
 🚨 **分配表是白名單，pack 不帶自由的 path**。client 送的是 kind ＋ subtype，method 與 path 由 server 這邊的表決定。反過來做（pack 裡直接寫 method 與 path）等於把**每一個** HTTP 端點都開到通道上 —— 包括 `/sync`（會佔住這條連線的 handler 幾十秒）、舊的媒體上傳、以及規格裡刻意標成「HTTP 不可」的那幾個（`Recent`、`Stream`）。認不得的 subtype 一律拒絕（fail closed）。
 

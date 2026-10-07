@@ -30,9 +30,8 @@
 | [/docs/design/wire/pack-pipeline.md](wire/pack-pipeline.md) | 連線就是佇列、handler 的契約、連線上限與 client 位址怎麼解析（§2.1／§2.2） |
 | [/docs/design/wire/api-bridge.md](wire/api-bridge.md) | 常用 Matrix API 走通道的那座橋：怎麼搬、搬的順序、每一支的成本 |
 | [/docs/design/wire/hide-server-version.md](wire/hide-server-version.md) | 📄 **提案，等維護者同意**：預設不說自己的版本（六個洩漏點、`publish_server_version`、哪些**不能**藏）|
-| [/docs/design/wire/client-ip-header-chain.md](wire/client-ip-header-chain.md) | client 位址讀一條寫死的 header 鏈（XFF 最右邊 → `X-Real-IP` → `X-Client-IP` → `Client-IP`），而「最右邊」要是真的最右邊（外部審查的 🟡：**原本**是「最右邊**解得開的**」，會退到 client 可控的值）|
-| [/docs/design/wire/bridge-catch-panic.md](wire/bridge-catch-panic.md) | 橋底下的 handler panic 不該帶走整條連線（外部審查最後一條 🟡）。⭐ 橋那一端不用改 —— 500 本來就會變成 `Error(Internal)`；要處理的是 crate 方向（§3）跟「測不到端到端」那個界限（§4）|
-| [/docs/design/wire/session-teardown.md](wire/session-teardown.md) | 登出／刪裝置／撤 token 要把**那個裝置**的連線拆掉（外部審查 #8 後半）。⚠️ 鎖帳號刻意**不**走這條（§4.3）|
+| [/docs/design/wire/client-ip-header-chain.md](wire/client-ip-header-chain.md) | ✅ PR #108 —— **只留「為什麼」**：閘與鏈為什麼分兩層、「最右邊」為什麼是最後一格、「值無效」為什麼跟沒設同一條路（這一條被推翻過一次）|
+| [/docs/design/wire/session-teardown.md](wire/session-teardown.md) | ✅ PR #103（前半）＋ #105（後半）—— 登出／刪裝置／撤 token 要把**那個裝置**的連線拆掉。⭐ 掛鉤點只有 `remove_device` 一個（§3）；⚠️ 鎖帳號刻意**不**走這條（§4.3）|
 | [/docs/design/wire/wbf-vectors.json](wire/wbf-vectors.json) | 黃金向量。⚠️ `src/core/wbf/vectors.rs` 用 `include_str!` 讀它、client repo 也複製一份對著測 —— **改路徑要連程式一起改** |
 
 📎 每個 kind 的逐支對照表在 [/docs/bridge-specs/index.md](../bridge-specs/index.md)（那是**分配結果**，設計理由在 `wire/api-bridge.md`）。
@@ -45,7 +44,7 @@
 | [/docs/design/media/chunked-upload-spec.md](media/chunked-upload-spec.md) | **給 client 開發者的線上規格**：byte 怎麼排、每個訊息、錯誤碼、流程 |
 | [/docs/design/media/media-holders.md](media/media-holders.md) | **現行做法**：持有者集合（外鍵）取代引用計數，誰加、誰拿掉、什麼時候刪 |
 | [/docs/design/media/media-attachments.md](media/media-attachments.md) | E2EE 房間裡 server 讀不到內容，所以附件由送訊息的請求**宣告** |
-| [/docs/design/media/purge-release-set.md](media/purge-release-set.md) | 清歷史**只釋放它真的刪掉的**（外部審查 #3：原本被保留的事件 —— 房間頭像、本地圖片 —— 媒體會被刪掉）。§9：**每房成員頭像**有自己的 `RoomAvatar{room,user}` 持有者，否則上傳滿 7 天就被掃掉 |
+| [/docs/design/media/purge-release-set.md](media/purge-release-set.md) | ✅ PR #106＋#107 —— **只留「為什麼」**：A 語意（兩個集合由構造相等）、每房頭像的鍵為什麼是 `(room, user)` 而不是事件、以及為什麼不需要遷移（§4：`mxc_managed`）|
 | [/docs/design/media/media-gc.md](media/media-gc.md) | 📕 **歷史**：精確計數、哨兵、收集器、墓碑、`migrate-references`（計數與哨兵已退場） |
 | [/docs/design/media/media-refcount.md](media/media-refcount.md) | 📕 **歷史**：最早的列式索引，已被計數取代、計數又被持有者集合取代 |
 
