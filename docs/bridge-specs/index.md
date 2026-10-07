@@ -113,6 +113,10 @@ offset  bytes              意思
 
 ### `0x13 Room`（房間）
 
+原生的 `InvitedRooms`（`0x01`）：列目前所有**待處理的邀請**，跟 `JoinedRooms`（`0x28`）對稱。
+⭐ 它是這個 kind 裡**唯一的原生 subtype**，因為它要的資料只在 `/sync` 的 `rooms.invite` 裡 ——
+沒有 Matrix 端點可以橋（[/docs/design/events/invites-on-the-wire.md](../design/events/invites-on-the-wire.md) §2）。
+
 | subtype | 前 4 bytes | 名稱 | 做什麼 | 端點 | 變數（path ／ query） | data |
 |---|---|---|---|---|---|---|
 | `0x20` | `01 13 20 10` | CreateRoom | 開房間 | `POST /createRoom` | — | JSON：名稱、邀請誰、公開與否、加密… |
@@ -144,7 +148,8 @@ offset  bytes              意思
 
 ### `0x14 Event`（訊息與房間狀態）
 
-原生的 `Recent`（`0x01`）、`Send`（`0x02`）、`Batch`（`0x03`）、`Subscribe`（`0x04`）、`Unsubscribe`（`0x05`）、`Push`（`0x06`）不變。
+原生的 `Recent`（`0x01`）、`Send`（`0x02`）、`Batch`（`0x03`）、`Subscribe`（`0x04`）、`Unsubscribe`（`0x05`）、`Push`（`0x06`）、
+`DeviceChanged`（`0x07`）、`Invited`（`0x08`）、`InviteGone`（`0x09`）不變 —— 📎 後四個**只有 server → client**。
 
 | subtype | 前 4 bytes | 名稱 | 做什麼 | 端點 | 變數（path ／ query） | data |
 |---|---|---|---|---|---|---|

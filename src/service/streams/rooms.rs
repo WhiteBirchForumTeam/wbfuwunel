@@ -33,11 +33,15 @@ pub const EVENT_DEVICE_CHANGED_SUBTYPE: u8 = 0x07;
 
 /// `Event/Invited`, server to client only
 /// (/docs/design/events/invites-on-the-wire.md §3.1).
-pub const EVENT_INVITED_SUBTYPE: u8 = 0x08;
+///
+/// 📎 Not `pub`, unlike `EVENT_PUSH_SUBTYPE` and `EVENT_DEVICE_CHANGED_SUBTYPE`:
+/// nothing outside this module writes or reads these two, so exporting them
+/// would be an unreachable `pub` (which the workspace lints as an error).
+const EVENT_INVITED_SUBTYPE: u8 = 0x08;
 
 /// `Event/InviteGone`, server to client only
 /// (/docs/design/events/invites-on-the-wire.md §3.2).
-pub const EVENT_INVITE_GONE_SUBTYPE: u8 = 0x09;
+const EVENT_INVITE_GONE_SUBTYPE: u8 = 0x09;
 
 /// One event as it goes on the wire: its global position and its JSON as
 /// served to clients.

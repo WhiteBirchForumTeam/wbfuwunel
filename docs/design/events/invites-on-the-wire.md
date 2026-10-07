@@ -1,6 +1,6 @@
-# 📄 提案：邀請走訂閱線 —— 推一則、沒了也推一則，再加一支列出待處理邀請
+# 邀請走訂閱線 —— 推一則、沒了也推一則，再加一支列出待處理邀請
 
-⚠️ **這是提案，等維護者同意才動 `src/`。** issue #111（維護者要求優先；client 的
+✅ **維護者 2026-10-07 同意（§7），已實作。** issue #111（維護者要求優先；client 的
 `amaid/wbf-matrix-client` 分支 `feat/room-actions` 正等它）。
 相關：[/docs/design/events/event-push.md](event-push.md)（訂閱線的規則）、
 [/docs/design/wire/wire-format.md](../wire/wire-format.md) §6.3（kind／subtype 分配）。
@@ -102,6 +102,21 @@ issue 的草圖把整包塞進一個 JSON（`{ "invite": { …, "state": [...] }
 所以用它不但正確，還不需要額外的過濾（`rooms.rs` 那個 enum 的註解寫著它存在的理由正是這個：
 「that is a topic of its own rather than a flag on the subscriber」）。
 
+### 4.1 🚫 為什麼**不**像 `DeviceChanged` 那樣用 feature 擋
+
+`Event/DeviceChanged`（`0x07`）只推給 `Hello.features` 宣告過 `org.wbftw.device_versions` 的連線。
+⚠️ **這兩支刻意不照它。** 三個理由：
+
+| | |
+|---|---|
+| 🚨 **擋錯了的失敗方式正是這個功能要修的 bug** | 一個忘記宣告的 client 得到的是「收不到邀請」，**而且沒有任何訊號** —— ⭐ 那就是 §1 那個問題本身，只是換成我們自己造成的 |
+| 📎 **`DeviceChanged` 被擋的理由不同** | 它的內容（房間版本號）只對正在做 E2EE 版本比對的 client 有意義，推給別人是純噪音，而且**要先算**（`is_listened_by_device_versions` 就是「值不值得算」那道檢查）。邀請沒有這個性質：任何 client 都用得到，而且不用額外計算 |
+| ⭐ **協定本來就要求 client 忽略認不得的 frame** | 每加一個 server → client 的 subtype 就要配一次 handshake，等於協定不能在不改 client 的情況下長大 |
+
+📎 **而這件事是 e2e 幫我分清的**：加完推送之後 e2e11 的 `[1.7b]` 紅了 —— `Call` 這個測試輔助函式
+「跳過插隊的 frame」只寫了 `0x14/0x06`。⚠️ **`0x07` 也會打爛它，只是它被 feature 擋著所以從沒浮現。**
+⇒ 那是**輔助函式少列了兩個 subtype**，不是協定該多一道旗標；修的是測試（它現在列 `6,7,8,9`）。
+
 ## 5. 不做什麼
 
 - 🚫 **不改 `invite_state` 的內容**（那是 server 既有的縮減邏輯，Matrix 規格定的那幾個 type）。
@@ -110,21 +125,26 @@ issue 的草圖把整包塞進一個 JSON（`{ "invite": { …, "state": [...] }
 - 🚫 **不碰 `Event/Recent`** —— 讓它帶 invites 是 issue 給的另一個選項，🚫 不採：`Recent` 的語意是
   「已加入房間的訊息窗」，塞進一種沒有訊息的東西會讓它的 `tc`／`fs`／`ls` 失去意義（A3：一個模組回答一種問題）。
 
-## 6. 測試計畫
+## 6. 測試
 
-| 要釘住的 | 怎麼測 |
+e2e11 情境 6（它跑在同一台 server 上，接在情境 5 之後）：
+
+| | 要釘住的 |
 |---|---|
-| 🔴 **被邀請時推得到** | e2e：bob 帳號層訂閱 → alice 建房並邀 bob → bob 收到 `0x14/0x08`，meta 的 `room_id`／`inviter` 對，data 解出來含 `m.room.name` |
-| 🔴 **只推給被邀的那個人** | 🚨 carol 也訂閱著、不在那間房、沒被邀 ⇒ **carol 收不到**（這條守的是「不要廣播邀請」）|
-| 🔴 **點名房間的訂閱收不到** | 同一個 bob 另開一條連線、`Subscribe` 點名別的房 ⇒ 那條**收不到**（§4 最後那條規則）|
-| 撤回／拒絕／封鎖／接受 | 四條各推一則 `InviteGone`，`membership` 各自對 |
-| 🔴 **補拿對得上推送** | 斷線期間被邀 → 重連 → `InvitedRooms` 列得到那間（⭐ 這條才是「推送是提示不是保證」的實證）|
-| 接受之後不再列 | `InvitedRooms` 不含已加入的房 |
-| `state` 太大 | 🚨 單元測試：`sc: 0` ＋ meta 照送，而**不是**整則不推（§3.1 那個取捨）|
+| `[6.1]`／`[6.1b]` | 被邀請時推得到：`0x14/0x08`，`id` 是 bob 自己 `Subscribe` 的，meta 的 `inviter` 對，data 解出來含 `m.room.name` 與**他自己的** member 事件 |
+| 🔴 `[6.2]` | **只推給被邀的那個人** —— carol 也帳號層訂閱著、沒被邀 ⇒ 收不到（守「不要廣播邀請」）|
+| 🔴 `[6.3]` | **點名房間的訂閱收不到** —— §4 最後那條規則 |
+| 🔴 `[6.4]`／`[6.4b]` | `InvitedRooms` 列得到，**而且它的 state 跟推送帶的那份一樣**（⭐ 那是「兩邊同一個來源」的實證）|
+| `[6.5]` | HTTP 走不通（`Unsupported`）|
+| `[6.6]`／`[6.6b]` | 拒絕 ⇒ `InviteGone(leave)`，而且 `InvitedRooms` 不再列它 |
+| `[6.7]` | 接受 ⇒ `InviteGone(join)` |
+| 🚨 `[6.8]` | **單純離開不是 `InviteGone`** —— bob 離開自己的房（從沒被邀請過）⇒ 不推。📌 這條守的是「`is_invited` 在寫入之前讀」，而不是每次離開都宣告 |
+| 🔴 `[6.9]` | **補拿** —— 連線全關時被邀請 → 重連 → 列得到（⭐ 「推送是提示不是保證」的實證）|
 
-## 7. ⏳ 要維護者點頭的三件
+⚠️ **沒有測到的一格**：§3.1 那個「縮減狀態框不進一個 pack ⇒ `sc: 0` 照送」。
+要觸發它得讓 `length_prefixed` 失敗（單一事件 > 4 GiB），🚫 構造不出來；
+📌 所以那段是**讀碼**確認的 fail-safe，不寫成已驗證。
 
-1. **§3 那個形狀**（meta ＋ data 分開，而不是 issue 草圖的單一 JSON）—— 📌 它是**線上契約**，
-   改一次要 client 跟著發版，所以值得先確認。
-2. **§3.1 的 `sc: 0` 取捨**（state 太大時照推、data 清空）。
-3. **`Room/InvitedRooms` 用 `0x13`/`0x01`**（原生）而不是塞進 `0x12 Sync` 或讓 `Recent` 帶。
+## 7. ✅ 維護者 2026-10-07 同意三件
+
+§3 的形狀（meta ＋ data 分開）、§3.1 的 `sc: 0` 取捨、`Room/InvitedRooms` 用 `0x13`/`0x01`。

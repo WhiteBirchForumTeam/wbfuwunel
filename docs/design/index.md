@@ -55,7 +55,7 @@
 |---|---|
 | [/docs/design/events/room-seq-and-recent.md](events/room-seq-and-recent.md) | 每房連續序號 `r_seq`、全域 `g_seq`、跨房間的「最近 N 則」（`Event/Recent`） |
 | [/docs/design/events/event-push.md](events/event-push.md) | 連線訂閱自己的帳號，server 把新事件推過來 |
-| [/docs/design/events/invites-on-the-wire.md](events/invites-on-the-wire.md) | 📄 **提案，等維護者同意**：邀請走訂閱線（`Event/Invited`／`InviteGone`）＋ `Room/InvitedRooms` 補拿（issue #111，維護者要求優先）|
+| [/docs/design/events/invites-on-the-wire.md](events/invites-on-the-wire.md) | 邀請走訂閱線：`Event/Invited`（`0x14/0x08`）／`InviteGone`（`0x14/0x09`）＋ `Room/InvitedRooms`（`0x13/0x01`）補拿（issue #111）。🚨 §4：推給 `FollowsJoins(user)`，🚫 不是 `by_user`、更不是 `listeners(room)` |
 | [/docs/design/events/streaming-messages.md](events/streaming-messages.md) | Draft Message：草稿一開始就是一則真的佔位訊息，之後的變化只廣播不進庫 |
 
 ## `keys/`：E2EE
@@ -84,4 +84,5 @@
 
 📕 **標成歷史的文件不要照著實作** —— 它們留下來是因為「為什麼換掉」比「換成什麼」更難重建。
 每一份的抬頭都寫著它被什麼取代了。
+
 

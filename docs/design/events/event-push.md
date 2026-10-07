@@ -84,8 +84,16 @@ registry（純記憶體，`Services.streams`）                          ← 所
 
 接點 2：state_cache 的 join／leave 寫入點（mark_as_joined 那一組）
    ├─ leave／kick／ban(user, room) → streams::evict(user, room)：一把鎖內，by_user[user] 的每條連線離開 Room(room)
-   └─ join(user, room)             → streams::follow(user, room)：一把鎖內，FollowsJoins(user) 裡的連線進入 Room(room)
+   ├─ join(user, room)             → streams::follow(user, room)：一把鎖內，FollowsJoins(user) 裡的連線進入 Room(room)
+   ├─ invite(user, room)           → streams::push_invited(…)：推給 FollowsJoins(user)，帶縮減狀態
+   └─ 邀請沒了（leave／ban／join）  → streams::push_invite_gone(…)：同一個 topic
 ```
+
+📎 **邀請那兩條在同一組寫入點上，但推的對象不同**：被邀請的人**還沒加入**，所以他不在
+`Room(room)` 裡 —— 推給 `FollowsJoins(user)`（那個 topic 的定義就是「訂閱了這個帳號」）。
+⚠️ 而 `InviteGone` 的三條路（撤回／拒絕 ＝ leave、ban、接受 ＝ join）都要**在寫入之前**讀
+「本來有沒有邀請」：`mark_as_left`／`mark_as_joined` 會把邀請狀態清掉，而單純離開的成員從來沒有邀請。
+⇒ [/docs/design/events/invites-on-the-wire.md](invites-on-the-wire.md) §4。
 
 ⭐ **「跟進之後加入的房」是一個 topic，不是訂閱者身上的旗標**（PR #42）。理由：join hook 因此問的是
 **跟其他人同一張索引**，而不是第二張會跟它不一致的表。

@@ -60,16 +60,21 @@ function Recv-Or-Null($ws, [int]$ms) {
   $p = Read-Pack ($stream.ToArray()); $p.http = 'ws'; $p
 }
 # Send one pack and wait for one frame, at most 10 s; a silent server fails the run instead of hanging it.
-# Push packs that were already queued for this connection are skipped: the caller wants the reply.
+# Anything the server sent on its own initiative is skipped: the caller wants the reply.
+# ⚠️ That is every server-to-client-only subtype of 0x14, not just Push: Push (0x06),
+# DeviceChanged (0x07), Invited (0x08) and InviteGone (0x09) can all land between a request and its
+# answer. This used to name 0x06 alone, and adding the invite pushes is what showed it — 0x07 would
+# have done the same, and only escaped because it is behind a feature this suite does not declare.
+$script:ServerInitiated = @(6, 7, 8, 9)
 function Call($ws, [byte[]]$pack) {
   Ws-Send $ws $pack
   for ($i = 0; $i -lt 50; $i++) {
     $p = Recv-Or-Null $ws 10000
     if ($null -eq $p) { throw 'no reply within 10 s' }
     if ($p.closed) { throw "server closed the connection: $($p.code)" }
-    if (-not ($p.kind -eq 0x14 -and $p.subtype -eq 6)) { return $p }
+    if (-not ($p.kind -eq 0x14 -and $script:ServerInitiated -contains $p.subtype)) { return $p }
   }
-  throw 'only pushes, no reply'
+  throw 'only server-initiated frames, no reply'
 }
 function Push-Events([byte[]]$data) {
   $events = @(); $at = 0
@@ -628,6 +633,98 @@ $refused = Recv-Or-Null $wsLocked 5000
 Check '[5.6] ... and its next frame is refused with M_USER_LOCKED' ($null -ne $refused -and -not $refused.closed -and $refused.subtype -eq 3 -and $refused.meta.errcode -eq 'M_USER_LOCKED') "$(if ($null -eq $refused) { 'nothing' } else { Describe $refused })"
 
 $wsOne.Dispose(); $wsTwo.Dispose(); $wsLocked.Dispose()
+
+# ========================= Scenario 6: invites on the subscription line (issue #111) =========================
+# /docs/design/events/invites-on-the-wire.md. A wbf account had no way to learn it was invited: the
+# subscription line carries joined rooms only, `JoinedRooms` lists joined ones only, and reading a
+# room's state before joining is 403. Two things close that — a push when it happens, and
+# `Room/InvitedRooms` to catch up on what a push may have missed.
+Log '################ Scenario 6: invites reach the subscription line ################'
+$regBob = Register 'invbob'; $tokBob = $regBob.access_token; $userBob = $regBob.user_id
+$regCar = Register 'invcarol'; $tokCar = $regCar.access_token
+
+# bob's own room: it is what [6.8] needs — a room he is in without ever having been invited.
+$rOwn = Create-Room $tokBob 'bob''s own room'
+
+$wsBob = Ws-Open $tokBob
+$null = Call $wsBob (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e11-s6'; features = @() } $null)
+$ackBob = Subscribe $wsBob 80 $null $null
+Check '[6.0] bob subscribes account-wide' ($ackBob.subtype -eq 2) (Describe $ackBob)
+$wsCar = Ws-Open $tokCar
+$null = Call $wsCar (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e11-s6'; features = @() } $null)
+$null = Subscribe $wsCar 81 $null $null
+$wsNamed = Ws-Open $tokBob
+$null = Call $wsNamed (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e11-s6'; features = @() } $null)
+$ackNamed = Subscribe $wsNamed 82 @($rOwn) $null
+Check '[6.0b] bob has a second connection subscribed to one named room' ($ackNamed.subtype -eq 2) (Describe $ackNamed)
+
+# [6.1] alice invites bob -> one Event/Invited on the account-wide connection
+$rInv = Create-Room $tokA 'dinner at mine'
+Invite $rInv $userBob $tokA
+$bobFrames = @(Drain-Pushes $wsBob)
+$invited = @($bobFrames | Where-Object { $_.kind -eq 0x14 -and $_.subtype -eq 8 })
+Check '[6.1] one Event/Invited, carrying bob''s own Subscribe id' ($invited.Count -eq 1 -and $invited[0].id -eq (Conv 80) -and $invited[0].meta.room_id -eq $rInv) "frames=$(($bobFrames | ForEach-Object { '{0}/{1}' -f $_.kind, $_.subtype }) -join ',') $(if ($invited.Count) { Describe $invited[0] })"
+$invState = @(); if ($invited.Count -eq 1 -and $invited[0].data.Length -gt 0) { $invState = @(Push-Events ([byte[]]$invited[0].data)) }
+$hasName = @($invState | Where-Object { $_.type -eq 'm.room.name' }).Count -eq 1
+$hasOwn = @($invState | Where-Object { $_.type -eq 'm.room.member' -and $_.state_key -eq $userBob }).Count -eq 1
+Check '[6.1b] meta names the inviter; data is the stripped state (room name + bob''s own member event)' ($invited.Count -eq 1 -and $invited[0].meta.inviter -eq $regA.user_id -and [int]$invited[0].meta.sc -eq $invState.Count -and $invState.Count -gt 0 -and $hasName -and $hasOwn) "sc=$(if ($invited.Count) { $invited[0].meta.sc }) parsed=$($invState.Count) name=$hasName member=$hasOwn types=$(@($invState | ForEach-Object { $_.type }) -join ',')"
+
+# [6.2] nobody else hears it: carol is subscribed account-wide but was not invited.
+$carolSaw = @(@(Drain-Pushes $wsCar 1200) | Where-Object { $_.subtype -eq 8 -or $_.subtype -eq 9 })
+Check '[6.2] carol, subscribed but not invited, gets nothing' ($carolSaw.Count -eq 0) "invite frames=$($carolSaw.Count)"
+
+# [6.3] a named-room subscription is not an account subscription: the invited room is not in its list,
+# so pushing it there would break what that subscription asked for.
+$namedSaw = @(@(Drain-Pushes $wsNamed 1200) | Where-Object { $_.subtype -eq 8 -or $_.subtype -eq 9 })
+Check '[6.3] bob''s named-room subscription gets no invite push' ($namedSaw.Count -eq 0) "invite frames=$($namedSaw.Count)"
+
+# [6.4] Room/InvitedRooms lists it, and says the same thing the push said
+$list = Call $wsBob (Json-Pack 0x13 1 0 0 @{} $null)
+$entries = @(); if ($list.subtype -eq 2 -and $list.data.Length -gt 0) { $entries = @(Push-Events ([byte[]]$list.data)) }
+$entry = @($entries | Where-Object { $_.room_id -eq $rInv })
+Check '[6.4] Room/InvitedRooms lists the pending invite, one length-prefixed entry per room' ($list.subtype -eq 2 -and [int]$list.meta.rc -eq $entries.Count -and $entry.Count -eq 1 -and $entry[0].inviter -eq $regA.user_id) "rc=$($list.meta.rc) entries=$($entries.Count) $(Describe $list)"
+Check '[6.4b] ... and its state is the same state the push carried' ($entry.Count -eq 1 -and @($entry[0].state).Count -eq $invState.Count -and $invState.Count -gt 0) "list=$(if ($entry.Count) { @($entry[0].state).Count }) push=$($invState.Count)"
+
+# [6.5] HTTP is not a transport for it: it is a connection's catch-up.
+$overHttp = Send-Pack (Json-Pack 0x13 1 0 0 @{} $null) $tokBob
+Check '[6.5] over HTTP it answers Unsupported' ($overHttp.subtype -eq 3 -and $overHttp.meta.code -eq 'Unsupported') (Describe $overHttp)
+
+# [6.6] declining ends it: InviteGone with membership=leave, and the list is empty again
+$null = Api Post "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($rInv))/leave" '{}' $tokBob
+$goneFrames = @(Drain-Pushes $wsBob)
+$gone = @($goneFrames | Where-Object { $_.kind -eq 0x14 -and $_.subtype -eq 9 })
+Check '[6.6] declining -> Event/InviteGone with membership=leave' ($gone.Count -eq 1 -and $gone[0].meta.room_id -eq $rInv -and $gone[0].meta.membership -eq 'leave') "frames=$(($goneFrames | ForEach-Object { '{0}/{1}' -f $_.kind, $_.subtype }) -join ',') $(if ($gone.Count) { Describe $gone[0] })"
+$after = Call $wsBob (Json-Pack 0x13 1 0 0 @{} $null)
+$afterEntries = @(); if ($after.data.Length -gt 0) { $afterEntries = @(Push-Events ([byte[]]$after.data)) }
+Check '[6.6b] ... and InvitedRooms no longer lists it' (@($afterEntries | Where-Object { $_.room_id -eq $rInv }).Count -eq 0) "rc=$($after.meta.rc)"
+
+# [6.7] accepting ends it too, with membership=join
+$rAccept = Create-Room $tokA 'the one bob joins'
+Invite $rAccept $userBob $tokA
+$null = Drain-Pushes $wsBob
+$null = Api Post "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($rAccept))/join" '{}' $tokBob
+$joinFrames = @(Drain-Pushes $wsBob)
+$joinGone = @($joinFrames | Where-Object { $_.kind -eq 0x14 -and $_.subtype -eq 9 })
+Check '[6.7] accepting -> Event/InviteGone with membership=join' ($joinGone.Count -eq 1 -and $joinGone[0].meta.room_id -eq $rAccept -and $joinGone[0].meta.membership -eq 'join') "frames=$(($joinFrames | ForEach-Object { '{0}/{1}' -f $_.kind, $_.subtype }) -join ',') $(if ($joinGone.Count) { Describe $joinGone[0] })"
+
+# [6.8] a plain leave is not an InviteGone: bob was never invited to his own room. This is the check
+# that `is_invited` is read *before* the write, rather than announcing on every departure.
+$null = Api Post "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($rOwn))/leave" '{}' $tokBob
+$plainLeave = @(@(Drain-Pushes $wsBob 1200) | Where-Object { $_.subtype -eq 9 })
+Check '[6.8] leaving a room bob was never invited to pushes no InviteGone' ($plainLeave.Count -eq 0) "InviteGone frames=$($plainLeave.Count)"
+
+# [6.9] the catch-up is what makes a missed push survivable: invited with no connection open at all.
+$wsBob.Dispose()
+$rAway = Create-Room $tokA 'invited while away'
+Invite $rAway $userBob $tokA
+$wsBack = (Ws-Open-Usable $tokBob).ws
+$null = Call $wsBack (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e11-s6'; features = @() } $null)
+$null = Subscribe $wsBack 83 $null $null
+$backList = Call $wsBack (Json-Pack 0x13 1 0 0 @{} $null)
+$backEntries = @(); if ($backList.data.Length -gt 0) { $backEntries = @(Push-Events ([byte[]]$backList.data)) }
+Check '[6.9] an invite that arrived with no connection open is still listed after reconnecting' (@($backEntries | Where-Object { $_.room_id -eq $rAway }).Count -eq 1) "rc=$($backList.meta.rc) rooms=$(@($backEntries | ForEach-Object { $_.room_id }) -join ',')"
+
+$wsBack.Dispose(); $wsCar.Dispose(); $wsNamed.Dispose()
 Stop-Server $server
 
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"
