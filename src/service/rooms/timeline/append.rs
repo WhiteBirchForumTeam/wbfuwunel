@@ -471,7 +471,7 @@ async fn append_member_effects(&self, pdu: &PduEvent, count: PduCount) -> Result
 	// (`avatar_url`), and that picture has no other holder: the media reference
 	// scanner reads `url`, `file.url` and the thumbnails, never `avatar_url`, so
 	// until this existed a per-room avatar was swept seven days after upload
-	// with nobody having done anything (/docs/design/media/purge-release-set.md §9).
+	// with nobody having done anything (/docs/design/media/purge-release-set.md §3).
 	//
 	// ⭐ The holder follows the **state**, so only the event that is now current
 	// state may move it. `count` is negative exactly for a backfilled event, by

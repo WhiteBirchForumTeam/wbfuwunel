@@ -47,7 +47,7 @@ async fn the_panic_response_is_a_500_the_bridge_can_turn_into_an_error_pack() {
 	// 🚨 `error` is the field `bridge::build_reply_pack` reads for an `Error`
 	// pack's message, and 500 is what `reject_code_for_status` maps to
 	// `RejectCode::Internal` — so these two are the contract with the bridge,
-	// not decoration (/docs/design/wire/bridge-catch-panic.md §2).
+	// not decoration (/docs/design/wire/api-bridge.md §2.1).
 	assert_eq!(body["errcode"], "M_UNKNOWN");
 	assert!(
 		body["error"]
@@ -66,7 +66,7 @@ async fn the_panic_response_is_a_500_the_bridge_can_turn_into_an_error_pack() {
 /// the only difference is the `requests_panic` metric, which needs a whole
 /// `Services`. So this pins the mechanism and the reply; that
 /// `build_bridge_router` installs the layer at all is read from the code
-/// (/docs/design/wire/bridge-catch-panic.md §4).
+/// (/docs/design/wire/api-bridge.md §2.1).
 #[tokio::test]
 async fn a_panicking_handler_under_this_layer_answers_instead_of_unwinding() {
 	async fn boom() -> StatusCode { panic!("boom") }

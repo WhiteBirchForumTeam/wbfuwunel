@@ -449,7 +449,7 @@ pub async fn set_avatar_ref(&self, txn: &mut Txn, user_id: &UserId, new_mxc: Opt
 /// that looked back) must not reach here: it would release the avatar that is
 /// on display. ⭐ Failing that way round is the irreversible one — "media held
 /// too long is recoverable, media released too early is not"
-/// (/docs/design/media/purge-release-set.md §9).
+/// (/docs/design/media/purge-release-set.md §3).
 ///
 /// ⚠️ The caller holds `new_mxc` (`hold_media`) until `txn` has committed — the
 /// same contract as `hold()` and `set_avatar_ref`. The collector decides between

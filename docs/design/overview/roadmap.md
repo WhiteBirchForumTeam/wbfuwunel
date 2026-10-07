@@ -206,9 +206,10 @@ client 側的三條契約在 [/docs/design/events/event-push.md](../events/event
 
 | 是什麼 | 狀態 |
 |---|---|
-| `client_ip.rs` 的 `rightmost_x_forwarded_for` 是「最右邊**解得開的**」而不是「最右邊」（壞的方向是 fail open）| ✅ **PR #108** —— 最後一格就是答案，讀不出來就落到傳輸層 peer。➕ 同一支加了維護者 2026-10-05 指定的**寫死 header 鏈**（見 §2.14 的引文與 [/docs/design/wire/client-ip-header-chain.md](../wire/client-ip-header-chain.md)）|
-| bridge router 缺 `CatchPanicLayer`（一個 handler panic 拖垮整條 WS 連線，CLAUDE.md P）| ✅ **PR #109**（設計在 [/docs/design/wire/bridge-catch-panic.md](../wire/bridge-catch-panic.md)）—— ⭐ 橋那一端不用改：500 本來就會變成 `Error(Internal)`。真正要處理的是 crate 方向（`catch_panic` 從 `tuwunel` 搬到 `tuwunel_api`，兩個 router 共用一份）。⚠️ 正式路由裡沒有會 panic 的 handler ⇒ **端到端測不到**，驗的是 layer 本身（§4）。<br>🚫 **WS handler 自己的** panic 不在這支（維護者 2026-10-06：「那個另外處理，先小的完成再說吧」）—— 那要包的是 task、不是一層 middleware |
-| `m.room.member` 的 `avatar_url` 不算持有者 | ✅ PR #107（§2.15 第 3 列的 ➕ 那半）—— 📎 這一行在 #107 合併後就過期了，而 #107 自己沒掃到它（cirno 在 PR #108 指出）|
+| `client_ip.rs` 的 `rightmost_x_forwarded_for` 取的是「最右邊**解得開的**」（壞的方向是 fail open）| ✅ **PR #108** —— 同一支加了本機 peer 的寫死 header 鏈（[/docs/design/wire/client-ip-header-chain.md](../wire/client-ip-header-chain.md)）|
+| bridge router 缺 `CatchPanicLayer` | ✅ **PR #109**（機制在 [/docs/design/wire/api-bridge.md](../wire/api-bridge.md) §2.1）|
+| `m.room.member` 的 `avatar_url` 不算持有者 | ✅ **PR #107**（§2.15 第 3 列的 ➕ 那半）|
+| 🚫 **WS handler 自己的** panic —— 不經過任何 HTTP router，所以 `CatchPanicLayer` 救不到（服務用 router 的外層 layer 同理）| 🔲 **未做**。維護者 2026-10-06：「那個另外處理，先小的完成再說吧」。要包的是 **task** 不是一層 middleware，而且要先決定 panic 之後連線是關掉還是回一則 `Error` 繼續 |
 
 
 ## 3. 候選（要不要做，由維護者決定）

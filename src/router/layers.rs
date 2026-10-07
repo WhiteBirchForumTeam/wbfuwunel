@@ -73,6 +73,17 @@ const TUWUNEL_CSP: &[&str] = &[
 	"base-uri 'none'",
 ];
 
+/// 🚨 **The layer added first is the outermost one.** `ServiceBuilder::layer`
+/// stacks `Stack::new(new, previous)` and `Stack` applies its inner first, so
+/// `builder.layer(A).layer(B)` becomes `A(B(service))`.
+///
+/// ⚠️ That makes `CatchPanicLayer` below — the **last** one added — the
+/// innermost, wrapping the router and nothing else. A panic inside any layer
+/// above it, `HandleLayer`'s `request::handle` included, still has nowhere to go
+/// (external review 2026-09-29 / PR #109 review; the bridge's own router gets
+/// the layer in `build_bridge_router`, see `/docs/design/wire/api-bridge.md`
+/// §2.1). 📎 Easy to read backwards, which is why it is written down here rather
+/// than left to whoever reads the chain next.
 pub(crate) fn build(services: &Arc<Services>) -> Result<(Router, Guard)> {
 	let server = &services.server;
 	let layers = ServiceBuilder::new();

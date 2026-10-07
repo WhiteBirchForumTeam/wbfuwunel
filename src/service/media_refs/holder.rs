@@ -29,7 +29,7 @@ pub enum Holder {
 	/// holder keyed by event would have to be released when superseded, which
 	/// is a race against backfill and state resolution; keyed by the pair it is
 	/// one swap with no ordering to get wrong
-	/// (/docs/design/media/purge-release-set.md §9, 維護者 2026-10-04).
+	/// (/docs/design/media/purge-release-set.md §3, 維護者 2026-10-04).
 	RoomAvatar { room: OwnedRoomId, user: OwnedUserId },
 }
 

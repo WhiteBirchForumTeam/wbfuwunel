@@ -154,7 +154,7 @@ Check '[3.2] startup warned about the override and the sweep logged a removal' (
 # never reads — `MXC_CONTENT_PATHS` has `url` and the thumbnails, not `avatar_url`. Until
 # `Holder::RoomAvatar` existed it therefore had **no holder at all**, and this is the sweep that took
 # it away: no purge, no redaction, nobody doing anything
-# (/docs/design/media/purge-release-set.md §9).
+# (/docs/design/media/purge-release-set.md §3).
 # ⭐ This is the direct test of that half. The PR first claimed it could not be tested because the
 # seven-day floor cannot be lowered — wrong: the env var above returns before the floor is applied,
 # and /docs/design/media/media-holders.md §5 says so in as many words (review of PR #107, cirno,

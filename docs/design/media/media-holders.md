@@ -33,7 +33,7 @@
 
 房間頭像（`m.room.avatar` state 事件）就是一個 `Event` 持有者，不另立種類。
 **profile** 的頭像不記遠端使用者（那是別站的媒體或別站的人）—— ⚠️ 但 `RoomAvatar` **記**：房間的成員包含遠端的人，
-而他們的 member 事件可能指著**本站**的媒體，那時這個持有者就是唯一留住它的東西（/docs/design/media/purge-release-set.md §9.2）。
+而他們的 member 事件可能指著**本站**的媒體，那時這個持有者就是唯一留住它的東西（/docs/design/media/purge-release-set.md §3）。
 🚨 **每房成員頭像（`m.room.member` 的 `avatar_url`）需要自己的種類**，因為媒體引用掃描器（`MXC_CONTENT_PATHS`）讀的是
 `url`／`file.url`／兩個 thumbnail，**從來不讀 `avatar_url`** —— 在 `RoomAvatar` 之前它完全沒有持有者，上傳滿寬限期就被掃掉。
 g_seq 用有號值（backfill 的歷史是負的）。
