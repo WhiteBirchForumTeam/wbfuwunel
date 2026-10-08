@@ -60,14 +60,21 @@ function Recv-Or-Null($ws, [int]$ms) {
   $p = Read-Pack ($stream.ToArray()); $p.http = 'ws'; $p
 }
 # Send one pack and wait for one frame, at most 10 s; a silent server fails the run instead of hanging it.
-# Push packs that were already queued for this connection are skipped: the caller wants the reply.
+# A server-initiated push already queued for this connection is skipped: the caller wants the reply.
+# ⭐ Told apart by a *field* rather than a list of subtypes: every server → client push carries `gap`
+# in its meta (they all share one subscription's gap flag) and no reply ever does -- Ack, Error and the
+# Batch packs all leave it out. 🚨 The list version had to name each push, and it named only 0x14/0x06:
+# 0x14/0x07 would have broken this too and never did only because a feature flag kept it off the wire,
+# and adding the invite pushes (0x05/0x06, 0x05/0x07) broke [1.7b] for exactly that reason.
+# ⇒ a new push needs no edit here (/docs/design/events/invites-on-the-wire.md §4).
+function Is-Push($p) { $null -ne $p.meta -and ($p.meta.PSObject.Properties.Name -contains 'gap') }
 function Call($ws, [byte[]]$pack) {
   Ws-Send $ws $pack
   for ($i = 0; $i -lt 50; $i++) {
     $p = Recv-Or-Null $ws 10000
     if ($null -eq $p) { throw 'no reply within 10 s' }
     if ($p.closed) { throw "server closed the connection: $($p.code)" }
-    if (-not ($p.kind -eq 0x14 -and $p.subtype -eq 6)) { return $p }
+    if (-not (Is-Push $p)) { return $p }
   }
   throw 'only pushes, no reply'
 }
@@ -116,6 +123,42 @@ function Unsubscribe($ws, [uint64]$id, $rooms) {
   Call $ws (Json-Pack 0x14 5 (Conv $id) 1 $meta $null)
 }
 function Ids($packs) { @($packs | ForEach-Object { $_.events } | ForEach-Object { $_.event_id }) }
+# ---------- 0x05 Invite (/docs/design/events/invites-on-the-wire.md §5) ----------
+function Invite-Subscribe($ws, [uint64]$id) { Call $ws (Json-Pack 0x05 4 (Conv $id) 0 @{} $null) }
+function Invite-Unsubscribe($ws, [uint64]$id) { Call $ws (Json-Pack 0x05 5 (Conv $id) 1 @{} $null) }
+# One complete pass: Batch packs until `r` reaches 0. Returns every pack, so a caller can check the
+# counting as well as the contents. 🚨 `r == 0` is the only thing that says the pass is complete.
+function Invite-Fetch($ws, [uint64]$id, $batch) {
+  $meta = @{}; if ($null -ne $batch) { $meta.batch = $batch }
+  $packs = @()
+  $p = Call $ws (Json-Pack 0x05 1 (Conv $id) 0 $meta $null)
+  while ($true) {
+    $packs += ,$p
+    if ($p.kind -ne 0x05 -or $p.subtype -ne 2) { break }
+    if ([int]$p.meta.r -eq 0) { break }
+    $p = $null
+    while ($null -eq $p) {
+      $q = Recv-Or-Null $ws 10000
+      if ($null -eq $q) { throw 'the invite pass stopped before r reached 0' }
+      if ($q.closed) { throw "server closed the connection: $($q.code)" }
+      if (-not (Is-Push $q)) { $p = $q }
+    }
+  }
+  $packs
+}
+# The rooms one pass listed, in the order it served them (oldest invite first).
+function Invite-Rooms($packs) {
+  @($packs | Where-Object { $_.kind -eq 0x05 -and $_.subtype -eq 2 } | ForEach-Object { Push-Events ([byte[]]$_.data) } | ForEach-Object { $_.room_id })
+}
+# Waits for one Invite push (0x05/0x06 Push or 0x05/0x07 Gone), or $null.
+function Recv-Invite($ws, [int]$ms = 4000) {
+  for ($i = 0; $i -lt 20; $i++) {
+    $p = Recv-Or-Null $ws $ms
+    if ($null -eq $p -or $p.closed) { return $null }
+    if ($p.kind -eq 0x05) { return $p }
+  }
+  $null
+}
 # A Stream pack (0x02): the meta is the room id itself, as UTF-8 text rather than JSON, and the
 # header carries which draft (id) and the author's piece counter (seq).
 function Stream-Pack([byte]$subtype, [string]$room, [uint64]$draftId, [uint32]$seq, [byte[]]$data) {
@@ -628,6 +671,120 @@ $refused = Recv-Or-Null $wsLocked 5000
 Check '[5.6] ... and its next frame is refused with M_USER_LOCKED' ($null -ne $refused -and -not $refused.closed -and $refused.subtype -eq 3 -and $refused.meta.errcode -eq 'M_USER_LOCKED') "$(if ($null -eq $refused) { 'nothing' } else { Describe $refused })"
 
 $wsOne.Dispose(); $wsTwo.Dispose(); $wsLocked.Dispose()
+
+# ================= Scenario 6: the invite stream (0x05 Invite, issue #111) =================
+# /docs/design/events/invites-on-the-wire.md. A wbf account had no way to learn it was invited:
+# Event/Push only carries joined rooms, the bridged /joined_rooms only lists joined ones, and asking
+# the room itself is a 403 before you accept. ⭐ So invites get a subscription of their own, and it has
+# the one property the message stream deliberately does not: its catch-up runs to completion.
+#
+# 📎 Two things in that doc e2e cannot reach, and unit tests cover instead:
+#   - §6 the trim of `invite_room_state`: it only applies to state another server sent, and this is
+#     one server (`list_stripped_state_kept` has four tests).
+#   - §7 `Gone(knock)`: the auth rules forbid invite → knock, so no API call reaches that arm. It is
+#     covered by construction — one hook after the match, not one per arm.
+Log '################ Scenario 6: invites have their own subscription ################'
+$regF = Register 'frank'; $regG = Register 'grace'
+$wsF = (Ws-Open-Usable $regF.access_token).ws
+$wsG = (Ws-Open-Usable $regG.access_token).ws
+$subF = Invite-Subscribe $wsF 60
+$null = Invite-Subscribe $wsG 61
+Check '[6.0] Invite/Subscribe is acked with the position it registered at' ($subF.subtype -eq 2 -and $null -ne $subF.meta.latest_count -and [int64]$subF.meta.latest_count -gt 0) "$(Describe $subF)"
+
+$roomI1 = Create-Room $tokA 'invite-one'
+Invite $roomI1 $regF.user_id $tokA
+$pushed = Recv-Invite $wsF
+Check '[6.1] being invited is pushed on the invite stream, with the room and who sent it' ($null -ne $pushed -and $pushed.subtype -eq 6 -and $pushed.meta.room_id -eq $roomI1 -and $pushed.meta.inviter -eq $regA.user_id -and $pushed.id -eq $subF.id) "$(if ($null -eq $pushed) { 'nothing within 4 s' } else { Describe $pushed })"
+Check '[6.1b] it carries the invite''s own position and is_direct, which this one is not' ($null -ne $pushed -and [int64]$pushed.meta.is -gt 0 -and $pushed.meta.is_direct -eq $false) "is=$($pushed.meta.is) is_direct=$($pushed.meta.is_direct)"
+$pushedState = @(Push-Events ([byte[]]$pushed.data))
+$pushedTypes = @($pushedState | ForEach-Object { $_.type })
+Check '[6.1c] and the stripped state, including frank''s own member event, so sc is never 0 in the ordinary case' ([int]$pushed.meta.sc -eq $pushedState.Count -and [int]$pushed.meta.sc -ge 1 -and ($pushedTypes -contains 'm.room.name') -and @($pushedState | Where-Object { $_.type -eq 'm.room.member' -and $_.state_key -eq $regF.user_id }).Count -eq 1) "sc=$($pushed.meta.sc) types=$($pushedTypes -join ',')"
+
+# 🔴 An invite is not news for everybody: grace is subscribed to the invite stream and was not invited.
+$leakG = Recv-Invite $wsG 1500
+Check '[6.2] only the invited user is pushed, not every invite subscriber' ($null -eq $leakG) "$(if ($null -eq $leakG) { 'silence, as designed' } else { Describe $leakG })"
+
+# 🔴 The streams do not mix: a connection that subscribed to messages only hears nothing about invites.
+$wsFmsg = (Ws-Open-Usable $regF.access_token).ws
+$null = Subscribe $wsFmsg 62 $null $null
+$roomI2 = Create-Room $tokA 'invite-two'
+Invite $roomI2 $regF.user_id $tokA
+$onMsgStream = Recv-Invite $wsFmsg 2000
+$onInviteStream = Recv-Invite $wsF
+Check '[6.3] Event/Subscribe does not carry invites: the two subscriptions are separate' ($null -eq $onMsgStream -and $null -ne $onInviteStream -and $onInviteStream.meta.room_id -eq $roomI2) "msgStream=$(if ($null -eq $onMsgStream) { 'silence' } else { Describe $onMsgStream }) inviteStream=$(if ($null -eq $onInviteStream) { 'nothing' } else { $onInviteStream.meta.room_id })"
+
+# The pass: every pending invite, oldest first, until r reaches 0.
+# ⚠️ Not `$pass`: PowerShell names are case-insensitive, so that is the same variable as the
+# `$script:Pass` counter at the top -- and overwriting it turns every later `Check` into
+# "The '++' operator works only on numbers" while still reporting fail=0.
+$passPacks = @(Invite-Fetch $wsF 63 $null)
+$passRooms = @(Invite-Rooms $passPacks)
+$last = $passPacks[$passPacks.Count - 1]
+Check '[6.4] one Fetch pass lists every pending invite and ends with r = 0' ($passRooms.Count -eq 2 -and ($passRooms -contains $roomI1) -and ($passRooms -contains $roomI2) -and [int]$last.meta.r -eq 0 -and [int]$last.meta.tc -eq 2) "rooms=$($passRooms -join ',') r=$($last.meta.r) tc=$($last.meta.tc)"
+Check '[6.4b] oldest first: the room invited to first is served first' ($passRooms[0] -eq $roomI1) "order=$($passRooms -join ',')"
+$entryOne = @($passPacks | Where-Object { $_.subtype -eq 2 } | ForEach-Object { Push-Events ([byte[]]$_.data) } | Where-Object { $_.room_id -eq $roomI1 })[0]
+Check '[6.4c] and the entry says the same as the push did: same state, same derived fields' ($null -ne $entryOne -and $entryOne.state.Count -eq [int]$pushed.meta.sc -and $entryOne.inviter -eq $regA.user_id -and $entryOne.is_direct -eq $false) "state=$(if ($null -eq $entryOne) { 'no entry' } else { $entryOne.state.Count }) push_sc=$($pushed.meta.sc)"
+
+# This stream is the connection's catch-up, so it has nowhere to go over HTTP.
+$httpFetch = Send-Pack (Json-Pack 0x05 1 (Conv 64) 0 @{} $null) $regF.access_token
+$httpSub = Send-Pack (Json-Pack 0x05 4 (Conv 65) 0 @{} $null) $regF.access_token
+Check '[6.5] Fetch and Subscribe are both refused over HTTP' ($httpFetch.subtype -eq 3 -and $httpFetch.meta.code -eq 'Unsupported' -and $httpSub.subtype -eq 3 -and $httpSub.meta.code -eq 'Unsupported') "fetch=$(Describe $httpFetch) sub=$(Describe $httpSub)"
+
+# Declining ends the invite, and the stream says what ended it.
+Leave $roomI1 $regF.access_token
+$gone = Recv-Invite $wsF
+Check '[6.6] declining is pushed as Gone(leave), with the position of the event that did it' ($null -ne $gone -and $gone.subtype -eq 7 -and $gone.meta.room_id -eq $roomI1 -and $gone.meta.membership -eq 'leave' -and [int64]$gone.meta.is -gt 0) "$(if ($null -eq $gone) { 'nothing' } else { Describe $gone })"
+$afterLeave = @(Invite-Rooms (Invite-Fetch $wsF 66 $null))
+Check '[6.6b] ... and the next pass no longer lists it' (-not ($afterLeave -contains $roomI1) -and ($afterLeave -contains $roomI2)) "rooms=$($afterLeave -join ',')"
+
+Join $roomI2 $regF.access_token
+$goneJoin = Recv-Invite $wsF
+Check '[6.7] accepting is pushed as Gone(join): how the list emptied has one source' ($null -ne $goneJoin -and $goneJoin.subtype -eq 7 -and $goneJoin.meta.room_id -eq $roomI2 -and $goneJoin.meta.membership -eq 'join') "$(if ($null -eq $goneJoin) { 'nothing' } else { Describe $goneJoin })"
+
+# 🚨 The negative of [6.6]: leaving a room nobody invited you to is not an invite ending. This is what
+# pins reading `is_invited` *before* the write — mark_as_left clears the invite either way.
+$ownRoom = Create-Room $regF.access_token 'frank-own'
+Leave $ownRoom $regF.access_token
+$notGone = Recv-Invite $wsF 2000
+Check '[6.8] leaving a room you were never invited to pushes nothing' ($null -eq $notGone) "$(if ($null -eq $notGone) { 'silence, as designed' } else { Describe $notGone })"
+
+# 🔴 §3.3, the whole reason the pass is a snapshot. While frank has no connection at all: one invite
+# arrives, and another arrives and is then withdrawn. A waterline the client kept would find the first
+# and never learn about the second -- the row it would have to notice is deleted.
+$wsF.Dispose(); $wsFmsg.Dispose()
+$roomI3 = Create-Room $tokA 'invite-while-away'
+$roomI4 = Create-Room $tokA 'withdrawn-while-away'
+Invite $roomI3 $regF.user_id $tokA
+Invite $roomI4 $regF.user_id $tokA
+Kick $roomI4 $regF.user_id $tokA
+$wsF2 = (Ws-Open-Usable $regF.access_token).ws
+$null = Invite-Subscribe $wsF2 67
+$away = @(Invite-Rooms (Invite-Fetch $wsF2 68 $null))
+Check '[6.9] an invite that arrived while every connection was closed is still caught up' ($away -contains $roomI3) "rooms=$($away -join ',')"
+Check '[6.10] and one that was withdrawn while away is absent, which is what makes the pass a snapshot' (-not ($away -contains $roomI4)) "rooms=$($away -join ',')"
+
+# Batching: the pass is cut into packs, and the counting has to add up across them.
+$roomI5 = Create-Room $tokA 'batch-one'; $roomI6 = Create-Room $tokA 'batch-two'
+Invite $roomI5 $regF.user_id $tokA; Invite $roomI6 $regF.user_id $tokA
+$batched = @(Invite-Fetch $wsF2 69 1)
+$batchPacks = @($batched | Where-Object { $_.kind -eq 0x05 -and $_.subtype -eq 2 })
+$seqs = @($batchPacks | ForEach-Object { [int]$_.seq })
+$remainders = @($batchPacks | ForEach-Object { [int]$_.meta.r })
+$oldests = @($batchPacks | ForEach-Object { [int64]$_.meta.os })
+$ascending = $true; for ($i = 1; $i -lt $oldests.Count; $i++) { if ($oldests[$i] -le $oldests[$i - 1]) { $ascending = $false } }
+Check '[6.11] batch = 1 cuts the pass into one pack per room, seq counting from 0' ($batchPacks.Count -eq 3 -and ($seqs -join ',') -eq '0,1,2' -and @($batchPacks | Where-Object { [int]$_.meta.bc -ne 1 }).Count -eq 0) "packs=$($batchPacks.Count) seqs=$($seqs -join ',')"
+Check '[6.11b] r counts down to 0 and the counts only go forwards' (($remainders -join ',') -eq '2,1,0' -and $ascending -and @($batchPacks | Where-Object { [int]$_.meta.tc -ne 3 }).Count -eq 0) "r=$($remainders -join ',') os=$($oldests -join ',')"
+
+# Unsubscribing stops the pushes; the catch-up is still there for next time.
+$null = Invite-Unsubscribe $wsF2 67
+$roomI7 = Create-Room $tokA 'after-unsubscribe'
+Invite $roomI7 $regF.user_id $tokA
+$afterUnsub = Recv-Invite $wsF2 2000
+Check '[6.12] Unsubscribe stops the pushes' ($null -eq $afterUnsub) "$(if ($null -eq $afterUnsub) { 'silence, as designed' } else { Describe $afterUnsub })"
+$backAgain = @(Invite-Rooms (Invite-Fetch $wsF2 70 $null))
+Check '[6.12b] ... and the invite it missed is still waiting in the next pass' ($backAgain -contains $roomI7) "rooms=$($backAgain -join ',')"
+
+$wsG.Dispose(); $wsF2.Dispose()
 Stop-Server $server
 
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"

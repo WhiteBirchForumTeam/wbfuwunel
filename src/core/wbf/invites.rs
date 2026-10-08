@@ -1,6 +1,8 @@
-//! What a pending invite looks like on the wire, and the two pure functions
-//! both directions share: reading the invite's own fields out of the stripped
-//! state, and trimming a stripped state that arrived from another server.
+//! What a pending invite looks like on the wire.
+//!
+//! Two pure functions both directions share: reading the invite's own fields
+//! out of the stripped state, and deciding which of another server's stripped
+//! state events are worth keeping.
 //!
 //! ⭐ Why both directions read the **stored** stripped state rather than the
 //! values a caller is holding: the federated path hands `update_membership` a
@@ -10,14 +12,16 @@
 
 use serde_json::{Map, Value};
 
-/// Bytes a single stripped state event may take before we refuse to store it:
-/// the Matrix limit on one event. Anything larger was never a legal state
-/// event, so it cannot be a legal stripped copy of one either
+/// Bytes a single stripped state event may take before we refuse to store it.
+///
+/// This is the Matrix limit on one event: anything larger was never a legal
+/// state event, so it cannot be a legal stripped copy of one either
 /// (/docs/design/events/invites-on-the-wire.md §6).
 pub const STRIPPED_EVENT_LEN_MAX: usize = 65536;
 
-/// Stripped state events one invite may carry after trimming. The recommended
-/// cells plus both member events leave room to spare; with
+/// Stripped state events one invite may carry after trimming.
+///
+/// The recommended cells plus both member events leave room to spare; with
 /// `STRIPPED_EVENT_LEN_MAX` this is what bounds an invite's bytes, so no
 /// separate byte setting is needed (same doc, §6 rule ③).
 pub const STRIPPED_EVENT_COUNT_MAX: usize = 16;
@@ -51,6 +55,7 @@ pub struct InviteFields {
 /// Args:
 ///     state: each stripped state event's JSON, in stored order
 ///     user: the invited user, example: "@bob:localhost"
+///
 /// Return:
 ///     InviteFields  all three derived from the invited user's **own**
 ///     `m.room.member` event; every field empty/false when the state does not

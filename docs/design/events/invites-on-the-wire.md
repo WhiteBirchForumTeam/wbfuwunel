@@ -110,7 +110,7 @@ issue #87）：**client 存的號碼是一個濾網，而濾網會造洞。**
 |---|---|
 | 🚨 **兩種水位語意不同** | 訊息是「補一段就停，除非使用者往上滾」—— 它**本來就不保證補齊**（`more` 可以一直是 true）。邀請**必須補到齊** |
 | 🚨 **往上滾會拖來一堆不相干的東西** | 混在一起之後，為了補更舊的邀請要連訊息（甚至媒體）一起拉，純屬多餘 |
-| ⭐ **A3：一個模組回答一種問題** | `Recent` 的 `tc`／`fs`／`ls` 是「已加入房間的訊息窗」，塞進一種沒有訊息的東西會讓它們失去意義 |
+| ⭐ **一條流回答一種問題** | `Recent` 的 `tc`／`fs`／`ls` 是「已加入房間的訊息窗」，塞進一種沒有訊息的東西會讓它們失去意義 |
 | 📎 **汙染** | 訊息處理那條路不該為了邀請多一個分支 |
 
 ⚠️ **重疊是已知且接受的取捨**：那則邀請的成員事件，之後 client 點進房間時也會在時間線裡看到。
@@ -128,7 +128,7 @@ issue #87）：**client 存的號碼是一個濾網，而濾網會造洞。**
 |---|---|---|---|
 | `0x01 Fetch` | client | `{ "ci_seq"?: u64, "batch"?: n }`；**`id` 由 client 選**；回應是一串 `0x02 Batch`，🚫 不是 `Ack`；**只走 WS** | 無 |
 | `0x02 Batch` | **server → client** | `{ "tc", "bc", "os", "ns", "counts": [u64…], "r" }` | `bc` 筆，每筆 u32 大端長度 ＋ 一間房的 JSON |
-| `0x04 Subscribe` | client | `{}`；**`id` 由 client 選**（之後每個 `Push`／`Gone` 抄它）| 無 |
+| `0x04 Subscribe` | client | `{}`；**`id` 由 client 選**（之後每個 `Push`／`Gone` 抄它）；回應 `{ "latest_count" }` —— **註冊完成的那一刻**的位置，所以 client 知道接下來那一輪 `Fetch` 涵著哪些推播。⚠️ 註冊**之後**才讀：反過來會讓 client 以為自己看過一則它沒看過的邀請 | 無 |
 | `0x05 Unsubscribe` | client | `{}`；回應 `{}`；沒訂也是 no-op | 無 |
 | `0x06 Push` | **server → client** | `{ "room_id", "inviter"?, "is_direct", "reason"?, "is": <count>, "sc": n, "gap": bool }` | `sc` 則縮減狀態事件 |
 | `0x07 Gone` | **server → client** | `{ "room_id", "membership", "is": <count>, "gap": bool }` | 無 |
@@ -139,6 +139,10 @@ issue #87）：**client 存的號碼是一個濾網，而濾網會造洞。**
 ⚠️ /docs/design/wire/wire-format.md §2.2 那張 **`id` 型別表**要加一列：
 `Invite/Fetch`、`Invite/Subscribe`／`Unsubscribe` 的 `id` **由 client 挑**。
 🚨 那張表自己寫著「先在這張表加一列，才能發」。
+
+⭐ **而 `Kind` 這個 enum 有一條測試在守這件事**：`all_kind_bytes_round_trip`（`src/core/wbf/pack.rs`）
+掃全 256 個 byte 數有幾個解得開，並把那個數寫成斷言 —— 📌 加一個 kind 就會紅，而它的
+訊息直接指著 §3.3 那張分配表。這一支把它從 19 改成 20。
 
 ### 5.1 一輪補窗怎麼走
 
@@ -277,20 +281,39 @@ if was_invited && ends_invite(&membership) {      // 🔴 推一次
   `DeviceChanged` 被擋是因為它的內容只對做 E2EE 版本比對的 client 有意義、而且**要先算**。
   ⭐ 協定本來就要求 client 忽略認不得的 frame。
 
-## 10. 測試要釘住的
+## 10. 測試
 
-| | |
+**e2e11 情境 6，20 條**（`tests/e2e/e2e11.ps1`，跑在前幾個情境的同一台 server 上）：
+
+| | 釘住什麼 |
 |---|---|
-| 🔴 補得齊 | 連線全關時被邀請 → 重連 → `Fetch` 一輪拿得到；`r` 遞減到 0；`tc` 對得上 |
-| 🔴 **被收回的不在快照裡** | 離線期間邀請被 kick 掉 → 重連一輪 ⇒ **不列它**（§3.3 的核心） |
-| 🔴 只給被邀的那個人 | 另一個也 `Invite/Subscribe` 著、沒被邀的 user ⇒ 收不到 |
-| 🔴 不混線 | 訊息那條訂閱（`Event/Subscribe`）**收不到**邀請推播；`gap` 各自獨立 |
-| 🚨 單純離開不是 `Gone` | 從沒被邀請過的人離開自己的房 ⇒ 不推（釘「寫入前讀 `is_invited`」）|
-| 🚨 knock 也要推 `Gone` | §7 那個一處接點的反面測試 |
-| 🚨 挑對成員事件 | state 裡有兩則 `m.room.member` ⇒ 衍生欄位取的是**被邀請者**那則 |
-| 🚨 閘 | 超大的 `invite_room_state` 進來 ⇒ 存下來的被修剪、**成員事件還在**、`validate_stripped_create` 仍然先跑 |
-| | 分批：`batch` 小於總數 ⇒ 多個 `Batch`，`counts` 與 data 筆數一致 |
-| | HTTP 走不通（`Fetch`／`Subscribe` ⇒ `Unsupported`）|
+| `[6.0]` | `Subscribe` 的 `latest_count` |
+| `[6.1]`／`[6.1b]`／`[6.1c]` | 推得到：`id` 抄 `Subscribe`、`inviter` 對、`is` > 0、`sc` 跟 data 的則數一致且 **≥ 1**、含**他自己的** member 事件 |
+| 🔴 `[6.2]` | **只給被邀的那個人** —— 另一個也 `Invite/Subscribe` 著、沒被邀的 user 收不到 |
+| 🔴 `[6.3]` | **不混線** —— 只訂了訊息（`Event/Subscribe`）的那條連線收不到邀請推播 |
+| `[6.4]`／`[6.4b]`／`[6.4c]` | 一輪 `Fetch` 列得齊、`r` 收在 0、`tc` 對得上；**舊 → 新**；而那一筆跟推播說的是同一件事（state 則數、`inviter`、`is_direct`）|
+| `[6.5]` | `Fetch` 與 `Subscribe` 走 HTTP 都是 `Unsupported` |
+| `[6.6]`／`[6.6b]` | 拒絕 ⇒ `Gone(leave)` 帶 `is`，而且下一輪不再列它 |
+| `[6.7]` | 接受 ⇒ `Gone(join)` |
+| 🚨 `[6.8]` | **單純離開不是 `Gone`** —— 從沒被邀請過的人離開自己的房 ⇒ 不推（釘「寫入前讀 `is_invited`」）|
+| 🔴 `[6.9]` | 連線全關時進來的邀請，重連一輪補得到 |
+| 🔴 `[6.10]` | **離線期間被收回的不在快照裡** —— ⭐ §3.3 的核心，也是 `ci_seq` 做不到的那一格 |
+| `[6.11]`／`[6.11b]` | `batch = 1` ⇒ 一房一個 pack、`seq` 從 0 遞增、`r` 收到 0、`tc` 每個 pack 一致、`os` 只往前 |
+| `[6.12]`／`[6.12b]` | `Unsubscribe` 之後不再推，而漏掉的那則還在下一輪的補窗裡 |
+
+📎 **e2e 到不了、改由單元測試守的兩格**（16 條，`core` 5、`service` 7、`api` 4）：
+
+| | 為什麼 e2e 到不了 | 誰守 |
+|---|---|---|
+| §6 的閘 | 它只對**別的 server 送來**的 state 生效，而 e2e 是單機 | `list_stripped_state_kept` 4 條（留建議的 type、丟超大的、格數上限、空的不炸）|
+| §7 的 `Gone(knock)` | 授權規則禁止 invite → knock，沒有 API 叫得到那個分支 | 結構上成立：接點是 match **之後**一處，不是每個分支一處 |
+| §5.2 挑對成員事件 | 要構造「兩則 member 事件」的 state | `get_invite_fields` 的那條測試（🚨 state 裡確實有兩則，邀請者的在前面）|
+| §5.3 兩個降級 | 要構造超過 2 MiB 的 state／60 KiB 的 `reason` | `framed_state`／`invited_meta` 各一條 |
+
+⚠️ **`Call` 這個測試輔助函式這一支改成看 `gap` 欄位**，不再逐個列 subtype ——
+📎 第一版列了 `0x14/0x06` 一個，而 `0x14/0x07` 也會打爛它（只是被 feature 擋著從沒浮現），
+加邀請推播時就真的弄壞了 `[1.7b]`。⭐ **每個 server → client 的推播都帶 `gap`，而回覆從不帶**
+（`Ack`、`Error`、三種 `Batch` 都沒有）⇒ 以後加新推播不用再改它。
 
 ## 11. ✅ 維護者定的
 

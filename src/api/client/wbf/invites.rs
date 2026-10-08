@@ -152,6 +152,11 @@ pub(super) async fn handle_invite_fetch(
 	reply: &mut Reply,
 ) -> Result<(), Failure> {
 	let session = ctx.get_session()?;
+	// ⚠️ `admission` already refuses this over HTTP, so this branch is not
+	// reachable today. It is here because the handler should not depend on a
+	// table elsewhere staying the way it is: an admission row edited later
+	// would otherwise have this queueing a run of `Batch` packs at a reply
+	// that can only carry one.
 	if reply.websocket_queue().is_none() {
 		return Err(Reject::code(
 			RejectCode::Unsupported,
@@ -168,16 +173,25 @@ pub(super) async fn handle_invite_fetch(
 	let pending = list_pending(services, &session.user, meta.ci_seq, upper_bound).await;
 	let total = pending.len();
 
-	let mut emitted: usize = 0;
+	// 🚨 Counted over the invites the pass **planned** to serve, not over the
+	// entries it managed to build. An invite that ends between the index pass
+	// and its state being read is served by nobody — and if the skipped ones
+	// did not count here, `r` would never reach 0 and the client would wait
+	// for a pack that is never coming.
+	let mut dealt_with: usize = 0;
 	let mut seq: u32 = 0;
 	let mut chunks = pending.chunks(batch);
 	loop {
-		let entries = match chunks.next() {
-			| Some(chunk) => read_entries(services, &session.user, chunk, services.config.wbf_data_max_bytes).await,
+		let (planned, entries) = match chunks.next() {
+			| Some(chunk) => (
+				chunk.len(),
+				read_entries(services, &session.user, chunk, services.config.wbf_data_max_bytes).await,
+			),
 			// An empty pass is still answered, by one empty Batch that ends it.
-			| None if seq == 0 => Vec::new(),
+			| None if seq == 0 => (0, Vec::new()),
 			| None => break,
 		};
+		let skipped = planned.saturating_sub(entries.len());
 
 		let mut ranges = list_pack_ranges(
 			entries.iter().map(|entry| entry.json.len()),
@@ -188,16 +202,23 @@ pub(super) async fn handle_invite_fetch(
 			ranges.push(0..0);
 		}
 
-		for range in ranges {
-			let in_pack = &entries[range];
-			emitted = emitted.saturating_add(in_pack.len());
+		let last = ranges.len().saturating_sub(1);
+		for (position, range) in ranges.into_iter().enumerate() {
+			// `list_pack_ranges` covers exactly these entries, so this cannot
+			// miss — and if it ever did, an empty pack is a pass that still
+			// ends rather than a panic inside a connection's task.
+			let in_pack = entries.get(range).unwrap_or(&[]);
+			dealt_with = dealt_with.saturating_add(in_pack.len());
+			if position == last {
+				dealt_with = dealt_with.saturating_add(skipped);
+			}
 			reply
 				.send(batch_pack(
 					view.header.id,
 					seq,
 					total,
 					in_pack,
-					total.saturating_sub(emitted),
+					total.saturating_sub(dealt_with),
 				)?)
 				.await?;
 			seq = seq.saturating_add(1);
@@ -381,7 +402,7 @@ mod tests {
 
 		let view = decode(&mut pack).expect("it decodes");
 		let meta: Value = view.meta_json().expect("the meta is JSON");
-		assert_eq!(Kind::try_from(view.header.kind as u8).expect("kind"), Kind::Invite);
+		assert_eq!(view.header.kind, Kind::Invite);
 		assert_eq!(view.header.subtype, BATCH);
 		assert_eq!(meta["tc"].as_u64(), Some(5));
 		assert_eq!(meta["bc"].as_u64(), Some(2));
