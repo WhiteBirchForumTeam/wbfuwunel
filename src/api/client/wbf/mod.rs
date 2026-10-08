@@ -46,7 +46,6 @@ use tuwunel_service::{
 
 mod bridge;
 mod device;
-mod invites;
 mod draft;
 mod recent;
 mod send;
@@ -91,16 +90,6 @@ mod event {
 	pub(super) const SUBSCRIBE: u8 = 0x04;
 	pub(super) const UNSUBSCRIBE: u8 = 0x05;
 	// 0x06 Push is server to client only: `streams::EVENT_PUSH_SUBTYPE`.
-	// 0x07 DeviceChanged, 0x08 Invited and 0x09 InviteGone are likewise server
-	// to client only (`streams::EVENT_*_SUBTYPE`).
-}
-
-/// `Room` subtypes. 📎 Everything else this kind carries goes over the bridge
-/// (`0x20`+); this is the one thing with no Matrix endpoint to bridge to,
-/// because the invites it lists live only in `/sync`
-/// (/docs/design/events/invites-on-the-wire.md §2).
-mod room {
-	pub(super) const INVITED_ROOMS: u8 = 0x01;
 }
 
 /// # `POST /_wbf/v1/pack`
@@ -509,10 +498,6 @@ const fn admission(kind: Kind, subtype: u8) -> Option<Admission> {
 		// They change what a connection listens to: WebSocket only.
 		| (Kind::Event, event::SUBSCRIBE | event::UNSUBSCRIBE) =>
 			Some(with(logged_in_websocket_only, IdType::ClientConversation)),
-		// Catching up on the invites a subscription may have missed is a
-		// connection's business, so it goes where the subscription is
-		// (/docs/design/events/invites-on-the-wire.md §3.3).
-		| (Kind::Room, room::INVITED_ROOMS) => Some(logged_in_websocket_only),
 		// The to-device queue is a connection's to hold, and destroying from
 		// it is only allowed to the connection holding it: WebSocket only,
 		// `Fetch` included (its reply is a stream of `Batch` packs).
@@ -733,13 +718,6 @@ async fn dispatch_native(
 		},
 		| (Kind::Event, event::UNSUBSCRIBE) => {
 			subscribe::handle_unsubscribe(services, ctx, view, reply).await?;
-			Ok(SessionChange::Keep)
-		},
-		| (Kind::Room, room::INVITED_ROOMS) => {
-			let (meta, data) = invites::list_pending_invites(services, ctx.user()?).await?;
-			reply
-				.send(ack(header.id, header.seq, meta, data))
-				.await?;
 			Ok(SessionChange::Keep)
 		},
 		| (Kind::Device, device::SUBSCRIBE) => {

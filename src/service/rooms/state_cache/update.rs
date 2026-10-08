@@ -99,25 +99,13 @@ pub async fn update_membership(
 		count,
 	}: MembershipUpdate<'_>,
 ) -> Result {
-	// Cloned rather than moved out: the invite arm still needs the event's
-	// `is_direct` and `reason` for its push.
-	let membership = membership_event.membership.clone();
+	let membership = membership_event.membership;
 
 	self.ensure_remote_user(user_id).await?;
 
 	match membership {
 		| MembershipState::Join => {
-			// Same reason as the leave arm: accepting an invite ends it, and
-			// after `mark_as_joined` there is no invite left to notice.
-			let was_invited = self.is_invited(user_id, room_id).await;
-
 			self.handle_join(room_id, user_id, count).await?;
-
-			if was_invited {
-				self.services
-					.streams
-					.push_invite_gone(user_id, room_id, membership.as_str());
-			}
 		},
 		| MembershipState::Invite => {
 			if self
@@ -131,27 +119,9 @@ pub async fn update_membership(
 
 			self.mark_as_invited(user_id, room_id, count, last_state, invite_via)
 				.await;
-
-			// The invite hook of the wbf channels: the user's account-wide
-			// subscriptions are told, because nothing else can tell them —
-			// they are not in this room's channel and cannot read its state
-			// yet (/docs/design/events/invites-on-the-wire.md §4).
-			self.push_invited_to_streams(user_id, room_id, sender, &membership_event)
-				.await;
 		},
 		| MembershipState::Leave | MembershipState::Ban => {
-			// 🚨 Read before the write: `mark_as_left` drops the invite state,
-			// and only an invite that **was** pending has an `InviteGone` to
-			// announce — a member who merely left never had one.
-			let was_invited = self.is_invited(user_id, room_id).await;
-
 			self.handle_leave(room_id, user_id, count).await;
-
-			if was_invited {
-				self.services
-					.streams
-					.push_invite_gone(user_id, room_id, membership.as_str());
-			}
 
 			// A departure drops the room from the account-wide badge total.
 			if self.services.globals.user_is_local(user_id) {
@@ -417,45 +387,6 @@ async fn ensure_remote_user(&self, user_id: &UserId) -> Result {
 		.users
 		.create(user_id, None, None)
 		.await
-}
-
-/// Pushes `Event/Invited` to the user's account-wide subscriptions.
-///
-/// ⭐ The stripped state is **read back from what was just stored** rather than
-/// taken from the caller's copy: that makes the push carry exactly what
-/// `Room/InvitedRooms` will answer later, so a client that uses one to check the
-/// other can never see them disagree
-/// (/docs/design/events/invites-on-the-wire.md §3.3).
-///
-/// Args:
-///     user_id: who was invited, example: "@bob:localhost"
-///     room_id: example: "!r:localhost"
-///     sender: who sent the invite, example: "@alice:localhost"
-///     membership_event: the invite's own content, for `is_direct` and `reason`
-#[implement(super::Service)]
-async fn push_invited_to_streams(
-	&self,
-	user_id: &UserId,
-	room_id: &RoomId,
-	sender: &UserId,
-	membership_event: &RoomMemberEventContent,
-) {
-	let state: Vec<Vec<u8>> = self
-		.invite_state(user_id, room_id)
-		.await
-		.unwrap_or_default()
-		.iter()
-		.map(|event| event.json().get().as_bytes().to_vec())
-		.collect();
-
-	self.services.streams.push_invited(
-		user_id,
-		room_id,
-		Some(sender),
-		membership_event.is_direct,
-		membership_event.reason.as_deref(),
-		&state,
-	);
 }
 
 #[implement(super::Service)]
