@@ -49,7 +49,7 @@ wbf 帳號**收不到邀請**，而且也查不到：
 
 🚨 **最後一列跟前四列性質不同**：沒有事件就沒有序號 ⇒ 它**搭不上水位那條路**。
 📌 §3 的完整快照仍然蓋住它（被清掉的房就是「不在快照裡」），所以它不會造成**漏**；
-剩下的只是「連線中的 client 要不要**即時**知道」，那是另一張 issue。
+剩下的只是「連線中的 client 要不要**即時**知道」，而那是 issue #116。
 
 ## 3. 水位：為什麼補得齊
 
@@ -174,7 +174,7 @@ issue #87）：**client 存的號碼是一個濾網，而濾網會造洞。**
 🚨 **因為呼叫者手上那份有一條路是空的**：聯邦的 `PUT /_matrix/federation/v2/invite`
 （`src/api/server/invite.rs`）傳給 `update_membership` 的是
 `RoomMemberEventContent::new(MembershipState::Invite)` —— **一個全新的空內容**，
-`is_direct` 永遠是 `false`、`reason` 掉了。而**真的那則 PDU 就在它存的 state 裡**
+`is_direct` 永遠是 `false`、`reason` 掉了（issue #117）。而**真的那則 PDU 就在它存的 state 裡**
 （那段 `.chain([pdu.to_format()])`）。
 
 ⭐ 兩條路都保證那則成員事件在 state 裡（本地是 `rooms::state::summary_stripped` 結尾的
