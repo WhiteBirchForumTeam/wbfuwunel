@@ -29,7 +29,8 @@ use tuwunel_core::{
 use tuwunel_service::{
 	Services,
 	membership::{
-		StrippedCreateVerdict, enforce_stripped_create, into_client_stripped, v12_room_ids,
+		StrippedCreateVerdict, enforce_stripped_create, into_client_stripped,
+		list_stripped_state_kept, v12_room_ids,
 	},
 	rooms::state_cache::MembershipUpdate,
 };
@@ -71,11 +72,25 @@ pub(crate) async fn create_invite_route(
 
 	let pdu = build_pdu(&body)?;
 
-	let invite_state: Vec<_> = body
+	// 🔴 Trimmed **after** `enforce_stripped_state` above, never before: that
+	// check reads the create event out of the untrimmed input, and trimming
+	// first would quietly weaken it.
+	//
+	// ⚠️ What the sender put here is bounded by nothing but the HTTP body, so
+	// the trim is what keeps one invite from storing megabytes per invited user
+	// (/docs/design/events/invites-on-the-wire.md §6).
+	//
+	// ⭐ Our own member PDU is appended afterwards and so is never trimmed: it
+	// is the one event both the invite push and `Invite/Fetch` derive the
+	// inviter, `is_direct` and `reason` from (same doc, §5.2).
+	let from_sender: Vec<_> = body
 		.invite_room_state
 		.clone()
 		.into_iter()
 		.filter_map(|state| into_client_stripped(&body.room_id, state))
+		.collect();
+	let invite_state: Vec<_> = list_stripped_state_kept(from_sender)
+		.into_iter()
 		.chain([pdu.to_format()])
 		.collect();
 

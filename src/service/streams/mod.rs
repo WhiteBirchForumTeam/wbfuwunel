@@ -25,6 +25,7 @@
 //! pushes.
 
 mod devices;
+mod invites;
 mod rooms;
 mod subscribers;
 
@@ -40,10 +41,12 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, mpsc};
 
 pub use self::{
 	devices::{CryptoState, DEVICE_CRYPTO_STATE_SUBTYPE, DEVICE_PUSH_SUBTYPE, PushedItem},
+	invites::{INVITE_GONE_SUBTYPE, INVITE_PUSH_SUBTYPE, PushedInvite},
 	rooms::{EVENT_DEVICE_CHANGED_SUBTYPE, EVENT_PUSH_SUBTYPE, PushedEvent, Subscribed},
 };
 use self::{
 	devices::DeviceTopic,
+	invites::InviteTopic,
 	rooms::RoomTopic,
 	subscribers::{Occupancy, Subscribers},
 };
@@ -247,6 +250,10 @@ pub struct Streams {
 	rooms: Subscribers<RoomTopic>,
 	/// The to-device queues (`0x16 Device`), at most one connection each.
 	devices: Subscribers<DeviceTopic>,
+	/// The pending-invite subscriptions (`0x05 Invite`), one topic per user
+	/// and as many connections each as the user has open
+	/// (/docs/design/events/invites-on-the-wire.md §7).
+	invites: Subscribers<InviteTopic>,
 	/// The connections whose last `Hello` declared `DEVICE_VERSIONS_FEATURE`
 	/// (/docs/design/keys/room-device-version.md §6.2, §7.1).
 	device_versions_declared: StdRwLock<HashSet<ConnectionId>>,
@@ -279,6 +286,9 @@ impl Streams {
 			// arrives: the registry can enforce it without a gap between
 			// looking and entering, and a call site cannot.
 			devices: Subscribers::new(Occupancy::OneTheLatest),
+			// Many, unlike the to-device queue: reading an invite destroys
+			// nothing, so every connection of a user may hold it at once.
+			invites: Subscribers::new(Occupancy::Many),
 			device_versions_declared: StdRwLock::new(HashSet::new()),
 		}
 	}
