@@ -113,9 +113,10 @@ offset  bytes              意思
 
 ### `0x13 Room`（房間）
 
-原生的 `InvitedRooms`（`0x01`）：列目前所有**待處理的邀請**，跟 `JoinedRooms`（`0x28`）對稱。
-⭐ 它是這個 kind 裡**唯一的原生 subtype**，因為它要的資料只在 `/sync` 的 `rooms.invite` 裡 ——
-沒有 Matrix 端點可以橋（[/docs/design/events/invites-on-the-wire.md](../design/events/invites-on-the-wire.md) §2）。
+📎 **這個 kind 全部走橋，一個原生 subtype 都沒有。** 待處理的邀請曾經想放在這裡（`0x01`），
+後來改成自己的 kind `0x05 Invite`：它要的是一條**自己的訂閱線**（補得齊、自己的 `gap`），
+不是一個請求／回應的端點 —— 見 [/docs/design/events/invites-on-the-wire.md](../design/events/invites-on-the-wire.md) §5。
+⚠️ 而 `JoinedRooms`（`0x28`）照 Matrix 的 `/joined_rooms` 原樣，**只列已加入的**，🚫 不含邀請。
 
 | subtype | 前 4 bytes | 名稱 | 做什麼 | 端點 | 變數（path ／ query） | data |
 |---|---|---|---|---|---|---|
