@@ -30,7 +30,7 @@ use tuwunel_service::{
 	Services,
 	membership::{
 		StrippedCreateVerdict, enforce_stripped_create, into_client_stripped,
-		list_stripped_state_kept, v12_room_ids,
+		list_stripped_state_kept, list_stripped_state_without_member_of, v12_room_ids,
 	},
 	rooms::state_cache::MembershipUpdate,
 };
@@ -80,16 +80,25 @@ pub(crate) async fn create_invite_route(
 	// the trim is what keeps one invite from storing megabytes per invited user
 	// (/docs/design/events/invites-on-the-wire.md §6).
 	//
-	// ⭐ Our own member PDU is appended afterwards and so is never trimmed: it
-	// is the one event both the invite push and `Invite/Fetch` derive the
-	// inviter, `is_direct` and `reason` from (same doc, §5.2).
+	// 🚨 And the sender's own copy of the invited user's member event is dropped
+	// before ours is appended: the three fields both `Invite/Push` and
+	// `Invite/Fetch` derive come from that event, and the sender's copy sat
+	// **first**, so a forged one decided who invited you
+	// (external review 2026-10-09, oliver and salvia).
+	// ⭐ Our own member PDU is appended afterwards and is never trimmed, so
+	// after this there is exactly one member event naming the invited user and
+	// it is the one we built from the PDU we verified (same doc, §5.2).
 	let from_sender: Vec<_> = body
 		.invite_room_state
 		.clone()
 		.into_iter()
 		.filter_map(|state| into_client_stripped(&body.room_id, state))
 		.collect();
-	let invite_state: Vec<_> = list_stripped_state_kept(from_sender)
+	let from_sender = list_stripped_state_without_member_of(
+		list_stripped_state_kept(from_sender),
+		&invited_user,
+	);
+	let invite_state: Vec<_> = from_sender
 		.into_iter()
 		.chain([pdu.to_format()])
 		.collect();

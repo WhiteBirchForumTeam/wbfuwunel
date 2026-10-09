@@ -127,7 +127,7 @@ issue #87）：**client 存的號碼是一個濾網，而濾網會造洞。**
 | subtype | 誰發 | meta | data |
 |---|---|---|---|
 | `0x01 Fetch` | client | `{ "ci_seq"?: u64, "batch"?: n }`；**`id` 由 client 選**；回應是一串 `0x02 Batch`，🚫 不是 `Ack`；**只走 WS** | 無 |
-| `0x02 Batch` | **server → client** | `{ "tc", "bc", "os", "ns", "counts": [u64…], "r" }` | `bc` 筆，每筆 u32 大端長度 ＋ 一間房的 JSON |
+| `0x02 Batch` | **server → client** | `{ "tc", "bc", "os"?, "ns"?, "counts": [u64…], "r" }`；🚨 `bc == 0` 時**不帶** `os`／`ns`（見 §5.1）| `bc` 筆，每筆 u32 大端長度 ＋ 一間房的 JSON |
 | `0x04 Subscribe` | client | `{}`；**`id` 由 client 選**（之後每個 `Push`／`Gone` 抄它）；回應 `{ "latest_count" }` —— **註冊完成的那一刻**的位置，所以 client 知道接下來那一輪 `Fetch` 涵著哪些推播。⚠️ 註冊**之後**才讀：反過來會讓 client 以為自己看過一則它沒看過的邀請 | 無 |
 | `0x05 Unsubscribe` | client | `{}`；回應 `{}`；沒訂也是 no-op | 無 |
 | `0x06 Push` | **server → client** | `{ "room_id", "inviter"?, "is_direct", "reason"?, "is": <count>, "sc": n, "gap": bool }` | `sc` 則縮減狀態事件 |
@@ -159,6 +159,10 @@ issue #87）：**client 存的號碼是一個濾網，而濾網會造洞。**
 | `counts` | 逐筆的 count，順序跟 data 一致 |
 | `r` | 這批之後還剩幾筆 —— 🚨 **`r == 0` 才是補完** |
 
+🚨 **空批次（`bc == 0`）不帶 `os`／`ns`。** 一輪當中整個 chunk 的邀請都剛好結束時就會出現空批次，
+而 client 正在拿 `ns` 推進續傳游標 —— ⭐ **那裡放一個 0 會把游標往後拉到開頭**（外部審查
+2026-10-09）。📌 「讀起來像資料的佔位值」比「欄位不存在」更危險，所以是不帶而不是帶 0。
+
 一筆的 JSON：`{ "room_id", "inviter"?, "is_direct", "reason"?, "state": [ …stripped… ] }`。
 📌 **一筆就是一間房**（state 包在裡面），所以 client 🚫 不用自己算「這 7 則屬於前一間」。
 
@@ -180,9 +184,34 @@ issue #87）：**client 存的號碼是一個濾網，而濾網會造洞。**
 ⭐ 兩條路都保證那則成員事件在 state 裡（本地是 `rooms::state::summary_stripped` 結尾的
 `.chain(once(event.to_format()))`），所以這個取法沒有退化情形。
 
-⚠️ **那份 state 裡有兩則 `m.room.member`** —— 邀請者的（`summary_stripped` 的清單裡有一格
-是 `event.sender()`）跟被邀請者的。🚨 **「找第一則 `m.room.member`」會挑錯人**，要比對
-`state_key`。測試釘這件事。
+### 🚨 5.2.1 不變量：名字是被邀請者的成員事件**只有一則，而且是我們造的**
+
+⚠️ **「從存起來的那份讀」本身不構成安全論證** —— 那個陣列裡混著兩種來源：
+
+| 來自 | 誰驗過 |
+|---|---|
+| 對方 server 的 `invite_room_state` | 🚫 **沒有人**。內容由它決定，`sender` 連網域都不必是它自己的 |
+| 我們自己接上去的那則 PDU | ✅ `validate_origins` 驗過 |
+
+🚨 **第一版的兩個決定剛好對立**：存的時候我們的那則接在**最後**（`.chain`），而讀的時候取的是
+**第一則**（`.find`）⇒ 對方只要在 `invite_room_state` 裡放一則「被邀請者的成員事件」，
+`inviter`／`is_direct`／`reason` 就全由它決定（外部審查 2026-10-09，oliver 與 salvia）。
+📎 ⚠️ 原生 Matrix client 多半是「後者覆蓋前者」，所以 wbf 這條線反而**比原生更容易被騙**。
+
+**修法是建立不變量，而不是換一個位置規則**：
+
+1. 🔴 **進門就丟掉對方給的那一格** —— `list_stripped_state_without_member_of(state, 被邀請者)`，
+   跑在 `list_stripped_state_kept` 之後、接上我們那則之前。⇒ 存進去的 state 裡，名字是被邀請者的
+   成員事件**恰好一則**。
+2. 📎 **讀的時候取最後一則**（`find_own_member_event`）當第二道鎖 —— 讓一個忘了第 1 條的新寫入點
+   也不會讓偽造的那則贏。
+
+🚫 **單靠第 2 條不夠**：`.chain` 的尾碼順序是每個寫入點自己的實作細節，不是契約；靠它就等於
+要求下一個加寫入點的人記得一個沒人會告訴他的約定（salvia 的話：**形狀保證不了的事，別靠列舉**）。
+
+⚠️ **那份 state 裡本來就有兩則 `m.room.member`** —— 邀請者的（`summary_stripped` 的清單裡有一格
+是 `event.sender()`）跟被邀請者的。所以比對 `state_key` 是必要的，但**還不夠**：上面那兩條才是。
+📌 三件事各有測試釘住（挑對人、偽造的不贏、進門就丟掉）。
 
 ### 5.3 降級：裝不下的時候
 
@@ -256,15 +285,35 @@ if was_invited && ends_invite(&membership) {      // 🔴 推一次
 📎 實作上就是 `Streams` 多一個 `invites: Subscribers<InviteTopic>`，跟既有的
 `rooms`／`devices` 並列。
 
+🔴 **而「並列」還不夠：三條生命週期路徑都要清它。** `remove_connection`（換身分）、
+`end_connection`（登出）、`forget_connection`（連線結束）—— 🚨 第一版那三個函數各自手寫
+`rooms` 與 `devices` 的清單，而它們的註解寫著「One place, so a new stream cannot be added
+without its cleanup」⇒ **註解宣稱的性質它並不具備**，於是加了邀請這條流卻沒接上
+（外部審查 2026-10-09，salvia）。後果是斷線留幽靈訂閱、而且換身分之後會把**前一個 user 的
+邀請推給新身分**（跟 PR #43 修掉的 device queue 是同一個 bug 的鏡像）。
+⇒ 改成 `fn streams(&self) -> [&dyn ConnectionLifecycle; 3]` **一處列出**，三個函數走它；
+一條測試對三條路徑各驗一次。
+
 ## 8. client 的義務
 
 | | |
 |---|---|
 | ① | 連線後 **`Invite/Subscribe` ＋ `Invite/Fetch`**，一直要到 **`r == 0`** ——🚨 補完才算有完整清單 |
-| ② | 一輪補完之後，用結果**整份取代**本地清單，🚫 不要 merge（被收回的邀請靠「不在快照裡」才發現）。⚠️ 補到一半的結果**不是**快照，不能拿去取代 |
+| ② | 一輪補完之後，用結果**整份取代**本地清單，🚫 不要 merge（被收回的邀請靠「不在快照裡」才發現）。⚠️ 補到一半的結果**不是**快照，不能拿去取代。🔴 **但「取代」的對象不含 ②' 那些**（見下）|
+| ②' | 🚨 **`Subscribe` 之後收到的 `Push`／`Gone` 要疊在快照上** —— 每間房以 **`is` 最大**的那筆為準。只有「本地舊清單裡有、這一輪沒出現、而且這段期間沒被 `Push`／`Gone` 碰過」的房才因為「不在快照裡」而刪掉 |
 | ③ | `Push` 與 `Gone` 都**按 `room_id` 取代**，🚫 不是追加 —— 拒絕後被重新邀請會再來一次（新事件、更大的 `is`）；而 `is` 比手上更舊的可以直接忽略 |
 | ④ | 看到 `gap: true` ⇒ 重跑一輪 `Fetch`。📎 這條流的 `gap` **只關於邀請**，不會跟訊息那條混 |
 | ⑤ | `sc: 0`（§5.3）⇒ 想要那間房的預覽就從補窗拿 |
+
+🚨 **②' 是外部審查 2026-10-09（oliver）補上的，而少了它 ② 會自己造出漏掉**：
+
+| 時間 | 發生什麼 | 少了 ②' 的後果 |
+|---|---|---|
+| 補窗跑到一半 | 新邀請進來，它的 count **大於這一輪的上界** ⇒ 只會以 `Push` 送達，🚫 不在快照裡 | `r == 0` 時整份取代 ⇒ **那則邀請消失**，要到下次重連才回來 |
+| 同樣在補窗期間 | 某間房的條目已經被 `read_entries` 讀出來、還沒送出，而它在那之間結束 ⇒ `Gone` 可能**比**那個 `Batch` 先到 | 整份取代之後留下一個**幽靈邀請** |
+
+⭐ **而這條規則自洽的理由是 `is` 跟 `counts` 是同一個號碼空間**（§3.1）：兩邊講的是同一條時間線，
+所以「取 `is` 最大的那筆」永遠分得出誰比較新。
 
 ⚠️ 以上是 client 這側的契約 ⇒ 合併後要在 `amaid/wbf-matrix-client` 開同步 issue
 （跟 /docs/design/keys/to-device.md §9 同一個做法）。

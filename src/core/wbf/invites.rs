@@ -99,9 +99,20 @@ where
 /// Args:
 ///     state: each stripped state event's JSON, in stored order
 ///     user: the invited user, whose `state_key` the event carries
+///
 /// Return:
-///     Option<Map<String, Value>>  None when the state does not carry it, or
-///     when what it carries is not a JSON object.
+///     Option<Map<String, Value>>  the **last** one that matches; None when
+///     the state does not carry it, or what it carries is not a JSON object.
+///
+/// 🚨 **Which one of several it takes is a security property, not a detail.**
+/// Whoever stores an invite's stripped state appends the copy this server
+/// verified last, and the guarantee that there is only one is established at
+/// the gate (`list_stripped_state_without_member_of`,
+/// /docs/design/events/invites-on-the-wire.md §5.2). Taking the last is the
+/// second lock on that door: a future writer that forgets the gate still
+/// cannot let a sender's forgery win (external review 2026-10-09, oliver and
+/// salvia — the first version took the first match, and the sender's copy came
+/// first).
 fn find_own_member_event<'a, I>(state: I, user: &str) -> Option<Map<String, Value>>
 where
 	I: IntoIterator<Item = &'a [u8]>,
@@ -113,10 +124,11 @@ where
 			| Value::Object(event) => Some(event),
 			| _ => None,
 		})
-		.find(|event| {
+		.filter(|event| {
 			event.get("type").and_then(Value::as_str) == Some("m.room.member")
 				&& event.get("state_key").and_then(Value::as_str) == Some(user)
 		})
+		.last()
 }
 
 /// Whether one stripped state event is worth storing: a recommended type,
@@ -188,6 +200,37 @@ mod tests {
 			is_direct: true,
 			reason: Some("come in".to_owned()),
 		});
+	}
+
+	/// 🚨 The forgery of external review 2026-10-09: a remote server put its
+	/// own `m.room.member` for the invited user in `invite_room_state`, and
+	/// it comes **before** the copy this server verified and appended. Taking
+	/// the first match handed it `inviter`, `is_direct` and `reason`.
+	#[test]
+	fn a_senders_own_copy_does_not_beat_the_one_we_appended() {
+		let state = [
+			member(
+				"@bob:localhost",
+				"@admin:localhost",
+				r#"{"membership":"invite","is_direct":true,"reason":"forged"}"#,
+			),
+			member("@alice:remote", "@alice:remote", r#"{"membership":"join"}"#),
+			member(
+				"@bob:localhost",
+				"@alice:remote",
+				r#"{"membership":"invite"}"#,
+			),
+		];
+
+		let fields = get_invite_fields(state.iter().map(Vec::as_slice), "@bob:localhost");
+
+		assert_eq!(
+			fields.inviter.as_deref(),
+			Some("@alice:remote"),
+			"the last member event naming the invited user is the one this server appended"
+		);
+		assert!(!fields.is_direct, "and the forged content does not reach the wire");
+		assert_eq!(fields.reason, None);
 	}
 
 	#[test]

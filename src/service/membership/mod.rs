@@ -19,7 +19,7 @@ pub use self::{
 	join::Join,
 	stripped_state::{
 		StrippedCreateVerdict, enforce_stripped_create, into_client_stripped,
-		list_stripped_state_kept, v12_room_ids,
+		list_stripped_state_kept, list_stripped_state_without_member_of, v12_room_ids,
 	},
 };
 

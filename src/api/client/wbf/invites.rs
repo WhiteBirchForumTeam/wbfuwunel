@@ -369,15 +369,24 @@ fn batch_pack(
 	let counts: Vec<u64> = entries.iter().map(|entry| entry.count).collect();
 	let data = length_prefixed(entries.iter().map(|entry| entry.json.as_slice()))?;
 
+	let mut meta = Map::new();
+	meta.insert("tc".into(), json!(tc));
+	meta.insert("bc".into(), json!(entries.len()));
+	// 🚨 Left out of an empty batch rather than sent as 0. A client advances
+	// its resume cursor to `ns`, and an empty batch happens mid-pass whenever a
+	// whole chunk's invites ended while the pass was running — a zero there
+	// would walk the cursor backwards to the beginning
+	// (external review 2026-10-09, oliver and salvia). A placeholder that reads
+	// as data is worse than an absent field.
+	if let (Some(oldest), Some(newest)) = (counts.first(), counts.last()) {
+		meta.insert("os".into(), json!(oldest));
+		meta.insert("ns".into(), json!(newest));
+	}
+	meta.insert("counts".into(), json!(counts));
+	meta.insert("r".into(), json!(remaining));
+
 	Ok(PackBuilder::new(Kind::Invite, BATCH, Flags::IS_RESPONSE, id, seq)
-		.json_meta(&json!({
-			"tc": tc,
-			"bc": entries.len(),
-			"os": counts.first().copied().unwrap_or(0),
-			"ns": counts.last().copied().unwrap_or(0),
-			"counts": counts,
-			"r": remaining,
-		}))?
+		.json_meta(&Value::Object(meta))?
 		.data(&data)?
 		.finish())
 }
@@ -428,6 +437,11 @@ mod tests {
 		assert_eq!(meta["bc"].as_u64(), Some(0));
 		assert_eq!(meta["r"].as_u64(), Some(0), "r = 0 is what says the pass is complete");
 		assert!(view.data.is_empty());
+		assert_eq!(
+			(meta.get("os"), meta.get("ns")),
+			(None, None),
+			"and it carries no cursor: a 0 there would walk a client's resume cursor backwards"
+		);
 	}
 
 	#[test]

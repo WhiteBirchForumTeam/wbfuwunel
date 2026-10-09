@@ -150,7 +150,10 @@ offset  bytes              意思
 ### `0x14 Event`（訊息與房間狀態）
 
 原生的 `Recent`（`0x01`）、`Send`（`0x02`）、`Batch`（`0x03`）、`Subscribe`（`0x04`）、`Unsubscribe`（`0x05`）、`Push`（`0x06`）、
-`DeviceChanged`（`0x07`）、`Invited`（`0x08`）、`InviteGone`（`0x09`）不變 —— 📎 後四個**只有 server → client**。
+`DeviceChanged`（`0x07`）不變 —— 📎 其中 `Batch`、`Push`、`DeviceChanged` **只有 server → client**。
+⚠️ 用名字而不是「後幾個」：第一版這裡寫「後四個」，而那個位置數法在 `Invited`（`0x08`）、
+`InviteGone`（`0x09`）被收回之後就錯了（邀請改走自己的 kind `0x05`，見
+[/docs/design/events/invites-on-the-wire.md](../design/events/invites-on-the-wire.md) §4）。
 
 | subtype | 前 4 bytes | 名稱 | 做什麼 | 端點 | 變數（path ／ query） | data |
 |---|---|---|---|---|---|---|
