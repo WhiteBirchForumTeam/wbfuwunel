@@ -266,27 +266,27 @@ pub struct Streams {
 /// each lifecycle function names the registries itself, three times, and the
 /// copies drift. 📎 The three methods are `Subscribers`' own — this trait adds
 /// no behaviour, it only makes them reachable through one array.
+/// 📎 The names are short rather than echoing `Subscribers`' own: a trait
+/// method with the same name as an inherent one reads as if the impl called
+/// itself.
 trait ConnectionLifecycle: Send + Sync {
-	fn remove_connection(&self, connection: ConnectionId);
-	fn end_connection(&self, connection: ConnectionId);
-	fn forget_connection(&self, connection: ConnectionId);
+	/// `Subscribers::remove_connection`.
+	fn leave(&self, connection: ConnectionId);
+	/// `Subscribers::end_connection`.
+	fn end(&self, connection: ConnectionId);
+	/// `Subscribers::forget_connection`.
+	fn forget(&self, connection: ConnectionId);
 }
 
 impl<Topic> ConnectionLifecycle for Subscribers<Topic>
 where
 	Topic: Clone + Eq + Hash + Send + Sync,
 {
-	fn remove_connection(&self, connection: ConnectionId) {
-		Subscribers::remove_connection(self, connection);
-	}
+	fn leave(&self, connection: ConnectionId) { self.remove_connection(connection); }
 
-	fn end_connection(&self, connection: ConnectionId) {
-		Subscribers::end_connection(self, connection);
-	}
+	fn end(&self, connection: ConnectionId) { self.end_connection(connection); }
 
-	fn forget_connection(&self, connection: ConnectionId) {
-		Subscribers::forget_connection(self, connection);
-	}
+	fn forget(&self, connection: ConnectionId) { self.forget_connection(connection); }
 }
 
 /// Leaves every stream when the connection's task ends, whichever way it
@@ -404,7 +404,7 @@ impl Streams {
 	/// when the connection itself is over, `forget_connection`.
 	pub fn remove_connection(&self, connection: ConnectionId) {
 		for stream in self.streams() {
-			stream.remove_connection(connection);
+			stream.leave(connection);
 		}
 		self.set_device_versions_declared(connection, false);
 	}
@@ -418,7 +418,7 @@ impl Streams {
 	/// (/docs/design/wire/session-teardown.md §4.4).
 	pub fn end_connection(&self, connection: ConnectionId) {
 		for stream in self.streams() {
-			stream.end_connection(connection);
+			stream.end(connection);
 		}
 		self.set_device_versions_declared(connection, false);
 	}
@@ -428,7 +428,7 @@ impl Streams {
 	/// guard calls when the task ends.
 	pub fn forget_connection(&self, connection: ConnectionId) {
 		for stream in self.streams() {
-			stream.forget_connection(connection);
+			stream.forget(connection);
 		}
 		self.set_device_versions_declared(connection, false);
 	}
@@ -444,7 +444,7 @@ mod tests {
 
 	use ruma::{device_id, room_id, user_id};
 
-	use super::{Outgoing, PackQueue, QueueError, Streams};
+	use super::{ConnectionId, Outgoing, PackQueue, QueueError, Streams};
 
 	/// 🚨 Each of the three lifecycle paths has to clear **every** stream, and
 	/// the invite stream was added to none of them: a ghost subscription stayed
@@ -455,8 +455,12 @@ mod tests {
 	/// that claimed it.
 	#[test]
 	fn every_lifecycle_path_clears_the_invite_stream_too() {
+		/// One of the three ways a connection stops being subscribed: what to
+		/// call it in a failure message, and the call itself.
+		type LifecyclePath = (&'static str, fn(&Streams, ConnectionId));
+
 		let user = user_id!("@bob:localhost");
-		let paths: [(&str, fn(&Streams, u64)); 3] = [
+		let paths: [LifecyclePath; 3] = [
 			("remove_connection", |streams, connection| streams.remove_connection(connection)),
 			("end_connection", |streams, connection| streams.end_connection(connection)),
 			("forget_connection", |streams, connection| streams.forget_connection(connection)),
