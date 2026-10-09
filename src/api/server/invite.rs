@@ -30,7 +30,7 @@ use tuwunel_service::{
 	Services,
 	membership::{
 		StrippedCreateVerdict, enforce_stripped_create, into_client_stripped,
-		list_stripped_state_kept, list_stripped_state_without_member_of, v12_room_ids,
+		list_invite_stripped_state, v12_room_ids,
 	},
 	rooms::state_cache::MembershipUpdate,
 };
@@ -94,11 +94,7 @@ pub(crate) async fn create_invite_route(
 		.into_iter()
 		.filter_map(|state| into_client_stripped(&body.room_id, state))
 		.collect();
-	let from_sender = list_stripped_state_without_member_of(
-		list_stripped_state_kept(from_sender),
-		&invited_user,
-	);
-	let invite_state: Vec<_> = from_sender
+	let invite_state: Vec<_> = list_invite_stripped_state(from_sender, &invited_user)
 		.into_iter()
 		.chain([pdu.to_format()])
 		.collect();

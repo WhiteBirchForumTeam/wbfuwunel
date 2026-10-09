@@ -84,6 +84,35 @@ pub fn list_stripped_state_kept(
 		.collect()
 }
 
+/// What an **invite** keeps of the stripped state its sender supplied: the
+/// trim every path does, and then the sender's copy of the invited user's own
+/// member event dropped.
+///
+/// Args:
+///     state: the down-converted entries, in the order the sender gave them
+///     invited_user: whose member event the caller appends itself,
+///         example: "@bob:localhost"
+///
+/// Return:
+///     Vec<Raw<AnyStrippedStateEvent>>  the kept ones, order preserved; the
+///     caller appends its own member PDU after.
+///
+/// ⭐ **The two steps are one function because the second is the one that gets
+/// forgotten.** A caller able to trim without dropping would compile, pass
+/// every test, and reopen the hole described below — and the forgery only
+/// exists on the federated path, which neither e2e nor a unit test of that
+/// handler can reach, so nothing else would notice.
+/// 📎 Knock state calls `list_stripped_state_kept` on its own: that path does
+/// **not** append its own copy, so dropping the knocker's member event there
+/// would simply lose it.
+#[must_use]
+pub fn list_invite_stripped_state(
+	state: Vec<Raw<AnyStrippedStateEvent>>,
+	invited_user: &UserId,
+) -> Vec<Raw<AnyStrippedStateEvent>> {
+	list_stripped_state_without_member_of(list_stripped_state_kept(state), invited_user)
+}
+
 /// Drops the `m.room.member` events a **sender** supplied about `subject`,
 /// for a caller that appends its own authoritative copy afterwards.
 ///
@@ -108,7 +137,7 @@ pub fn list_stripped_state_kept(
 /// order is an implementation detail of each call site, and the next call site
 /// would have to remember it.
 #[must_use]
-pub fn list_stripped_state_without_member_of(
+fn list_stripped_state_without_member_of(
 	state: Vec<Raw<AnyStrippedStateEvent>>,
 	subject: &UserId,
 ) -> Vec<Raw<AnyStrippedStateEvent>> {
@@ -259,7 +288,7 @@ mod tests {
 	use serde_json::value::RawValue;
 	use tuwunel_core::wbf::invites::{STRIPPED_EVENT_COUNT_MAX, STRIPPED_EVENT_LEN_MAX};
 
-	use super::{list_stripped_state_kept, list_stripped_state_without_member_of};
+	use super::{list_invite_stripped_state, list_stripped_state_kept};
 
 	fn stripped(json: &str) -> Raw<AnyStrippedStateEvent> {
 		Raw::from_json(RawValue::from_string(json.to_owned()).expect("valid JSON"))
@@ -326,9 +355,7 @@ mod tests {
 	#[test]
 	fn an_empty_stripped_state_stays_empty_rather_than_failing() {
 		assert!(list_stripped_state_kept(Vec::new()).is_empty());
-		assert!(
-			list_stripped_state_without_member_of(Vec::new(), user_id!("@bob:localhost")).is_empty()
-		);
+		assert!(list_invite_stripped_state(Vec::new(), user_id!("@bob:localhost")).is_empty());
 	}
 
 	/// 🚨 This is the invariant the invite's three derived fields rest on:
@@ -346,7 +373,7 @@ mod tests {
 			),
 		];
 
-		let kept = list_stripped_state_without_member_of(state, user_id!("@bob:localhost"));
+		let kept = list_invite_stripped_state(state, user_id!("@bob:localhost"));
 
 		assert_eq!(
 			types_of(&kept),
