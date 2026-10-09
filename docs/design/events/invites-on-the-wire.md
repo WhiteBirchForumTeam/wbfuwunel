@@ -200,9 +200,12 @@ issue #87）：**client 存的號碼是一個濾網，而濾網會造洞。**
 
 **修法是建立不變量，而不是換一個位置規則**：
 
-1. 🔴 **進門就丟掉對方給的那一格** —— `list_stripped_state_without_member_of(state, 被邀請者)`，
-   跑在 `list_stripped_state_kept` 之後、接上我們那則之前。⇒ 存進去的 state 裡，名字是被邀請者的
-   成員事件**恰好一則**。
+1. 🔴 **進門就丟掉對方給的那一格** —— 邀請這條路呼叫的是
+   **`list_invite_stripped_state(state, 被邀請者)`**：它把「修剪」跟「丟掉對方那則」**合成一個
+   函數**，中間沒有可以漏掉的一步。⇒ 存進去的 state 裡，名字是被邀請者的成員事件**恰好一則**。
+   ⭐ **為什麼不是兩個函數接起來**：那樣呼叫者可以只做第一步，而它**編得過、測得過** ——
+   這個偽造只在聯邦路徑上浮現，e2e 與那個 handler 的單元測試都構造不到，所以沒有人會發現。
+   📎 knock 仍然只叫 `list_stripped_state_kept`：那條路不接自己的那則，丟掉就真的沒了。
 2. 📎 **讀的時候取最後一則**（`find_own_member_event`）當第二道鎖 —— 讓一個忘了第 1 條的新寫入點
    也不會讓偽造的那則贏。
 
@@ -350,11 +353,15 @@ without its cleanup」⇒ **註解宣稱的性質它並不具備**，於是加�
 | `[6.11]`／`[6.11b]` | `batch = 1` ⇒ 一房一個 pack、`seq` 從 0 遞增、`r` 收到 0、`tc` 每個 pack 一致、`os` 只往前 |
 | `[6.12]`／`[6.12b]` | `Unsubscribe` 之後不再推，而漏掉的那則還在下一輪的補窗裡 |
 
-📎 **e2e 到不了、改由單元測試守的兩格**（16 條，`core` 5、`service` 7、`api` 4）：
+📎 **e2e 到不了、改由單元測試守的幾格**（這一支新增 **20 條**：`core/wbf/invites.rs` 6、
+`service/streams/invites.rs` 4、`service/membership/stripped_state.rs` 5、
+`service/streams/mod.rs` 1、`api/client/wbf/invites.rs` 4）：
 
 | | 為什麼 e2e 到不了 | 誰守 |
 |---|---|---|
 | §6 的閘 | 它只對**別的 server 送來**的 state 生效，而 e2e 是單機 | `list_stripped_state_kept` 4 條（留建議的 type、丟超大的、格數上限、空的不炸）|
+| 🚨 §5.2.1 的偽造 | 同上，而且**只有聯邦路徑**構造得出來 | `a_senders_own_copy_does_not_beat_the_one_we_appended`（讀的那端）＋ `the_senders_copy_of_the_invited_users_member_event_is_dropped`（進門那端）|
+| 🚨 §7 的生命週期 | 要真的斷線、或真的換身分才看得到幽靈訂閱 | `every_lifecycle_path_clears_the_invite_stream_too`：三條路徑各驗一次 |
 | §7 的 `Gone(knock)` | 授權規則禁止 invite → knock，沒有 API 叫得到那個分支 | 結構上成立：接點是 match **之後**一處，不是每個分支一處 |
 | §5.2 挑對成員事件 | 要構造「兩則 member 事件」的 state | `get_invite_fields` 的那條測試（🚨 state 裡確實有兩則，邀請者的在前面）|
 | §5.3 兩個降級 | 要構造超過 2 MiB 的 state／60 KiB 的 `reason` | `framed_state`／`invited_meta` 各一條 |
