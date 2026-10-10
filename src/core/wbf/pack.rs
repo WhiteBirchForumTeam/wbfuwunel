@@ -54,6 +54,10 @@ pub enum Kind {
 	Upload = 0x03,
 	/// Chunked download.
 	Download = 0x04,
+	/// Pending invites: their own subscription, because they have to be
+	/// caught up completely rather than within a window
+	/// (/docs/design/events/invites-on-the-wire.md).
+	Invite = 0x05,
 	/// Login, logout, refresh, register.
 	Session = 0x10,
 	/// Account data, profile, third-party ids, password.
@@ -95,6 +99,7 @@ impl TryFrom<u8> for Kind {
 			| 0x02 => Self::Stream,
 			| 0x03 => Self::Upload,
 			| 0x04 => Self::Download,
+			| 0x05 => Self::Invite,
 			| 0x10 => Self::Session,
 			| 0x11 => Self::Account,
 			| 0x12 => Self::Sync,
@@ -638,7 +643,7 @@ mod tests {
 
 		assert_eq!(
 			decodable.len(),
-			19,
+			20,
 			"a kind was added or removed; `/docs/design/wire/wire-format.md` §3.3 is the allocation table and has to say the same"
 		);
 	}

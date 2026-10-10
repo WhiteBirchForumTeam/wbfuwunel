@@ -22,6 +22,8 @@ use tuwunel_core::{
 };
 use tuwunel_database::{Json, serialize_key, serialize_val};
 
+use crate::streams::PushedInvite;
+
 /// Optional stripped room state attached to invite and knock transitions.
 pub type StrippedRoomState = Option<Vec<Raw<AnyStrippedStateEvent>>>;
 
@@ -101,6 +103,12 @@ pub async fn update_membership(
 ) -> Result {
 	let membership = membership_event.membership;
 
+	// 🔴 Read before any write below: every transition that ends an invite
+	// clears `userroomid_invitestate` on its way through, and only an invite
+	// that **was** pending has anything to announce — a member who merely left
+	// never had one (/docs/design/events/invites-on-the-wire.md §7).
+	let was_invited = self.is_invited(user_id, room_id).await;
+
 	self.ensure_remote_user(user_id).await?;
 
 	match membership {
@@ -118,6 +126,13 @@ pub async fn update_membership(
 			}
 
 			self.mark_as_invited(user_id, room_id, count, last_state, invite_via)
+				.await;
+
+			// The invite hook of the wbf channels: nothing else can tell the
+			// invited user's connections, because they are not in this room's
+			// channel and cannot read its state yet
+			// (/docs/design/events/invites-on-the-wire.md §7).
+			self.push_invited_to_streams(user_id, room_id, count)
 				.await;
 		},
 		| MembershipState::Leave | MembershipState::Ban => {
@@ -139,11 +154,89 @@ pub async fn update_membership(
 		| _ => {},
 	}
 
+	// 🔴 One place, not one per arm. The first version of this hook sat inside
+	// the Join and Leave arms and so missed Knock — and that was not an
+	// accident but what the shape guarantees: the next arm added would miss it
+	// too (/docs/design/events/invites-on-the-wire.md §7).
+	if was_invited && is_invite_ended_by(&membership) {
+		self.services.streams.push_invite_gone(
+			user_id,
+			room_id,
+			membership.as_str(),
+			count.into_unsigned(),
+		);
+	}
+
 	if update_joined_count {
 		self.update_joined_count(room_id).await;
 	}
 
 	Ok(())
+}
+
+/// Whether becoming this membership clears a pending invite.
+///
+/// Args:
+///     membership: the state the member event just set
+/// Return:
+///     bool  true for exactly the transitions whose `mark_as_*` deletes
+///     `userroomid_invitestate` — Join, Leave, Ban and Knock.
+///
+/// 🚨 This list is the one place that has to stay in step with those three
+/// writers. Everything else (including `_Custom`) writes nothing, so claiming
+/// an invite ended there would be announcing something that did not happen
+/// (/docs/design/events/invites-on-the-wire.md §7).
+fn is_invite_ended_by(membership: &MembershipState) -> bool {
+	matches!(
+		membership,
+		MembershipState::Join
+			| MembershipState::Leave
+			| MembershipState::Ban
+			| MembershipState::Knock
+	)
+}
+
+/// Pushes `Invite/Push` to the invited user's own subscriptions, reading the
+/// stripped state back out of storage first.
+///
+/// Args:
+///     user: who was invited, example: "@bob:localhost"
+///     room: example: "!r:localhost"
+///     count: the invite member event's position
+///
+/// ⭐ Read **back** rather than reusing the caller's copy, for two reasons:
+/// the federated path hands this function's caller a blank member content, and
+/// reading what was stored is what makes this push and `Invite/Fetch` answer
+/// with the same thing (/docs/design/events/invites-on-the-wire.md §5.2).
+///
+/// ⚠️ The listener check comes first because that read copies the whole
+/// stripped state, and most invites go to nobody listening — remote users, and
+/// anyone who is offline (external review 2026-10-08, oliver).
+#[implement(super::Service)]
+async fn push_invited_to_streams(&self, user: &UserId, room: &RoomId, count: PduCount) {
+	if !self.services.streams.is_listened_for_invites(user) {
+		return;
+	}
+
+	let Ok(state) = self.invite_state(user, room).await else {
+		// Written a moment ago, so this is a storage problem rather than a
+		// missing invite; the client still catches up with `Invite/Fetch`.
+		warn!(%user, %room, "wbf invite push: the stripped state could not be read back");
+		return;
+	};
+
+	let state: Vec<Vec<u8>> = state
+		.iter()
+		.map(|event| event.json().get().as_bytes().to_vec())
+		.collect();
+
+	self.services.streams.push_invited(
+		user,
+		room,
+		&PushedInvite { count: count.into_unsigned(), state: &state },
+		self.services.config.wbf_data_max_bytes,
+		self.services.config.wbf_meta_max_bytes,
+	);
 }
 
 #[implement(super::Service)]

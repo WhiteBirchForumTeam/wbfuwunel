@@ -87,6 +87,11 @@ registry（純記憶體，`Services.streams`）                          ← 所
    └─ join(user, room)             → streams::follow(user, room)：一把鎖內，FollowsJoins(user) 裡的連線進入 Room(room)
 ```
 
+🚫 **邀請不在這條線上。** 它有自己的 kind、自己的訂閱、自己的 `id`／`seq`／`gap`
+（`0x05 Invite`，[/docs/design/events/invites-on-the-wire.md](invites-on-the-wire.md) §4）——
+⭐ 理由是**兩種水位語意不同**：這條線補一段就停（`more` 可以一直是 true），而邀請必須補到齊。
+📎 所以這一節的 `gap` 仍然只講「事件」：看到它就 `Recent` 補一窗，🚫 不必管邀請。
+
 ⭐ **「跟進之後加入的房」是一個 topic，不是訂閱者身上的旗標**（PR #42）。理由：join hook 因此問的是
 **跟其他人同一張索引**，而不是第二張會跟它不一致的表。
 ⚠️ 兩個 hook 都是**單一交易**（查與改在同一把 write lock 內）：拆成兩次取鎖時，中間關掉的連線會被放進一個

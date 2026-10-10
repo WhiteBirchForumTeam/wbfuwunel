@@ -25,11 +25,13 @@
 //! pushes.
 
 mod devices;
+mod invites;
 mod rooms;
 mod subscribers;
 
 use std::{
 	collections::HashSet,
+	hash::Hash,
 	sync::{
 		Arc, RwLock as StdRwLock,
 		atomic::{AtomicU64, Ordering},
@@ -40,10 +42,12 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, mpsc};
 
 pub use self::{
 	devices::{CryptoState, DEVICE_CRYPTO_STATE_SUBTYPE, DEVICE_PUSH_SUBTYPE, PushedItem},
+	invites::{INVITE_GONE_SUBTYPE, INVITE_PUSH_SUBTYPE, PushedInvite},
 	rooms::{EVENT_DEVICE_CHANGED_SUBTYPE, EVENT_PUSH_SUBTYPE, PushedEvent, Subscribed},
 };
 use self::{
 	devices::DeviceTopic,
+	invites::InviteTopic,
 	rooms::RoomTopic,
 	subscribers::{Occupancy, Subscribers},
 };
@@ -247,9 +251,42 @@ pub struct Streams {
 	rooms: Subscribers<RoomTopic>,
 	/// The to-device queues (`0x16 Device`), at most one connection each.
 	devices: Subscribers<DeviceTopic>,
+	/// The pending-invite subscriptions (`0x05 Invite`), one topic per user
+	/// and as many connections each as the user has open
+	/// (/docs/design/events/invites-on-the-wire.md §7).
+	invites: Subscribers<InviteTopic>,
 	/// The connections whose last `Hello` declared `DEVICE_VERSIONS_FEATURE`
 	/// (/docs/design/keys/room-device-version.md §6.2, §7.1).
 	device_versions_declared: StdRwLock<HashSet<ConnectionId>>,
+}
+
+/// What every subscription registry does when a connection goes away.
+///
+/// ⭐ Its only job is to let `Streams::streams` be the single list: without it
+/// each lifecycle function names the registries itself, three times, and the
+/// copies drift. 📎 The three methods are `Subscribers`' own — this trait adds
+/// no behaviour, it only makes them reachable through one array.
+/// 📎 The names are short rather than echoing `Subscribers`' own: a trait
+/// method with the same name as an inherent one reads as if the impl called
+/// itself.
+trait ConnectionLifecycle: Send + Sync {
+	/// `Subscribers::remove_connection`.
+	fn leave(&self, connection: ConnectionId);
+	/// `Subscribers::end_connection`.
+	fn end(&self, connection: ConnectionId);
+	/// `Subscribers::forget_connection`.
+	fn forget(&self, connection: ConnectionId);
+}
+
+impl<Topic> ConnectionLifecycle for Subscribers<Topic>
+where
+	Topic: Clone + Eq + Hash + Send + Sync,
+{
+	fn leave(&self, connection: ConnectionId) { self.remove_connection(connection); }
+
+	fn end(&self, connection: ConnectionId) { self.end_connection(connection); }
+
+	fn forget(&self, connection: ConnectionId) { self.forget_connection(connection); }
 }
 
 /// Leaves every stream when the connection's task ends, whichever way it
@@ -279,6 +316,9 @@ impl Streams {
 			// arrives: the registry can enforce it without a gap between
 			// looking and entering, and a call site cannot.
 			devices: Subscribers::new(Occupancy::OneTheLatest),
+			// Many, unlike the to-device queue: reading an invite destroys
+			// nothing, so every connection of a user may hold it at once.
+			invites: Subscribers::new(Occupancy::Many),
 			device_versions_declared: StdRwLock::new(HashSet::new()),
 		}
 	}
@@ -342,15 +382,30 @@ impl Streams {
 		ConnectionGuard { streams: self.clone(), connection }
 	}
 
-	/// Takes `connection` out of **every** stream. One place, so a new stream
-	/// cannot be added without its cleanup.
+	/// 🚨 **The one place that lists the streams.** Each of the three lifecycle
+	/// functions below walks this, so a stream that is added here is cleaned up
+	/// by all of them at once.
+	///
+	/// ⚠️ This exists because the previous shape — each function naming
+	/// `rooms` and `devices` itself — promised in its own doc comment that "a
+	/// new stream cannot be added without its cleanup", and then the invite
+	/// stream was added without it (external review 2026-10-09, salvia). A list
+	/// repeated three times is a list that will disagree with itself;
+	/// /docs/design/events/invites-on-the-wire.md §7 is the same lesson one
+	/// layer up.
+	fn streams(&self) -> [&dyn ConnectionLifecycle; 3] {
+		[&self.rooms, &self.devices, &self.invites]
+	}
+
+	/// Takes `connection` out of **every** stream.
 	///
 	/// ⚠️ The connection may subscribe again afterwards — that is what a `Login`
 	/// to another identity needs. To stop it for good use `end_connection`, and
 	/// when the connection itself is over, `forget_connection`.
 	pub fn remove_connection(&self, connection: ConnectionId) {
-		self.rooms.remove_connection(connection);
-		self.devices.remove_connection(connection);
+		for stream in self.streams() {
+			stream.leave(connection);
+		}
 		self.set_device_versions_declared(connection, false);
 	}
 
@@ -362,8 +417,9 @@ impl Streams {
 	/// own lock, so this marks rather than merely removes
 	/// (/docs/design/wire/session-teardown.md §4.4).
 	pub fn end_connection(&self, connection: ConnectionId) {
-		self.rooms.end_connection(connection);
-		self.devices.end_connection(connection);
+		for stream in self.streams() {
+			stream.end(connection);
+		}
 		self.set_device_versions_declared(connection, false);
 	}
 
@@ -371,8 +427,9 @@ impl Streams {
 	/// out again, so what `end_connection` marked is dropped with it. What the
 	/// guard calls when the task ends.
 	pub fn forget_connection(&self, connection: ConnectionId) {
-		self.rooms.forget_connection(connection);
-		self.devices.forget_connection(connection);
+		for stream in self.streams() {
+			stream.forget(connection);
+		}
 		self.set_device_versions_declared(connection, false);
 	}
 
@@ -387,7 +444,44 @@ mod tests {
 
 	use ruma::{device_id, room_id, user_id};
 
-	use super::{Outgoing, PackQueue, QueueError, Streams};
+	use super::{ConnectionId, Outgoing, PackQueue, QueueError, Streams};
+
+	/// 🚨 Each of the three lifecycle paths has to clear **every** stream, and
+	/// the invite stream was added to none of them: a ghost subscription stayed
+	/// in the registry for the life of the process, and a connection that
+	/// logged in as somebody else kept being pushed the previous user's invites
+	/// (external review 2026-10-09, salvia — the same bug PR #43 fixed for the
+	/// device queue). This asserts the shape rather than trusting the comment
+	/// that claimed it.
+	#[test]
+	fn every_lifecycle_path_clears_the_invite_stream_too() {
+		/// One of the three ways a connection stops being subscribed: what to
+		/// call it in a failure message, and the call itself.
+		type LifecyclePath = (&'static str, fn(&Streams, ConnectionId));
+
+		let user = user_id!("@bob:localhost");
+		let paths: [LifecyclePath; 3] = [
+			("remove_connection", |streams, connection| streams.remove_connection(connection)),
+			("end_connection", |streams, connection| streams.end_connection(connection)),
+			("forget_connection", |streams, connection| streams.forget_connection(connection)),
+		];
+
+		for (name, leave) in paths {
+			let streams = Arc::new(Streams::new());
+			let (queue, _receiver) = PackQueue::new(8, 1 << 20);
+			streams
+				.subscribe_invites(7, user, queue, 42)
+				.expect("a fresh connection subscribes");
+			assert!(streams.is_listened_for_invites(user), "{name}: subscribed to begin with");
+
+			leave(&streams, 7);
+
+			assert!(
+				!streams.is_listened_for_invites(user),
+				"{name} left the invite subscription behind"
+			);
+		}
+	}
 
 	#[test]
 	fn a_declaration_lasts_until_the_next_hello_or_the_end_of_the_connection() {

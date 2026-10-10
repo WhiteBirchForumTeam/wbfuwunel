@@ -119,7 +119,7 @@ offset=4  size=8   id  ＝ [id_type: 1 byte] ‖ [值: 7 byte 大端]
 | `id_type` | 誰鑄 | 值是什麼 | 用在 |
 |---|---|---|---|
 | `0x00` | — | **整個 id 必須是 0** | 沒有會話的包：`Control/Hello`、`Ping`、`Session/*`、`Download/*`（用 meta 的 mxc 定位）、`Upload/Create`、`Stream/Draft`（還沒有錨） |
-| `0x01` | **client** | 它自己挑的會話號 | `Event/Recent`、`Event/Subscribe`／`Unsubscribe`、`Device/Subscribe`／`Unsubscribe`／`Fetch`／`ItemsDestroy` |
+| `0x01` | **client** | 它自己挑的會話號 | `Event/Recent`、`Event/Subscribe`／`Unsubscribe`、`Device/Subscribe`／`Unsubscribe`／`Fetch`／`ItemsDestroy`、`Invite/Subscribe`／`Unsubscribe`／`Fetch` |
 | `0x02` | **server**（資料庫） | 事件位置 `g_seq` | `Stream/Abandon`／`Keypoint`／`Delta`／`Append`／`Demand`（草稿的錨） |
 | `0x03` | **server** | 上傳 id。⚠️ **去掉型別 byte 就是 mxc 的 media id** | `Upload/Chunk`／`Status`／`Seal`／`Abort` |
 | `0x04`–`0xEF` | — | 未分配 | 🚨 照 §3.4 的同一條鐵律：**先在這張表加一列，才能發** |
@@ -200,6 +200,12 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 | | *三種片共同* | 片**不回 Ack**（盡快語意，掉了就掉了）；server 只做三個無狀態檢查：data ≥ 4 byte、`seq ≥ 1`、`Keypoint` 的 `prev` = 0，不合都是 `InvalidRequest`。⭐ `prev` 讓接收者**套之前**就知道自己對不對得上；中途加入或漏掉一片都會對不上 → 發 `Demand` | |
 | `0x03 Upload` | `Create` `Chunk` `Status` `Seal` `Abort` | [/docs/design/media/chunked-upload.md](../media/chunked-upload.md) §4 | 塊 bytes（`Chunk`） |
 | `0x04 Download` | `Info` `Read` | [/docs/design/media/chunked-upload.md](../media/chunked-upload.md) §5 | 回應的 data 是讀出的 bytes |
+| `0x05 Invite` | `0x01 Fetch` | `{ "ci_seq"?: u64, "batch"?: n }`，**`id` 由 client 選**；回應是一串 `0x02 Batch`，不是 `Ack`；**只走 WS**。🚨 `ci_seq` 是**同一輪之內的續傳游標**，🚫 不是跨連線保存的水位 —— 不帶就是正確的叫法（它補不到「邀請被收回」，見 [/docs/design/events/invites-on-the-wire.md](../events/invites-on-the-wire.md) §3.3）| 無 |
+| | `0x02 Batch`（只有 server → client） | `{ "tc", "bc", "os", "ns", "counts": [u64…], "r" }`：這一輪總共幾筆、這批幾筆、這批**最舊／最新**的 count、逐筆的 count、這批之後還剩幾筆；🚨 **`r = 0` 才算補完**。⚠️ 沒有 `more`（`Event`／`Device` 的 `more` 是「這窗停在上限」，而這一輪跑到完為止）。`id` 抄 `Fetch`，`seq` 從 0 嚴格 +1 | `bc` 筆，每筆 u32 大端長度 ＋ 一間房的 JSON `{ "room_id", "inviter"?, "is_direct", "reason"?, "state": [ …縮減狀態… ] }`。⭐ **一筆就是一間房**（state 包在裡面）|
+| | `0x04 Subscribe` | `{}`，**`id` 由 client 選**（之後每個 `Push`／`Gone` 抄它）；回應 `{ "latest_count" }`；**只走 WS** | 無 |
+| | `0x05 Unsubscribe` | `{}`；回應 `{}`；沒訂也是 no-op | 無 |
+| | `0x06 Push`（只有 server → client） | `{ "room_id", "inviter"?, "is_direct": bool, "reason"?, "is": <count>, "sc": <data 裡幾則>, "gap": bool }`；`id` 抄 `Subscribe`，`seq` 每推一次 +1。🚨 縮減狀態框不進一個 pack 時照送 meta、`sc: 0`；而 [/docs/design/events/invites-on-the-wire.md](../events/invites-on-the-wire.md) §6 那道進門的閘讓正常的邀請 `sc` 永遠 ≥ 1 ⇒ **`sc == 0` 無歧義地代表降級**。`reason` 太長塞不進 `wbf_meta_max_bytes` 時整個拿掉（不截斷）| `sc` 則縮減狀態事件，每則 u32 大端長度 ＋ JSON |
+| | `0x07 Gone`（只有 server → client） | `{ "room_id", "membership", "is": <count>, "gap": bool }`；`membership` 是**造成邀請消失的那個新狀態**：`leave`（對方撤回、自己拒絕）、`ban`、`join`（自己接受）、`knock`。同樣跟 `Push` 共用這條訂閱的 `id`／`seq`／`gap` | 無 |
 | `0x10 Session`（§6.3） | `0x01 Login` | Matrix `/login` 的請求體原樣：`{ "type": "m.login.password" \| "m.login.token", "identifier", "password" \| "token", "device_id"?, "initial_device_display_name"?, "refresh_token"?: bool }`；回應 `{ "user_id", "device_id", "access_token", "refresh_token"?, "expires_in_ms"? }` | 無 |
 | | `0x02 Refresh` | `{ "refresh_token" }`；回應同 `Login` | 無 |
 | | `0x03 Logout` | `{ "all"?: bool }`；回應 `{}`，緊接 server 送 Close 1000 關線 | 無 |
@@ -234,7 +240,8 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 | `0x02` | Stream | 流式訊息（fork 自己的） |
 | `0x03` | Upload | 分塊上傳（fork 自己的） |
 | `0x04` | Download | 分塊下載（fork 自己的） |
-| `0x05`–`0x0F` | 保留給 fork 自己的新功能 | |
+| `0x05` | Invite | 待處理的邀請：自己的訂閱線（fork 自己的）——⭐ 它不是一個端點而是一條流，而且**必須補得齊**，所以不放在 `0x13 Room` 裡（[/docs/design/events/invites-on-the-wire.md](../events/invites-on-the-wire.md) §4、§5）。已定：`0x01 Fetch`、`0x02 Batch`、`0x04 Subscribe`、`0x05 Unsubscribe`、`0x06 Push`、`0x07 Gone` |
+| `0x06`–`0x0F` | 保留給 fork 自己的新功能 | |
 | `0x10` | Session | login、logout、refresh、register（`session/`、`register/`）；§6.3 已佔 `0x01 Login`、`0x02 Refresh`、`0x03 Logout` |
 | `0x11` | Account | account data、profile、3pid、password（`account/`、`account_data/`、`profile.rs`） |
 | `0x12` | Sync | sync、filter（`sync/`、`filter.rs`） |

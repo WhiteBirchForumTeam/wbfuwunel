@@ -21,7 +21,7 @@ use ruma::{
 };
 use serde::Deserialize;
 use tuwunel_core::{
-	Err, Error, Result, debug_warn, err,
+	Err, Error, Result, debug_warn, err, warn,
 	matrix::{Event, PduCount, PduEvent, event::gen_event_id},
 	utils,
 	utils::hash::sha256,
@@ -29,7 +29,8 @@ use tuwunel_core::{
 use tuwunel_service::{
 	Services,
 	membership::{
-		StrippedCreateVerdict, enforce_stripped_create, into_client_stripped, v12_room_ids,
+		StrippedCreateVerdict, enforce_stripped_create, into_client_stripped,
+		list_invite_stripped_state, v12_room_ids,
 	},
 	rooms::state_cache::MembershipUpdate,
 };
@@ -63,19 +64,61 @@ pub(crate) async fn create_invite_route(
 
 	let (mut signed_event, invited_user) = parse_and_validate_event(&services, &body).await?;
 
-	sign_event(&services, &mut signed_event, &body.room_version)?;
+	// 🚨 A federated invite's sender is always a user of the server that sent
+	// it, so a sender on **this** server means another homeserver is claiming
+	// one of our users invited somebody. Refused below like any other
+	// sender/origin mismatch; logged here as what it is, because the generic
+	// refusal says nothing about who was impersonated
+	// (維護者 2026-10-09).
+	let sender = find_event_sender(&signed_event)?;
+	if is_forged_local_sender(&sender, body.origin(), services.globals.server_name()) {
+		warn!(
+			forged_sender = %sender,
+			invited_user = %invited_user,
+			room_id = %body.room_id,
+			from_homeserver = %body.origin(),
+			"a remote homeserver sent an invite claiming to come from a user of this server; \
+			 refused, and nothing was recorded"
+		);
+	}
 
-	let sender = validate_origins(&signed_event, body.origin())?;
+	// 🔴 Validated **before** signing: a refusal must never hand back an event
+	// carrying this server's signature. Today the refusal is an `Err` with no
+	// body, so nothing could leak — but ordering it this way means a later
+	// change to the error path cannot turn a refused invite into one this
+	// server has endorsed.
+	validate_origins(&signed_event, &sender, body.origin())?;
+
+	sign_event(&services, &mut signed_event, &body.room_version)?;
 
 	check_invite_permitted(&services, &body, &invited_user).await?;
 
 	let pdu = build_pdu(&body)?;
 
-	let invite_state: Vec<_> = body
+	// 🔴 Trimmed **after** `enforce_stripped_state` above, never before: that
+	// check reads the create event out of the untrimmed input, and trimming
+	// first would quietly weaken it.
+	//
+	// ⚠️ What the sender put here is bounded by nothing but the HTTP body, so
+	// the trim is what keeps one invite from storing megabytes per invited user
+	// (/docs/design/events/invites-on-the-wire.md §6).
+	//
+	// 🚨 And the sender's own copy of the invited user's member event is dropped
+	// before ours is appended: the three fields both `Invite/Push` and
+	// `Invite/Fetch` derive come from that event, and the sender's copy sat
+	// **first**, so a forged one decided who invited you
+	// (external review 2026-10-09, oliver and salvia).
+	// ⭐ Our own member PDU is appended afterwards and is never trimmed, so
+	// after this there is exactly one member event naming the invited user and
+	// it is the one we built from the PDU we verified (same doc, §5.2).
+	let from_sender: Vec<_> = body
 		.invite_room_state
 		.clone()
 		.into_iter()
 		.filter_map(|state| into_client_stripped(&body.room_id, state))
+		.collect();
+	let invite_state: Vec<_> = list_invite_stripped_state(from_sender, &invited_user)
+		.into_iter()
 		.chain([pdu.to_format()])
 		.collect();
 
@@ -92,7 +135,7 @@ pub(crate) async fn create_invite_route(
 		.server_in_room(services.globals.server_name(), &body.room_id)
 		.await
 	{
-		record_local_invite(&services, &body, &invited_user, sender, invite_state, &pdu).await?;
+		record_local_invite(&services, &body, &invited_user, &sender, invite_state, &pdu).await?;
 	}
 
 	Ok(create_invite::v2::Response {
@@ -251,18 +294,28 @@ fn sign_event(
 	Ok(())
 }
 
-fn validate_origins<'a>(
-	signed_event: &'a CanonicalJsonObject,
+/// Return:
+///     Result<OwnedUserId>  the invite event's `sender`; `InvalidParam` when
+///     it is missing or not a user id.
+///
+/// 📎 Owned rather than borrowed because the caller reads it **before**
+/// `sign_event`, which needs the event mutably.
+fn find_event_sender(signed_event: &CanonicalJsonObject) -> Result<OwnedUserId> {
+	signed_event
+		.get("sender")
+		.try_into()
+		.map(UserId::to_owned)
+		.map_err(|e| err!(Request(InvalidParam("Invalid sender property: {e}"))))
+}
+
+fn validate_origins(
+	signed_event: &CanonicalJsonObject,
+	sender: &UserId,
 	body_origin: &ServerName,
-) -> Result<&'a UserId> {
+) -> Result<()> {
 	let origin: Option<&str> = signed_event
 		.get("origin")
 		.and_then(CanonicalJsonValue::as_str);
-
-	let sender: &UserId = signed_event
-		.get("sender")
-		.try_into()
-		.map_err(|e| err!(Request(InvalidParam("Invalid sender property: {e}"))))?;
 
 	if sender.server_name() != body_origin {
 		return Err!(Request(Forbidden("Can only send invites on behalf of your users.")));
@@ -272,7 +325,39 @@ fn validate_origins<'a>(
 		return Err!(Request(Forbidden("Can only send events from your origin.")));
 	}
 
-	Ok(sender)
+	Ok(())
+}
+
+/// Whether a federated invite claims to come from a user of **this** server.
+///
+/// Args:
+///     sender: the invite event's `sender`, example: "@alice:remote"
+///     body_origin: the server the federation request authenticated as,
+///         example: "remote"
+///     our_server: this server's name, example: "localhost"
+///
+/// Return:
+///     bool  true only for the forgery: a sender on this server sent by
+///     somebody else.
+///
+/// 🚨 An invite over federation is always sent by the sender's **own** server
+/// (`validate_origins` is the general form of that rule), so a sender here that
+/// belongs to this server is another server claiming one of our users invited
+/// somebody. Refused by `validate_origins` either way — this only tells the two
+/// cases apart so the forgery can be logged as one
+/// (維護者 2026-10-09).
+///
+/// ⚠️ The `our_server != body_origin` half is not redundant: a request this
+/// server authenticated as **itself** has a local sender legitimately, and
+/// without that half an odd self-federating deployment would be reported as an
+/// attack.
+#[must_use]
+fn is_forged_local_sender(
+	sender: &UserId,
+	body_origin: &ServerName,
+	our_server: &ServerName,
+) -> bool {
+	sender.server_name() == our_server && body_origin != our_server
 }
 
 async fn check_invite_permitted(
@@ -417,4 +502,54 @@ async fn notify_pushers(services: &Services, invited_user: &UserId, pdu: &PduEve
 				.ok();
 		})
 		.await;
+}
+
+#[cfg(test)]
+mod tests {
+	use ruma::{server_name, user_id};
+
+	use super::is_forged_local_sender;
+
+	/// 🚨 The forgery itself: another homeserver claiming one of our users sent
+	/// the invite. `validate_origins` refuses it either way; this is what tells
+	/// it apart from an ordinary mismatch so it can be logged as an attack
+	/// (維護者 2026-10-09).
+	#[test]
+	fn a_remote_claiming_one_of_our_users_is_the_forgery() {
+		assert!(is_forged_local_sender(
+			user_id!("@admin:localhost"),
+			server_name!("evil.example"),
+			server_name!("localhost"),
+		));
+	}
+
+	/// ⚠️ The half that is easy to leave out. A request this server
+	/// authenticated as **itself** has a local sender legitimately, and
+	/// reporting it would be crying wolf at a working deployment.
+	#[test]
+	fn our_own_server_sending_for_its_own_user_is_not_a_forgery() {
+		assert!(!is_forged_local_sender(
+			user_id!("@alice:localhost"),
+			server_name!("localhost"),
+			server_name!("localhost"),
+		));
+	}
+
+	/// The ordinary cases: a remote inviting for its own user (allowed), and a
+	/// remote inviting for a **third** server's user. The second is refused by
+	/// `validate_origins`, but it impersonates nobody here, so it is not this
+	/// warning's business.
+	#[test]
+	fn a_sender_that_is_not_ours_is_never_this_warnings_business() {
+		assert!(!is_forged_local_sender(
+			user_id!("@alice:remote.example"),
+			server_name!("remote.example"),
+			server_name!("localhost"),
+		));
+		assert!(!is_forged_local_sender(
+			user_id!("@alice:third.example"),
+			server_name!("remote.example"),
+			server_name!("localhost"),
+		));
+	}
 }
