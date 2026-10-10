@@ -20,7 +20,8 @@ use tuwunel_core::{
 };
 
 use super::{
-	Service, StrippedCreateVerdict, enforce_stripped_create, into_client_stripped, v12_room_ids,
+	Service, StrippedCreateVerdict, enforce_stripped_create, into_client_stripped,
+	list_stripped_state_kept, v12_room_ids,
 };
 use crate::{
 	membership::join::get_servers_for_room,
@@ -260,11 +261,15 @@ async fn finalize_knock_membership(
 		.get_content::<RoomMemberEventContent>()
 		.expect("we just created this");
 
-	let last_state = send_knock_response
+	// Trimmed for the same reason as a federated invite's: this is the remote
+	// server's choice of contents and nothing above it bounds the size
+	// (/docs/design/events/invites-on-the-wire.md §6).
+	let from_remote: Vec<_> = send_knock_response
 		.knock_room_state
 		.into_iter()
 		.filter_map(|state| into_client_stripped(room_id, state))
 		.collect();
+	let last_state = list_stripped_state_kept(from_remote);
 
 	self.services
 		.state_cache

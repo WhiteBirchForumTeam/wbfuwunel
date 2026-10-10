@@ -47,6 +47,7 @@ use tuwunel_service::{
 mod bridge;
 mod device;
 mod draft;
+mod invites;
 mod recent;
 mod send;
 mod session;
@@ -505,6 +506,13 @@ const fn admission(kind: Kind, subtype: u8) -> Option<Admission> {
 			Kind::Device,
 			device::FETCH | device::ITEMS_DESTROY | device::SUBSCRIBE | device::UNSUBSCRIBE,
 		) => Some(with(logged_in_websocket_only, IdType::ClientConversation)),
+		// The invite stream, same shape and for the same reason: `Fetch`
+		// answers with a run of `Batch` packs rather than one `Ack`
+		// (/docs/design/events/invites-on-the-wire.md §5).
+		| (
+			Kind::Invite,
+			invites::FETCH | invites::SUBSCRIBE | invites::UNSUBSCRIBE,
+		) => Some(with(logged_in_websocket_only, IdType::ClientConversation)),
 		// A draft only means anything to connections that are listening to
 		// the room, and its pieces are broadcast rather than answered:
 		// WebSocket only, every subtype.
@@ -730,6 +738,18 @@ async fn dispatch_native(
 		},
 		| (Kind::Device, device::FETCH) => {
 			device::handle_device_fetch(services, ctx, view, reply).await?;
+			Ok(SessionChange::Keep)
+		},
+		| (Kind::Invite, invites::SUBSCRIBE) => {
+			invites::handle_invite_subscribe(services, ctx, view, reply).await?;
+			Ok(SessionChange::Keep)
+		},
+		| (Kind::Invite, invites::UNSUBSCRIBE) => {
+			invites::handle_invite_unsubscribe(services, ctx, view, reply).await?;
+			Ok(SessionChange::Keep)
+		},
+		| (Kind::Invite, invites::FETCH) => {
+			invites::handle_invite_fetch(services, ctx, view, reply).await?;
 			Ok(SessionChange::Keep)
 		},
 		| (Kind::Device, device::ITEMS_DESTROY) => {

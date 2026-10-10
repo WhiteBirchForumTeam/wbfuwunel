@@ -113,6 +113,11 @@ offset  bytes              意思
 
 ### `0x13 Room`（房間）
 
+📎 **這個 kind 全部走橋，一個原生 subtype 都沒有。** 待處理的邀請曾經想放在這裡（`0x01`），
+後來改成自己的 kind `0x05 Invite`：它要的是一條**自己的訂閱線**（補得齊、自己的 `gap`），
+不是一個請求／回應的端點 —— 見 [/docs/design/events/invites-on-the-wire.md](../design/events/invites-on-the-wire.md) §5。
+⚠️ 而 `JoinedRooms`（`0x28`）照 Matrix 的 `/joined_rooms` 原樣，**只列已加入的**，🚫 不含邀請。
+
 | subtype | 前 4 bytes | 名稱 | 做什麼 | 端點 | 變數（path ／ query） | data |
 |---|---|---|---|---|---|---|
 | `0x20` | `01 13 20 10` | CreateRoom | 開房間 | `POST /createRoom` | — | JSON：名稱、邀請誰、公開與否、加密… |
@@ -144,7 +149,11 @@ offset  bytes              意思
 
 ### `0x14 Event`（訊息與房間狀態）
 
-原生的 `Recent`（`0x01`）、`Send`（`0x02`）、`Batch`（`0x03`）、`Subscribe`（`0x04`）、`Unsubscribe`（`0x05`）、`Push`（`0x06`）不變。
+原生的 `Recent`（`0x01`）、`Send`（`0x02`）、`Batch`（`0x03`）、`Subscribe`（`0x04`）、`Unsubscribe`（`0x05`）、`Push`（`0x06`）、
+`DeviceChanged`（`0x07`）不變 —— 📎 其中 `Batch`、`Push`、`DeviceChanged` **只有 server → client**。
+⚠️ 用名字而不是「後幾個」：第一版這裡寫「後四個」，而那個位置數法在 `Invited`（`0x08`）、
+`InviteGone`（`0x09`）被收回之後就錯了（邀請改走自己的 kind `0x05`，見
+[/docs/design/events/invites-on-the-wire.md](../design/events/invites-on-the-wire.md) §4）。
 
 | subtype | 前 4 bytes | 名稱 | 做什麼 | 端點 | 變數（path ／ query） | data |
 |---|---|---|---|---|---|---|
