@@ -2,7 +2,7 @@
 # requires-python = ">=3.10"
 # dependencies = ["websockets==17.1"]
 # ///
-"""e2e11: WS subscriptions and Push, backpressure, the connection health counter, drafts, logout teardown.
+"""e2e11: WS subscriptions and Push, backpressure, the connection health counter, drafts, logout teardown, invites.
 
 The Python port of e2e11.ps1 (issue #114): same scenarios, same check names. Run with `uv run tests/e2e/e2e11.py`.
 """
@@ -11,8 +11,8 @@ import time
 import uuid
 from urllib.parse import quote
 
-from wbf_helpers import (S, Suite, anchor, be32, conv, describe, hello_pack, json_pack, new_pack, push_events,
-                         rd_be32, recv_or_none, send_pack, to_json, utf8, ws_close, ws_is_open, ws_open, ws_send)
+from wbf_helpers import (Suite, anchor, be32, conv, describe, hello_pack, json_pack, new_pack, push_events, rd_be32,
+                         recv_or_none, send_pack, utf8, ws_close, ws_is_open, ws_open, ws_send)
 
 t = Suite("e2e11")
 GSEQKEY = "org.wbftw.wbfuwunel.g_seq"
@@ -81,12 +81,23 @@ def send_msg(room, body, tok):
     return send_msg_typed(room, "m.room.message", {"msgtype": "m.text", "body": body}, tok)
 
 
-def is_push(p):
+# Two different questions, so two functions (e2e11.ps1 answers the first with `Is-Push`):
+# - Did the server send this on its own, rather than in reply? `call()` skips those.
+#   ⭐ Told apart by a *field* rather than a list of subtypes: every server → client push carries `gap` in its
+#   meta and no reply ever does -- Ack, Error and the Batch packs all leave it out. A list has to name each push;
+#   the one this port first copied named only 0x14/0x06 and would have taken 0x14/0x07, 0x16/0x06, 0x16/0x08 and
+#   the invite pushes for replies (/docs/design/events/invites-on-the-wire.md §4).
+# - Is this an Event/Push (0x14/0x06), whose data is events to decode?
+def is_server_initiated(p):
+    return p is not None and not p.closed and isinstance(p.meta, dict) and "gap" in p.meta
+
+
+def is_event_push(p):
     return p is not None and not p.closed and p.kind == 0x14 and p.subtype == 6
 
 
 # Send one pack and wait for one frame, at most 10 s; a silent server fails the run instead of hanging it.
-# Push packs that were already queued for this connection are skipped: the caller wants the reply.
+# A server-initiated push already queued for this connection is skipped: the caller wants the reply.
 def call(ws, pack):
     ws_send(ws, pack)
     for _ in range(50):
@@ -95,7 +106,7 @@ def call(ws, pack):
             raise RuntimeError("no reply within 10 s")
         if p.closed:
             raise RuntimeError(f"server closed the connection: {p}")
-        if not is_push(p):
+        if not is_server_initiated(p):
             return p
     raise RuntimeError("only pushes, no reply")
 
@@ -107,7 +118,7 @@ def drain_pushes(ws, quiet_ms: int = 1500):
         p = recv_or_none(ws, quiet_ms)
         if p is None or p.closed:
             break
-        p.events = push_events(p.data) if is_push(p) else []
+        p.events = push_events(p.data) if is_event_push(p) else []
         packs.append(p)
     return packs
 
@@ -152,6 +163,56 @@ def unsubscribe(ws, id, rooms=None):
 
 def ids(packs):
     return [e.get("event_id") for p in packs for e in p.events]
+
+
+# ---------- 0x05 Invite (/docs/design/events/invites-on-the-wire.md §5) ----------
+def invite_subscribe(ws, id):
+    return call(ws, json_pack(0x05, 4, conv(id), 0, {}))
+
+
+def invite_unsubscribe(ws, id):
+    return call(ws, json_pack(0x05, 5, conv(id), 1, {}))
+
+
+# One complete pass: Batch packs until `r` reaches 0. Returns every pack, so a caller can check the
+# counting as well as the contents. 🚨 `r == 0` is the only thing that says the pass is complete.
+def invite_fetch(ws, id, batch=None):
+    meta = {} if batch is None else {"batch": batch}
+    packs = []
+    p = call(ws, json_pack(0x05, 1, conv(id), 0, meta))
+    while True:
+        packs.append(p)
+        if p.kind != 0x05 or p.subtype != 2 or int(p.m("r")) == 0:
+            return packs
+        p = None
+        while p is None:
+            q = recv_or_none(ws, 10000)
+            if q is None:
+                raise RuntimeError("the invite pass stopped before r reached 0")
+            if q.closed:
+                raise RuntimeError(f"server closed the connection: {q}")
+            if not is_server_initiated(q):
+                p = q
+
+
+def invite_entries(packs):
+    return [e for p in packs if p.kind == 0x05 and p.subtype == 2 for e in push_events(p.data)]
+
+
+# The rooms one pass listed, in the order it served them (oldest invite first).
+def invite_rooms(packs):
+    return [e.get("room_id") for e in invite_entries(packs)]
+
+
+# Waits for one Invite push (0x05/0x06 Push or 0x05/0x07 Gone), or None.
+def recv_invite(ws, ms: int = 4000):
+    for _ in range(20):
+        p = recv_or_none(ws, ms)
+        if p is None or p.closed:
+            return None
+        if p.kind == 0x05:
+            return p
+    return None
 
 
 # A Stream pack (0x02): the meta is the room id itself, as UTF-8 text rather than JSON, and the
@@ -218,7 +279,7 @@ def main():
     # The Push is queued inside append, before the handler's Ack: two frames, Push first.
     frames = drain_pushes(ws_sub)
     ack_send = [f for f in frames if f.kind == 1 and f.subtype == 2]
-    pushes = [f for f in frames if is_push(f)]
+    pushes = [f for f in frames if is_event_push(f)]
     t.check("[1.2] own Event/Send -> Ack with event_id and a Push of the same event (seq 1), Push first",
             lambda: len(ack_send) == 1 and ack_send[0].m("event_id") and len(pushes) == 1 and pushes[0].seq == 1
             and pushes[0].events[0]["event_id"] == ack_send[0].m("event_id") and frames[0].subtype == 6,
@@ -735,6 +796,157 @@ def main():
             describe(refused))
 
     ws_close(ws_one, ws_two, ws_locked)
+
+    # ================= Scenario 6: the invite stream (0x05 Invite, issue #111) =================
+    # /docs/design/events/invites-on-the-wire.md. A wbf account had no way to learn it was invited:
+    # Event/Push only carries joined rooms, the bridged /joined_rooms only lists joined ones, and asking
+    # the room itself is a 403 before you accept. ⭐ So invites get a subscription of their own, and it has
+    # the one property the message stream deliberately does not: its catch-up runs to completion.
+    #
+    # 📎 Two things in that doc e2e cannot reach, and unit tests cover instead:
+    #   - §6 the trim of `invite_room_state`: it only applies to state another server sent, and this is
+    #     one server (`list_stripped_state_kept` has four tests).
+    #   - §7 `Gone(knock)`: the auth rules forbid invite → knock, so no API call reaches that arm. It is
+    #     covered by construction — one hook after the match, not one per arm.
+    t.log("################ Scenario 6: invites have their own subscription ################")
+    reg_f = register("frank"); tok_f = reg_f["access_token"]
+    reg_g = register("grace")
+    ws_f, _ = ws_open_usable(tok_f)
+    ws_g, _ = ws_open_usable(reg_g["access_token"])
+    sub_f = invite_subscribe(ws_f, 60)
+    invite_subscribe(ws_g, 61)
+    t.check("[6.0] Invite/Subscribe is acked with the position it registered at",
+            lambda: sub_f.subtype == 2 and sub_f.m("latest_count") is not None and int(sub_f.m("latest_count")) > 0,
+            describe(sub_f))
+
+    room_i1 = create_room(tok_a, "invite-one")
+    invite(room_i1, reg_f["user_id"], tok_a)
+    pushed = recv_invite(ws_f)
+    t.check("[6.1] being invited is pushed on the invite stream, with the room and who sent it",
+            pushed is not None and pushed.subtype == 6 and pushed.m("room_id") == room_i1
+            and pushed.m("inviter") == reg_a["user_id"] and pushed.id == sub_f.id,
+            "nothing within 4 s" if pushed is None else describe(pushed))
+    t.check("[6.1b] it carries the invite's own position and is_direct, which this one is not",
+            lambda: int(pushed.m("is")) > 0 and pushed.m("is_direct") is False,
+            lambda: f"is={pushed.m('is')} is_direct={pushed.m('is_direct')}")
+    pushed_state = push_events(pushed.data) if pushed is not None else []
+    pushed_types = [e.get("type") for e in pushed_state]
+    t.check("[6.1c] and the stripped state, including frank's own member event, so sc is never 0 in the ordinary case",
+            lambda: int(pushed.m("sc")) == len(pushed_state) and int(pushed.m("sc")) >= 1 and "m.room.name" in pushed_types
+            and len([e for e in pushed_state if e.get("type") == "m.room.member" and e.get("state_key") == reg_f["user_id"]]) == 1,
+            lambda: f"sc={pushed.m('sc')} types={','.join(map(str, pushed_types))}")
+
+    # 🔴 An invite is not news for everybody: grace is subscribed to the invite stream and was not invited.
+    leak_g = recv_invite(ws_g, 1500)
+    t.check("[6.2] only the invited user is pushed, not every invite subscriber",
+            leak_g is None, "silence, as designed" if leak_g is None else describe(leak_g))
+
+    # 🔴 The streams do not mix: a connection that subscribed to messages only hears nothing about invites.
+    ws_f_msg, _ = ws_open_usable(tok_f)
+    subscribe(ws_f_msg, 62)
+    room_i2 = create_room(tok_a, "invite-two")
+    invite(room_i2, reg_f["user_id"], tok_a)
+    on_msg_stream = recv_invite(ws_f_msg, 2000)
+    on_invite_stream = recv_invite(ws_f)
+    t.check("[6.3] Event/Subscribe does not carry invites: the two subscriptions are separate",
+            on_msg_stream is None and on_invite_stream is not None and on_invite_stream.m("room_id") == room_i2,
+            f"msgStream={'silence' if on_msg_stream is None else describe(on_msg_stream)} "
+            f"inviteStream={'nothing' if on_invite_stream is None else on_invite_stream.m('room_id')}")
+
+    # The pass: every pending invite, oldest first, until r reaches 0.
+    pass_packs = invite_fetch(ws_f, 63)
+    pass_rooms = invite_rooms(pass_packs)
+    last = pass_packs[-1]
+    t.check("[6.4] one Fetch pass lists every pending invite and ends with r = 0",
+            lambda: len(pass_rooms) == 2 and room_i1 in pass_rooms and room_i2 in pass_rooms
+            and int(last.m("r")) == 0 and int(last.m("tc")) == 2,
+            lambda: f"rooms={','.join(map(str, pass_rooms))} r={last.m('r')} tc={last.m('tc')}")
+    t.check("[6.4b] oldest first: the room invited to first is served first",
+            lambda: pass_rooms[0] == room_i1, f"order={','.join(map(str, pass_rooms))}")
+    entry_one = next((e for e in invite_entries(pass_packs) if e.get("room_id") == room_i1), None)
+    t.check("[6.4c] and the entry says the same as the push did: same state, same derived fields",
+            lambda: entry_one is not None and len(entry_one["state"]) == int(pushed.m("sc"))
+            and entry_one.get("inviter") == reg_a["user_id"] and entry_one.get("is_direct") is False,
+            lambda: f"state={'no entry' if entry_one is None else len(entry_one['state'])} push_sc={pushed.m('sc')}")
+
+    # This stream is the connection's catch-up, so it has nowhere to go over HTTP.
+    http_fetch = send_pack(json_pack(0x05, 1, conv(64), 0, {}), tok_f)
+    http_sub = send_pack(json_pack(0x05, 4, conv(65), 0, {}), tok_f)
+    t.check("[6.5] Fetch and Subscribe are both refused over HTTP",
+            http_fetch.subtype == 3 and http_fetch.m("code") == "Unsupported"
+            and http_sub.subtype == 3 and http_sub.m("code") == "Unsupported",
+            f"fetch={describe(http_fetch)} sub={describe(http_sub)}")
+
+    # Declining ends the invite, and the stream says what ended it.
+    leave(room_i1, tok_f)
+    gone = recv_invite(ws_f)
+    t.check("[6.6] declining is pushed as Gone(leave), with the position of the event that did it",
+            lambda: gone is not None and gone.subtype == 7 and gone.m("room_id") == room_i1
+            and gone.m("membership") == "leave" and int(gone.m("is")) > 0,
+            "nothing" if gone is None else describe(gone))
+    after_leave = invite_rooms(invite_fetch(ws_f, 66))
+    t.check("[6.6b] ... and the next pass no longer lists it",
+            room_i1 not in after_leave and room_i2 in after_leave, f"rooms={','.join(map(str, after_leave))}")
+
+    join(room_i2, tok_f)
+    gone_join = recv_invite(ws_f)
+    t.check("[6.7] accepting is pushed as Gone(join): how the list emptied has one source",
+            gone_join is not None and gone_join.subtype == 7 and gone_join.m("room_id") == room_i2
+            and gone_join.m("membership") == "join",
+            "nothing" if gone_join is None else describe(gone_join))
+
+    # 🚨 The negative of [6.6]: leaving a room nobody invited you to is not an invite ending. This is what
+    # pins reading `is_invited` *before* the write — mark_as_left clears the invite either way.
+    own_room = create_room(tok_f, "frank-own")
+    leave(own_room, tok_f)
+    not_gone = recv_invite(ws_f, 2000)
+    t.check("[6.8] leaving a room you were never invited to pushes nothing",
+            not_gone is None, "silence, as designed" if not_gone is None else describe(not_gone))
+
+    # 🔴 §3.3, the whole reason the pass is a snapshot. While frank has no connection at all: one invite
+    # arrives, and another arrives and is then withdrawn. A waterline the client kept would find the first
+    # and never learn about the second -- the row it would have to notice is deleted.
+    ws_close(ws_f, ws_f_msg)
+    room_i3 = create_room(tok_a, "invite-while-away")
+    room_i4 = create_room(tok_a, "withdrawn-while-away")
+    invite(room_i3, reg_f["user_id"], tok_a)
+    invite(room_i4, reg_f["user_id"], tok_a)
+    kick(room_i4, reg_f["user_id"], tok_a)
+    ws_f2, _ = ws_open_usable(tok_f)
+    invite_subscribe(ws_f2, 67)
+    away = invite_rooms(invite_fetch(ws_f2, 68))
+    t.check("[6.9] an invite that arrived while every connection was closed is still caught up",
+            room_i3 in away, f"rooms={','.join(map(str, away))}")
+    t.check("[6.10] and one that was withdrawn while away is absent, which is what makes the pass a snapshot",
+            room_i4 not in away, f"rooms={','.join(map(str, away))}")
+
+    # Batching: the pass is cut into packs, and the counting has to add up across them.
+    room_i5 = create_room(tok_a, "batch-one"); room_i6 = create_room(tok_a, "batch-two")
+    invite(room_i5, reg_f["user_id"], tok_a); invite(room_i6, reg_f["user_id"], tok_a)
+    batch_packs = [p for p in invite_fetch(ws_f2, 69, 1) if p.kind == 0x05 and p.subtype == 2]
+    seqs = [p.seq for p in batch_packs]
+    remainders = [int(p.m("r")) for p in batch_packs]
+    oldests = [int(p.m("os")) for p in batch_packs]
+    ascending = all(b > a for a, b in zip(oldests, oldests[1:]))
+    t.check("[6.11] batch = 1 cuts the pass into one pack per room, seq counting from 0",
+            len(batch_packs) == 3 and seqs == [0, 1, 2] and all(int(p.m("bc")) == 1 for p in batch_packs),
+            f"packs={len(batch_packs)} seqs={','.join(map(str, seqs))}")
+    t.check("[6.11b] r counts down to 0 and the counts only go forwards",
+            remainders == [2, 1, 0] and ascending and all(int(p.m("tc")) == 3 for p in batch_packs),
+            f"r={','.join(map(str, remainders))} os={','.join(map(str, oldests))}")
+
+    # Unsubscribing stops the pushes; the catch-up is still there for next time.
+    invite_unsubscribe(ws_f2, 67)
+    room_i7 = create_room(tok_a, "after-unsubscribe")
+    invite(room_i7, reg_f["user_id"], tok_a)
+    after_unsub = recv_invite(ws_f2, 2000)
+    t.check("[6.12] Unsubscribe stops the pushes",
+            after_unsub is None, "silence, as designed" if after_unsub is None else describe(after_unsub))
+    back_again = invite_rooms(invite_fetch(ws_f2, 70))
+    t.check("[6.12b] ... and the invite it missed is still waiting in the next pass",
+            room_i7 in back_again, f"rooms={','.join(map(str, back_again))}")
+
+    ws_close(ws_g, ws_f2)
     t.stop_server(server)
 
 

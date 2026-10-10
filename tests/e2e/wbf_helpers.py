@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from websockets.exceptions import ConnectionClosed, InvalidStatus
+from websockets.exceptions import ConnectionClosed
 from websockets.protocol import State
 from websockets.sync.client import connect as _ws_connect
 
@@ -338,8 +338,10 @@ class Suite:
         print(m, flush=True)
 
     def check(self, name: str, ok, detail="") -> bool:
-        """`ok` and `detail` may be callables: a condition that raises (an index into an empty list, a field of a
-        reply that never came) is a FAIL with the exception in the detail, not the end of the run."""
+        """`ok` and `detail` may be callables. Only then is a condition that raises (an index into an empty list,
+        a field of a reply that never came) a FAIL with the exception in the detail: a plain value is computed
+        before `check` is called, so if *that* raises, the run ends as ABORTED. ⇒ Pass a lambda whenever the
+        condition reaches into something that may not be there."""
         if callable(ok):
             try:
                 ok = ok()

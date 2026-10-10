@@ -38,13 +38,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\e2e\e2e10.ps1
 
 ### Python 版（移植中，issue #114）
 
-同一份腳本 Windows／Linux 都跑；相依（`websockets`）寫在腳本開頭的 PEP 723 區塊，[uv](https://docs.astral.sh/uv/) 自己裝，不用管 venv：
+同一份腳本 Windows／Linux 都跑。**用 [uv](https://docs.astral.sh/uv/) 跑是標準做法**（維護者 2026-10-10 定的）：相依（`websockets`）寫在腳本開頭的 PEP 723 區塊，uv 自己裝，不用管 venv：
 
 ```sh
 E2E_EXE=target/debug/tuwunel uv run tests/e2e/e2e11.py
 ```
 
 - 目前移植了 `wbf_helpers.py`（對應 `wbf-helpers.ps1`）與 `e2e11.py`；其他支還是 `.ps1`，全部移植並對照過之後才刪 `.ps1`。
+- 🚨 **兩邊都在的期間，改了 `.ps1` 的 check 就要改 `.py`**，反過來也一樣。`uv run tests/e2e/verify-ports.py` 比對每一對的 check 名稱集合，
+  少一條、多一條、重名都是 exit 1。起因：#113 在這支審查期間把情境 6（20 條）加進 `e2e11.ps1`，`.py` 照樣印 `fail=0`，沒有東西講話。
 - check 名稱、`ok`／`FAIL`／`RESULT` 格式、產物位置（`target/e2e-runs/<腳本>-out/`）、`E2E_EXE` 都跟 `.ps1` 一樣；
   `E2E_EXE` 沒給時找 `target/e2e/tuwunel`（Windows 是 `tuwunel.exe`）。
 - 跟 `.ps1` 不同的地方，都是刻意的：
