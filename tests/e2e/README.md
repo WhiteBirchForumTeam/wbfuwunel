@@ -36,6 +36,26 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\e2e\e2e10.ps1
   `WBFUWUNEL_MEDIA_GRACE_SECONDS` 由 e2e10 情境 3 自己設與清。
 - 沒有機密：帳號密碼是固定的測試字串，只連 localhost。
 
+### Python 版（移植中，issue #114）
+
+同一份腳本 Windows／Linux 都跑。**用 [uv](https://docs.astral.sh/uv/) 跑是標準做法**（維護者 2026-10-10 定的）：相依（`websockets`）寫在腳本開頭的 PEP 723 區塊，uv 自己裝，不用管 venv：
+
+```sh
+E2E_EXE=target/debug/tuwunel uv run tests/e2e/e2e11.py
+```
+
+- 目前移植了 `wbf_helpers.py`（對應 `wbf-helpers.ps1`）與 `e2e11.py`；其他支還是 `.ps1`，全部移植並對照過之後才刪 `.ps1`。
+- 🚨 **兩邊都在的期間，改了 `.ps1` 的 check 就要改 `.py`**，反過來也一樣。`uv run tests/e2e/verify-ports.py` 比對每一對的 check 名稱集合，
+  少一條、多一條、重名都是 exit 1。起因：#113 在這支審查期間把情境 6（20 條）加進 `e2e11.ps1`，`.py` 照樣印 `fail=0`，沒有東西講話。
+- check 名稱、`ok`／`FAIL`／`RESULT` 格式、產物位置（`target/e2e-runs/<腳本>-out/`）、`E2E_EXE` 都跟 `.ps1` 一樣；
+  `E2E_EXE` 沒給時找 `target/e2e/tuwunel`（Windows 是 `tuwunel.exe`）。
+- 跟 `.ps1` 不同的地方，都是刻意的：
+  - 腳本中途丟例外時，**一定**收掉自己起的 server，`RESULT` 行標 `ABORTED`、exit code 非 0（`.ps1` 會留下一台活的 server）。
+  - check 的條件丟例外（例如回覆沒來就去讀它的欄位）是那一條 `FAIL`，不會讓整支停掉。
+  - 收 server 只掃**這次測的那個 binary**（Linux 比 `/proc/<pid>/exe`，Windows 比映像名稱），不是任何叫 `tuwunel` 的行程。
+  - WebSocket 收不到東西逾時**不會**吃掉下一個 frame（函式庫自己有佇列），`.ps1` 的 `Recv-Or-Null` 手動記住未完成的接收那一套不需要了。
+  - 連線關閉的原因是數字（`1008`），不是 .NET 的列舉名（`PolicyViolation`）。
+
 ## 寫新的
 
 - 從 `e2e10.ps1` 抄骨架：dot-source helpers、`Check name ok detail`、每個情境一個乾淨的資料庫目錄、結束 `Stop-Server`。
