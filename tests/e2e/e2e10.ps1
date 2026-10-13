@@ -5,11 +5,11 @@ $script:Pass = 0; $script:Fail = 0
 function Check([string]$name, [bool]$ok, [string]$detail) {
   if ($ok) { $script:Pass++; Log "  ok   $name  $detail" } else { $script:Fail++; Log "  FAIL $name  $detail" }
 }
-function Write-Config10([string]$db) {
+function Write-Config10([string]$db, [string[]]$extra = @()) {
   $cfg = "$S\e2e10.toml"
-  @('[global]','server_name = "localhost"',('database_path = "' + ($db.Replace([string][char]92, '/')) + '"'),'port = 8015','address = ["127.0.0.1"]',
+  (@('[global]','server_name = "localhost"',('database_path = "' + ($db.Replace([string][char]92, '/')) + '"'),'port = 8015','address = ["127.0.0.1"]',
     'allow_registration = true','yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse = true','allow_federation = false',
-    'save_unredacted_events = true','redaction_retention_seconds = 1','media_gc_sweep_interval = 2','log = "info"') -join "`n" | Set-Content -Path $cfg -Encoding ascii
+    'save_unredacted_events = true','redaction_retention_seconds = 1','media_gc_sweep_interval = 2','log = "info"') + $extra) -join "`n" | Set-Content -Path $cfg -Encoding ascii
   $cfg
 }
 function Room-Messages($room, $tok, $dir = 'b', $limit = 100) {
@@ -235,6 +235,103 @@ Check '[4.3] the sweep ran' ($log4 -match 'Unreferenced media sweep finished') '
 Stop-Server $script:p
 Remove-Item Env:WBFUWUNEL_MEDIA_GRACE_SECONDS -ErrorAction SilentlyContinue
 }
+
+# ================= Scenario 5: the traditional upload has a server-wide memory budget =================
+# /docs/design/media/legacy-upload-concurrency.md. One request's size was bounded and how long it
+# may take was bounded, but how many of them may be in memory together was not -- so the real
+# ceiling was "people uploading at once x max_request_size", with no number to point at.
+Log '################ Scenario 5: the upload memory budget ################'
+$db5 = "$S\e2e10db-5"; Remove-Item -Recurse -Force $db5 -EA SilentlyContinue; New-Item -ItemType Directory -Force $db5 | Out-Null
+# 2 MiB for the whole server. max_request_size cannot go below 10 MB (config/check refuses to
+# start), so the budget is deliberately the smaller of the two here -- which is exactly the
+# configuration the startup warning is for, asserted in [5.0].
+$cfg5 = Write-Config10 $db5 @('matrix_upload_memory_budget = "2 MiB"')
+$script:p = Start-Server $cfg5 's5'
+$regA5 = Api Post '/_matrix/client/v3/register' '{"username":"alice","password":"correct-horse-battery","auth":{"type":"m.login.dummy"}}' $null
+$tokA5 = $regA5.access_token
+
+$log5 = Read-ServerLog 's5'
+Check '[5.0] a budget below max_request_size is warned about at startup, not refused' `
+  ($log5 -match 'matrix_upload_memory_budget is 2097152 bytes but max_request_size is') ''
+
+$small = [byte[]](1..1024 | ForEach-Object { $_ % 251 })
+$firstUpload = Upload-Legacy $tokA5 $small 'within-budget.bin'
+Check '[5.1] an ordinary upload is unaffected by the budget' `
+  ($firstUpload.status -eq 200 -and $firstUpload.mxc) "status=$($firstUpload.status) mxc=$($firstUpload.mxc)"
+
+# Sends an upload's request head (and one byte of body) and then stops. The budget is booked when
+# the head has been read, before the body is -- so this holds the bytes without ever sending them.
+# 🚨 Raw sockets because that is the only way to hold a reservation open and then vanish mid-body,
+# which is the case the whole design rests on: a request can end in more ways than it can succeed.
+function Start-Stalled-Upload($tok, [int]$declare, [string]$path = '/_matrix/media/v3/upload') {
+  $client = New-Object System.Net.Sockets.TcpClient
+  $client.Connect('127.0.0.1', 8015)
+  $stream = $client.GetStream()
+  $head = "POST $path`?filename=stalled HTTP/1.1`r`nHost: 127.0.0.1:8015`r`n" +
+    "Authorization: Bearer $tok`r`nContent-Type: application/octet-stream`r`n" +
+    "Content-Length: $declare`r`nConnection: close`r`n`r`n"
+  $headBytes = [Text.Encoding]::ASCII.GetBytes($head)
+  $stream.Write($headBytes, 0, $headBytes.Length); $stream.Flush()
+  # One byte of the body, so the server is certainly past the head and waiting for the rest.
+  $stream.Write([byte[]]@(65), 0, 1); $stream.Flush()
+  Start-Sleep -Milliseconds 800
+  @{ client = $client; stream = $stream }
+}
+function Stop-Stalled-Upload($stalled) {
+  if ($null -eq $stalled) { return }
+  $stalled.stream.Close(); $stalled.client.Close()
+  Start-Sleep -Milliseconds 800
+}
+
+# 1.5 MiB of the 2 MiB budget is booked and never sent; 1 MiB more does not fit.
+$stalled = Start-Stalled-Upload $tokA5 1572864
+$req429 = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::Post, "$B/_matrix/media/v3/upload?filename=does-not-fit.bin")
+$req429.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $tokA5)
+$req429.Content = New-Object System.Net.Http.ByteArrayContent (,([byte[]]::new(1048576)))
+$req429.Content.Headers.ContentType = New-Object System.Net.Http.Headers.MediaTypeHeaderValue('application/octet-stream')
+$resp429 = $script:PackHttpClient.SendAsync($req429).Result
+$json429 = $resp429.Content.ReadAsStringAsync().Result | ConvertFrom-Json
+Check '[5.2] with most of the budget held, the next upload is refused instead of being buffered' `
+  ([int]$resp429.StatusCode -eq 429) "status=$([int]$resp429.StatusCode)"
+# A limit with no retry hint turns a client into a hot loop.
+Check '[5.2b] ... as M_LIMIT_EXCEEDED with retry_after_ms' `
+  ($json429.errcode -eq 'M_LIMIT_EXCEEDED' -and $json429.retry_after_ms -gt 0) `
+  "errcode=$($json429.errcode) retry_after_ms=$($json429.retry_after_ms)"
+
+# 🚨 The gate must not reach every request: a server busy with uploads still has to let people in.
+$versions = Http Get '/_matrix/client/versions' $null $null
+$loginWhileFull = Api Post '/_matrix/client/v3/login' '{"type":"m.login.password","identifier":{"type":"m.id.user","user":"alice"},"password":"correct-horse-battery"}' $null
+# The wbf chunked upload declares its file over the same HTTP endpoint and must not be gated: it
+# only ever holds one chunk, which is why this budget is about the other path and not about it.
+$chunkedWhileFull = Send-Pack (New-Pack 3 1 0 0 1 (FileInfo-Meta 131072 65536 2) @()) $tokA5
+Check '[5.3] while the budget is held, requests that are not traditional uploads carry on' `
+  ($versions.status -eq 200 -and $null -ne $loginWhileFull.access_token -and $chunkedWhileFull.subtype -eq 2) `
+  "versions=$($versions.status) login=$($null -ne $loginWhileFull.access_token) chunked=$(Describe $chunkedWhileFull)"
+
+# 📎 The reservation is given back by dropping it, so the client going away mid-body is the same
+# path as success. Nothing in the server was told this request ended.
+Stop-Stalled-Upload $stalled
+$afterAbort = Upload-Legacy $tokA5 ([byte[]]::new(1048576)) 'after-abort.bin'
+Check '[5.4] a client that vanishes mid-body gives its bytes back, so the next upload fits' `
+  ($afterAbort.status -eq 200 -and $afterAbort.mxc) "status=$($afterAbort.status)"
+
+# 🚫 Not 429: no amount of retrying makes a request smaller than it is.
+$tooBig = Upload-Legacy $tokA5 ([byte[]]::new(3145728)) 'larger-than-the-budget.bin'
+Check '[5.5] an upload larger than the whole budget is refused 413, not asked to retry' `
+  ($tooBig.status -eq 413) "status=$($tooBig.status)"
+
+# Both generations of the path are one Ruma endpoint, so they are one budget. Holding it from the
+# r0 spelling has to refuse the v3 one.
+$stalledOld = Start-Stalled-Upload $tokA5 1572864 '/_matrix/media/r0/upload'
+$refusedNew = Upload-Legacy $tokA5 ([byte[]]::new(1048576)) 'other-generation.bin'
+Stop-Stalled-Upload $stalledOld
+Check '[5.6] the r0 and v3 spellings of upload share the one budget' `
+  ($refusedNew.status -eq 429) "status=$($refusedNew.status)"
+
+$afterRelease = Upload-Legacy $tokA5 ([byte[]]::new(1048576)) 'budget-is-back.bin'
+Check '[5.7] and the budget is spendable again once nothing holds it' `
+  ($afterRelease.status -eq 200) "status=$($afterRelease.status)"
+Stop-Server $script:p
 
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"
 
