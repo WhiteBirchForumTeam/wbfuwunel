@@ -96,6 +96,7 @@ pub fn check(config: &Config) -> Result {
 	warn_address_keyed_limits_share_one_bucket(config);
 	check_wbf_send_queue_bytes(config)?;
 	check_wbf_window_max_bytes(config)?;
+	check_matrix_upload_memory_budget(config);
 	check_s3_part_size(config)?;
 	check_network(config)?;
 	check_storage(config)?;
@@ -304,6 +305,25 @@ fn check_wbf_send_queue_bytes(config: &Config) -> Result {
 	}
 
 	Ok(())
+}
+
+/// The upload budget should hold at least one largest-allowed upload.
+///
+/// ⚠️ A warning and not a refusal: the server works, and the operator may
+/// well mean it (a budget below `max_request_size` is how you say "only small
+/// uploads"). What it must not do is surprise them — an upload the size limit
+/// advertises as acceptable is refused before its body is read, and the
+/// reason is in a different setting from the one the client was told about.
+fn check_matrix_upload_memory_budget(config: &Config) {
+	if config.matrix_upload_memory_budget < config.max_request_size {
+		warn!(
+			"matrix_upload_memory_budget is {} bytes but max_request_size is {}, so an upload \
+			 larger than the budget is refused with 413 however idle the server is. Raise \
+			 matrix_upload_memory_budget to at least max_request_size, or lower \
+			 max_request_size, unless refusing the larger ones is what you want.",
+			config.matrix_upload_memory_budget, config.max_request_size,
+		);
+	}
 }
 
 /// A window must hold the largest event a pack can carry.

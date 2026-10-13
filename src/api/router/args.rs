@@ -9,7 +9,7 @@ use ruma::{
 	OwnedUserId, ServerName, UserId, api::IncomingRequest,
 };
 use tuwunel_core::{Err, Error, Result, err, trace, utils::string::EMPTY};
-use tuwunel_service::{Services, appservice::RegistrationInfo};
+use tuwunel_service::{Services, appservice::RegistrationInfo, media::upload_budget::Reservation};
 
 use super::{
 	auth,
@@ -51,6 +51,16 @@ pub(crate) struct Args<T> {
 	/// The request's HTTP headers, for the few endpoints that read one Ruma
 	/// does not model (e.g. `X-Wbf-Attachments` on send).
 	pub(crate) headers: http::HeaderMap,
+
+	/// Bytes booked out of the upload budget to hold this request's body.
+	///
+	/// `None` for everything but the traditional upload endpoints.
+	///
+	/// ⚠️ 🚫 Nothing reads this and nothing releases it: it is here so that
+	/// the memory stays booked for exactly as long as the handler holds the
+	/// body, and is given back however the handler ends
+	/// (`/docs/design/media/legacy-upload-concurrency.md` §2).
+	_upload: Option<Reservation>,
 }
 
 impl<T> Args<T> {
@@ -103,7 +113,8 @@ where
 		request: http::Request<Body>,
 		services: &State,
 	) -> Result<Self, Self::Rejection> {
-		let mut request = request::from(services, request).await?;
+		let mut request =
+			request::from(services, request, request::is_whole_file_upload::<T>()).await?;
 		let mut json_body = serde_json::from_slice::<CanonicalJsonValue>(&request.body).ok();
 		trace!(?request);
 
@@ -135,6 +146,10 @@ where
 		.await?;
 
 		let headers = request.parts.headers.clone();
+		// ⚠️ Moved into `Args` rather than dropped here: the body lives for as
+		// long as the handler holds this, and the bytes are booked until then
+		// (`/docs/design/media/legacy-upload-concurrency.md` §2).
+		let upload = request.upload.take();
 		Ok(Self {
 			body: make_body::<T>(services, &mut request, json_body.as_mut(), &auth)?,
 			headers,
@@ -144,6 +159,7 @@ where
 			sender_device: auth.sender_device,
 			appservice_info: auth.appservice_info,
 			json_body,
+			_upload: upload,
 		})
 	}
 }

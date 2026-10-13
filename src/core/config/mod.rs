@@ -637,6 +637,28 @@ pub struct Config {
 	#[serde(default = "default_max_pending_media_uploads")]
 	pub max_pending_media_uploads: usize,
 
+	/// Total request body the traditional Matrix upload endpoints may hold in
+	/// memory at once, across the whole server. Each upload books what it
+	/// declares (capped at max_request_size) before its body is read and gives
+	/// it back when the request ends; one that cannot book is refused with 429
+	/// M_LIMIT_EXCEEDED rather than buffered. The number of uploads running
+	/// together is therefore not configured: it is this budget divided by what
+	/// they declare, so a small upload is never starved by a large one.
+	///
+	/// Parsing the body may hold a second copy, so the real peak can be about
+	/// twice this. The chunked wbf upload holds one chunk at a time and does
+	/// not use this budget. Accepts an integer byte count or a string with
+	/// SI/IEC suffix such as "1 GiB".
+	///
+	/// See /docs/design/media/legacy-upload-concurrency.md
+	///
+	/// default: 1 GiB
+	#[serde(
+		default = "default_matrix_upload_memory_budget",
+		deserialize_with = "deserialize_bytesize_usize"
+	)]
+	pub matrix_upload_memory_budget: usize,
+
 	/// The time in seconds before an unused pending MXC URI expires and is
 	/// removed.
 	///
@@ -5853,6 +5875,8 @@ fn default_max_request_size() -> usize { 24 * 1024 * 1024 }
 fn default_max_response_size() -> usize { 256 * 1024 * 1024 }
 
 fn default_max_pending_media_uploads() -> usize { 5 }
+
+fn default_matrix_upload_memory_budget() -> usize { 1024 * 1024 * 1024 }
 
 fn default_media_create_unused_expiration_time() -> u64 { 86400 }
 

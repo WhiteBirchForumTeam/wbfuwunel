@@ -6,6 +6,7 @@ mod remote;
 mod tests;
 mod thumbnail;
 mod upload;
+pub mod upload_budget;
 #[cfg(feature = "media_thumbnail")]
 mod video;
 use std::{
@@ -47,6 +48,7 @@ use self::{
 	preview::Agent,
 	remote::Fetch,
 	upload::UploadHot,
+	upload_budget::UploadBudget,
 };
 pub use self::{
 	data::{ChunkSpan, ChunkedMedia, Metadata, Tombstone, TombstoneReason, Upload, UploadProgress},
@@ -110,6 +112,13 @@ pub struct Service {
 	/// here is loaded from them on first use.
 	uploads_hot: Mutex<HashMap<u64, UploadHot>>,
 	mxc_state: MXCState,
+	/// How much traditional-upload body the whole server may hold at once.
+	///
+	/// ⚠️ Lives here because it bounds media memory, but it is booked in the
+	/// router before the body is read — that is the only place that knows the
+	/// request has not been buffered yet
+	/// (`/docs/design/media/legacy-upload-concurrency.md` §2).
+	upload_budget: UploadBudget,
 	#[cfg(feature = "media_thumbnail")]
 	video_thumbnail_slots: Semaphore,
 	#[cfg(feature = "media_thumbnail")]
@@ -142,6 +151,11 @@ impl crate::Service for Service {
 				notifiers: Mutex::new(HashMap::new()),
 				ratelimiter: Mutex::new(HashMap::new()),
 			},
+			upload_budget: UploadBudget::new(
+				args.server
+					.config
+					.matrix_upload_memory_budget,
+			),
 			#[cfg(feature = "media_thumbnail")]
 			video_thumbnail_failures: Failures::new(FAILURES).into(),
 			#[cfg(feature = "media_thumbnail")]
@@ -175,6 +189,15 @@ impl crate::Service for Service {
 }
 
 impl Service {
+	/// Args:
+	///     (none)
+	/// Return:
+	///     &UploadBudget  the server-wide byte budget a traditional upload
+	///     books before its body is read.
+	#[inline]
+	#[must_use]
+	pub fn upload_budget(&self) -> &UploadBudget { &self.upload_budget }
+
 	/// Create a pending media upload ID.
 	#[tracing::instrument(level = "debug", skip(self))]
 	pub async fn create_pending(
