@@ -239,6 +239,7 @@ mod tests {
 			appservice_info: None,
 			json_body: None,
 			headers: axum::http::HeaderMap::new(),
+			_upload: None,
 		}
 	}
 

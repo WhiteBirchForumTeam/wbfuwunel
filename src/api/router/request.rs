@@ -178,3 +178,45 @@ fn book_upload_memory(services: &Services, parts: &Parts) -> Result<Reservation>
 		))),
 	})
 }
+
+#[cfg(test)]
+mod tests {
+	use ruma::api::client::{
+		account::whoami,
+		media::{create_content, create_content_async, create_mxc_uri},
+	};
+
+	use super::is_whole_file_upload;
+
+	// 🚨 A traditional upload endpoint that is not named here is not bounded
+	// by anything: the per-request size limit still applies, but nothing caps
+	// what all of them hold together. So this test is where a new one has to
+	// be noticed — it fails for the endpoint that was added without a line in
+	// `is_whole_file_upload`, rather than the budget silently not applying.
+	#[test]
+	fn both_endpoints_that_buffer_a_whole_file_book_memory() {
+		assert!(
+			is_whole_file_upload::<create_content::v3::Request>(),
+			"POST /_matrix/media/*/upload sends the file in the request body"
+		);
+		assert!(
+			is_whole_file_upload::<create_content_async::v3::Request>(),
+			"PUT /_matrix/media/*/upload/{{server}}/{{id}} does too"
+		);
+	}
+
+	// ⭐ The budget is about bytes held, not about being an upload endpoint:
+	// this one is named `create` and is part of uploading, but its request is
+	// `Request {}` — there is nothing to book.
+	#[test]
+	fn minting_an_mxc_uri_books_nothing_because_its_request_has_no_body() {
+		assert!(!is_whole_file_upload::<create_mxc_uri::v1::Request>());
+	}
+
+	// ⚠️ The negative side of §2.3: the gate must not reach every request, or
+	// a server busy with uploads would start refusing logins.
+	#[test]
+	fn an_endpoint_that_is_not_an_upload_books_nothing() {
+		assert!(!is_whole_file_upload::<whoami::v3::Request>());
+	}
+}

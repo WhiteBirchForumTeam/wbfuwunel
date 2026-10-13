@@ -146,7 +146,7 @@ mod tests {
 		let budget = UploadBudget::new(100);
 		let _first = budget.reserve(80).expect("80 of 100 fits");
 
-		assert_eq!(budget.reserve(40), Err(BudgetError::Full));
+		assert_eq!(budget.reserve(40).err(), Some(BudgetError::Full));
 	}
 
 	// 🚨 This is the one the whole feature rests on: every way a request can
@@ -167,7 +167,7 @@ mod tests {
 	fn a_request_larger_than_the_whole_budget_is_told_so_instead_of_being_asked_to_retry() {
 		let budget = UploadBudget::new(100);
 
-		assert_eq!(budget.reserve(101), Err(BudgetError::LargerThanBudget));
+		assert_eq!(budget.reserve(101).err(), Some(BudgetError::LargerThanBudget));
 	}
 
 	#[test]

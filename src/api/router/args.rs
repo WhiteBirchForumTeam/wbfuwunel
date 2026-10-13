@@ -60,7 +60,7 @@ pub(crate) struct Args<T> {
 	/// the memory stays booked for exactly as long as the handler holds the
 	/// body, and is given back however the handler ends
 	/// (`/docs/design/media/legacy-upload-concurrency.md` §2).
-	_upload: Option<Reservation>,
+	pub(crate) _upload: Option<Reservation>,
 }
 
 impl<T> Args<T> {
