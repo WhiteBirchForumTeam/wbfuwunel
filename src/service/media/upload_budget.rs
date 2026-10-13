@@ -103,8 +103,12 @@ impl UploadBudget {
 
 		match Arc::clone(&self.budget).try_acquire_many_owned(permits) {
 			| Ok(room) => Ok(Reservation { _room: Some(room), bytes }),
-			| Err(TryAcquireError::NoPermits) => Err(BudgetError::Full),
-			| Err(TryAcquireError::Closed) => Err(BudgetError::Full),
+			// ⚠️ `Closed` cannot happen — nothing ever closes this budget, it
+			// lives as long as the process — but it is the same answer either
+			// way: no bytes, so no upload. 🚫 Not `unreachable!`; a refusal is
+			// a result, a panic would take the connection with it.
+			| Err(TryAcquireError::NoPermits | TryAcquireError::Closed) =>
+				Err(BudgetError::Full),
 		}
 	}
 
@@ -154,10 +158,12 @@ mod tests {
 	#[test]
 	fn dropping_a_reservation_gives_the_bytes_back() {
 		let budget = UploadBudget::new(100);
-		{
-			let _first = budget.reserve(80).expect("80 of 100 fits");
-			assert!(budget.reserve(40).is_err(), "the budget is spent while the first one lives");
-		}
+		let first = budget.reserve(80).expect("80 of 100 fits");
+		assert!(budget.reserve(40).is_err(), "the budget is spent while the first one lives");
+
+		// ⭐ Named rather than left to the end of a scope: the release is the
+		// behaviour under test, so it should be a line you can point at.
+		drop(first);
 
 		assert_eq!(budget.available_bytes(), 100);
 		assert!(budget.reserve(40).is_ok(), "and it is spendable again afterwards");
