@@ -475,10 +475,11 @@
 # together is therefore not configured: it is this budget divided by what
 # they declare, so a small upload is never starved by a large one.
 #
-# Parsing the body may hold a second copy, so the real peak can be about
-# twice this. The chunked wbf upload holds one chunk at a time and does
-# not use this budget. Accepts an integer byte count or a string with
-# SI/IEC suffix such as "1 GiB".
+# This bounds the bytes received, not everything derived from them:
+# decoding the body into the request type may hold a second copy, so the
+# real peak is about twice this. The chunked wbf upload holds one chunk at
+# a time and does not use this budget. Accepts an integer byte count or a
+# string with SI/IEC suffix such as "1 GiB".
 #
 # See /docs/design/media/legacy-upload-concurrency.md
 #
