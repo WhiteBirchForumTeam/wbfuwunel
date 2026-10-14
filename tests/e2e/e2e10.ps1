@@ -331,6 +331,19 @@ Check '[5.6] the r0 and v3 spellings of upload share the one budget' `
 $afterRelease = Upload-Legacy $tokA5 ([byte[]]::new(1048576)) 'budget-is-back.bin'
 Check '[5.7] and the budget is spendable again once nothing holds it' `
   ($afterRelease.status -eq 200) "status=$($afterRelease.status)"
+
+# 🚨 An upload's body is a file, not a document: it must not be parsed as JSON on the way in.
+# The parse grew a tree nothing bounded (a JSON-shaped file of a few MiB becomes hundreds), and
+# a parsed *object* was re-serialised over the file -- so this deliberately ugly object is the
+# one that used to come back with its whitespace gone and its keys re-ordered.
+# /docs/design/media/legacy-upload-concurrency.md 2.4 (review 2026-10-14)
+$jsonFile = [Text.Encoding]::UTF8.GetBytes('{  "z" : 1,   "a"  :  [2, 3] ,  "m":"  spaced  "  }')
+$jsonUp = Upload-Legacy $tokA5 $jsonFile 'object.json'
+$jsonBack = Get-Bytes $jsonUp.mxc $tokA5
+$sameBytes = $jsonUp.status -eq 200 -and $jsonBack.status -eq 200 -and
+  (@(Compare-Object $jsonFile $jsonBack.bytes -SyncWindow 0).Count -eq 0)
+Check '[5.8] a JSON object uploaded as a file comes back byte for byte (it is never parsed)' `
+  $sameBytes "up=$($jsonUp.status) down=$($jsonBack.status) sent=$($jsonFile.Length)B got=$($jsonBack.bytes.Length)B"
 Stop-Server $script:p
 
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"
