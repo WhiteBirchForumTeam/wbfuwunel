@@ -355,8 +355,13 @@ $reqBig = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMe
 $reqBig.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $tokA5)
 $reqBig.Content = New-Object System.Net.Http.StringContent (('{"msgtype":"m.text","body":"' + ('x' * 3000000) + '"}'), [Text.Encoding]::UTF8, 'application/json')
 $respBig = $script:PackHttpClient.SendAsync($reqBig).Result
+$bigText = $respBig.Content.ReadAsStringAsync().Result
+# 🚨 The status alone would pass for the wrong reason: a 3 MB message event is over
+# MAX_PDU_BYTES too, and that refusal is also a 413. So the message has to say it was this
+# gate -- and it names the setting, which is the same thing an operator needs to read.
 Check '[5.9] a client request body over max_json_body_size is refused before it is parsed' `
-  ([int]$respBig.StatusCode -eq 413) "status=$([int]$respBig.StatusCode)"
+  ([int]$respBig.StatusCode -eq 413 -and $bigText -match 'max_json_body_size') `
+  "status=$([int]$respBig.StatusCode) body=$($bigText.Substring(0, [Math]::Min(150, $bigText.Length)))"
 
 # ⚠️ The other side of it: the bound must not be in the way of an ordinary request.
 $ordinarySend = Send-Text $room5 'an ordinary message, well under the limit' $tokA5
