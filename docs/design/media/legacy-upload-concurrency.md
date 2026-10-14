@@ -135,6 +135,56 @@ to_bytes(body, reserve)                                 // ⭐ 上限用「預�
 
 🔴 **可以帶走的規則**：問「什麼上限它」要問到**衍生物**，不只是入口那個緩衝區。
 
+### 2.5 ✅ 其他端點：解析之前先量，而上限分兩段（維護者 2026-10-14）
+
+§2.4 把上傳那兩條的解析拿掉了，但那是**局部解** —— 解析對**每一個**走 `Args<T>` 的端點都做、
+而且都在認證之前，所以其他端點照樣可以在沒有 token 的情況下讓 server 解析到 `max_request_size`：
+
+| 輸入（最壞形狀 `[0,0,0,…]`）| 節點數 | 樹大約 |
+|---|---|---|
+| 1 MiB | 0.5 M | 17 MB |
+| 2 MiB | 1.0 M | **34 MB** |
+| 6 MiB | 3.1 M | **100 MB** |
+| 24 MiB（預設 `max_request_size`）| 12.6 M | **403 MB**（Vec 擴容最壞 805 MB）|
+
+⭐ **做法照這個 repo 自己已有的形狀**（🚫 不發明第二種）：wbf 那條路在任何 handler 解析 meta
+之前就先量（`api/client/wbf/mod.rs` 的 `limits_ok`），而且 WS 層在**收滿之前**就拒絕超大訊息
+（`api/client/wbf/ws.rs` 的 `max_message_size`）。⇒ 把同一件事給 Matrix 那條：
+**呼叫 `serde_json::from_slice` 之前先比大小，超過就 413。**
+
+📎 而「改的地方多」不成立：解析**請求 body** 的呼叫點全樹只有一個（`api/router/args.rs`），
+所以這道閘也只有一處 —— 收在 `api/router/request.rs` 的 `parse_json_body::<T>()` 裡。
+
+**上限分兩段，而判準是結構性的**：
+
+| 端點類 | 判準 | 上限 |
+|---|---|---|
+| 兩條傳統上傳 | `is_whole_file_upload::<T>()` | **完全不解析**（§2.4）|
+| 聯邦 | `is_federation_scheme::<T::Authentication>()` | **`PDU_LIMIT × MAX_PDU_BYTES × 2` ＝ 6.25 MiB**，🚫 不是設定 |
+| 其餘（client／appservice／未認證）| 以上皆非 | **`max_json_body_size`，預設 2 MiB** |
+
+⭐ **聯邦那段是推導出來的，不是挑的**：協定說一個 transaction 最多 `PDU_LIMIT`（50）則、
+每則最多 `MAX_PDU_BYTES`（65535）⇒ 3.12 MiB；×2 是給同一個 transaction 裡最多 `EDU_LIMIT`
+（100）個 EDU 的餘裕（⚠️ **EDU 沒有 spec 上限**）加上外層 JSON 的框。
+⇒ 運維沒有數字要挑：調高等於接受不合規的 transaction，調低等於自己弄壞聯邦。
+
+⭐ **而「這是不是聯邦端點」問的是認證方式，不是路徑清單**：`Scheme::ServerSignatures` **就是**
+X-Matrix ⇒ 以後新增的聯邦端點**當天就被涵蓋**，🚫 沒有清單會忘記更新。
+📎 `Scheme` 留在 auth 模組裡不外流，`request.rs` 拿到的是一個 bool（`is_federation_scheme`）——
+跨邊界只傳**資料**，不傳整個 enum。
+
+⚠️ **兩件要記著的**：
+1. `config/check.rs` 拒絕 `max_request_size` 低於 **10 MB**，理由字面寫著聯邦需要 —— 比 6.25 MiB 大。
+   spec 的數字站在我們這邊，但**萬一哪天真的擋到聯邦，這就是第一個嫌疑犯**；所以那條 413 的訊息
+   直接點名「the federation transaction limit」還是「`max_json_body_size`」。
+2. client 那段為什麼是 2 MiB 而不是 1：`/keys/query` 查上萬個使用者約 0.5 MB，已經開始接近 ——
+   2 MiB 的代價只比 1 MiB 多一倍（17 MB → 34 MB），餘裕多四倍。
+   📎 單則事件本來就 ≤ 64 KiB，所以 `check.rs` 會在 `max_json_body_size < MAX_PDU_BYTES` 時警告。
+
+🔴 **這還不是根治。** 真正的根治是**先認證再解析**（那樣攻擊者至少要有一個帳號），而
+`Args::from_request` 現在是泛用的一條路、認證本身又要讀 body（UIAA）⇒ 那是獨立的一支。
+📌 這一節做的是把無界換成有界，並且把界放在**攻擊者付得起的那一側之前**。
+
 ## 3. 🚫 不做：「關掉傳統上傳」的開關
 
 維護者 2026-10-07 問了一個好問題：**「開關應該就是把上傳限額設定成 0 byte 對嗎？如果參數支援就不需要額外寫開關。」**

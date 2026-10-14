@@ -23,6 +23,7 @@ use super::{
 };
 use crate::{
 	Config, Err, Result, debug, debug_info, err, error,
+	matrix::pdu::MAX_PDU_BYTES,
 	wbf::pack::OVERHEAD as PACK_OVERHEAD,
 	utils::{
 		is_secret_set,
@@ -97,6 +98,7 @@ pub fn check(config: &Config) -> Result {
 	check_wbf_send_queue_bytes(config)?;
 	check_wbf_window_max_bytes(config)?;
 	check_matrix_upload_memory_budget(config);
+	check_max_json_body_size(config);
 	check_s3_part_size(config)?;
 	check_network(config)?;
 	check_storage(config)?;
@@ -305,6 +307,23 @@ fn check_wbf_send_queue_bytes(config: &Config) -> Result {
 	}
 
 	Ok(())
+}
+
+/// The JSON allowance should hold at least one largest-allowed event.
+///
+/// ⚠️ A warning and not a refusal, for the same reason as the budget below:
+/// it is a working configuration, just a surprising one. Sending a legal
+/// 64 KiB event would be refused for a reason that is in a different setting
+/// from the one the client was told about.
+fn check_max_json_body_size(config: &Config) {
+	if config.max_json_body_size < MAX_PDU_BYTES {
+		warn!(
+			"max_json_body_size is {} bytes, less than the {} a single event may be, so a legal \
+			 event would be refused with 413 before it is read. Raise max_json_body_size to at \
+			 least that, unless refusing them is what you want.",
+			config.max_json_body_size, MAX_PDU_BYTES,
+		);
+	}
 }
 
 /// The upload budget should hold at least one largest-allowed upload.

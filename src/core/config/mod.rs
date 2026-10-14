@@ -660,6 +660,33 @@ pub struct Config {
 	)]
 	pub matrix_upload_memory_budget: usize,
 
+	/// Largest request body that may be parsed as JSON, for every endpoint
+	/// other than federation and the traditional media uploads. A body over
+	/// this is refused with 413 before it is parsed.
+	///
+	/// Parsing grows a tree out of the body: a body that is one long array of
+	/// numbers becomes some sixteen times its own size in memory, and that
+	/// tree is held for as long as the request runs. It also happens before
+	/// the request is authenticated, so this is what bounds the memory an
+	/// unauthenticated request can ask the server to allocate.
+	///
+	/// Federation is not covered by this setting. The size of a transaction
+	/// follows from the protocol — at most 50 events of 64 KiB each, plus the
+	/// EDUs riding with them — so it is fixed in the code rather than
+	/// configured. The traditional media uploads are never parsed as JSON at
+	/// all; their memory is bounded by matrix_upload_memory_budget instead.
+	/// Accepts an integer byte count or a string with SI/IEC suffix such as
+	/// "2 MiB".
+	///
+	/// See /docs/design/media/legacy-upload-concurrency.md
+	///
+	/// default: 2 MiB
+	#[serde(
+		default = "default_max_json_body_size",
+		deserialize_with = "deserialize_bytesize_usize"
+	)]
+	pub max_json_body_size: usize,
+
 	/// The time in seconds before an unused pending MXC URI expires and is
 	/// removed.
 	///
@@ -5878,6 +5905,8 @@ fn default_max_response_size() -> usize { 256 * 1024 * 1024 }
 fn default_max_pending_media_uploads() -> usize { 5 }
 
 fn default_matrix_upload_memory_budget() -> usize { 1024 * 1024 * 1024 }
+
+fn default_max_json_body_size() -> usize { 2 * 1024 * 1024 }
 
 fn default_media_create_unused_expiration_time() -> u64 { 86400 }
 

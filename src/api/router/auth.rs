@@ -40,6 +40,23 @@ use self::dispatch::Scheme;
 pub(crate) use self::uiaa::auth_uiaa;
 use super::request::Request;
 
+/// Whether this endpoint is one a federating server calls.
+///
+/// ⭐ Asked of the authentication scheme rather than of a list of paths:
+/// `ServerSignatures` **is** X-Matrix, so a federation endpoint added later is
+/// covered the day it appears — there is no list to forget to update.
+/// 📎 Exists so callers can tell the two apart without `Scheme` leaving this
+/// module: what they need is one bit, not the whole enum.
+///
+/// Args:
+///     A: the endpoint's authentication scheme, example: AccessToken
+/// Return:
+///     bool  true when the caller authenticates as a server (X-Matrix),
+///     false for every client, appservice and unauthenticated endpoint.
+pub(super) fn is_federation_scheme<A: AuthDispatch>() -> bool {
+	A::SCHEME == Scheme::ServerSignatures
+}
+
 type AccessToken = SmallString<[u8; 32]>;
 
 pub(super) enum Token {

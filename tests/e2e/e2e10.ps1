@@ -344,6 +344,24 @@ $sameBytes = $jsonUp.status -eq 200 -and $jsonBack.status -eq 200 -and
   (@(Compare-Object $jsonFile $jsonBack.bytes -SyncWindow 0).Count -eq 0)
 Check '[5.8] a JSON object uploaded as a file comes back byte for byte (it is never parsed)' `
   $sameBytes "up=$($jsonUp.status) down=$($jsonBack.status) sent=$($jsonFile.Length)B got=$($jsonBack.bytes.Length)B"
+
+# 🚨 Every other endpoint's body IS parsed, so how much of it may be is bounded per endpoint
+# and checked before the parse runs. A client endpoint gets max_json_body_size (2 MiB by
+# default); federation gets what the protocol allows a transaction to be, which is not a setting.
+# /docs/design/media/legacy-upload-concurrency.md 2.5
+$room5 = Create-Room $tokA5 'json-limit'
+$sendPath = "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($room5))/send/m.room.message"
+$reqBig = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::Put, "$B$sendPath/$([guid]::NewGuid().ToString('N'))")
+$reqBig.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $tokA5)
+$reqBig.Content = New-Object System.Net.Http.StringContent (('{"msgtype":"m.text","body":"' + ('x' * 3000000) + '"}'), [Text.Encoding]::UTF8, 'application/json')
+$respBig = $script:PackHttpClient.SendAsync($reqBig).Result
+Check '[5.9] a client request body over max_json_body_size is refused before it is parsed' `
+  ([int]$respBig.StatusCode -eq 413) "status=$([int]$respBig.StatusCode)"
+
+# ⚠️ The other side of it: the bound must not be in the way of an ordinary request.
+$ordinarySend = Send-Text $room5 'an ordinary message, well under the limit' $tokA5
+Check '[5.9b] ... and an ordinary send is unaffected' `
+  ($null -ne $ordinarySend) "event_id=$ordinarySend"
 Stop-Server $script:p
 
 Log "################ RESULT: pass=$($script:Pass) fail=$($script:Fail) ################"

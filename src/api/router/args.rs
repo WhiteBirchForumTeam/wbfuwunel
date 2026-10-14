@@ -113,23 +113,14 @@ where
 		request: http::Request<Body>,
 		services: &State,
 	) -> Result<Self, Self::Rejection> {
-		let whole_file = request::is_whole_file_upload::<T>();
-		let mut request = request::from(services, request, whole_file).await?;
-		// 🚨 An upload's body is a file, not a document. Parsing it as JSON grows a tree
-		// out of it that nothing bounds — the budget covers the `Bytes`, 🚫 not what is
-		// derived from them, and 24 MiB of `[0,0,0,…]` is some twelve million nodes held
-		// for as long as the handler runs. It also happens before authentication, so no
-		// token is needed to ask for it.
-		//
-		// ⭐ Nothing wants it on this path: these two endpoints authenticate by access
-		// token (`AccessToken::dispatch` ignores its `_json_body`), their handlers read
-		// `body.file`, and no handler that reads `Args::json_body` is one of them.
-		// 📎 It is also what kept the file intact: `take_body` re-serialises a parsed
-		// object, so a JSON object uploaded as a file used to come back re-ordered and
-		// stripped of its whitespace (/docs/design/media/legacy-upload-concurrency.md §2.4).
-		let mut json_body = (!whole_file)
-			.then(|| serde_json::from_slice::<CanonicalJsonValue>(&request.body).ok())
-			.flatten();
+		let mut request =
+			request::from(services, request, request::is_whole_file_upload::<T>()).await?;
+		// 🚨 Parsing a body grows a tree out of it that nothing else bounds, and it
+		// happens before this request is authenticated — so what may be parsed, and how
+		// much of it, is decided per endpoint before the parse runs
+		// (/docs/design/media/legacy-upload-concurrency.md §2.4 and §2.5). An upload's
+		// body is a file and is never parsed at all.
+		let mut json_body = request::parse_json_body::<T>(services, &request)?;
 		trace!(?request);
 
 		// An empty body defaults to `{}` like Synapse so a UIA flow can start;

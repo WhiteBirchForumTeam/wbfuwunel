@@ -4,19 +4,26 @@ use axum::{RequestExt, RequestPartsExt, extract::Path};
 use axum_extra::extract::cookie::CookieJar;
 use bytes::Bytes;
 use http::{header::CONTENT_LENGTH, request::Parts};
-use ruma::api::{
-	IncomingRequest,
-	client::media::{create_content, create_content_async},
-	error::{ErrorKind, LimitExceededErrorData, RetryAfter},
+use ruma::{
+	CanonicalJsonValue,
+	api::{
+		IncomingRequest,
+		client::media::{create_content, create_content_async},
+		error::{ErrorKind, LimitExceededErrorData, RetryAfter},
+	},
 };
 use serde::Deserialize;
 use tuwunel_core::{
-	Error, Result, err, smallstr::SmallString, smallvec::SmallVec, trace,
+	Err, Error, Result, err, matrix::pdu::MAX_PDU_BYTES, smallstr::SmallString,
+	smallvec::SmallVec, trace,
 };
 use tuwunel_service::{
 	Services,
 	media::upload_budget::{BudgetError, Reservation},
+	sending::PDU_LIMIT,
 };
+
+use super::auth::{AuthDispatch, is_federation_scheme};
 
 /// How long a refused upload is told to wait.
 ///
@@ -141,6 +148,80 @@ pub(super) fn is_whole_file_upload<T: IncomingRequest + 'static>() -> bool {
 		|| endpoint == TypeId::of::<create_content_async::v3::Request>()
 }
 
+/// What one federation transaction may legitimately be.
+///
+/// ⭐ Derived, 🚫 not configured: the protocol already says how large it can
+/// get — at most `PDU_LIMIT` events of at most `MAX_PDU_BYTES` each — so there
+/// is no number for an operator to pick. The doubling is the allowance for the
+/// EDUs riding in the same transaction (up to `EDU_LIMIT` of them, and 🚫
+/// nothing caps an EDU's size) plus the JSON frame around them.
+///
+/// ⚠️ If this ever refuses a real transaction it will be the first suspect:
+/// `config/check.rs` refuses `max_request_size` under 10 MB on the grounds
+/// that federation needs it, which is more than this. The spec's own limits
+/// say otherwise, and the refusal names itself, so it is diagnosable.
+const FEDERATION_JSON_MAX: usize = PDU_LIMIT
+	.saturating_mul(MAX_PDU_BYTES)
+	.saturating_mul(2);
+
+/// Args:
+///     configured: `max_json_body_size`, example: 2097152
+/// Return:
+///     Option<(usize, &'static str)>  how many bytes of this endpoint's body
+///     may be parsed as JSON and what says so, or None when its body is a
+///     file that is never parsed.
+pub(super) fn find_json_body_limit<T>(configured: usize) -> Option<(usize, &'static str)>
+where
+	T: IncomingRequest + 'static,
+	T::Authentication: AuthDispatch,
+{
+	if is_whole_file_upload::<T>() {
+		return None;
+	}
+
+	if is_federation_scheme::<T::Authentication>() {
+		return Some((FEDERATION_JSON_MAX, "the federation transaction limit"));
+	}
+
+	Some((configured, "max_json_body_size"))
+}
+
+/// Args:
+///     services: for the configured limit
+///     request: the request whose body has already been read
+/// Return:
+///     Result<Option<CanonicalJsonValue>>  the parsed body; None when this
+///     endpoint's body is never read as JSON, or when it is not JSON at all.
+///     Err 413 when it is larger than this endpoint may have parsed.
+///
+/// 🚨 The size is checked **before** the parse, because the parse is the
+/// expensive part: a body of nothing but a long array becomes some sixteen
+/// times its own size in memory, and it happens before the request is
+/// authenticated (`/docs/design/media/legacy-upload-concurrency.md` §2.5).
+pub(super) fn parse_json_body<T>(
+	services: &Services,
+	request: &Request,
+) -> Result<Option<CanonicalJsonValue>>
+where
+	T: IncomingRequest + 'static,
+	T::Authentication: AuthDispatch,
+{
+	let configured = services.server.config.max_json_body_size;
+	let Some((limit, named_by)) = find_json_body_limit::<T>(configured) else {
+		return Ok(None);
+	};
+
+	if request.body.len() > limit {
+		return Err!(Request(TooLarge(
+			"Request body is {} bytes, more than the {limit} this endpoint may have read as \
+			 JSON ({named_by}).",
+			request.body.len(),
+		)));
+	}
+
+	Ok(serde_json::from_slice(&request.body).ok())
+}
+
 /// Args:
 ///     services: for the budget and the configured maximum
 ///     parts: the request head, read for its declared length
@@ -218,5 +299,68 @@ mod tests {
 	#[test]
 	fn an_endpoint_that_is_not_an_upload_books_nothing() {
 		assert!(!is_whole_file_upload::<whoami::v3::Request>());
+	}
+}
+
+#[cfg(test)]
+mod json_limit_tests {
+	use ruma::api::{
+		client::{
+			account::whoami,
+			media::{create_content, create_content_async},
+		},
+		federation::transactions::send_transaction_message,
+	};
+	use tuwunel_core::matrix::pdu::MAX_PDU_BYTES;
+	use tuwunel_service::sending::PDU_LIMIT;
+
+	use super::{FEDERATION_JSON_MAX, find_json_body_limit};
+
+	const CONFIGURED: usize = 2 * 1024 * 1024;
+
+	// 🚫 Never parsed, so there is no allowance to compare a body against.
+	#[test]
+	fn an_upload_body_has_no_json_allowance_because_it_is_never_parsed() {
+		assert_eq!(find_json_body_limit::<create_content::v3::Request>(CONFIGURED), None);
+		assert_eq!(find_json_body_limit::<create_content_async::v3::Request>(CONFIGURED), None);
+	}
+
+	// ⭐ Told apart by the authentication scheme, so a federation endpoint
+	// added later is covered without anyone editing a list.
+	#[test]
+	fn a_federation_transaction_is_allowed_what_the_protocol_allows() {
+		let found = find_json_body_limit::<send_transaction_message::v1::Request>(CONFIGURED);
+
+		assert_eq!(found.map(|(limit, _)| limit), Some(FEDERATION_JSON_MAX));
+	}
+
+	#[test]
+	fn every_other_endpoint_is_allowed_what_the_configuration_says() {
+		let found = find_json_body_limit::<whoami::v3::Request>(CONFIGURED);
+
+		assert_eq!(found, Some((CONFIGURED, "max_json_body_size")));
+	}
+
+	// 🚨 The number itself: a transaction of the largest legal size has to fit,
+	// or federation breaks on a busy peer and nothing here would say why.
+	#[test]
+	fn the_federation_allowance_holds_a_full_transaction_of_largest_events() {
+		let largest_transaction = PDU_LIMIT * MAX_PDU_BYTES;
+
+		assert!(
+			FEDERATION_JSON_MAX >= largest_transaction,
+			"{FEDERATION_JSON_MAX} must hold {PDU_LIMIT} events of {MAX_PDU_BYTES} bytes"
+		);
+		assert!(
+			FEDERATION_JSON_MAX >= largest_transaction * 2,
+			"and leave as much again for the EDUs riding with them"
+		);
+	}
+
+	// ⚠️ The client allowance must not be the one federation gets by accident:
+	// if these ever became the same number, the split would be doing nothing.
+	#[test]
+	fn the_two_allowances_are_not_the_same_number() {
+		assert_ne!(CONFIGURED, FEDERATION_JSON_MAX);
 	}
 }
