@@ -55,13 +55,26 @@ impl QueryParams {
 pub(super) type UserId = SmallString<[u8; 48]>;
 pub(super) type DeviceId = SmallString<[u8; 24]>;
 
+/// Everything about a request except its body.
+///
+/// ⭐ Its own type so that **authentication cannot reach a body**: a whole-file
+/// upload is authenticated before its body is read, and that is only sound
+/// while nothing in the authentication path needs one
+/// (`/docs/design/media/legacy-upload-concurrency.md` §2.6). 🚫 Not a comment
+/// promising it — `AuthDispatch::dispatch` takes this, so reaching for a body
+/// there does not compile.
 #[derive(Debug)]
-pub(super) struct Request {
+pub(super) struct Head {
 	pub(super) cookie: CookieJar,
 	pub(super) path: Path<PathParams>,
 	pub(super) query: QueryParams,
-	pub(super) body: Bytes,
 	pub(super) parts: Parts,
+}
+
+#[derive(Debug)]
+pub(super) struct Request {
+	pub(super) head: Head,
+	pub(super) body: Bytes,
 
 	/// Bytes booked out of the upload budget to hold this body.
 	///
@@ -77,21 +90,19 @@ pub(super) struct Request {
 pub(super) type PathParams = SmallVec<[PathParam; 8]>;
 pub(super) type PathParam = SmallString<[u8; 32]>;
 
-#[tracing::instrument(
-	name = "parse",
-	level = "trace",
-	skip(services),
-	err(level = "debug")
-	ret(level = "trace"),
-)]
-pub(super) async fn from(
-	services: &Services,
+/// Args:
+///     request: the request as axum hands it over, example: a POST to
+///         `/_matrix/media/v3/upload`
+/// Return:
+///     Result<(Head, axum::body::Body)>  everything but the body, and the body
+///     itself still unread — 🚫 not one byte of it is in memory yet
+#[tracing::instrument(name = "head", level = "trace", err(level = "debug"))]
+pub(super) async fn to_head_and_body(
 	request: http::Request<axum::body::Body>,
-	holds_whole_file: bool,
-) -> Result<Request> {
+) -> Result<(Head, axum::body::Body)> {
 	let limited = request.with_limited_body();
 	let (mut parts, body) = limited.into_parts();
-	trace!(?parts, ?body);
+	trace!(?parts);
 
 	let cookie: CookieJar = parts.extract().await?;
 	trace!(?cookie);
@@ -103,27 +114,44 @@ pub(super) async fn from(
 	let query = serde_html_form::from_str(query)
 		.map_err(|e| err!(Request(Unknown("Failed to read query parameters: {e}"))))?;
 
-	let configured_max = services.server.config.max_request_size;
+	Ok((Head { cookie, path, query, parts }, body))
+}
 
-	// 🚨 Booked before the body is read, which is the one moment the memory
-	// has not been spent yet.
-	let upload = holds_whole_file
-		.then(|| book_upload_memory(services, &parts))
-		.transpose()?;
-
+/// Args:
+///     services: the server's services, example: for `max_request_size`
+///     head: what `to_head_and_body` returned
+///     body: the unread body it returned alongside that head
+///     upload: bytes already booked to hold this body, example: None for
+///         anything but a whole-file upload
+/// Return:
+///     Result<Request>  the body read into memory, or `TooLarge` when it ran
+///     past what may be held for it
+#[tracing::instrument(
+	name = "body",
+	level = "trace",
+	skip(services),
+	err(level = "debug")
+	ret(level = "trace"),
+)]
+pub(super) async fn to_request(
+	services: &Services,
+	head: Head,
+	body: axum::body::Body,
+	upload: Option<Reservation>,
+) -> Result<Request> {
 	// ⭐ The limit is what was booked, not what the configuration allows: a
 	// client that declares less than it sends is cut off at its own number, so
 	// "bytes held at once <= the budget" holds without believing the
 	// declaration (`/docs/design/media/legacy-upload-concurrency.md` §2.1).
 	let max_body_size = upload
 		.as_ref()
-		.map_or(configured_max, Reservation::bytes);
+		.map_or(services.server.config.max_request_size, Reservation::bytes);
 
 	let body = axum::body::to_bytes(body, max_body_size)
 		.await
 		.map_err(|e| err!(Request(TooLarge("Request body too large: {e}"))))?;
 
-	Ok(Request { cookie, path, query, body, parts, upload })
+	Ok(Request { head, body, upload })
 }
 
 /// Whether this endpoint's body is one whole file, buffered in memory.
@@ -222,27 +250,44 @@ where
 	Ok(serde_json::from_slice(&request.body).ok())
 }
 
+/// 🚨 Called only once this request is authenticated: booking is what an
+/// attacker spends, so it has to cost an account
+/// (`/docs/design/media/legacy-upload-concurrency.md` §2.6).
+///
 /// Args:
 ///     services: for the budget and the configured maximum
-///     parts: the request head, read for its declared length
+///     head: the request head, read for its declared length
 /// Return:
 ///     Result<Reservation>  Err 429 M_LIMIT_EXCEEDED when the budget is
-///     spent, Err 413 when this one request exceeds the whole budget.
-fn book_upload_memory(services: &Services, parts: &Parts) -> Result<Reservation> {
+///     spent, Err 413 when this one request declares more than the server
+///     accepts at all or more than the whole budget.
+pub(super) fn book_upload_memory(services: &Services, head: &Head) -> Result<Reservation> {
 	let budget = services.media.upload_budget();
+	let configured_max = services.server.config.max_request_size;
 
-	// 🚨 What the client declares, never more than we would read anyway — and
-	// the whole maximum when it declares nothing, which is the fail-closed
-	// side: a chunked body has no length to believe.
-	let declared = parts
+	let declared = head
+		.parts
 		.headers
 		.get(CONTENT_LENGTH)
 		.and_then(|length| length.to_str().ok())
-		.and_then(|length| length.parse::<usize>().ok())
-		.map_or_else(
-			|| services.server.config.max_request_size,
-			|length| length.min(services.server.config.max_request_size),
-		);
+		.and_then(|length| length.parse::<usize>().ok());
+
+	// 🚨 Refused on the declaration alone, 🚫 not clamped to the maximum and
+	// booked: clamping spends the budget — and then the bandwidth to read that
+	// much — on a request that cannot be accepted whatever arrives
+	// (`/docs/design/media/legacy-upload-concurrency.md` §2.7).
+	if declared.is_some_and(|length| length > configured_max) {
+		return Err!(Request(TooLarge(
+			"Upload declares more than the server accepts in one request \
+			 ({configured_max} bytes)."
+		)));
+	}
+
+	// 🚨 What the client declares, and the whole maximum when it declares
+	// nothing — a chunked body has no length to believe. ⚠️ That is fail
+	// closed for the memory and fail open for the availability of uploads,
+	// which is the other half of why authentication runs first (§2.6).
+	let declared = declared.unwrap_or(configured_max);
 
 	budget.reserve(declared).map_err(|error| match error {
 		| BudgetError::Full => Error::BadRequest(
@@ -262,12 +307,15 @@ fn book_upload_memory(services: &Services, parts: &Parts) -> Result<Reservation>
 
 #[cfg(test)]
 mod tests {
-	use ruma::api::client::{
-		account::whoami,
-		media::{create_content, create_content_async, create_mxc_uri},
+	use ruma::api::{
+		Metadata,
+		client::{
+			account::whoami,
+			media::{create_content, create_content_async, create_mxc_uri},
+		},
 	};
 
-	use super::is_whole_file_upload;
+	use super::{is_federation_scheme, is_whole_file_upload};
 
 	// 🚨 A traditional upload endpoint that is not named here is not bounded
 	// by anything: the per-request size limit still applies, but nothing caps
@@ -299,6 +347,22 @@ mod tests {
 	#[test]
 	fn an_endpoint_that_is_not_an_upload_books_nothing() {
 		assert!(!is_whole_file_upload::<whoami::v3::Request>());
+	}
+
+	// 🚨 These two authenticate *before* their body is read, and that early call
+	// hands `None` where a parsed body would go (`args.rs`, and
+	// `/docs/design/media/legacy-upload-concurrency.md` §2.6). The one scheme
+	// that reads a body to authenticate is `ServerSignatures`, which signs over
+	// it — so an upload endpoint authenticating as a server would have to go
+	// back to authenticating last, and this is where that gets noticed.
+	#[test]
+	fn neither_upload_scheme_needs_a_body_to_authenticate() {
+		assert!(!is_federation_scheme::<
+			<create_content::v3::Request as Metadata>::Authentication,
+		>());
+		assert!(!is_federation_scheme::<
+			<create_content_async::v3::Request as Metadata>::Authentication,
+		>());
 	}
 }
 

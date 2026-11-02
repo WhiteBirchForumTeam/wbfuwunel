@@ -38,7 +38,7 @@ use tuwunel_service::{Services, appservice::RegistrationInfo};
 pub(super) use self::dispatch::AuthDispatch;
 use self::dispatch::Scheme;
 pub(crate) use self::uiaa::auth_uiaa;
-use super::request::Request;
+use super::request::Head;
 
 /// Whether this endpoint is one a federating server calls.
 ///
@@ -78,22 +78,22 @@ pub(super) struct Auth {
 
 #[tracing::instrument(
 	level = "trace",
-	skip(services, request, json_body),
+	skip(services, head, json_body),
 	err(level = "debug"),
 	ret
 )]
 pub(super) async fn auth<A: AuthDispatch>(
 	services: &Services,
-	request: &mut Request,
+	head: &mut Head,
 	json_body: Option<&CanonicalJsonValue>,
 	route: TypeId,
 ) -> Result<Auth> {
 	let bearer: Option<TypedHeader<Authorization<Bearer>>> =
-		request.parts.extract().await.unwrap_or(None);
+		head.parts.extract().await.unwrap_or(None);
 
 	let access_token = match &bearer {
 		| Some(TypedHeader(Authorization(bearer))) => Some(bearer.token()),
-		| None => request.query.access_token.as_deref(),
+		| None => head.query.access_token.as_deref(),
 	};
 
 	let token = match find_token(services, access_token).await? {
@@ -108,7 +108,7 @@ pub(super) async fn auth<A: AuthDispatch>(
 		check_auth_still_required(services, &token, route)?;
 	}
 
-	let auth = A::dispatch(services, request, json_body, token, route).await?;
+	let auth = A::dispatch(services, head, json_body, token, route).await?;
 
 	try_join(
 		locked_account_check(services, &auth, route),

@@ -2,14 +2,14 @@ use ruma::{OwnedDeviceId, OwnedUserId};
 use tuwunel_core::{Err, Result, err};
 use tuwunel_service::{Services, appservice::RegistrationInfo};
 
-use super::{Auth, Request};
+use super::{Auth, Head};
 
 pub(super) async fn auth_appservice(
 	services: &Services,
-	request: &Request,
+	head: &Head,
 	info: Box<RegistrationInfo>,
 ) -> Result<Auth> {
-	let user_id = request
+	let user_id = head
 		.query
 		.user_id
 		.as_deref()
@@ -23,7 +23,7 @@ pub(super) async fn auth_appservice(
 	}
 
 	// MSC4326: appservices may assert a device_id alongside user_id.
-	let sender_device = request.query.device_id().map(OwnedDeviceId::from);
+	let sender_device = head.query.device_id().map(OwnedDeviceId::from);
 
 	if let Some(device_id) = sender_device.as_deref()
 		&& !services

@@ -113,22 +113,49 @@ where
 		request: http::Request<Body>,
 		services: &State,
 	) -> Result<Self, Self::Rejection> {
-		let mut request =
-			request::from(services, request, request::is_whole_file_upload::<T>()).await?;
-		// 🚨 Parsing a body grows a tree out of it that nothing else bounds, and it
-		// happens before this request is authenticated — so what may be parsed, and how
-		// much of it, is decided per endpoint before the parse runs
-		// (/docs/design/media/legacy-upload-concurrency.md §2.4 and §2.5). An upload's
-		// body is a file and is never parsed at all.
+		let (mut head, body) = request::to_head_and_body(request).await?;
+		let route = TypeId::of::<T>();
+
+		// 🚨 Two orders, and which one an endpoint takes is the whole point of this
+		// fork (`/docs/design/media/legacy-upload-concurrency.md` §2.6):
+		//
+		// - A whole-file upload books memory before reading its body, and booking
+		//   is what an attacker spends — so it authenticates first. Its scheme is a
+		//   token and never reads a body, which is what makes a `Head` enough and
+		//   `None` enough for the JSON argument.
+		// - Everything else authenticates last, because its credentials may be *in*
+		//   the body (UIAA) — so that body has to be read and parsed first.
+		let whole_file_upload = request::is_whole_file_upload::<T>();
+
+		let upload_auth = if whole_file_upload {
+			Some(auth::auth::<T::Authentication>(services, &mut head, None, route).await?)
+		} else {
+			None
+		};
+
+		// 🚨 Booked after that authentication and before the body is read — the one
+		// moment the memory has not been spent yet.
+		let upload = whole_file_upload
+			.then(|| request::book_upload_memory(services, &head))
+			.transpose()?;
+
+		let mut request = request::to_request(services, head, body, upload).await?;
+
+		// 🚨 Parsing a body grows a tree out of it that nothing else bounds, and for
+		// every endpoint but those two it happens before this request is
+		// authenticated — so what may be parsed, and how much of it, is decided per
+		// endpoint before the parse runs
+		// (/docs/design/media/legacy-upload-concurrency.md §2.4 and §2.5). An
+		// upload's body is a file and is never parsed at all.
 		let mut json_body = request::parse_json_body::<T>(services, &request)?;
 		trace!(?request);
 
 		// An empty body defaults to `{}` like Synapse so a UIA flow can start;
 		// a present body that is not valid JSON is rejected as M_NOT_JSON.
 		let json_endpoint = matches!(
-			request.parts.method,
+			request.head.parts.method,
 			Method::POST | Method::PUT | Method::DELETE | Method::PATCH
-		) && !request.parts.uri.path().contains("/media/");
+		) && !request.head.parts.uri.path().contains("/media/");
 
 		if json_body.is_none() && json_endpoint {
 			let empty = request.body.iter().all(u8::is_ascii_whitespace);
@@ -137,20 +164,24 @@ where
 				return Err!(Request(NotJson("Request body is not valid JSON.")));
 			}
 
-			if empty && matches!(request.parts.method, Method::POST | Method::DELETE) {
+			if empty && matches!(request.head.parts.method, Method::POST | Method::DELETE) {
 				json_body = Some(CanonicalJsonValue::Object(CanonicalJsonObject::new()));
 			}
 		}
 
-		let auth = auth::auth::<T::Authentication>(
-			services,
-			&mut request,
-			json_body.as_ref(),
-			TypeId::of::<T>(),
-		)
-		.await?;
+		let auth = match upload_auth {
+			| Some(auth) => auth,
+			| None =>
+				auth::auth::<T::Authentication>(
+					services,
+					&mut request.head,
+					json_body.as_ref(),
+					route,
+				)
+				.await?,
+		};
 
-		let headers = request.parts.headers.clone();
+		let headers = request.head.parts.headers.clone();
 		// ⚠️ Moved into `Args` rather than dropped here: the body lives for as
 		// long as the handler holds this, and the bytes are booked until then
 		// (`/docs/design/media/legacy-upload-concurrency.md` §2).
@@ -158,7 +189,7 @@ where
 		Ok(Self {
 			body: make_body::<T>(services, &mut request, json_body.as_mut(), &auth)?,
 			headers,
-			cookie: request.cookie,
+			cookie: request.head.cookie,
 			origin: auth.origin,
 			sender_user: auth.sender_user,
 			sender_device: auth.sender_device,
@@ -180,18 +211,18 @@ where
 {
 	let body = take_body(services, request, json_body, auth);
 	let http_request = into_http_request(request, body);
-	T::try_from_http_request(http_request, &request.path)
+	T::try_from_http_request(http_request, &request.head.path)
 		.map_err(|e| err!(Request(BadJson(debug_warn!("{e}")))))
 }
 
 fn into_http_request(request: &Request, body: Bytes) -> http::Request<Bytes> {
 	let mut http_request = http::Request::builder()
-		.uri(request.parts.uri.clone())
-		.method(request.parts.method.clone());
+		.uri(request.head.parts.uri.clone())
+		.method(request.head.parts.method.clone());
 
 	*http_request
 		.headers_mut()
-		.expect("mutable http headers") = request.parts.headers.clone();
+		.expect("mutable http headers") = request.head.parts.headers.clone();
 
 	http_request
 		.body(body)

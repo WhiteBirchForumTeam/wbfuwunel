@@ -259,23 +259,40 @@ $firstUpload = Upload-Legacy $tokA5 $small 'within-budget.bin'
 Check '[5.1] an ordinary upload is unaffected by the budget' `
   ($firstUpload.status -eq 200 -and $firstUpload.mxc) "status=$($firstUpload.status) mxc=$($firstUpload.mxc)"
 
-# Sends an upload's request head (and one byte of body) and then stops. The budget is booked when
-# the head has been read, before the body is -- so this holds the bytes without ever sending them.
+# Sends an upload's request head (and one byte of body) and then stops. The budget is booked once
+# the head has been read and authenticated, before the body is -- so this holds the bytes without
+# ever sending them.
 # 🚨 Raw sockets because that is the only way to hold a reservation open and then vanish mid-body,
 # which is the case the whole design rests on: a request can end in more ways than it can succeed.
+# An empty $tok sends no Authorization header at all, which is what [5.10] needs.
 function Start-Stalled-Upload($tok, [int]$declare, [string]$path = '/_matrix/media/v3/upload') {
   $client = New-Object System.Net.Sockets.TcpClient
   $client.Connect('127.0.0.1', 8015)
   $stream = $client.GetStream()
-  $head = "POST $path`?filename=stalled HTTP/1.1`r`nHost: 127.0.0.1:8015`r`n" +
-    "Authorization: Bearer $tok`r`nContent-Type: application/octet-stream`r`n" +
+  $auth = if ([string]::IsNullOrEmpty($tok)) { '' } else { "Authorization: Bearer $tok`r`n" }
+  $head = "POST $path`?filename=stalled HTTP/1.1`r`nHost: 127.0.0.1:8015`r`n" + $auth +
+    "Content-Type: application/octet-stream`r`n" +
     "Content-Length: $declare`r`nConnection: close`r`n`r`n"
   $headBytes = [Text.Encoding]::ASCII.GetBytes($head)
   $stream.Write($headBytes, 0, $headBytes.Length); $stream.Flush()
   # One byte of the body, so the server is certainly past the head and waiting for the rest.
-  $stream.Write([byte[]]@(65), 0, 1); $stream.Flush()
+  # ⚠️ In a try: a head that is refused (no token, over-declared length) is answered and closed
+  # before this byte can land, and that refusal is the thing being tested, not a failure.
+  try { $stream.Write([byte[]]@(65), 0, 1); $stream.Flush() } catch { }
   Start-Sleep -Milliseconds 800
   @{ client = $client; stream = $stream }
+}
+# The status line the server has already sent, or 'no-answer' when it is still waiting for a body.
+# 🚨 This is what tells [5.10] and [5.11] apart from an ordinary refusal: the answer has to arrive
+# without the body ever being sent.
+function Read-Stalled-Status($stalled) {
+  $buffer = [byte[]]::new(256)
+  try {
+    $stalled.stream.ReadTimeout = 2000
+    $read = $stalled.stream.Read($buffer, 0, $buffer.Length)
+  } catch { return 'no-answer' }
+  if ($read -le 0) { return 'no-answer' }
+  ([Text.Encoding]::ASCII.GetString($buffer, 0, $read) -split "`r`n")[0]
 }
 function Stop-Stalled-Upload($stalled) {
   if ($null -eq $stalled) { return }
@@ -331,6 +348,28 @@ Check '[5.6] the r0 and v3 spellings of upload share the one budget' `
 $afterRelease = Upload-Legacy $tokA5 ([byte[]]::new(1048576)) 'budget-is-back.bin'
 Check '[5.7] and the budget is spendable again once nothing holds it' `
   ($afterRelease.status -eq 200) "status=$($afterRelease.status)"
+
+# 🚨 Booking has to cost an account. An upload with no token is refused at the head and holds
+# nothing -- before that order, 43 of these (each declaring the maximum, each sending one byte a
+# minute, none of them logged in) stopped every real user from uploading
+# (/docs/design/media/legacy-upload-concurrency.md §2.6).
+$anonHeld = Start-Stalled-Upload '' 2097152
+$anonStatus = Read-Stalled-Status $anonHeld
+$whileAnonHeld = Upload-Legacy $tokA5 ([byte[]]::new(1048576)) 'anonymous-books-nothing.bin'
+Stop-Stalled-Upload $anonHeld
+Check '[5.10] an upload with no access token is refused at the head and books nothing' `
+  ($anonStatus -match '^HTTP/1\.1 401' -and $whileAnonHeld.status -eq 200) `
+  "anon=$anonStatus next=$($whileAnonHeld.status)"
+
+# ⚠️ A declared length over max_request_size is refused on the declaration alone -- 🚫 not clamped
+# to the maximum, booked, and then read to the end before saying no (§2.7).
+$overDeclared = Start-Stalled-Upload $tokA5 104857600
+$overStatus = Read-Stalled-Status $overDeclared
+$afterOverDeclared = Upload-Legacy $tokA5 ([byte[]]::new(1048576)) 'over-declared-books-nothing.bin'
+Stop-Stalled-Upload $overDeclared
+Check '[5.11] a length declared over max_request_size is 413 before the body is read, and books nothing' `
+  ($overStatus -match '^HTTP/1\.1 413' -and $afterOverDeclared.status -eq 200) `
+  "declared=$overStatus next=$($afterOverDeclared.status)"
 
 # 🚨 An upload's body is a file, not a document: it must not be parsed as JSON on the way in.
 # The parse grew a tree nothing bounded (a JSON-shaped file of a few MiB becomes hundreds), and

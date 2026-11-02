@@ -15,7 +15,7 @@ use ruma::{
 use tuwunel_core::{Err, Error, Result};
 use tuwunel_service::Services;
 
-use super::{Auth, Request, Token, appservice::auth_appservice, server::auth_server};
+use super::{Auth, Head, Token, appservice::auth_appservice, server::auth_server};
 
 /// Tag identifying an [`AuthScheme`] for tuwunel's purposes.
 ///
@@ -43,7 +43,7 @@ pub(in crate::router) trait AuthDispatch: AuthScheme {
 
 	fn dispatch(
 		services: &Services,
-		request: &mut Request,
+		head: &mut Head,
 		json_body: Option<&CanonicalJsonValue>,
 		token: Token,
 		route: TypeId,
@@ -55,12 +55,12 @@ impl AuthDispatch for NoAccessToken {
 
 	async fn dispatch(
 		services: &Services,
-		request: &mut Request,
+		head: &mut Head,
 		json_body: Option<&CanonicalJsonValue>,
 		token: Token,
 		route: TypeId,
 	) -> Result<Auth> {
-		<NoAuthentication as AuthDispatch>::dispatch(services, request, json_body, token, route)
+		<NoAuthentication as AuthDispatch>::dispatch(services, head, json_body, token, route)
 			.await
 	}
 }
@@ -70,7 +70,7 @@ impl AuthDispatch for NoAuthentication {
 
 	async fn dispatch(
 		_services: &Services,
-		_request: &mut Request,
+		_head: &mut Head,
 		_json_body: Option<&CanonicalJsonValue>,
 		token: Token,
 		_route: TypeId,
@@ -100,7 +100,7 @@ impl AuthDispatch for AccessToken {
 
 	async fn dispatch(
 		services: &Services,
-		request: &mut Request,
+		head: &mut Head,
 		_json_body: Option<&CanonicalJsonValue>,
 		token: Token,
 		route: TypeId,
@@ -108,7 +108,7 @@ impl AuthDispatch for AccessToken {
 		match token {
 			| Token::Invalid => unknown_token(),
 			| Token::Expired(access_token) => expired_token(services, &access_token).await,
-			| Token::Appservice(info) => Ok(auth_appservice(services, request, info).await?),
+			| Token::Appservice(info) => Ok(auth_appservice(services, head, info).await?),
 			| Token::User(user) => Ok(Auth {
 				sender_user: Some(user.0),
 				sender_device: Some(user.1),
@@ -137,7 +137,7 @@ impl AuthDispatch for AccessTokenOptional {
 
 	async fn dispatch(
 		services: &Services,
-		_request: &mut Request,
+		_head: &mut Head,
 		_json_body: Option<&CanonicalJsonValue>,
 		token: Token,
 		_route: TypeId,
@@ -165,7 +165,7 @@ impl AuthDispatch for AppserviceToken {
 
 	async fn dispatch(
 		services: &Services,
-		_request: &mut Request,
+		_head: &mut Head,
 		_json_body: Option<&CanonicalJsonValue>,
 		token: Token,
 		_route: TypeId,
@@ -189,7 +189,7 @@ impl AuthDispatch for AppserviceTokenOptional {
 
 	async fn dispatch(
 		services: &Services,
-		_request: &mut Request,
+		_head: &mut Head,
 		_json_body: Option<&CanonicalJsonValue>,
 		token: Token,
 		_route: TypeId,
@@ -217,7 +217,7 @@ impl AuthDispatch for ServerSignatures {
 
 	async fn dispatch(
 		services: &Services,
-		request: &mut Request,
+		head: &mut Head,
 		json_body: Option<&CanonicalJsonValue>,
 		token: Token,
 		_route: TypeId,
@@ -227,7 +227,7 @@ impl AuthDispatch for ServerSignatures {
 			| Token::Expired(access_token) => expired_token(services, &access_token).await,
 			| Token::Appservice(_) | Token::User(_) =>
 				Err!(Request(Unauthorized("Server signatures must be used on this endpoint."))),
-			| Token::None => Ok(auth_server(services, request, json_body).await?),
+			| Token::None => Ok(auth_server(services, head, json_body).await?),
 		}
 	}
 }
