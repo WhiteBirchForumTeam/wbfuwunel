@@ -282,17 +282,20 @@ function Start-Stalled-Upload($tok, [int]$declare, [string]$path = '/_matrix/med
   Start-Sleep -Milliseconds 800
   @{ client = $client; stream = $stream }
 }
-# The status line the server has already sent, or 'no-answer' when it is still waiting for a body.
+# Whatever the server has already sent -- status line, headers and the start of the body, as one
+# line -- or 'no-answer' when it is still waiting for a body.
 # 🚨 This is what tells [5.10] and [5.11] apart from an ordinary refusal: the answer has to arrive
-# without the body ever being sent.
-function Read-Stalled-Status($stalled) {
-  $buffer = [byte[]]::new(256)
+# without the body ever being sent. ⚠️ And the text matters, not just the code: with the budget at
+# 2 MiB a *clamped* 24 MiB booking is refused 413 as well (it is larger than the whole budget), so
+# [5.11] has to see which 413 it got or it passes for the wrong reason.
+function Read-Stalled-Response($stalled) {
+  $buffer = [byte[]]::new(2048)
   try {
     $stalled.stream.ReadTimeout = 2000
     $read = $stalled.stream.Read($buffer, 0, $buffer.Length)
   } catch { return 'no-answer' }
   if ($read -le 0) { return 'no-answer' }
-  ([Text.Encoding]::ASCII.GetString($buffer, 0, $read) -split "`r`n")[0]
+  [Text.Encoding]::ASCII.GetString($buffer, 0, $read) -replace "`r`n", ' | '
 }
 function Stop-Stalled-Upload($stalled) {
   if ($null -eq $stalled) { return }
@@ -354,22 +357,22 @@ Check '[5.7] and the budget is spendable again once nothing holds it' `
 # minute, none of them logged in) stopped every real user from uploading
 # (/docs/design/media/legacy-upload-concurrency.md §2.6).
 $anonHeld = Start-Stalled-Upload '' 2097152
-$anonStatus = Read-Stalled-Status $anonHeld
+$anonStatus = Read-Stalled-Response $anonHeld
 $whileAnonHeld = Upload-Legacy $tokA5 ([byte[]]::new(1048576)) 'anonymous-books-nothing.bin'
 Stop-Stalled-Upload $anonHeld
 Check '[5.10] an upload with no access token is refused at the head and books nothing' `
-  ($anonStatus -match '^HTTP/1\.1 401' -and $whileAnonHeld.status -eq 200) `
-  "anon=$anonStatus next=$($whileAnonHeld.status)"
+  ($anonStatus -match '^HTTP/1\.1 401' -and $anonStatus -match 'M_MISSING_TOKEN' -and $whileAnonHeld.status -eq 200) `
+  "anon=$($anonStatus.Substring(0, [Math]::Min(120, $anonStatus.Length))) next=$($whileAnonHeld.status)"
 
 # ⚠️ A declared length over max_request_size is refused on the declaration alone -- 🚫 not clamped
 # to the maximum, booked, and then read to the end before saying no (§2.7).
 $overDeclared = Start-Stalled-Upload $tokA5 104857600
-$overStatus = Read-Stalled-Status $overDeclared
+$overStatus = Read-Stalled-Response $overDeclared
 $afterOverDeclared = Upload-Legacy $tokA5 ([byte[]]::new(1048576)) 'over-declared-books-nothing.bin'
 Stop-Stalled-Upload $overDeclared
 Check '[5.11] a length declared over max_request_size is 413 before the body is read, and books nothing' `
-  ($overStatus -match '^HTTP/1\.1 413' -and $afterOverDeclared.status -eq 200) `
-  "declared=$overStatus next=$($afterOverDeclared.status)"
+  ($overStatus -match '^HTTP/1\.1 413' -and $overStatus -match 'accepts in one request' -and $afterOverDeclared.status -eq 200) `
+  "declared=$($overStatus.Substring(0, [Math]::Min(160, $overStatus.Length))) next=$($afterOverDeclared.status)"
 
 # 🚨 An upload's body is a file, not a document: it must not be parsed as JSON on the way in.
 # The parse grew a tree nothing bounded (a JSON-shaped file of a few MiB becomes hundreds), and
