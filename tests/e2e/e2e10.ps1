@@ -297,6 +297,15 @@ function Read-Stalled-Response($stalled) {
   if ($read -le 0) { return 'no-answer' }
   [Text.Encoding]::ASCII.GetString($buffer, 0, $read) -replace "`r`n", ' | '
 }
+# The status line plus the JSON body, with the headers dropped. ⚠️ For the failure message: both
+# refusals are 413, so a detail that gets cut off inside the headers says nothing about which one
+# arrived -- and a check whose red tells you nothing is half a check.
+function Describe-Stalled([string]$text) {
+  if ($text -eq 'no-answer') { return $text }
+  $parts = $text -split ' \| '
+  $body = (@($parts | Where-Object { $_ -match '^\{' }) -join '')
+  "$($parts[0]) $($body.Substring(0, [Math]::Min(140, $body.Length)))"
+}
 function Stop-Stalled-Upload($stalled) {
   if ($null -eq $stalled) { return }
   $stalled.stream.Close(); $stalled.client.Close()
@@ -362,7 +371,7 @@ $whileAnonHeld = Upload-Legacy $tokA5 ([byte[]]::new(1048576)) 'anonymous-books-
 Stop-Stalled-Upload $anonHeld
 Check '[5.10] an upload with no access token is refused at the head and books nothing' `
   ($anonStatus -match '^HTTP/1\.1 401' -and $anonStatus -match 'M_MISSING_TOKEN' -and $whileAnonHeld.status -eq 200) `
-  "anon=$($anonStatus.Substring(0, [Math]::Min(120, $anonStatus.Length))) next=$($whileAnonHeld.status)"
+  "anon=$(Describe-Stalled $anonStatus) next=$($whileAnonHeld.status)"
 
 # ⚠️ A declared length over max_request_size is refused on the declaration alone -- 🚫 not clamped
 # to the maximum, booked, and then read to the end before saying no (§2.7).
@@ -372,7 +381,7 @@ $afterOverDeclared = Upload-Legacy $tokA5 ([byte[]]::new(1048576)) 'over-declare
 Stop-Stalled-Upload $overDeclared
 Check '[5.11] a length declared over max_request_size is 413 before the body is read, and books nothing' `
   ($overStatus -match '^HTTP/1\.1 413' -and $overStatus -match 'accepts in one request' -and $afterOverDeclared.status -eq 200) `
-  "declared=$($overStatus.Substring(0, [Math]::Min(160, $overStatus.Length))) next=$($afterOverDeclared.status)"
+  "declared=$(Describe-Stalled $overStatus) next=$($afterOverDeclared.status)"
 
 # 🚨 An upload's body is a file, not a document: it must not be parsed as JSON on the way in.
 # The parse grew a tree nothing bounded (a JSON-shaped file of a few MiB becomes hundreds), and
