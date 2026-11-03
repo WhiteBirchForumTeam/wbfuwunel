@@ -57,6 +57,35 @@ pub(super) fn is_federation_scheme<A: AuthDispatch>() -> bool {
 	A::SCHEME == Scheme::ServerSignatures
 }
 
+/// Whether this endpoint's scheme refuses a request carrying no credential.
+///
+/// 🚨 The other half of what `is_federation_scheme` answers, and
+/// `/docs/design/media/legacy-upload-concurrency.md` §2.6 needs both:
+/// authenticating a whole-file upload early is sound only while that
+/// authentication reads no body **and** turns an anonymous caller away. A
+/// scheme that satisfies the first and not the second — `NoAuthentication`,
+/// or either `*Optional` — makes the early call a no-op, and the budget goes
+/// back to being anonymous to spend.
+/// 📎 Recognised positively, so a scheme added later is absent from the list
+/// and reads as "does not refuse" rather than quietly as "does".
+/// 📎 `#[cfg(test)]` because this is asserted at build time, not branched on:
+/// an endpoint whose scheme stops demanding a credential is a mistake to
+/// catch in the test suite, not a case to handle per request. It lives here
+/// so `Scheme` stays inside this module.
+///
+/// Args:
+///     A: the endpoint's authentication scheme, example: AccessToken
+/// Return:
+///     bool  true when a missing credential is refused, false for the
+///     unauthenticated and optional schemes.
+#[cfg(test)]
+pub(super) fn is_scheme_requiring_a_credential<A: AuthDispatch>() -> bool {
+	matches!(
+		A::SCHEME,
+		Scheme::AccessToken | Scheme::AppserviceToken | Scheme::ServerSignatures
+	)
+}
+
 type AccessToken = SmallString<[u8; 32]>;
 
 pub(super) enum Token {

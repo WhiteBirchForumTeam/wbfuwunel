@@ -290,12 +290,22 @@ function Start-Stalled-Upload($tok, [int]$declare, [string]$path = '/_matrix/med
 # [5.11] has to see which 413 it got or it passes for the wrong reason.
 function Read-Stalled-Response($stalled) {
   $buffer = [byte[]]::new(2048)
+  $text = ''
   try {
     $stalled.stream.ReadTimeout = 2000
-    $read = $stalled.stream.Read($buffer, 0, $buffer.Length)
-  } catch { return 'no-answer' }
-  if ($read -le 0) { return 'no-answer' }
-  [Text.Encoding]::ASCII.GetString($buffer, 0, $read) -replace "`r`n", ' | '
+    # ⚠️ Read until the server closes or stops sending, not once: one Read is one segment, so the
+    # status line can arrive without the JSON body the checks match on -- and then they go red for
+    # having read too little rather than for a regression, which is the worst kind of red.
+    for ($chunk = 0; $chunk -lt 8; $chunk++) {
+      $read = $stalled.stream.Read($buffer, 0, $buffer.Length)
+      if ($read -le 0) { break }
+      $text += [Text.Encoding]::ASCII.GetString($buffer, 0, $read)
+      # A refusal ends with its JSON object; stop there instead of paying the timeout again.
+      if ($text -match '\}\s*$') { break }
+    }
+  } catch { }
+  if ($text -eq '') { return 'no-answer' }
+  $text -replace "`r`n", ' | '
 }
 # The status line plus the JSON body, with the headers dropped. ⚠️ For the failure message: both
 # refusals are 413, so a detail that gets cut off inside the headers says nothing about which one

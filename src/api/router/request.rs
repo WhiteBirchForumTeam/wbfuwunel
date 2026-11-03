@@ -311,11 +311,13 @@ mod tests {
 		Metadata,
 		client::{
 			account::whoami,
+			discovery::get_supported_versions,
 			media::{create_content, create_content_async, create_mxc_uri},
 		},
 	};
 
 	use super::{is_federation_scheme, is_whole_file_upload};
+	use crate::router::auth::is_scheme_requiring_a_credential;
 
 	// 🚨 A traditional upload endpoint that is not named here is not bounded
 	// by anything: the per-request size limit still applies, but nothing caps
@@ -362,6 +364,27 @@ mod tests {
 		>());
 		assert!(!is_federation_scheme::<
 			<create_content_async::v3::Request as Metadata>::Authentication,
+		>());
+	}
+
+	// 🚨 The second half of the same precondition, and the test above cannot
+	// stand in for it: §2.6 keeps anonymous callers out of the budget only
+	// because authenticating early *refuses* them. Were either endpoint to
+	// become `NoAuthentication` or `AccessTokenOptional`, that early call would
+	// still read no body — the test above would stay green — while the early
+	// call turned into a no-op and the hole this gate closes reopened.
+	#[test]
+	fn both_upload_schemes_refuse_a_caller_with_no_credential() {
+		assert!(is_scheme_requiring_a_credential::<
+			<create_content::v3::Request as Metadata>::Authentication,
+		>());
+		assert!(is_scheme_requiring_a_credential::<
+			<create_content_async::v3::Request as Metadata>::Authentication,
+		>());
+		// ⭐ And the control case, so the two above cannot pass by the predicate
+		// answering true to everything: `/versions` is served to anyone.
+		assert!(!is_scheme_requiring_a_credential::<
+			<get_supported_versions::Request as Metadata>::Authentication,
 		>());
 	}
 }
