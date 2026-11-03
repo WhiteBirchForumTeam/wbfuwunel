@@ -38,7 +38,7 @@ use tuwunel_service::{Services, appservice::RegistrationInfo};
 pub(super) use self::dispatch::AuthDispatch;
 use self::dispatch::Scheme;
 pub(crate) use self::uiaa::auth_uiaa;
-use super::request::Request;
+use super::request::Head;
 
 /// Whether this endpoint is one a federating server calls.
 ///
@@ -55,6 +55,35 @@ use super::request::Request;
 ///     false for every client, appservice and unauthenticated endpoint.
 pub(super) fn is_federation_scheme<A: AuthDispatch>() -> bool {
 	A::SCHEME == Scheme::ServerSignatures
+}
+
+/// Whether this endpoint's scheme refuses a request carrying no credential.
+///
+/// 🚨 The other half of what `is_federation_scheme` answers, and
+/// `/docs/design/media/legacy-upload-concurrency.md` §2.6 needs both:
+/// authenticating a whole-file upload early is sound only while that
+/// authentication reads no body **and** turns an anonymous caller away. A
+/// scheme that satisfies the first and not the second — `NoAuthentication`,
+/// or either `*Optional` — makes the early call a no-op, and the budget goes
+/// back to being anonymous to spend.
+/// 📎 Recognised positively, so a scheme added later is absent from the list
+/// and reads as "does not refuse" rather than quietly as "does".
+/// 📎 `#[cfg(test)]` because this is asserted at build time, not branched on:
+/// an endpoint whose scheme stops demanding a credential is a mistake to
+/// catch in the test suite, not a case to handle per request. It lives here
+/// so `Scheme` stays inside this module.
+///
+/// Args:
+///     A: the endpoint's authentication scheme, example: AccessToken
+/// Return:
+///     bool  true when a missing credential is refused, false for the
+///     unauthenticated and optional schemes.
+#[cfg(test)]
+pub(super) fn is_scheme_requiring_a_credential<A: AuthDispatch>() -> bool {
+	matches!(
+		A::SCHEME,
+		Scheme::AccessToken | Scheme::AppserviceToken | Scheme::ServerSignatures
+	)
 }
 
 type AccessToken = SmallString<[u8; 32]>;
@@ -78,22 +107,22 @@ pub(super) struct Auth {
 
 #[tracing::instrument(
 	level = "trace",
-	skip(services, request, json_body),
+	skip(services, head, json_body),
 	err(level = "debug"),
 	ret
 )]
 pub(super) async fn auth<A: AuthDispatch>(
 	services: &Services,
-	request: &mut Request,
+	head: &mut Head,
 	json_body: Option<&CanonicalJsonValue>,
 	route: TypeId,
 ) -> Result<Auth> {
 	let bearer: Option<TypedHeader<Authorization<Bearer>>> =
-		request.parts.extract().await.unwrap_or(None);
+		head.parts.extract().await.unwrap_or(None);
 
 	let access_token = match &bearer {
 		| Some(TypedHeader(Authorization(bearer))) => Some(bearer.token()),
-		| None => request.query.access_token.as_deref(),
+		| None => head.query.access_token.as_deref(),
 	};
 
 	let token = match find_token(services, access_token).await? {
@@ -108,7 +137,7 @@ pub(super) async fn auth<A: AuthDispatch>(
 		check_auth_still_required(services, &token, route)?;
 	}
 
-	let auth = A::dispatch(services, request, json_body, token, route).await?;
+	let auth = A::dispatch(services, head, json_body, token, route).await?;
 
 	try_join(
 		locked_account_check(services, &auth, route),

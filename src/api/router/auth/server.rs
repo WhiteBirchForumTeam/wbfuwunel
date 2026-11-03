@@ -11,23 +11,23 @@ use tuwunel_service::{
 	server_keys::{PubKeyMap, PubKeys},
 };
 
-use super::{Auth, Request};
+use super::{Auth, Head};
 
 pub(super) async fn auth_server(
 	services: &Services,
-	request: &mut Request,
+	head: &mut Head,
 	body: Option<&CanonicalJsonValue>,
 ) -> Result<Auth> {
 	type Member = (CanonicalJsonName, CanonicalJsonValue);
 	type Object = CanonicalJsonObject;
 	type Value = CanonicalJsonValue;
 
-	let x_matrix = parse_x_matrix(request).await?;
+	let x_matrix = parse_x_matrix(head).await?;
 	auth_server_checks(services, &x_matrix)?;
 
 	let destination = services.globals.server_name();
 	let origin = &x_matrix.origin;
-	let signature_uri = request
+	let signature_uri = head
 		.parts
 		.uri
 		.path_and_query()
@@ -43,7 +43,7 @@ pub(super) async fn auth_server(
 		let authorization: [Member; 6] = [
 			("content".into(), body),
 			("destination".into(), Value::String(destination.into())),
-			("method".into(), Value::String(request.parts.method.as_str().into())),
+			("method".into(), Value::String(head.parts.method.as_str().into())),
 			("origin".into(), Value::String(origin.as_str().into())),
 			("signatures".into(), Value::Object(signatures.into())),
 			("uri".into(), Value::String(signature_uri.into())),
@@ -53,7 +53,7 @@ pub(super) async fn auth_server(
 	} else {
 		let authorization: [Member; 5] = [
 			("destination".into(), Value::String(destination.into())),
-			("method".into(), Value::String(request.parts.method.as_str().into())),
+			("method".into(), Value::String(head.parts.method.as_str().into())),
 			("origin".into(), Value::String(origin.as_str().into())),
 			("signatures".into(), Value::Object(signatures.into())),
 			("uri".into(), Value::String(signature_uri.into())),
@@ -74,7 +74,7 @@ pub(super) async fn auth_server(
 	let keys: PubKeyMap = [(origin.as_str().into(), keys)].into();
 	if let Err(e) = ruma::signatures::verify_json(&keys, &authorization) {
 		debug_error!("Failed to verify federation request from {origin}: {e}");
-		if request.parts.uri.to_string().contains('@') {
+		if head.parts.uri.to_string().contains('@') {
 			warn!(
 				"Request uri contained '@' character. Make sure your reverse proxy gives \
 				 tuwunel the raw uri (apache: use nocanon)"
@@ -113,8 +113,8 @@ fn auth_server_checks(services: &Services, x_matrix: &XMatrix) -> Result {
 	Ok(())
 }
 
-async fn parse_x_matrix(request: &mut Request) -> Result<XMatrix> {
-	let TypedHeader(Authorization(x_matrix)) = request
+async fn parse_x_matrix(head: &mut Head) -> Result<XMatrix> {
+	let TypedHeader(Authorization(x_matrix)) = head
 		.parts
 		.extract::<TypedHeader<Authorization<XMatrix>>>()
 		.await
