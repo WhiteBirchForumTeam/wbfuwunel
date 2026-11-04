@@ -226,17 +226,45 @@ wbf 帳號**收不到也查不到邀請**：`Event/Push` 只推已加入的房�
 🚫 **房名／頭像仍是對方的說法，而且修不掉** —— 縮減狀態不是 PDU，而且就算是也驗不動（驗授權要
 房間狀態，而邀請的定義就是還沒加入，那是循環）。⇒ client 的義務見那份文件 §8 ⑥。
 
-⏳ **接著的兩支，設計都已經定案等做**：
+⏳ **接著的兩支，設計都已經定案**：
 
 | | 文件 | 規模 |
 |---|---|---|
 | 🔲 邀請的金鑰範圍 | [/docs/design/keys/invite-key-scope.md](../keys/invite-key-scope.md) | ~550 行。被邀請者算不算進房間版本號／裝置清單，看 `history_visibility`。🚨 §3 的 ③（`announce_device_change` 走 `rooms_joined`，不含只被邀請的房）**漏了就靜默失效** |
-| 🔲 傳統 `/upload` 的記憶體預算（issue #110）| [/docs/design/media/legacy-upload-concurrency.md](../media/legacy-upload-concurrency.md) | ~500 行。全站 **byte 預算**（permit ＝ byte，預設 1 GiB），🚫 不是固定並行數、🚫 不量 process RAM |
+| ✅ 傳統 `/upload` 的記憶體預算（issue #110）| [/docs/design/media/legacy-upload-concurrency.md](../media/legacy-upload-concurrency.md) | 已完成，見 §2.17（PR #119 ＋ #120） |
 
 📎 合併後另開的兩張 issue：**#116**（管理員清房時邀請靜靜消失 —— 五種「邀請結束」裡唯一沒有事件、
 沒有 count 的那種）、**#117**（聯邦邀請傳給 `update_membership` 的是空的 member 內容）。
 📎 client 端的同步 issue：`amaid/wbf-matrix-client` **#77**（六條義務、`state` 可不可信，
 以及一直沒通知到的「房間版本號不再單調」）。
+
+### 2.17 ✅ 傳統 `/upload` 的記憶體預算，以及「預約要在認證之後」（[/docs/design/media/legacy-upload-concurrency.md](../media/legacy-upload-concurrency.md)，issue #110，實作 PR #119（2026-10-15）＋ 修補 PR #120（2026-11-03））
+
+傳統 Matrix 的上傳**一個請求送完整個檔**，server 把整個 body 收進記憶體，而**同時幾個請求在收原本沒有上限**
+（最壞 ≈ 同時上傳人數 × `max_request_size`）。⭐ 封法是一個全站的 **byte 預算**
+（`matrix_upload_memory_budget`，預設 1 GiB）：permit ＝ byte，FORBID 固定並行數、FORBID 量 process RAM ——
+封的是「我們自己答應要握住多少位元組」。歸還**只有一條路**，`Reservation` 的 `Drop` ⇒ 斷線、逾時、
+解析失敗、handler 提早返回都會還。
+
+🚨 **而 #119 自己造了一個洞，由外部審查抓到（2026-11-02）：預約發生在認證之前。**
+匿名宣告 24 MiB（或什麼都不宣告 —— 那會直接預約上限）、每 70 秒送 1 byte，**43 條連線就讓全站傳不了檔**。
+⚠️ 文件原本寫著「最多佔住 75 秒」與「沒有變糟」，**兩句都是錯的**：`client_receive_timeout` 是
+tower-http 的 `TimeoutBody`，**收到一個框就重新計時**，它是框間的閒置逾時；總時限是
+`client_request_timeout`（240 秒）而且斷線重連就重新開始。
+⇒ #120 把 whole-file upload 那兩個端點改成 **讀 head → 認證 → 預約 → 讀 body**，其餘端點照舊
+（UIAA 的憑據在 body 裡）。🚨 **那個前提由型別成立**：`Head` 沒有 body 欄位，而認證路徑收的就是它 ⇒
+以後想在認證裡讀 body **編不過**。
+
+⚠️ **行為與限制**：
+- 上傳在預算滿時**會被拒絕**（429 ＋ `retry_after_ms`）；單一請求大於整個預算回 413（重試也沒用）。
+- **宣告就超過 `max_request_size` 的，不預約、不讀，當場 413。**
+- 非上傳的 client 端點套 `max_json_body_size`（2 MiB）⇒ **舊 client 的大批 `/keys/upload`、
+  `/room_keys/keys`、`/sendToDevice` 可能開始撞 413**，要觀察日誌。
+- 🔴 **剩下的洞**：**一個帳號仍然可以佔滿全站預算**（43 條慢連線現在要一個 token，但一個就夠）、
+  240 秒可以重連、沒有最低傳輸速率判準。
+
+⏳ **下一支建議 per-user 上限，FORBID per-address**：user 來自 token，**不需要相信任何 header**；
+per-address 的強度等於 `client_ip` 的可信度（見 [/docs/design/wire/pack-pipeline.md](../wire/pack-pipeline.md) §2.2）。
 
 ## 3. 候選（要不要做，由維護者決定）
 
