@@ -148,6 +148,36 @@ async fn release_leaves_removal_to_the_sweep(services: &Services) -> Result {
 		.set_avatar_url(keeper, Some(&kept_uri), None)
 		.await?;
 
+	// 🚨 A real sweep, with the real protection period, over all three: it must
+	// take none of them. This is what pins the period inside `is_removable` --
+	// without it every check above still passes when that condition is deleted,
+	// because the release path no longer asks anything at all (verified by
+	// mutation 2026-11-07: `if false && created >= cutoff` left the test green).
+	services.media_refs.sweep_unreferenced().await;
+
+	for (what, parsed) in [("the released media", &mxc), ("the twice-released media", &shared)] {
+		if let Some(tombstone) = services.media.find_tombstone(parsed).await {
+			return Err!("a sweep inside the protection period removed {what}: {tombstone:?}");
+		}
+	}
+
+	// ⭐ And the decision asked directly, because a sweep cannot ask it about a
+	// young media at all: the candidate filter is the other age gate, so it
+	// never hands one over. Each line is one of the four conditions.
+	let kept_key = kept.to_string();
+	let refusals = [
+		("unheld but inside the protection period", key.as_str(), false),
+		("held by an avatar", kept_key.as_str(), false),
+		("no mxc_managed row: predates the model", "mxc://localhost/never-created-here", false),
+		("another server's media", "mxc://elsewhere.example/whatever", false),
+		("not an mxc at all", "not-an-mxc", false),
+	];
+	for (what, candidate, expected) in refusals {
+		if services.media_refs.is_removable(candidate).await != expected {
+			return Err!("is_removable said {} for a media that is {what}", !expected);
+		}
+	}
+
 	// And now the other half: with the media past the protection period the
 	// sweep does remove it. Without this, everything above would also pass on a
 	// server that had simply stopped collecting anything at all.
@@ -156,6 +186,13 @@ async fn release_leaves_removal_to_the_sweep(services: &Services) -> Result {
 	// is floored at seven days, which a test cannot wait out.
 	unsafe {
 		set_var(MEDIA_UNREFERENCED_GRACE_ENV, "0");
+	}
+
+	// ⭐ The positive case, or the five refusals above could all come from a
+	// predicate that says no to everything: the same media, the same holders,
+	// only now past the period.
+	if !services.media_refs.is_removable(&key).await {
+		return Err!("is_removable still refuses an unheld media that is past the protection period");
 	}
 
 	services.media_refs.sweep_unreferenced().await;

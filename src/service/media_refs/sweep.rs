@@ -20,9 +20,13 @@ use crate::media::TombstoneReason;
 /// protection period (`media_unreferenced_grace_seconds`, floored at 7 days by
 /// the config).
 ///
-/// 🚨 The only place this is computed. `is_removable` is the decision and the
-/// sweep's candidate filter is an optimisation over the same number, so one of
-/// them drifting from the other is not possible.
+/// 🚨 The only place this is computed, so the decision and the sweep's candidate
+/// filter cannot drift apart: they are two gates on one number, and **either one
+/// alone refuses a media that is too young** (verified by mutation 2026-11-07:
+/// disabling the condition in `is_removable` changed no observable behaviour,
+/// because the filter never offered it a young candidate). That is deliberate
+/// depth on a path that deletes files, and it is why the condition in
+/// `is_removable` is asserted directly rather than through a sweep.
 ///
 /// Return:
 ///     u64  milliseconds since the epoch; 0 when the period is longer than the
@@ -48,13 +52,18 @@ pub(super) fn get_grace_cutoff_millis(&self) -> u64 {
 /// again, which deleted it inside the window the period exists to guard
 /// (/docs/design/media/premature-deletion.md §2).
 ///
+/// 📎 `pub` so it can be asked directly: the sweep's candidate filter hides
+/// young media from it, so a test driving a sweep cannot tell whether this
+/// function knows about the protection period at all
+/// (`src/main/tests/media_release_does_not_delete.rs`).
+///
 /// Args:
 ///     mxc: example: "mxc://localhost/abcdef"
 /// Return:
 ///     bool  true only when all four hold; false for anything unparseable,
 ///     remote, unmanaged, young, or still held.
 #[implement(Service)]
-pub(super) async fn is_removable(&self, mxc: &str) -> bool {
+pub async fn is_removable(&self, mxc: &str) -> bool {
 	let Ok(parsed) = Mxc::try_from(mxc) else {
 		return false;
 	};
@@ -99,9 +108,10 @@ pub(super) fn sweep_interval(&self) -> Interval {
 pub async fn sweep_unreferenced(&self) {
 	let cutoff = self.get_grace_cutoff_millis();
 
-	// Only an optimisation: it keeps the protected majority out of the
-	// candidate list, and `is_removable` asks about the age again anyway. A
-	// row whose value is not a timestamp is kept out of the list (`u64::MAX`),
+	// The first of the two age gates: it keeps the protected majority out of
+	// the candidate list, so this does not build a Vec of every managed media,
+	// and `is_removable` asks the same question again on what survives. A row
+	// whose value is not a timestamp is kept out of the list (`u64::MAX`),
 	// never swept in by accident.
 	let candidates: Vec<String> = self
 		.db
