@@ -3118,12 +3118,18 @@
 #
 # A reference is an event naming the media in its content, or a user's
 # avatar. A redacted event keeps its reference while its unredacted
-# original is retained (see `save_unredacted_events`), so media goes when
-# the last retained original is dropped, not when the message is redacted.
-# Media created before reference counting existed is never collected.
+# original is retained (see `save_unredacted_events`), so a media stops
+# being referenced when the last retained original is dropped, not when
+# the message is redacted.
 #
-# When false, the collector and the sweep only log what they would
-# delete.
+# Losing its last reference does not delete a media by itself: the
+# periodic sweep (`media_gc_sweep_interval`) deletes it, and only once it
+# is also older than `media_unreferenced_grace_seconds`. So deletion
+# follows the last reference by up to one sweep interval, or by the rest
+# of the protection period for a file that recent. Media created before
+# reference counting existed is never deleted automatically.
+#
+# When false, the sweep only logs what it would delete.
 #
 # reloadable: yes
 #
