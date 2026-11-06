@@ -75,14 +75,20 @@ server 收到 `attachments` 逐一驗：是 `mxc://`、本站的、`search_file_
 
 ### 4.3 後台掃描：計數 0、非哨兵、過了寬限期就清
 
-- 現況：收集器只在 −1 交到手上時動手；`migrate-references` 是手動離線工具。**沒有東西會去掃計數 0 的媒體**，這支要加。
+- 現況（寫這段時）：收集器只在 −1 交到手上時動手；`migrate-references` 是手動離線工具。**沒有東西會去掃計數 0 的媒體**，這支要加。
+  📎 而 2026-11-07 之後它已經是**唯一**的刪除者：收集器整個拿掉了。
 - 做法：`media_refs` 服務多一個週期性任務（間隔 config `media_gc_sweep_interval`，預設 3600 秒），掃 `mxc_refcount` 裡
   **本地、非哨兵、計數 = 0、建立時間超過保護期** 的 mxc，持每 mxc 一鎖、鎖下重讀計數仍為 0 → `media.collect(Unreferenced)`。
   跟 migrate 刪孤兒同一個決策形狀（rumia 在 #12 抓過的：決策要在鎖下）。
 - **保護期：新 config `media_unreferenced_grace_seconds`，預設 604800（7 天），維護者 2026-09-06 定「至少 7 天」。**
   不沿用 `media_gc_migrate_skip_recent_seconds`（600）—— 那是 migrate 避開「剛上傳還沒送出」的窗口，這裡是「上傳了但一直沒人指」的判定，
   兩個問題不同，數量級也不同。設定值低於 7 天啟動時 warn 並夾成 7 天（fail closed：寧可多留）。
-- 為什麼不用區分「從沒被指」跟「被指過又歸零」：後者收集器當下就刪了，能在 0 停留超過保護期的只有前者。
+- ~~為什麼不用區分「從沒被指」跟「被指過又歸零」：後者收集器當下就刪了，能在 0 停留超過保護期的只有前者。~~
+  🚨 **這句少了一個前提，而那個前提不成立（外部審查，2026-11-07 驗過）**：它在「釋放者就是
+  上傳者」時完全對，而**任何人都能把一份「從沒被指」的媒體變成「被指過又歸零」的**
+  （把自己的頭像指到別人的 mxc，再改掉）—— 於是別人剛上傳的檔案落進「當下就刪」那一類。
+  維護者 2026-11-07 的修法：**釋放只釋放，刪除只在掃描裡，而掃描只看年齡** ⇒ 兩類不用再分，
+  因為兩類走的是同一條路（[/docs/design/media/premature-deletion.md](premature-deletion.md) §2）。
 - 頭像不受影響：`set_avatar_ref` 是 server 看得到的引用，照舊 +1。縮圖跟原檔同一個 mxc，前綴刪除一起走。
 
 ### 4.4 `migrate-references` 移除
@@ -151,7 +157,7 @@ server 認得出的訊號：事件是 `m.room.encrypted`、從舊 HTTP `send` �
 | `eventid_mxcs` 表、驗證、聯集 | `src/service/media_refs/`、`src/database/maps.rs` |
 | 送訊息入口（header、`Event/Send`） | `src/api/client/send.rs`（`send_message_event` 兩個入口共用；`Args.headers`）、`src/api/client/wbf/send.rs` |
 | redact／purge／retention 改查表 | `timeline/redact.rs`、`timeline/purge.rs`、`retention/mod.rs` |
-| 週期掃描 | `media_refs/collect.rs`（`sweep_unreferenced`，收集器旁邊，同一把每 mxc 鎖） |
+| 週期掃描 | `media_refs/sweep.rs`（`sweep_unreferenced`，現在是**唯一**的刪除者，持每 mxc 鎖） |
 | 宣告驗證、legacy 上傳記錄、一次性警告的判定 | `media_refs/attachments.rs` |
 | 警告私訊本體 | `src/service/admin/attachments_notice.rs`（server user 開 DM、`is_direct`、一則明文） |
 | 引擎識別 | `/_matrix/client/versions` 的 `unstable_features["org.wbftw.wbfuwunel"]` 與 `server.name`；`Hello.engine`；`version::name()` = `wbfuwunel` |
