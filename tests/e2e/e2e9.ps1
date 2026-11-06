@@ -76,7 +76,11 @@ Check '[1.1] encrypted send with X-Wbf-Attachments accepted' ($sendA.status -eq 
 Check '[1.1b] media served while referenced' ((Download-Status $upA.mxc $tokA) -eq 200) ''
 $null = Redact $rE $sendA.event_id $tokA
 $after = Download-Status $upA.mxc $tokA
-Check '[1.1c] redaction of the declaring event removes the media (410)' ($after -eq 410) "status=$after"
+# 🚨 A release releases, and that is all it does (2026-11-07,
+# /docs/design/media/premature-deletion.md §2.4). Nothing holds the media now, and the sweep is
+# what will remove it once it is past the protection period -- [1.8] does that for every media this
+# scenario released, in one go, which is also what keeps these checks from racing a sweep.
+Check '[1.1c] redaction of the declaring event releases the media; inside the protection period it is still served (200)' ($after -eq 200) "status=$after"
 
 # [1.2] refused declarations refuse the whole send
 $upB = Upload-Legacy $tokA $payload 'b.bin'
@@ -98,13 +102,16 @@ $null = Redact $rE $sendB1.event_id $tokA
 $mid = Download-Status $upB.mxc $tokA
 $null = Redact $rE $sendB2.event_id $tokA
 $end = Download-Status $upB.mxc $tokA
-Check '[1.3] shared attachment survives the first redaction, goes with the second' ($mid -eq 200 -and $end -eq 410) "after1=$mid after2=$end"
+# ⚠️ Both are 200 now, so this check no longer tells "still held" from "unheld but protected" --
+# that distinction is not visible to a client any more. It is pinned at the holder level instead, in
+# src/main/tests/media_release_does_not_delete.rs, and [1.8] shows that upB does end up removed.
+Check '[1.3] a shared attachment is served through both redactions (the first leaves a holder, the second leaves the protection period)' ($mid -eq 200 -and $end -eq 200) "after1=$mid after2=$end"
 
 # [1.4] plaintext room: no declaration needed, content is read
 $upC = Upload-Legacy $tokA $payload 'c.bin'
 $sendC = Send-Raw $rP 'm.room.message' @{ msgtype = 'm.image'; body = 'c.bin'; url = $upC.mxc; info = @{ mimetype = 'application/octet-stream' } } $tokA $null
 $null = Redact $rP $sendC.event_id $tokA
-Check '[1.4] plaintext m.image without header still counted and released' ($sendC.status -eq 200 -and (Download-Status $upC.mxc $tokA) -eq 410) "status=$($sendC.status)"
+Check '[1.4] plaintext m.image without header still counted and released (served until the sweep)' ($sendC.status -eq 200 -and (Download-Status $upC.mxc $tokA) -eq 200) "status=$($sendC.status)"
 
 # [1.5] Event/Send over the wbf channel
 $upD = Upload-Legacy $tokA $payload 'd.bin'
@@ -115,10 +122,10 @@ Check '[1.5] Event/Send -> Ack with event_id' ($ackD.subtype -eq 2 -and $ackD.me
 $evD = Api Get "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($rE))/event/$([uri]::EscapeDataString($ackD.meta.event_id))" $null $tokA
 Check '[1.5b] the event is in the room with the same content' ($evD.type -eq 'm.room.encrypted' -and $evD.content.session_id -eq 'sessD') "type=$($evD.type)"
 $null = Redact $rE $ackD.meta.event_id $tokA
-Check '[1.5c] redacting the pack-sent event frees the declared media' ((Download-Status $upD.mxc $tokA) -eq 410) ''
-$sendMeta2 = @{ room_id = $rE; type = 'm.room.encrypted'; txn_id = [guid]::NewGuid().ToString('N'); attachments = @($upD.mxc) }
-$rej = Ws-Call $ws (Json-Pack 0x14 2 0 3 $sendMeta2 $content)
-Check '[1.5d] Event/Send declaring removed media -> Error InvalidRequest' ($rej.subtype -eq 3 -and $rej.meta.code -eq 'InvalidRequest') (Describe $rej)
+Check '[1.5c] redacting the pack-sent event frees the declared media (served until the sweep)' ((Download-Status $upD.mxc $tokA) -eq 200) ''
+# 📎 [1.5d] -- declaring media that is really gone -- moved to [1.9]: it needs a tombstone, and a
+# redaction no longer makes one. ⭐ Declaring it again *here* now succeeds, and that is right: the
+# file still exists, and re-declaring it holds it again, which saves it from the sweep.
 $sendMeta3 = @{ room_id = $rE; type = 'm.room.encrypted'; txn_id = 'dup-txn'; attachments = @() }
 $first = Ws-Call $ws (Json-Pack 0x14 2 0 4 $sendMeta3 $content)
 $second = Ws-Call $ws (Json-Pack 0x14 2 0 5 $sendMeta3 $content)
@@ -164,10 +171,40 @@ $null = Send-Raw $rE 'm.room.encrypted' (Encrypted-Body 'G') $tokA @($upG.mxc)
 Start-Sleep -Seconds 5
 $fStatus = Download-Status $upF.mxc $tokA; $gStatus = Download-Status $upG.mxc $tokA
 Check '[1.7] sweep leaves a fresh unheld upload (200) and a held one (200) alone' ($fStatus -eq 200 -and $gStatus -eq 200) "fresh=$fStatus held=$gStatus"
-Check '[1.7b] media referenced by a live event is untouched by the sweep' ((Download-Status $upE.mxc $tokB) -eq 200) ''
+# ⚠️ Renamed 2026-11-07: upE is the *undeclared* upload from [1.6] -- the room is encrypted, so the
+# server never saw a reference to it and **nothing holds it**. It is served because of the
+# protection period, not because of any event, which is exactly why [1.6] warned its uploader. The
+# old name ("referenced by a live event") described something this check never tested.
+Check '[1.7b] the undeclared upload from [1.6] is still served: nothing holds it, the protection period does' ((Download-Status $upE.mxc $tokB) -eq 200) ''
+
+# ⭐ One deliberate sweep for the whole scenario. Everything released above is past the protection
+# period here, and everything a live event holds is not affected by it -- so this is where "the
+# release ended that media's life" is actually asserted, and where a sweep that had quietly stopped
+# working would show up (every 410 below was an inline check before 2026-11-07).
+$env:WBFUWUNEL_MEDIA_GRACE_SECONDS = '3'
+$ws.Dispose()
+Stop-Server $p
+$p = Start-Server $cfg 's1-swept'
+Start-Sleep -Seconds 8
+$tokA = (Api Post '/_matrix/client/v3/login' '{"type":"m.login.password","identifier":{"type":"m.id.user","user":"alice"},"password":"correct-horse-battery"}' $null).access_token
+$gone = @{ 'A (redacted, [1.1c])' = $upA.mxc; 'B (shared, both redacted, [1.3])' = $upB.mxc; 'C (plaintext, redacted, [1.4])' = $upC.mxc;
+          'D (pack-sent, redacted, [1.5c])' = $upD.mxc; 'E (undeclared, [1.7b])' = $upE.mxc; 'F (never held, [1.7])' = $upF.mxc }
+$stillThere = @($gone.GetEnumerator() | Where-Object { (Download-Status $_.Value $tokA) -ne 410 } | ForEach-Object { $_.Key })
+$heldStatus = Download-Status $upG.mxc $tokA
+Check '[1.8] past the protection period the sweep takes every media nothing holds any more' ($stillThere.Count -eq 0) "still_served=$($stillThere -join '; ')"
+Check '[1.8b] ... and leaves the one a live event still declares (200), so [1.8] is not a sweep that took everything' ($heldStatus -eq 200) "held=$heldStatus"
+
+# [1.9] what [1.5d] used to check, now that there really is a tombstone: a declaration naming
+# removed media is refused.
+$ws = Ws-Open $tokA
+$null = Ws-Call $ws (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e9'; features = @() } $null)
+$sendMeta2 = @{ room_id = $rE; type = 'm.room.encrypted'; txn_id = [guid]::NewGuid().ToString('N'); attachments = @($upD.mxc) }
+$rej = Ws-Call $ws (Json-Pack 0x14 2 0 3 $sendMeta2 $content)
+Check '[1.9] Event/Send declaring removed media -> Error InvalidRequest' ($rej.subtype -eq 3 -and $rej.meta.code -eq 'InvalidRequest') (Describe $rej)
 
 $ws.Dispose()
 Stop-Server $p
+Remove-Item Env:WBFUWUNEL_MEDIA_GRACE_SECONDS -ErrorAction SilentlyContinue
 
 # ================= Scenario 2: a retained original holds the references; purge releases once =================
 Log '################ Scenario 2: redact with retained original, then purge ################'
@@ -175,7 +212,7 @@ $db2 = "$S\e2e9db-2"; Remove-Item -Recurse -Force $db2 -EA SilentlyContinue; New
 $cfg2 = "$S\e2e9-2.toml"
 @('[global]','server_name = "localhost"',('database_path = "' + ($db2.Replace([string][char]92, '/')) + '"'),'port = 8015','address = ["127.0.0.1"]',
   'allow_registration = true','yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse = true','allow_federation = false',
-  'save_unredacted_events = true','log = "info"') -join "`n" | Set-Content -Path $cfg2 -Encoding ascii
+  'save_unredacted_events = true','media_gc_sweep_interval = 2','log = "info"') -join "`n" | Set-Content -Path $cfg2 -Encoding ascii
 $p = Start-Server $cfg2 's2'
 $regA = Api Post '/_matrix/client/v3/register' '{"username":"alice","password":"correct-horse-battery","auth":{"type":"m.login.dummy"}}' $null
 $tokA = $regA.access_token
@@ -198,7 +235,9 @@ $null = Redact $rP $e2.event_id $tokA
 $e3 = Send-Raw $rP 'm.room.message' @{ msgtype = 'm.text'; body = 'marker' } $tokA $null
 $purge2 = Purge-Before $rP $e3.event_id $tokA
 $afterPurge2 = Download-Status $upA.mxc $tokA
-Check '[2.3] purging the last holder (its original dropped) frees the media exactly then (410)' ($purge2.purge_id -and $afterPurge2 -eq 410) "status=$afterPurge2"
+# The purge released the last holder, and a release deletes nothing: the file is served until the
+# sweep takes it, which [2b.8] -- one sweep for scenarios 2 and 2b together -- waits for.
+Check '[2.3] purging the last holder (its original dropped) releases the media exactly then; it is served until the sweep (200)' ($purge2.purge_id -and $afterPurge2 -eq 200) "status=$afterPurge2"
 $log2 = (Get-Content "$OUT\s2.out" -Raw) -replace "`e\[[0-9;]*m", ''
 Check '[2.4] no negative count was ever logged' (-not ($log2 -match 'reference count is negative')) ''
 
@@ -239,7 +278,7 @@ $upGone = Upload-Legacy $tokA $payload 'goes-away.bin'
 $eGone = Send-Raw $rK 'm.room.message' @{ msgtype = 'm.image'; body = 'doomed'; url = $upGone.mxc } $tokA $null
 $eGoneMarker = Send-Raw $rK 'm.room.message' @{ msgtype = 'm.text'; body = 'boundary two' } $tokA $null
 $purgeG = Purge-Before $rK $eGoneMarker.event_id $tokA
-Check '[2b.5] an event the purge really deletes does lose its media (410)' ((Download-Status $upGone.mxc $tokA) -eq 410) "status=$(Download-Status $upGone.mxc $tokA) purge_id=$($purgeG.purge_id)"
+Check '[2b.5] an event the purge really deletes does lose its media (released; served until the sweep)' ((Download-Status $upGone.mxc $tokA) -eq 200) "status=$(Download-Status $upGone.mxc $tokA) purge_id=$($purgeG.purge_id)"
 Check '[2b.6] ... while everything the purge kept is still there' (((Download-Status $upAvatar.mxc $tokA) -eq 200) -and ((Download-Status $upMember.mxc $tokA) -eq 200)) "avatar=$(Download-Status $upAvatar.mxc $tokA) member=$(Download-Status $upMember.mxc $tokA)"
 
 # ⭐ The swap: only the *current* member event holds the per-room avatar, so changing it releases the
@@ -247,7 +286,30 @@ Check '[2b.6] ... while everything the purge kept is still there' (((Download-St
 $upMember2 = Upload-Legacy $tokA $payload 'member-avatar-2.bin'
 $null = Api Put "/_matrix/client/v3/rooms/$([uri]::EscapeDataString($rK))/state/m.room.member/$([uri]::EscapeDataString($regA.user_id))" (@{ membership = 'join'; avatar_url = $upMember2.mxc } | ConvertTo-Json -Compress) $tokA
 Start-Sleep -Seconds 2
-Check '[2b.7] changing the per-room avatar releases the old one and holds the new' (((Download-Status $upMember.mxc $tokA) -eq 410) -and ((Download-Status $upMember2.mxc $tokA) -eq 200)) "old=$(Download-Status $upMember.mxc $tokA) new=$(Download-Status $upMember2.mxc $tokA)"
+Check '[2b.7] changing the per-room avatar releases the old one and holds the new (both served until the sweep)' (((Download-Status $upMember.mxc $tokA) -eq 200) -and ((Download-Status $upMember2.mxc $tokA) -eq 200)) "old=$(Download-Status $upMember.mxc $tokA) new=$(Download-Status $upMember2.mxc $tokA)"
+
+# ⭐ One deliberate sweep for scenarios 2 and 2b: this is where "the purge ended that media's life"
+# and "the swap released the old avatar" are actually asserted. 🚨 The partition is the point -- the
+# three on the left were released, the three on the right are still held by a kept state event, a
+# kept local message, or the current member event -- so neither "the sweep takes everything" nor
+# "the sweep takes nothing" can pass it (every 410 here was an inline check before 2026-11-07).
+$env:WBFUWUNEL_MEDIA_GRACE_SECONDS = '3'
+Stop-Server $p
+$p = Start-Server $cfg2 's2-swept'
+Start-Sleep -Seconds 8
+$tokA = (Api Post '/_matrix/client/v3/login' '{"type":"m.login.password","identifier":{"type":"m.id.user","user":"alice"},"password":"correct-horse-battery"}' $null).access_token
+$swept = @{ 'shared.bin (last holder purged, [2.3])' = $upA.mxc; 'goes-away.bin (its event purged, [2b.5])' = $upGone.mxc;
+            'member-avatar.bin (swapped out, [2b.7])' = $upMember.mxc }
+# 📎 local-image.bin is deliberately in neither set: the second purge above runs with
+# delete_local_events = true over a range that contains it, so whether it is still held depends on
+# that purge, not on this branch. [2b.2] checks it where its state is unambiguous.
+$kept = @{ 'room-avatar.bin (state event, [2b.1])' = $upAvatar.mxc;
+           'member-avatar-2.bin (current member event, [2b.7])' = $upMember2.mxc }
+$notSwept = @($swept.GetEnumerator() | Where-Object { (Download-Status $_.Value $tokA) -ne 410 } | ForEach-Object { $_.Key })
+$notKept = @($kept.GetEnumerator() | Where-Object { (Download-Status $_.Value $tokA) -ne 200 } | ForEach-Object { $_.Key })
+Check '[2b.8] past the protection period the sweep takes exactly what was released' ($notSwept.Count -eq 0) "still_served=$($notSwept -join '; ')"
+Check '[2b.9] ... and nothing that is still held' ($notKept.Count -eq 0) "gone=$($notKept -join '; ')"
+Remove-Item Env:WBFUWUNEL_MEDIA_GRACE_SECONDS -ErrorAction SilentlyContinue
 
 Stop-Server $p
 

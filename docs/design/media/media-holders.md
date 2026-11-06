@@ -82,13 +82,13 @@ redact 5678、備份到期、清頭像    → {}  → 刪
 
 ```
 hold(txn, mxc, holder)              加一個外鍵（含所有索引）
-release(txn, mxc, holder)           拿掉一個外鍵；commit 後交收集器
+release(txn, mxc, holder)           拿掉一個外鍵，就這樣（不刪、不排程刪）
 swap(txn, mxc, from, to)            換外鍵（redact → Backup）
 release_room(txn, room_id)          走 room_mxc，拔掉這個 room 的全部外鍵
 release_range(txn, room_id, kind, until)   走 holder_mxc，拔掉 g_seq < until 的
 release_avatar(txn, localpart)
 list_holders(mxc) -> Vec<Holder>    admin 印用
-is_removable(mxc) -> bool           收集器與掃描共用的決策
+is_removable(mxc) -> bool           刪不刪的唯一決策（含保護期）
 ```
 
 `holder` 是一個 enum（`Event{room, g_seq}`、`Backup{room, g_seq}`、`Avatar{localpart}`、`RoomAvatar{room, user}`），編碼只在這個模組裡。
@@ -100,30 +100,40 @@ is_removable(mxc) -> bool           收集器與掃描共用的決策
 |---|---|
 | `append_pdu` | 列出媒體（宣告 ∪ 明文）；每個：`put mxc_holder(M, Event, room, g_seq)`、`put holder_mxc(room, Event, g_seq, M)` |
 | `backfill_pdu` | 同上（只有明文） |
-| redact，備份**不**保留 | 反向索引找這則的媒體；每個：`del Event`；commit 後交收集器 |
+| redact，備份**不**保留 | 反向索引找這則的媒體；每個：`del Event`。媒體變成沒人持有，由掃描處理 |
 | redact，備份保留 | 每個：`del Event`、`put Backup`（同一交易換掉）。媒體不會空 |
-| 備份到期／`purge_original` | 反向索引 `(room, Backup, g_seq)` 找媒體；每個 `del Backup`；交收集器 |
+| 備份到期／`purge_original` | 反向索引 `(room, Backup, g_seq)` 找媒體；每個 `del Backup` |
 | `purge_history(room, until)` | 🚨 **逐事件，不是整段**：只有迴圈**真的刪掉**的那些事件，在**刪它的那同一筆交易裡** `release_all_of(Holder::event(room, g_seq))`；`Backup` 由同一條路上的 `purge_original` 收。<br>⚠️ 原本是 `release_range` 一批清掉、「不讀事件內容」—— 而那正是它不可能對的原因：迴圈會保留 state 事件與（`delete_local_events=false` 時）本地事件，於是釋放的是刪除的**超集**（外部審查 #3，/docs/design/media/purge-release-set.md）|
-| 刪房 | `release_room(room)`：走 `room_mxc`，每個媒體前綴刪它在這個 room 的 Event／Backup／**RoomAvatar** 外鍵；交收集器。**不走事件**。⚠️ `RoomAvatar` 一定要在這裡清：唯一會 swap 掉它的是「那個房間的下一個 member 事件」，而房間已經不在了 |
+| 刪房 | `release_room(room)`：走 `room_mxc`，每個媒體前綴刪它在這個 room 的 Event／Backup／**RoomAvatar** 外鍵。**不走事件**。⚠️ `RoomAvatar` 一定要在這裡清：唯一會 swap 掉它的是「那個房間的下一個 member 事件」，而房間已經不在了 |
 | 設每房頭像（成員自己的 `m.room.member`）| `set_room_avatar_ref`：從反向索引列出 `(RoomAvatar, room, user)` 現在持有的，除了新的以外全 `del`，再 `put` 新的（同交易）。⚠️ **只有 `g_seq > 0` 的事件可以做這件事** —— backfilled 是舊歷史，拿它 swap 等於提早釋放 |
-| 設 profile 頭像 | 從反向索引列出 `(Avatar, localpart)` 現在持有的全部，除了新的以外全 `del`，再 `put` 新的；拿掉的交收集器。🚫 不用呼叫者讀到的「舊頭像」：兩個並行更新讀到同一個舊值，輸的那個新頭像會成為永不釋放的幽靈持有者；讀索引則下次更新自癒（/docs/design/history/review-followups-2026-09-06.md §2.7） |
+| 設 profile 頭像 | 從反向索引列出 `(Avatar, localpart)` 現在持有的全部，除了新的以外全 `del`，再 `put` 新的。🚫 不用呼叫者讀到的「舊頭像」：兩個並行更新讀到同一個舊值，輸的那個新頭像會成為永不釋放的幽靈持有者；讀索引則下次更新自癒（/docs/design/history/review-followups-2026-09-06.md §2.7） |
 | 刪使用者 | `del (Avatar, localpart)` |
 
-「交收集器」= 交易 commit 後把 mxc 丟給收集器（既有的 `on_execute` 掛鉤）。任何一條路徑重跑一次，結果一樣。
+🚨 **以上每一條都只拿掉外鍵，一條都不刪 bytes。** 刪除只發生在週期掃描裡（§5）——
+所以任何一條路徑重跑一次結果一樣，而任何一條路徑**釋放錯了**，代價是保留，不是資料
+（維護者 2026-11-07，[/docs/design/media/premature-deletion.md](premature-deletion.md) §2.4）。
+📎 這也是為什麼這裡不再有「交收集器」那一步：收集器與它的 `on_execute` 掛鉤都已經拿掉。
 
 ## 5. 什麼時候刪
 
-一個決策函數，收集器與掃描共用，**在每 mxc 一鎖之下**：
+一個決策函數，只有週期掃描問它，**在每 mxc 一鎖之下**：
 
 ```
-可刪 ⇔ 本地 且 mxc_managed 有列 且 mxc_holder 前綴為空 且（曾經有過持有者 或 建立時間超過保護期）
+可刪 ⇔ 本地 且 mxc_managed 有列 且 mxc_holder 前綴為空 且 建立時間超過保護期
 ```
 
-- 「曾經有過持有者」：收集器收到的 mxc 一定是有人剛拿掉外鍵的，所以收集器**不看年齡**，空了就刪 —— 維護者要的「訊息消失媒體立刻消失」。
-- 週期掃描走 `mxc_managed`（不再掃全部媒體），只處理「從沒被指過、超過 7 天」的：沒有持有者且 `created + 7d < now`。
-- 既存媒體沒有 `mxc_managed` 列，兩條路都不會碰它。不需要哨兵。
-- 鎖：加持有者的人從寫入前持鎖到 commit（現有做法）；收集器與掃描持鎖下 seek 前綴再刪。同型的窗口論述沿用 /docs/design/media/media-gc.md §3.3。
-- 媒體被刪掉（收集器、掃描、`!admin media delete`，都經 `media.collect` 寫墓碑）之後 `forget_media`：走 `mxc_room` 把 `room_mxc`／`mxc_room` 的列清掉，
+- ⚠️ **第四個條件以前不在這個函數裡**（只在掃描的候選過濾裡），而收集器不看年齡 ——
+  於是任何人都能替別人剛上傳的媒體加一個持有者再拿掉，把它從「保護期內」送進「剛被釋放」
+  那一類，當場刪掉。保護期進到決策裡，那條路就沒有了
+  （[/docs/design/media/premature-deletion.md](premature-deletion.md) §2）。
+- 📎 這一節原本寫的是「（曾經有過持有者 **或** 超過保護期）」—— 前半從來沒有實作過
+  （沒有任何地方記「曾經有過」），而實作等效於「釋放的那條路不看年齡」。維護者 2026-11-07
+  把前半整個拿掉：**唯一的判準是年齡**。
+- 週期掃描走 `mxc_managed`（不再掃全部媒體），處理所有「沒有持有者、超過 7 天」的 ——
+  不分它是從沒被指過，還是被指過又被釋放。
+- 既存媒體沒有 `mxc_managed` 列，掃描不會碰它。不需要哨兵。
+- 鎖：加持有者的人從寫入前持鎖到 commit（現有做法）；掃描持鎖下 seek 前綴再刪。同型的窗口論述沿用 /docs/design/media/media-gc.md §3.3。
+- 媒體被刪掉（掃描、`!admin media delete`，都經 `media.collect` 寫墓碑）之後 `forget_media`：走 `mxc_room` 把 `room_mxc`／`mxc_room` 的列清掉，
   連還掛在它身上的持有者列一起清（admin 強制刪一個被持有的媒體時，那些持有者就是幽靈；rumia 抓到的）。拿掉單一持有者時**不**清加速索引
   （那要掃一次才知道這房還有沒有別的持有者），所以它們記的是「持有或持有過」，上界是活著的媒體 × 房間。
 
@@ -160,7 +170,7 @@ is_removable(mxc) -> bool           收集器與掃描共用的決策
 - purge_history 到 marker 之前：範圍內的 Event（c2）與 Backup（redact 過的 c1）都拿掉 → 410；marker 之後的 c4 持有的媒體 200；同一範圍再 purge 一次無錯、狀態不變。
 - 掃描：`WBFUWUNEL_MEDIA_GRACE_SECONDS=3`、`media_gc_sweep_interval=2` → 沒被指的上傳 8 秒後 410、被指的 200，啟動 log 有 override 警告；沒設變數時新上傳不被掃。
 - E2EE 宣告、四種拒送、`Event/Send`、警告一次：沿用 e2e9 情境 1。
-- 既存媒體（用舊 binary 建的庫）：沒有 `mxc_managed` 列，掃描與收集器都不碰。**e2e10 情境 4（`media/managed-origin`，2026-09-06）**：舊 binary 上傳兩張圖
+- 既存媒體（用舊 binary 建的庫）：沒有 `mxc_managed` 列，掃描不碰。**e2e10 情境 4（`media/managed-origin`，2026-09-06）**：舊 binary 上傳兩張圖
   （一張被訊息引用、一張沒人引用）→ 新 binary 對兩張都生成縮圖 → 保護期 3 秒過後兩張與縮圖都 200，同時上傳的新孤兒 410。
   **紅燈驗過**：把 `create_file_metadata` 暫時改回「任何列都寫 `mxc_managed`」重建，同一情境 [4.2] 變成 `held=410 free=410 thumb=410`
   —— 連被引用的那張都被掃掉，就是 /docs/design/history/review-followups-2026-09-06.md §2.1 描述的破壞。
@@ -177,6 +187,6 @@ is_removable(mxc) -> bool           收集器與掃描共用的決策
 | 五張表 | `src/database/maps.rs` |
 | `Holder` enum、編碼、§3.1 的管理器 | `src/service/media_refs/`（重寫 mod.rs；`attachments.rs` 留） |
 | 各路徑 | `timeline/{append,backfill,redact,purge,pdus}.rs`、`retention/mod.rs`、`profile/mod.rs`、`rooms/delete/mod.rs`、`users`（刪使用者） |
-| 收集器＋掃描 | `media_refs/collect.rs`（決策函數一個） |
+| 掃描 | `media_refs/sweep.rs`（決策函數一個，保護期在它裡面） |
 | `mxc_managed` 寫入 | `media/data.rs::create_file_metadata`（取代 `Init` merge） |
 | admin | `admin/media/refcount.rs` → 列持有者 |
