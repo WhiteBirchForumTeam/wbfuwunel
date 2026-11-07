@@ -18,7 +18,7 @@ use crate::media::TombstoneReason;
 
 /// How long after startup the first sweep runs, when the configured interval is
 /// longer than this.
-const STARTUP_SWEEP_DELAY: Duration = Duration::from_secs(60);
+const STARTUP_SWEEP_DELAY_SECONDS: u64 = 60;
 
 /// The moment before which a media is old enough to be removed: now minus the
 /// protection period (`media_unreferenced_grace_seconds`, floored at 7 days by
@@ -95,7 +95,10 @@ pub async fn is_removable(&self, mxc: &str) -> bool {
 #[implement(Service)]
 pub(super) fn sweep_interval(&self) -> Interval {
 	let period = Duration::from_secs(self.services.config.media_gc_sweep_interval.max(1));
-	let first = Instant::now().checked_add(period.min(STARTUP_SWEEP_DELAY)).unwrap_or_else(Instant::now);
+	let delay = period.min(Duration::from_secs(STARTUP_SWEEP_DELAY_SECONDS));
+	let first = Instant::now()
+		.checked_add(delay)
+		.unwrap_or_else(Instant::now);
 	let mut clock = interval_at(first, period);
 	clock.set_missed_tick_behavior(MissedTickBehavior::Delay);
 	clock
