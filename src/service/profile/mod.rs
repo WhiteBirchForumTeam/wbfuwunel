@@ -369,8 +369,8 @@ pub async fn set_profile_keys(
 	// holder index, so two racing updates cannot both act on one stale value.
 	let avatar_change = find_avatar_update(profile_values);
 
-	// Hold the incoming avatar until its holder has committed, so the
-	// collector cannot remove it in between.
+	// Hold the incoming avatar until its holder has committed, so a sweep
+	// cannot remove it in between.
 	let media_held = match &avatar_change {
 		| Some(Some(new_avatar)) => Some(
 			self.services

@@ -163,8 +163,8 @@ $invites2 = 0; if ($syncB2.rooms.invite) { $invites2 = @($syncB2.rooms.invite.PS
 Check '[1.6c] a second undeclared send does not warn again' ($undeclared2.status -eq 200 -and $invites2 -eq 0) "pending_invites=$invites2"
 
 # [1.7] the sweep: the protection clock is the stored creation time (not the file mtime), so a
-# fresh upload nothing holds must survive the sweep; a held one too. Removal after seven
-# days cannot be exercised live (the floor is hard); the decision is unit-tested.
+# fresh upload nothing holds must survive the sweep; a held one too. The configured period is
+# floored at seven days, so removal is exercised with WBFUWUNEL_MEDIA_GRACE_SECONDS (see [1.8]).
 $upF = Upload-Legacy $tokA $payload 'f.bin'
 $upG = Upload-Legacy $tokA $payload 'g.bin'
 $null = Send-Raw $rE 'm.room.encrypted' (Encrypted-Body 'G') $tokA @($upG.mxc)
@@ -290,8 +290,8 @@ Check '[2b.7] changing the per-room avatar releases the old one and holds the ne
 
 # ⭐ One deliberate sweep for scenarios 2 and 2b: this is where "the purge ended that media's life"
 # and "the swap released the old avatar" are actually asserted. 🚨 The partition is the point -- the
-# three on the left were released, the three on the right are still held by a kept state event, a
-# kept local message, or the current member event -- so neither "the sweep takes everything" nor
+# three on the left were released, the two on the right are still held by a kept state event or by
+# the current member event -- so neither "the sweep takes everything" nor
 # "the sweep takes nothing" can pass it (every 410 here was an inline check before 2026-11-07).
 $env:WBFUWUNEL_MEDIA_GRACE_SECONDS = '3'
 Stop-Server $p

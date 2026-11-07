@@ -1,6 +1,10 @@
 #![cfg(test)]
 
-use std::{env::set_var, fs::remove_dir_all, process::id as process_id};
+use std::{
+	env::{remove_var, set_var},
+	fs::remove_dir_all,
+	process::id as process_id,
+};
 
 use tuwunel::{Args, Runtime, Server, async_run, async_start, async_stop};
 use tuwunel_core::{
@@ -184,9 +188,7 @@ async fn release_leaves_removal_to_the_sweep(services: &Services) -> Result {
 	//
 	// ⚠️ The environment override exists for exactly this: the configured period
 	// is floored at seven days, which a test cannot wait out.
-	unsafe {
-		set_var(MEDIA_UNREFERENCED_GRACE_ENV, "0");
-	}
+	let _grace = GraceOverride::set("0");
 
 	// ⭐ The positive case, or the five refusals above could all come from a
 	// predicate that says no to everything: the same media, the same holders,
@@ -208,4 +210,36 @@ async fn release_leaves_removal_to_the_sweep(services: &Services) -> Result {
 	}
 
 	Ok(())
+}
+
+/// Sets the protection-period override and takes it away again however the test
+/// ends, including on an early `return Err!`.
+///
+/// 🚨 Why it is a guard and not two calls: `cargo test` runs the tests of one
+/// binary in one process, so a leaked `grace = 0` would be read by any test
+/// added here later — and it would read it as a *configured* value, with
+/// nothing to say where it came from. 📎 The guard narrows that to the window
+/// this test holds it; a second test in this binary that must not see it needs
+/// its own binary.
+struct GraceOverride;
+
+impl GraceOverride {
+	fn set(seconds: &str) -> Self {
+		// SAFETY: no other thread of this test reads the environment; the
+		// override is read per call by `media_unreferenced_grace_seconds_effective`.
+		unsafe {
+			set_var(MEDIA_UNREFERENCED_GRACE_ENV, seconds);
+		}
+
+		Self
+	}
+}
+
+impl Drop for GraceOverride {
+	fn drop(&mut self) {
+		// SAFETY: as above.
+		unsafe {
+			remove_var(MEDIA_UNREFERENCED_GRACE_ENV);
+		}
+	}
 }

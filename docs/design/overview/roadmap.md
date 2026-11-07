@@ -242,7 +242,7 @@ wbf 帳號**收不到也查不到邀請**：`Event/Push` 只推已加入的房�
 
 傳統 Matrix 的上傳**一個請求送完整個檔**，server 把整個 body 收進記憶體，而**同時幾個請求在收原本沒有上限**
 （最壞 ≈ 同時上傳人數 × `max_request_size`）。⭐ 封法是一個全站的 **byte 預算**
-（`matrix_upload_memory_budget`，預設 1 GiB）：permit ＝ byte，FORBID 固定並行數、FORBID 量 process RAM ——
+（`matrix_upload_memory_budget`，預設 1 GiB）：permit ＝ byte，不用固定並行數、也不量 process RAM ——
 封的是「我們自己答應要握住多少位元組」。歸還**只有一條路**，`Reservation` 的 `Drop` ⇒ 斷線、逾時、
 解析失敗、handler 提早返回都會還。
 
@@ -263,7 +263,7 @@ tower-http 的 `TimeoutBody`，**收到一個框就重新計時**，它是框間
 - 🔴 **剩下的洞**：**一個帳號仍然可以佔滿全站預算**（43 條慢連線現在要一個 token，但一個就夠）、
   240 秒可以重連、沒有最低傳輸速率判準。
 
-⏳ **下一支建議 per-user 上限，FORBID per-address**：user 來自 token，**不需要相信任何 header**；
+⏳ **下一支建議 per-user 上限，不用 per-address**：user 來自 token，**不需要相信任何 header**；
 per-address 的強度等於 `client_ip` 的可信度（見 [/docs/design/wire/pack-pipeline.md](../wire/pack-pipeline.md) §2.2）。
 
 ## 3. 候選（要不要做，由維護者決定）

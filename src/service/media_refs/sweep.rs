@@ -10,11 +10,15 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use ruma::Mxc;
-use tokio::time::{Interval, MissedTickBehavior, interval};
+use tokio::time::{Instant, Interval, MissedTickBehavior, interval_at};
 use tuwunel_core::{debug, error, implement, info, utils::{stream::TryIgnore, time::now_millis}};
 
 use super::Service;
 use crate::media::TombstoneReason;
+
+/// How long after startup the first sweep runs, when the configured interval is
+/// longer than this.
+const STARTUP_SWEEP_DELAY: Duration = Duration::from_secs(60);
 
 /// The moment before which a media is old enough to be removed: now minus the
 /// protection period (`media_unreferenced_grace_seconds`, floored at 7 days by
@@ -80,14 +84,20 @@ pub async fn is_removable(&self, mxc: &str) -> bool {
 	!self.has_holders(mxc).await
 }
 
-/// The sweep's clock: `media_gc_sweep_interval`, first tick after one whole
-/// interval (not at startup), late ticks not made up.
+/// The sweep's clock: `media_gc_sweep_interval`, late ticks not made up.
+///
+/// 🚨 The first tick is one minute after startup, not one whole interval: the
+/// sweep is the only thing that removes media, so a server that restarts more
+/// often than its interval would otherwise never remove anything, and nothing
+/// in the log would say so (every restart forgets when the last sweep was).
+/// A minute, not immediately, so the sweep does not compete with startup
+/// (/docs/design/media/premature-deletion.md §2.4).
 #[implement(Service)]
 pub(super) fn sweep_interval(&self) -> Interval {
 	let period = Duration::from_secs(self.services.config.media_gc_sweep_interval.max(1));
-	let mut clock = interval(period);
+	let first = Instant::now().checked_add(period.min(STARTUP_SWEEP_DELAY)).unwrap_or_else(Instant::now);
+	let mut clock = interval_at(first, period);
 	clock.set_missed_tick_behavior(MissedTickBehavior::Delay);
-	clock.reset();
 	clock
 }
 

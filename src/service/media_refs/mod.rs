@@ -207,7 +207,7 @@ fn del_holder_rows(&self, txn: &mut Txn, mxc: &str, holder: &Holder) {
 /// `room_mxc`/`mxc_room` accelerator rows and any holder rows still on it
 /// (an administrator can remove held media; the holders are then ghosts).
 /// Idempotent. Called by `media.collect` for every tombstoning removal, so
-/// the collector, the sweep and `!admin media delete` all clean up alike.
+/// the sweep and `!admin media delete` both clean up alike.
 #[implement(Service)]
 pub async fn forget_media(&self, mxc: &str) {
 	let rooms: Vec<OwnedRoomId> = self
@@ -382,8 +382,8 @@ pub async fn release_room(&self, txn: &mut Txn, room: &RoomId) -> usize {
 /// `server_name` does not orphan every local avatar — which means
 /// `@alice:other.org` and the local `@alice` are *the same holder*. Without
 /// this check, one lookup of a remote profile (`fetch_remote_profile` writes
-/// `avatar_url` like any other profile key) releases the local user's avatar
-/// and hands it to the collector, which deletes it for good.
+/// `avatar_url` like any other profile key) releases the local user's avatar,
+/// and the next sweep after its protection period removes it for good.
 ///
 /// The invariant is the one `Holder::Avatar` already states — "avatars of
 /// other servers' users are never counted" — and it had nobody enforcing it

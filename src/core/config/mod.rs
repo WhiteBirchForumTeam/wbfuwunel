@@ -3552,6 +3552,15 @@ pub struct Config {
 	///
 	/// They can be retrieved with `admin debug get-retained-pdu` or MSC2815.
 	///
+	/// Turning this off does not make a redaction delete the media it
+	/// referenced right away: the redaction only releases the media, and the
+	/// sweep removes it once it is past `media_unreferenced_grace_seconds`,
+	/// which is measured from the upload and floored at seven days. Until then
+	/// anyone holding the `mxc://` can still download it, and everyone in the
+	/// room holds it. Use `!admin media delete <mxc>` for a removal that has to
+	/// happen now; it is not subject to the protection period
+	/// (/docs/design/media/premature-deletion.md §2.5b).
+	///
 	/// reloadable: yes
 	/// default: true
 	#[serde(default = "true_fn")]
@@ -3606,6 +3615,11 @@ pub struct Config {
 
 	/// How often the sweep looks for local media whose reference count is
 	/// zero and whose protection has expired, in seconds.
+	///
+	/// The sweep is the only thing that removes such media, so the first one
+	/// runs a minute after startup rather than a whole interval later; a
+	/// server restarting more often than its interval would otherwise never
+	/// remove anything.
 	///
 	/// default: 3600
 	#[serde(default = "default_media_gc_sweep_interval")]
