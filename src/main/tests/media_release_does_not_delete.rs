@@ -1,0 +1,245 @@
+#![cfg(test)]
+
+use std::{
+	env::{remove_var, set_var},
+	fs::remove_dir_all,
+	process::id as process_id,
+};
+
+use tuwunel::{Args, Runtime, Server, async_run, async_start, async_stop};
+use tuwunel_core::{
+	Err, Result,
+	config::MEDIA_UNREFERENCED_GRACE_ENV,
+	ruma::{Mxc, OwnedMxcUri, UserId, user_id},
+};
+use tuwunel_service::Services;
+
+/// Releasing a holder releases it and nothing else: the media is still there
+/// afterwards, even though nothing holds it any more, because it is inside the
+/// protection period. The sweep is what removes it, and only once it is past
+/// that period (/docs/design/media/premature-deletion.md §2.4).
+///
+/// 🚨 This is the third-party attack from §2.1 end to end: the attacker never
+/// uploaded anything, and the two steps are the two profile writes any user can
+/// make. Before this gate, step 2 deleted the victim's fresh upload.
+#[test]
+fn releasing_a_holder_keeps_media_inside_the_protection_period() -> Result {
+	let db_path = format!("/tmp/tuwunel-test-media-release-{}", process_id());
+
+	let mut args = Args::default_test(&["fresh", "cleanup"]);
+	args.maintenance = true;
+	args.option
+		.push(format!("database_path=\"{db_path}\""));
+
+	let runtime = Runtime::new(Some(&args))?;
+	let server = Server::new(Some(&args), Some(&runtime))?;
+
+	let result: Result = runtime.block_on(async {
+		let services = async_start(&server).await?;
+
+		let outcome = release_leaves_removal_to_the_sweep(&services).await;
+
+		server.server.shutdown()?;
+		drop(services);
+
+		async_run(&server).await?;
+		async_stop(&server).await?;
+
+		outcome
+	});
+
+	drop(runtime);
+
+	remove_dir_all(&db_path).ok();
+
+	result
+}
+
+async fn release_leaves_removal_to_the_sweep(services: &Services) -> Result {
+	let victim: &UserId = user_id!("@victim:localhost");
+	let attacker: &UserId = user_id!("@attacker:localhost");
+	let keeper: &UserId = user_id!("@keeper:localhost");
+	// Built, not written out: `mxc.to_string()` is the key the upload records in
+	// `mxc_managed` and the string a client would put in a profile, so building
+	// both sides from one `Mxc` is what keeps the test asking about one media.
+	let mxc = Mxc {
+		server_name: services.globals.server_name(),
+		media_id: "victims-fresh-upload",
+	};
+	let key = mxc.to_string();
+
+	// The victim uploads and does nothing else with it: managed, held by
+	// nothing, seconds old. The state the protection period exists for.
+	services
+		.media
+		.create(&mxc, Some(victim), None, Some("image/png"), b"victim bytes")
+		.await?;
+
+	if services.media_refs.managed_since(&key).await.is_none() {
+		return Err!("the upload did not get an mxc_managed row, so this test would pass vacuously");
+	}
+
+	// Step 1: the attacker points their own avatar at it. Allowed on purpose —
+	// holding someone else's media only keeps it alive longer.
+	let as_avatar: OwnedMxcUri = key.clone().into();
+	services
+		.profile
+		.set_avatar_url(attacker, Some(&as_avatar), None)
+		.await?;
+
+	if !services.media_refs.has_holders(&key).await {
+		return Err!("the attacker's avatar did not become a holder, so step 2 releases nothing");
+	}
+
+	// Step 2: and takes it away again. This is the release that used to delete.
+	services
+		.profile
+		.set_avatar_url(attacker, None, None)
+		.await?;
+
+	if services.media_refs.has_holders(&key).await {
+		return Err!("the avatar was not released, so this test would pass for the wrong reason");
+	}
+	if let Some(tombstone) = services.media.find_tombstone(&mxc).await {
+		return Err!("the release deleted the victim's media inside the protection period: {tombstone:?}");
+	}
+	if services.media_refs.managed_since(&key).await.is_none() {
+		return Err!("the release dropped the victim's mxc_managed row");
+	}
+
+	// ⭐ One holder of two: the first release must leave the media held, the
+	// second must leave it unheld. This used to be visible in e2e9 ([1.3], a
+	// shared attachment redacted twice) because the second release deleted the
+	// file; now that neither release deletes anything, a client cannot see the
+	// difference at all and this is the only place it is pinned.
+	let shared = Mxc { server_name: services.globals.server_name(), media_id: "two-holders" };
+	let shared_key = shared.to_string();
+	let shared_uri: OwnedMxcUri = shared_key.clone().into();
+	services
+		.media
+		.create(&shared, Some(victim), None, Some("image/png"), b"shared bytes")
+		.await?;
+	for holder in [attacker, keeper] {
+		services
+			.profile
+			.set_avatar_url(holder, Some(&shared_uri), None)
+			.await?;
+	}
+	services
+		.profile
+		.set_avatar_url(attacker, None, None)
+		.await?;
+	if !services.media_refs.has_holders(&shared_key).await {
+		return Err!("releasing one of two holders left the media unheld");
+	}
+	services
+		.profile
+		.set_avatar_url(keeper, None, None)
+		.await?;
+	if services.media_refs.has_holders(&shared_key).await {
+		return Err!("releasing the second of two holders left a holder behind");
+	}
+
+	// The control: this one keeps its holder all the way through the sweep.
+	let kept = Mxc { server_name: services.globals.server_name(), media_id: "still-held" };
+	let kept_uri: OwnedMxcUri = kept.to_string().into();
+	services
+		.media
+		.create(&kept, Some(victim), None, Some("image/png"), b"kept bytes")
+		.await?;
+	services
+		.profile
+		.set_avatar_url(keeper, Some(&kept_uri), None)
+		.await?;
+
+	// 🚨 A real sweep, with the real protection period, over all three: it must
+	// take none of them. This is what pins the period inside `is_removable` --
+	// without it every check above still passes when that condition is deleted,
+	// because the release path no longer asks anything at all (verified by
+	// mutation 2026-11-07: `if false && created >= cutoff` left the test green).
+	services.media_refs.sweep_unreferenced().await;
+
+	for (what, parsed) in [("the released media", &mxc), ("the twice-released media", &shared)] {
+		if let Some(tombstone) = services.media.find_tombstone(parsed).await {
+			return Err!("a sweep inside the protection period removed {what}: {tombstone:?}");
+		}
+	}
+
+	// ⭐ And the decision asked directly, because a sweep cannot ask it about a
+	// young media at all: the candidate filter is the other age gate, so it
+	// never hands one over. Each line is one of the four conditions.
+	let kept_key = kept.to_string();
+	let refusals = [
+		("unheld but inside the protection period", key.as_str(), false),
+		("held by an avatar", kept_key.as_str(), false),
+		("no mxc_managed row: predates the model", "mxc://localhost/never-created-here", false),
+		("another server's media", "mxc://elsewhere.example/whatever", false),
+		("not an mxc at all", "not-an-mxc", false),
+	];
+	for (what, candidate, expected) in refusals {
+		if services.media_refs.is_removable(candidate).await != expected {
+			return Err!("is_removable said {} for a media that is {what}", !expected);
+		}
+	}
+
+	// And now the other half: with the media past the protection period the
+	// sweep does remove it. Without this, everything above would also pass on a
+	// server that had simply stopped collecting anything at all.
+	//
+	// ⚠️ The environment override exists for exactly this: the configured period
+	// is floored at seven days, which a test cannot wait out.
+	let _grace = GraceOverride::set("0");
+
+	// ⭐ The positive case, or the five refusals above could all come from a
+	// predicate that says no to everything: the same media, the same holders,
+	// only now past the period.
+	if !services.media_refs.is_removable(&key).await {
+		return Err!("is_removable still refuses an unheld media that is past the protection period");
+	}
+
+	services.media_refs.sweep_unreferenced().await;
+
+	if services.media.find_tombstone(&mxc).await.is_none() {
+		return Err!("the sweep left media that nothing holds and that is past the protection period");
+	}
+	if services.media.find_tombstone(&shared).await.is_none() {
+		return Err!("the sweep left the media whose two holders had both been released");
+	}
+	if let Some(tombstone) = services.media.find_tombstone(&kept).await {
+		return Err!("the sweep removed media an avatar still holds, so it is not deciding anything: {tombstone:?}");
+	}
+
+	Ok(())
+}
+
+/// Sets the protection-period override and takes it away again however the test
+/// ends, including on an early `return Err!`.
+///
+/// 🚨 Why it is a guard and not two calls: `cargo test` runs the tests of one
+/// binary in one process, so a leaked `grace = 0` would be read by any test
+/// added here later — and it would read it as a *configured* value, with
+/// nothing to say where it came from. 📎 The guard narrows that to the window
+/// this test holds it; a second test in this binary that must not see it needs
+/// its own binary.
+struct GraceOverride;
+
+impl GraceOverride {
+	fn set(seconds: &str) -> Self {
+		// SAFETY: no other thread of this test reads the environment; the
+		// override is read per call by `media_unreferenced_grace_seconds_effective`.
+		unsafe {
+			set_var(MEDIA_UNREFERENCED_GRACE_ENV, seconds);
+		}
+
+		Self
+	}
+}
+
+impl Drop for GraceOverride {
+	fn drop(&mut self) {
+		// SAFETY: as above.
+		unsafe {
+			remove_var(MEDIA_UNREFERENCED_GRACE_ENV);
+		}
+	}
+}

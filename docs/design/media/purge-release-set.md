@@ -60,11 +60,13 @@ txn.execute();
 `RoomAvatar` 只在那個 `(room, user)` 的**下一則** member 事件被 append 時才出現，而 `src/service/migrations/`
 裡沒有任何 walk 會替既有的當前成員狀態補上它。那麼**部署前就設好的每房頭像呢？**
 
-⭐ **決定性的事實在刪除那一端，不是持有者那一端**（`media_refs/collect.rs`）：
+⭐ **決定性的事實在刪除那一端，不是持有者那一端**（`media_refs/sweep.rs` 的 `is_removable`；
+寫這段的時候它在 `collect.rs`，那個檔 2026-11-07 跟收集器一起退場，見
+[/docs/design/media/premature-deletion.md](premature-deletion.md) §2）：
 
 ```rust
-/// The one decision: local, managed by this model, and held by nothing.
-/// Unknown (not managed) is "no", never "yes".
+// 只引與本節有關的那一條。完整的判準現在是四條（本站、managed、過保護期、
+// 沒有持有者），以 `sweep.rs` 為準。
 if self.managed_since(mxc).await.is_none() { return false; }
 ```
 

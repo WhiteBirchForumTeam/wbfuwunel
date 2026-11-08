@@ -3552,6 +3552,15 @@ pub struct Config {
 	///
 	/// They can be retrieved with `admin debug get-retained-pdu` or MSC2815.
 	///
+	/// Turning this off does not make a redaction delete the media it
+	/// referenced right away: the redaction only releases the media, and the
+	/// sweep removes it once it is past `media_unreferenced_grace_seconds`,
+	/// which is measured from the upload and floored at seven days. Until then
+	/// anyone holding the `mxc://` can still download it, and everyone in the
+	/// room holds it. Use `!admin media delete <mxc>` for a removal that has to
+	/// happen now; it is not subject to the protection period
+	/// (/docs/design/media/premature-deletion.md §2.5b).
+	///
 	/// reloadable: yes
 	/// default: true
 	#[serde(default = "true_fn")]
@@ -3570,12 +3579,18 @@ pub struct Config {
 	///
 	/// A reference is an event naming the media in its content, or a user's
 	/// avatar. A redacted event keeps its reference while its unredacted
-	/// original is retained (see `save_unredacted_events`), so media goes when
-	/// the last retained original is dropped, not when the message is redacted.
-	/// Media created before reference counting existed is never collected.
+	/// original is retained (see `save_unredacted_events`), so a media stops
+	/// being referenced when the last retained original is dropped, not when
+	/// the message is redacted.
 	///
-	/// When false, the collector and the sweep only log what they would
-	/// delete.
+	/// Losing its last reference does not delete a media by itself: the
+	/// periodic sweep (`media_gc_sweep_interval`) deletes it, and only once it
+	/// is also older than `media_unreferenced_grace_seconds`. So deletion
+	/// follows the last reference by up to one sweep interval, or by the rest
+	/// of the protection period for a file that recent. Media created before
+	/// reference counting existed is never deleted automatically.
+	///
+	/// When false, the sweep only logs what it would delete.
 	///
 	/// reloadable: yes
 	/// default: true
@@ -3600,6 +3615,11 @@ pub struct Config {
 
 	/// How often the sweep looks for local media whose reference count is
 	/// zero and whose protection has expired, in seconds.
+	///
+	/// The sweep is the only thing that removes such media, so the first one
+	/// runs a minute after startup rather than a whole interval later; a
+	/// server restarting more often than its interval would otherwise never
+	/// remove anything.
 	///
 	/// default: 3600
 	#[serde(default = "default_media_gc_sweep_interval")]

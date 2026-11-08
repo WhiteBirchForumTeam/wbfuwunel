@@ -2,7 +2,9 @@
 
 > **狀態：✅ 已實作，其中計數與哨兵已退場**（2026-09-14 補標：精確計數 PR #7、收集器與墓碑 PR #10、每 mxc 一鎖 PR #12；
 > 計數器與哨兵在 PR #24 被 [/docs/design/media/media-holders.md](media-holders.md) 的持有者集合取代，`migrate-references` 同一支拔掉）。
-> 收集器、墓碑 410、每 mxc 一鎖仍是現行設計；計數的那幾節留作歷史，讀的時候對照 /docs/design/media/media-holders.md。
+> 墓碑 410 與每 mxc 一鎖仍是現行設計；計數的那幾節留作歷史，讀的時候對照 /docs/design/media/media-holders.md。
+> 🚨 **收集器（釋放持有者時當場決定要不要刪）2026-11-07 退場**，`collect.rs` 一起刪掉 —— 現在唯一會自動刪的是掃描，
+> 而且它看保護期，見 [/docs/design/media/premature-deletion.md](premature-deletion.md) §2。本檔凡是寫「收集器」的地方都是歷史。
 > ⚠️ 這行原本一直寫著「提案，尚未實作」，從 PR #7 合併起就不對了。
 >
 > 撰寫日期：2026-09-02（第三版：第一版「候選表」被推翻；第二版改成精確計數；第三版依維護者指示

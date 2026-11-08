@@ -412,7 +412,7 @@ pub async fn backfill_pdu(
 	set_json_positions(&mut value, positions);
 
 	// Hold the media this event references until its count has committed,
-	// so the collector cannot remove it between reading zero and deleting.
+	// so a sweep cannot remove it between reading zero and deleting.
 	// Nothing is declared on this path: backfilled events are other servers'
 	// history, and only plaintext content can name media here.
 	let media_refs = list_event_refs_at_store(&value, &[]);

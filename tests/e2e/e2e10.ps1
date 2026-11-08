@@ -83,7 +83,11 @@ $tokA = Login-Alice
 Check '[1.4] b2 redacted and reaped; the avatar alone holds M (200)' ((Download-Status $M $tokA) -eq 200) ''
 
 $null = Set-Avatar $regA.user_id '' $tokA
-Check '[1.5] avatar cleared: nothing holds M -> 410' ((Download-Status $M $tokA) -eq 410) ''
+# 🚨 Releasing does not delete. Nothing holds M any more, and inside the protection period that is
+# not enough to remove it (/docs/design/media/premature-deletion.md §2.4). This assertion read 410
+# until 2026-11-07 -- and since anyone may point their own avatar at anyone's mxc, the Set-Avatar
+# pair above was a way to delete somebody else's fresh upload. [1.8] is the other half.
+Check '[1.5] avatar cleared: nothing holds M, and inside the protection period it is still served (200)' ((Download-Status $M $tokA) -eq 200) ''
 
 # idempotency: doing the removals again changes nothing and logs no error
 $null = Redact $rB $b2 $tokA
@@ -97,6 +101,18 @@ $H = (Upload-Legacy $tokA $payload 'held.bin').mxc
 $null = Send-Image $rB $H 'held' $tokA
 Start-Sleep -Seconds 5
 Check '[1.7] sweep leaves a fresh unheld upload (protected) and a held one alone' (((Download-Status $F $tokA) -eq 200) -and ((Download-Status $H $tokA) -eq 200)) ''
+
+# ⭐ The other half of [1.5] and [1.7]: past the protection period the sweep does take what nothing
+# holds -- M, which the avatar released, and F, which nothing ever held -- while H, held by an
+# event, stays. Without this the two checks above would also pass on a server whose sweep had
+# quietly stopped working, which is this branch's most likely way to be wrong.
+$env:WBFUWUNEL_MEDIA_GRACE_SECONDS = '3'
+Restart-Server $cfg 's1d'
+$tokA = Login-Alice
+Start-Sleep -Seconds 8
+$stM = Download-Status $M $tokA; $stF = Download-Status $F $tokA; $stH = Download-Status $H $tokA
+Check '[1.8] past the protection period the sweep takes the released M and the never-held F (410), and keeps the held H (200)' ($stM -eq 410 -and $stF -eq 410 -and $stH -eq 200) "m=$stM f=$stF h=$stH"
+Remove-Item Env:WBFUWUNEL_MEDIA_GRACE_SECONDS -ErrorAction SilentlyContinue
 Stop-Server $script:p
 
 # ================= Scenario 2: purge_history takes a range of holders, from the index =================
@@ -105,7 +121,7 @@ $db2 = "$S\e2e10db-2"; Remove-Item -Recurse -Force $db2 -EA SilentlyContinue; Ne
 $cfg2 = "$S\e2e10-2.toml"
 @('[global]','server_name = "localhost"',('database_path = "' + ($db2.Replace([string][char]92, '/')) + '"'),'port = 8015','address = ["127.0.0.1"]',
   'allow_registration = true','yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse = true','allow_federation = false',
-  'save_unredacted_events = true','log = "info"') -join "`n" | Set-Content -Path $cfg2 -Encoding ascii
+  'save_unredacted_events = true','media_gc_sweep_interval = 2','log = "info"') -join "`n" | Set-Content -Path $cfg2 -Encoding ascii
 $script:p = Start-Server $cfg2 's2'
 $regA = Api Post '/_matrix/client/v3/register' '{"username":"alice","password":"correct-horse-battery","auth":{"type":"m.login.dummy"}}' $null
 $tokA = $regA.access_token
@@ -119,12 +135,26 @@ $c3 = Send-Text $rC 'marker' $tokA
 $c4 = Send-Image $rC $M3 'c4' $tokA    # after the marker: outside the purge range
 $purge = Purge-Before $rC $c3 $tokA
 $st2 = Download-Status $M2 $tokA; $st3 = Download-Status $M3 $tokA
-Check '[2.1] purge before the marker removes Event c2 and Backup c1: M2 gone (410), M3 outside the range stays (200)' ($purge.purge_id -and $st2 -eq 410 -and $st3 -eq 200) "m2=$st2 m3=$st3"
+# The purge released M2's Event c2 and its Backup c1, and a release deletes nothing: M2 is served
+# until the sweep takes it, which [2.3] waits for.
+Check '[2.1] purge before the marker releases Event c2 and Backup c1: M2 is unheld but protected (200), M3 outside the range stays held (200)' ($purge.purge_id -and $st2 -eq 200 -and $st3 -eq 200) "m2=$st2 m3=$st3"
 $purge2 = Purge-Before $rC $c3 $tokA
 $log2 = (Get-Content "$OUT\s2.out" -Raw) -replace "`e\[[0-9;]*m", ''
 $st3b = Download-Status $M3 $tokA
 $errs = @([regex]::Matches($log2, '(?m)^.*ERROR.*$') | ForEach-Object { $_.Value })
 Check '[2.2] purging the same range again is a no-op without errors' ($purge2.purge_id -and $errs.Count -eq 0 -and $st3b -eq 200) "purge_id=$($purge2.purge_id) m3=$st3b errors=$($errs.Count) first=$(if ($errs.Count) { $errs[0].Substring(0, [Math]::Min(160, $errs[0].Length)) })"
+
+# ⭐ What [2.1] used to assert, moved to where it now happens: the purge is still what ends M2's
+# life, the sweep is what carries it out, and M3 -- held by c4, after the marker -- is untouched by
+# both. The discriminating signal is here, so [2.1] staying green cannot hide a purge that released
+# nothing.
+$env:WBFUWUNEL_MEDIA_GRACE_SECONDS = '3'
+Restart-Server $cfg2 's2b'
+$tokA = Login-Alice
+Start-Sleep -Seconds 8
+$st2c = Download-Status $M2 $tokA; $st3c = Download-Status $M3 $tokA
+Check '[2.3] past the protection period the sweep takes the purged M2 (410) and keeps M3, which c4 still holds (200)' ($st2c -eq 410 -and $st3c -eq 200) "m2=$st2c m3=$st3c"
+Remove-Item Env:WBFUWUNEL_MEDIA_GRACE_SECONDS -ErrorAction SilentlyContinue
 Stop-Server $script:p
 
 

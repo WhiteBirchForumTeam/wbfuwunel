@@ -1,5 +1,5 @@
-//! Media holders: who keeps a media item alive, and the collector and sweep
-//! that remove what nobody holds.
+//! Media holders: who keeps a media item alive, and the sweep that removes
+//! what nobody holds.
 //!
 //! A media item is not counted, it is **held**: a set of foreign keys, one per
 //! thing that references it (`Holder`: an event by room and `g_seq`, the
@@ -18,27 +18,29 @@
 //! see, so the sender declares the media with the send (`attachments`,
 //! checked in `attachments.rs`). The union is what the event holds.
 //!
-//! Removal: whenever a holder is removed, the media is handed to the
-//! collector once the transaction has committed; the collector removes it if
-//! nothing holds it any more. Media nothing ever held is removed by the sweep
-//! after the protection period. Both decide under the media's lock, and both
-//! only touch media with a `mxc_managed` row: media from before this existed
-//! is never removed automatically.
+//! Removal: releasing a holder only releases it. Nothing is deleted at that
+//! moment and no deletion is scheduled — the sweep is the only thing that
+//! removes bytes, and it removes a media only once nothing holds it **and** it
+//! is older than the protection period (`sweep.rs`,
+//! `/docs/design/media/premature-deletion.md` §2.4). ⭐ So a release path that
+//! releases more than it should costs retention, not data: the irreversible
+//! step is not on those paths at all. The sweep decides under the media's lock
+//! and only touches media with a `mxc_managed` row: media from before this
+//! existed is never removed automatically.
 
 pub mod attachments;
-mod collect;
 pub mod holder;
+mod sweep;
 #[cfg(test)]
 mod tests;
 
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::StreamExt;
 use ruma::{CanonicalJsonObject, CanonicalJsonValue, OwnedRoomId, OwnedUserId, RoomId, UserId};
-use tokio::sync::mpsc;
 use tuwunel_core::{
-	Result, debug, implement,
+	Result, implement,
 	matrix::list_content_mxc_uris,
 	utils::{MutexMap, MutexMapGuard, stream::TryIgnore},
 };
@@ -55,12 +57,9 @@ pub type MediaHold = MutexMapGuard<String, ()>;
 pub struct Service {
 	services: Arc<crate::services::OnceServices>,
 	db: Data,
-	/// One lock per media, shared by whoever adds a holder and the collector
-	/// or sweep deciding whether to remove it.
+	/// One lock per media, shared by whoever adds a holder and the sweep
+	/// deciding whether to remove it.
 	mxc_locks: MutexMap<String, ()>,
-	/// Where a release sends the media it released, once the releasing
-	/// transaction has committed. Absent while the collector is not running.
-	released: StdRwLock<Option<mpsc::UnboundedSender<String>>>,
 }
 
 struct Data {
@@ -95,39 +94,19 @@ impl crate::Service for Service {
 				userid_lastlegacyupload: args.db["userid_lastlegacyupload"].clone(),
 			},
 			mxc_locks: MutexMap::new(),
-			released: StdRwLock::new(None),
 		}))
 	}
 
 	async fn worker(self: Arc<Self>) -> Result {
-		let (sender, mut receiver) = mpsc::unbounded_channel();
-		_ = self
-			.released
-			.write()
-			.expect("locked for writing")
-			.insert(sender);
-
 		let mut sweep = self.sweep_interval();
 		loop {
 			tokio::select! {
-				released = receiver.recv() => match released {
-					| Some(mxc) => self.collect(&mxc).await,
-					| None => break,
-				},
 				_ = sweep.tick() => self.sweep_unreferenced().await,
 				() = self.services.server.until_shutdown() => break,
 			}
 		}
 
 		Ok(())
-	}
-
-	async fn interrupt(&self) {
-		_ = self
-			.released
-			.write()
-			.expect("locked for writing")
-			.take();
 	}
 
 	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }
@@ -196,18 +175,18 @@ pub fn hold(&self, txn: &mut Txn, mxc: &str, holder: &Holder) {
 	}
 }
 
-/// Removes `holder` from `mxc`, in `txn`, and hands the media to the
-/// collector once `txn` commits. Removing a holder that is not there
-/// changes nothing (the collector then finds the media still held, or
-/// already gone).
+/// Removes `holder` from `mxc`, in `txn`. Nothing is deleted here and no
+/// deletion is scheduled: the sweep removes the bytes, and only once nothing
+/// holds the media and it is past the protection period
+/// (`/docs/design/media/premature-deletion.md` §2.4). Removing a holder that is
+/// not there changes nothing.
 #[implement(Service)]
 pub fn release(&self, txn: &mut Txn, mxc: &str, holder: &Holder) {
 	self.del_holder_rows(txn, mxc, holder);
-	self.hand_to_collector(txn, vec![mxc.to_owned()]);
 }
 
 /// Replaces `from` by `to` on `mxc` in one transaction; the media is never
-/// unheld in between, so nothing is handed to the collector.
+/// unheld in between, so no sweep can find it unheld.
 #[implement(Service)]
 pub fn swap(&self, txn: &mut Txn, mxc: &str, from: &Holder, to: &Holder) {
 	self.del_holder_rows(txn, mxc, from);
@@ -228,7 +207,7 @@ fn del_holder_rows(&self, txn: &mut Txn, mxc: &str, holder: &Holder) {
 /// `room_mxc`/`mxc_room` accelerator rows and any holder rows still on it
 /// (an administrator can remove held media; the holders are then ghosts).
 /// Idempotent. Called by `media.collect` for every tombstoning removal, so
-/// the collector, the sweep and `!admin media delete` all clean up alike.
+/// the sweep and `!admin media delete` both clean up alike.
 #[implement(Service)]
 pub async fn forget_media(&self, mxc: &str) {
 	let rooms: Vec<OwnedRoomId> = self
@@ -300,8 +279,8 @@ pub async fn list_mxcs_of(&self, holder: &Holder) -> Vec<String> {
 	}
 }
 
-/// Removes `holder` from everything it holds, in `txn`; the media are handed
-/// to the collector once `txn` commits.
+/// Removes `holder` from everything it holds, in `txn`. Nothing is deleted
+/// here; see `release`.
 ///
 /// Return:
 ///     Vec<String>  the media it held (for the caller's log).
@@ -311,7 +290,6 @@ pub async fn release_all_of(&self, txn: &mut Txn, holder: &Holder) -> Vec<String
 	for mxc in &mxc_uris {
 		self.del_holder_rows(txn, mxc, holder);
 	}
-	self.hand_to_collector(txn, mxc_uris.clone());
 	mxc_uris
 }
 
@@ -328,8 +306,8 @@ pub async fn swap_all_of(&self, txn: &mut Txn, from: &Holder, to: &Holder) -> us
 
 /// Removes every holder `room` ever had on any media, in `txn`: room
 /// deletion. Walks `room_mxc` (one row per media the room ever held) and,
-/// for each media, its holders of this room; never the events. The media
-/// are handed to the collector once `txn` commits.
+/// for each media, its holders of this room; never the events. Nothing is
+/// deleted here; see `release`.
 ///
 /// Return:
 ///     usize  media the room held.
@@ -386,13 +364,12 @@ pub async fn release_room(&self, txn: &mut Txn, room: &RoomId) -> usize {
 		txn.del(&self.db.mxc_room, (mxc.as_str(), room));
 	}
 
-	self.hand_to_collector(txn, media.clone());
 	media.len()
 }
 
 /// Makes `new_mxc` the one media `user_id`'s avatar holds, in `txn`: every
-/// other media the avatar holder is on is released (handed to the collector
-/// once `txn` commits), `new_mxc` is held. `None` releases them all.
+/// other media the avatar holder is on is released, `new_mxc` is held. `None`
+/// releases them all.
 ///
 /// What the avatar held is read from the reverse index, not taken from the
 /// caller: two updates racing on the same profile both read the same old
@@ -405,8 +382,8 @@ pub async fn release_room(&self, txn: &mut Txn, room: &RoomId) -> usize {
 /// `server_name` does not orphan every local avatar — which means
 /// `@alice:other.org` and the local `@alice` are *the same holder*. Without
 /// this check, one lookup of a remote profile (`fetch_remote_profile` writes
-/// `avatar_url` like any other profile key) releases the local user's avatar
-/// and hands it to the collector, which deletes it for good.
+/// `avatar_url` like any other profile key) releases the local user's avatar,
+/// and the next sweep after its protection period removes it for good.
 ///
 /// The invariant is the one `Holder::Avatar` already states — "avatars of
 /// other servers' users are never counted" — and it had nobody enforcing it
@@ -421,14 +398,9 @@ pub async fn set_avatar_ref(&self, txn: &mut Txn, user_id: &UserId, new_mxc: Opt
 	let holder = Holder::avatar(user_id);
 	let held = self.list_mxcs_of(&holder).await;
 
-	let released: Vec<String> = held
-		.into_iter()
-		.filter(|mxc| Some(mxc.as_str()) != new_mxc)
-		.collect();
-	for mxc in &released {
+	for mxc in held.iter().filter(|mxc| Some(mxc.as_str()) != new_mxc) {
 		self.del_holder_rows(txn, mxc, &holder);
 	}
-	self.hand_to_collector(txn, released);
 
 	if let Some(new_mxc) = new_mxc {
 		self.hold(txn, new_mxc, &holder);
@@ -452,27 +424,27 @@ pub async fn set_avatar_ref(&self, txn: &mut Txn, user_id: &UserId, new_mxc: Opt
 /// (/docs/design/media/purge-release-set.md §3).
 ///
 /// ⚠️ The caller holds `new_mxc` (`hold_media`) until `txn` has committed — the
-/// same contract as `hold()` and `set_avatar_ref`. The collector decides between
-/// a look at a media's holders and its removal, and that decision only holds
+/// same contract as `hold()` and `set_avatar_ref`. The sweep decides between a
+/// look at a media's holders and its removal, and that decision only holds
 /// while whoever adds a holder waits on the same lock.
 ///
 /// 📎 Unlike `set_avatar_ref` this counts remote members too: the media they
-/// name is usually another server's and the collector never touches that, but a
+/// name is usually another server's and the sweep never touches that, but a
 /// remote member may name media of this server, and then the holder is the only
 /// thing keeping it.
+///
+/// 📎 Holding another user's media is deliberately allowed: it keeps that media
+/// alive longer, which is the recoverable direction. What used to make it a
+/// weapon was the release, not the hold — see
+/// `/docs/design/media/premature-deletion.md` §2.2.
 #[implement(Service)]
 pub async fn set_room_avatar_ref(&self, txn: &mut Txn, room: &RoomId, user: &UserId, new_mxc: Option<&str>) {
 	let holder = Holder::room_avatar(room, user);
 	let held = self.list_mxcs_of(&holder).await;
 
-	let released: Vec<String> = held
-		.into_iter()
-		.filter(|mxc| Some(mxc.as_str()) != new_mxc)
-		.collect();
-	for mxc in &released {
+	for mxc in held.iter().filter(|mxc| Some(mxc.as_str()) != new_mxc) {
 		self.del_holder_rows(txn, mxc, &holder);
 	}
-	self.hand_to_collector(txn, released);
 
 	if let Some(new_mxc) = new_mxc {
 		self.hold(txn, new_mxc, &holder);
@@ -564,35 +536,4 @@ pub async fn has_holders(&self, mxc: &str) -> bool {
 pub async fn managed_since(&self, mxc: &str) -> Option<u64> {
 	let bytes = self.db.mxc_managed.get(mxc).await.ok()?;
 	bytes.as_ref().try_into().ok().map(u64::from_be_bytes)
-}
-
-/// Arranges for `mxc_uris` to reach the collector after `txn` commits.
-///
-/// Registered on the transaction rather than sent now, so the collector can
-/// never look before the release has been applied. With no collector running
-/// (startup, shutdown) nothing is sent: the sweep finds what was missed.
-#[implement(Service)]
-fn hand_to_collector(&self, txn: &mut Txn, mxc_uris: Vec<String>) {
-	if mxc_uris.is_empty() {
-		return;
-	}
-
-	let sender = self
-		.released
-		.read()
-		.expect("locked for reading")
-		.clone();
-
-	let Some(sender) = sender else {
-		debug!(?mxc_uris, "No collector running; released media waits for the sweep.");
-		return;
-	};
-
-	txn.on_execute(move || {
-		for mxc in mxc_uris {
-			// A closed receiver means the collector is shutting down; the
-			// sweep covers what it drops.
-			_ = sender.send(mxc);
-		}
-	});
 }

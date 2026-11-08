@@ -122,15 +122,17 @@ pub struct ChunkedMedia {
 /// back can tell a collection from a rebuild from a manual delete.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum TombstoneReason {
-	/// The collector saw its reference count reach zero.
+	/// The removed collector saw the media lose its last holder. Kept so
+	/// tombstones written before releasing stopped deleting still decode
+	/// (/docs/design/media/premature-deletion.md §2.6).
 	GarbageCollected,
 	/// The removed `migrate-references` rebuild found it referenced by nothing.
 	/// Kept so tombstones written before the rebuild went away still decode.
 	Migrated,
 	/// An administrator deleted it by MXC.
 	AdminDeleted,
-	/// The sweep found its count still zero after the protection period:
-	/// uploaded, never attached to anything the server was told about.
+	/// The sweep found nothing holding it after the protection period. The only
+	/// reason written for an automatic removal.
 	Unreferenced,
 }
 

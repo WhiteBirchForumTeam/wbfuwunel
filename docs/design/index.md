@@ -46,6 +46,7 @@
 | [/docs/design/media/media-holders.md](media/media-holders.md) | **現行做法**：持有者集合（外鍵）取代引用計數，誰加、誰拿掉、什麼時候刪 |
 | [/docs/design/media/media-attachments.md](media/media-attachments.md) | E2EE 房間裡 server 讀不到內容，所以附件由送訊息的請求**宣告** |
 | [/docs/design/media/purge-release-set.md](media/purge-release-set.md) | ✅ PR #106＋#107 —— **只留「為什麼」**：A 語意（兩個集合由構造相等）、每房頭像的鍵為什麼是 `(room, user)` 而不是事件、以及為什麼不需要遷移（§4：`mxc_managed`）|
+| [/docs/design/media/premature-deletion.md](media/premature-deletion.md) | 📄 **提案**：媒體被刪得太早的兩條路 —— 第三方「先持有再放掉」繞過保護期（§2）、引用讀取器是四條平的路徑所以巢狀位置七天後被清（§3） |
 | [/docs/design/media/media-gc.md](media/media-gc.md) | 📕 **歷史**：精確計數、哨兵、收集器、墓碑、`migrate-references`（計數與哨兵已退場） |
 | [/docs/design/media/media-refcount.md](media/media-refcount.md) | 📕 **歷史**：最早的列式索引，已被計數取代、計數又被持有者集合取代 |
 

@@ -100,7 +100,7 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 
 	// Only once the stripped event is stored. With the original retained it
 	// takes the media over (Event becomes Backup, never unheld in between);
-	// without one, the event's holder goes and the collector decides. An
+	// without one, the event's holder goes and a later sweep decides. An
 	// event from before positions existed holds nothing to move.
 	if let Some(positions) = positions {
 		let media_refs = &self.services.media_refs;
