@@ -65,7 +65,14 @@ async fn revoke(services: &Services, body: RevokeRequest) -> Result<Response, Re
 
 	// RFC7009 §2.2: invalid or unknown tokens still produce a 200 OK.
 	// remove_device drops both the access and refresh tokens (and the device).
-	if let Ok((user_id, device_id, _)) = services.users.find_from_token(&token).await {
+	// Either kind: this endpoint takes an access token or a refresh token, and
+	// the authenticating lookup deliberately refuses the latter
+	// (/docs/design/accounts/session-tokens.md §2.3).
+	if let Ok((user_id, device_id, _)) = services
+		.users
+		.find_from_access_or_refresh_token(&token)
+		.await
+	{
 		services
 			.users
 			.remove_device(&user_id, &device_id)

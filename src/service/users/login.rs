@@ -22,7 +22,9 @@ use tuwunel_core::{
 	},
 };
 
-use super::device::{RefreshToken, generate_refresh_token, resolve_device_id};
+use super::device::{
+	REFRESH_TOKEN_PREFIX, RefreshToken, generate_refresh_token, resolve_device_id,
+};
 
 /// What a successful login hands the client: the fields of the Matrix
 /// `/login` response that name the session.
@@ -123,6 +125,20 @@ pub async fn issue_session(
 	let refresh_token = expires_in.is_some().then(generate_refresh_token);
 
 	let device_id = if existing_device.is_some() {
+		// 🚨 Before the new tokens are written, not after: `remove_tokens` drops
+		// *every* token this device holds, so doing it afterwards would take the
+		// ones just issued with it.
+		//
+		// ⭐ Logging in again on a device ends that device's previous session: this
+		// is what a user does when they think a token was stolen, and it is the
+		// stronger of the two readings the spec gives (the device section says the
+		// server will invalidate the previous tokens; `/login` says it may)
+		// (/docs/design/accounts/session-tokens.md §3). 📎 Connections opened with
+		// the old token end at their next frame, where `revalidate` asks about it
+		// again — bounded by `wbf_ws_idle_timeout`, the same way a locked account's
+		// are (/docs/design/wire/session-teardown.md §4.3).
+		self.remove_tokens(user_id, &final_device_id).await;
+
 		self.set_access_token(user_id, &final_device_id, &access_token, expires_in, refresh_token.as_deref())
 			.await?;
 
@@ -167,7 +183,7 @@ pub async fn issue_session(
 ///     is then still current and usable elsewhere).
 #[implement(super::Service)]
 pub async fn refresh_session(&self, presented: &str, admit: AdmitSession<'_>) -> Result<RefreshedSession> {
-	if !presented.starts_with("refresh_") {
+	if !presented.starts_with(REFRESH_TOKEN_PREFIX) {
 		return Err!(Request(Forbidden("Refresh token is malformed.")));
 	}
 

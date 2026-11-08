@@ -32,6 +32,12 @@ const DEVICE_ID_LENGTH: usize = 10;
 /// generated user access token length
 pub const TOKEN_LENGTH: usize = 32;
 
+/// What every refresh token starts with. It makes a refresh token recognisable
+/// on sight, which is what the second gate in `find_from_token` uses; the
+/// credentials are told apart by the table they are in, not by this
+/// (/docs/design/accounts/session-tokens.md §2.3).
+pub const REFRESH_TOKEN_PREFIX: &str = "refresh_";
+
 /// Adds a new device to a user.
 #[implement(super::Service)]
 #[tracing::instrument(level = "info", skip(self, access_token))]
@@ -186,16 +192,84 @@ pub fn all_device_ids<'a>(
 		.map(|(_, device_id): (Ignore, &DeviceId)| device_id)
 }
 
-/// Find out which user an access or refresh token belongs to.
+/// Find out whose session an **access token** is, for authenticating a request.
+///
+/// 🚨 Access tokens only. A refresh token is a different credential with a
+/// different job — one call, which rotates it and is replay-checked — and it is
+/// deliberately long-lived, so letting it authenticate a request would make it a
+/// permanent key to everything, with none of the rotation that makes its
+/// lifetime safe (/docs/design/accounts/session-tokens.md §1.1, §2).
+///
+/// That is why refresh tokens are stored in a table of their own: this lookup
+/// cannot find one. The prefix refusal below is the second gate, kept **because**
+/// it should be unreachable — it is what catches a future writer putting a
+/// refresh token back into this table, and it fails by refusing (CLAUDE.md A5).
+/// Whoever needs either kind (RFC7009 revocation) asks
+/// `find_from_access_or_refresh_token`.
+///
+/// Args:
+///     token: example: "syt_abc…" (a refresh token is refused)
+/// Return:
+///     Result<(user, device, expires_at)>  Err not-found for an unknown token,
+///     a refresh token, or any string with the refresh prefix.
 #[implement(super::Service)]
 #[tracing::instrument(level = "trace", skip(self, token))]
 pub async fn find_from_token(
 	&self,
 	token: &str,
 ) -> Result<(OwnedUserId, OwnedDeviceId, Option<SystemTime>)> {
-	self.db
-		.token_userdeviceid
-		.get(token)
+	if token.starts_with(REFRESH_TOKEN_PREFIX) {
+		return Err!(Request(NotFound("Not an access token.")));
+	}
+
+	read_token_owner(&self.db.token_userdeviceid, token).await
+}
+
+/// Find out whose session a **refresh token** is: the current one of its device.
+///
+/// Args:
+///     token: example: "refresh_abc…"
+/// Return:
+///     Result<(user, device, expires_at)>  Err not-found unless it is a device's
+///     current refresh token; a spent one is not found here (see
+///     `classify_refresh_token`).
+#[implement(super::Service)]
+#[tracing::instrument(level = "trace", skip(self, token))]
+pub async fn find_from_refresh_token(
+	&self,
+	token: &str,
+) -> Result<(OwnedUserId, OwnedDeviceId, Option<SystemTime>)> {
+	read_token_owner(&self.db.refresh_userdeviceid, token).await
+}
+
+/// Find out whose session a token is when **either kind** is meant: RFC7009's
+/// revocation endpoint takes an access token or a refresh token and says so in
+/// `token_type_hint`, so it cannot ask the authenticating lookup
+/// (/docs/design/accounts/session-tokens.md §2.3).
+///
+/// Args:
+///     token: example: "syt_abc…" or "refresh_abc…"
+/// Return:
+///     Result<(user, device, expires_at)>  Err not-found when neither table has
+///     it.
+#[implement(super::Service)]
+#[tracing::instrument(level = "trace", skip(self, token))]
+pub async fn find_from_access_or_refresh_token(
+	&self,
+	token: &str,
+) -> Result<(OwnedUserId, OwnedDeviceId, Option<SystemTime>)> {
+	match self.find_from_token(token).await {
+		| Ok(owner) => Ok(owner),
+		| Err(_) => self.find_from_refresh_token(token).await,
+	}
+}
+
+/// The stored `(user, device, expires_at)` of one token in `map`.
+async fn read_token_owner(
+	map: &Arc<Map>,
+	token: &str,
+) -> Result<(OwnedUserId, OwnedDeviceId, Option<SystemTime>)> {
+	map.get(token)
 		.await
 		.deserialized()
 		.and_then(|(user_id, device_id, expires_at): (_, _, Option<u64>)| {
@@ -364,7 +438,10 @@ pub async fn set_refresh_token(
 	device_id: &DeviceId,
 	refresh_token: &str,
 ) -> Result {
-	debug_assert!(refresh_token.starts_with("refresh_"), "refresh_token missing prefix");
+	debug_assert!(
+		refresh_token.starts_with(REFRESH_TOKEN_PREFIX),
+		"refresh_token missing prefix"
+	);
 
 	let config = &self.services.server.config;
 	let ttl = config.refresh_token_ttl;
@@ -406,7 +483,10 @@ pub async fn set_refresh_token(
 	let value = (user_id, device_id, expires_at_secs);
 	let mut txn = self.services.db.txn();
 
-	txn.raw_put(&self.db.token_userdeviceid, refresh_token, value);
+	// 🚨 The refresh table, never `token_userdeviceid`: a refresh token that lands
+	// in the access-token table is a permanent key to every endpoint
+	// (/docs/design/accounts/session-tokens.md §2).
+	txn.raw_put(&self.db.refresh_userdeviceid, refresh_token, value);
 	txn.put_raw(&self.db.userdeviceid_refresh, userdeviceid, refresh_token);
 
 	// Retain the outgoing token as the device's spent token, pointing at its
@@ -444,7 +524,7 @@ async fn find_refresh_token_expires_at(
 
 	let (_, _, expires_at_secs): (Ignore, Ignore, Option<u64>) = self
 		.db
-		.token_userdeviceid
+		.refresh_userdeviceid
 		.get(&old_token)
 		.await
 		.deserialized()
@@ -470,7 +550,7 @@ pub async fn remove_refresh_token(&self, user_id: &UserId, device_id: &DeviceId)
 	let mut txn = self.services.db.txn();
 
 	if let Ok(refresh_token) = refresh_token {
-		txn.del_raw(&self.db.token_userdeviceid, &refresh_token);
+		txn.del_raw(&self.db.refresh_userdeviceid, &refresh_token);
 	}
 
 	txn.del(&self.db.userdeviceid_refresh, userdeviceid);
@@ -534,9 +614,12 @@ pub enum RefreshToken {
 /// Classify a presented refresh token for the token-endpoint rotation path.
 #[implement(super::Service)]
 pub async fn classify_refresh_token(&self, presented: &str) -> RefreshToken {
-	// The current refresh token resolves and matches the device's active
-	// pointer (an access token resolves but will not match).
-	if let Ok((user_id, device_id, expires_at)) = self.find_from_token(presented).await {
+	// The current refresh token resolves in the refresh table and matches the
+	// device's active pointer. 📎 The pointer check is a second gate and stays:
+	// the table holds one token per device, so it should always agree, and if it
+	// ever does not, this path refuses rather than rotating something that is not
+	// current (/docs/design/accounts/session-tokens.md §2.3).
+	if let Ok((user_id, device_id, expires_at)) = self.find_from_refresh_token(presented).await {
 		let current: Option<String> = self
 			.db
 			.userdeviceid_refresh
@@ -592,7 +675,9 @@ pub async fn classify_refresh_token(&self, presented: &str) -> RefreshToken {
 }
 
 #[must_use]
-pub fn generate_refresh_token() -> String { format!("refresh_{}", random_string(TOKEN_LENGTH)) }
+pub fn generate_refresh_token() -> String {
+	format!("{REFRESH_TOKEN_PREFIX}{}", random_string(TOKEN_LENGTH))
+}
 
 /// One queue item exactly as it is stored, which is also exactly what a
 /// `Device/Batch` pack has to carry it in.
