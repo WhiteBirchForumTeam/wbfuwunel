@@ -74,7 +74,7 @@
 | 文件 | 講什麼 |
 |---|---|
 | [/docs/design/accounts/server-user.md](accounts/server-user.md) | `@system`、顯示名稱 `[SYS] <server_name>`，以及怎麼防止它變成真人的帳號 |
-| [/docs/design/accounts/session-tokens.md](accounts/session-tokens.md) | 📄 **提案**：會話 token 的兩個洞 —— refresh token 可以直接當 access token 用（§2，實跑 200）、同一個 `device_id` 重新登入舊 token 還能自我續命（§3，⏳ 等維護者） |
+| [/docs/design/accounts/session-tokens.md](accounts/session-tokens.md) | ✅ **已實作**：access token 與 refresh token 是兩種憑證 —— refresh token 認證不了請求（§2，分表 ＋ 前綴第二道）、同一個 `device_id` 重新登入收掉該裝置先前的 token（§3）。兩條都是繼承 upstream 的洞，§1.2 有對照 |
 
 ## `history/`：留著因為推理還值得讀
 

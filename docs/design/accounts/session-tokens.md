@@ -6,8 +6,8 @@
 
 | | 狀態 |
 |---|---|
-| §2 S1：refresh token 直接當 access token 用 | ✅ **成立**（實跑 200）。§2.4 是提案 |
-| §3 S4：同一個 `device_id` 重新登入，舊的 access ／ refresh token 都還活著 | ✅ **成立**（實跑 200），⚠️ 但它是 **upstream 刻意的設計** ⇒ §3.4 要維護者決定 |
+| §2 S1：refresh token 直接當 access token 用 | ✅ **成立**（實跑 200）⇒ ✅ **已修**（維護者 2026-11-09 核可，§2.3 的兩張表） |
+| §3 S4：同一個 `device_id` 重新登入，舊的 access ／ refresh token 都還活著 | ✅ **成立**（實跑 200），而且是 **upstream 刻意的設計** ⇒ ✅ **照選項 A 修**（維護者 2026-11-09） |
 
 ⭐ 兩條的共同根因只有一句：**「這個字串是不是一把 access token」是用「它在不在
 `token_userdeviceid` 這張表裡」回答的，而 refresh token 也寫在那張表裡。**
@@ -145,6 +145,26 @@ spentrefresh_userdeviceid ← 不動（上一代的 refresh token，重放偵測
 5. 🔴 **第二道自己也要有測試**：直接把一把 `refresh_` 開頭的字串寫進 access 表，
    然後認證 → 要被拒。不然「第二道」只是一句註解。
 
+### 2.5 ⏳ 跟著冒出來的一個問題：被撤銷的 refresh token 該回 401 還是 403
+
+`/refresh` 拿到一把**不認識**的 refresh token 時回 **403 `M_FORBIDDEN`**
+（`RefreshToken::Unknown` 那條，upstream 也是這樣），而「已經被用過」那條回
+**401 `M_UNKNOWN_TOKEN`**。
+
+🚨 **這支改完之後，「被撤銷」會落進前者**：§3 的重新登入、以及 RFC7009 的撤銷，都讓那把
+refresh token 變成「不認識」⇒ client 收到 403。而 Matrix 規格的 `/refresh` 寫的是
+**401 `M_UNKNOWN_TOKEN`**（「The provided token was unknown, or has already been used」），
+而 401 ＋ `soft_logout: false` 正是在告訴 client「這個 session 沒了，重新登入」——
+403 沒有這個意思，client 多半只會當成一個錯誤。
+
+⇒ 📄 **建議把 `Unknown` 改成 401 `M_UNKNOWN_TOKEN`（`soft_logout: false`）**，理由跟 §3 選 A
+一樣是「朝規格那一邊」，而且它是這支造成的後果 —— 但它同樣是 client 可見的改變，
+所以**等維護者**。⏳ 在那之前 `tests/e2e/e2e18.ps1` 的 `[1.5c]`、`[2.2]` 只釘「被拒絕」
+並把代碼印出來，答案定了就收成一個。
+
+📎 **真的要改的話，跟著要動的還有一處**：`tests/e2e/e2e7.ps1` 的 `[4.8c]` 寫的預期就是
+「Refresh with an unknown token → 403 `M_FORBIDDEN`」（2026-11-09 實跑還是那樣）。
+
 ## 3. S4：同一個 `device_id` 重新登入，舊 token 都還活著
 
 ### 3.1 實跑（同一次，接在 §2.1 之後）
@@ -234,22 +254,44 @@ client 手上有密碼（它剛用密碼登入），而被收掉的那一個要�
 **主動偏離 upstream**（§1.2）⇒ 依 `matrix-compat-best-effort` 的約定要先讓維護者同意，
 標 `[BREAKING]`。這一節就是在問。
 
-### 3.5 測試（A 版）
+### 3.5 測試（實際做的）
 
-1. 同一個 `device_id` 登入兩次 → **第一次的 access token 401**、第二次的 200。
-2. 第一次的 **refresh token** 也 401，而且 `POST /refresh` 用它 → 401（§3.1 那一行的反面）。
-3. **不同 `device_id`** 登入兩次 → 兩把都還有效（這條防的是「修過頭，把別的裝置也收了」）。
-4. 裝置還在、沒有被刪：`/devices` 仍然列得到 `DEVICEONE`（登入不是登出）。
-5. wbf 通道：用舊 token 開的連線在重新登入後要被結束 —— ⚠️ 走的是
-   `remove_device` 以外的路，所以要確認 `/docs/design/wire/session-teardown.md` §3.1
-   的「一個出口」在這條路上也成立，或者明寫它不成立、為什麼。
+**整合測試**（`src/main/tests/session_token_separation.rs`，一支裡兩節，真 server ＋ 真資料庫）：
 
-## 4. 狀態與還沒定的
+1. 同一個 `device_id` 登入兩次 → 第一次的 access token、以及**那次 refresh 換到的那把**，
+   兩把都不再認證。
+2. 🚨 **第一個 session 的 refresh token 不能再換一組**（§3.1 最後一行的反面）。
+3. **另一個裝置的 token 仍然有效** —— 這條防的是「修過頭，把整個帳號的 token 都收了」。
+4. 裝置還在：`device_exists` 仍然是 true（登入不是登出）。
+
+**e2e**（`tests/e2e/e2e18.ps1`，情境 2 ＋ 情境 3）：同樣四件事走**公開 HTTP**，外加
+通道那一半 —— refresh token 開不了連線；既有連線在重新登入後的**下一個 frame** 被拒。
+
+📎 **通道那一半的語意寫在這裡**：這條路不走 `remove_device`，所以
+`/docs/design/wire/session-teardown.md` §3.1 的「一個出口」在這裡**不適用**，而它不需要
+適用 —— `revalidate` 每個 frame 都重問一次 token，所以連線在下一個 frame 自己結束。
+⚠️ 代價跟鎖定帳號那條一樣：**不是立刻**，上限是 `wbf_ws_idle_timeout`（同 §4.3）。
+
+### 3.6 變異驗證（2026-11-09，三個各自驗）
+
+🚨 分開驗，因為同一支測試在第一個失敗就停 —— 一起弄壞只證明得了第一道：
+
+| 弄壞什麼 | 紅在哪 |
+|---|---|
+| `find_from_token` 的前綴第二道改成 `false && …` | 「a refresh-prefixed token sitting in the access table authenticates」 |
+| `issue_session` 裡的 `remove_tokens` 拿掉 | 「the access token from the first login still authenticates after a re-login on its device」 |
+| `set_refresh_token` 寫回 `token_userdeviceid` | 「the refresh token is not in the refresh table, so /refresh cannot work」 |
+
+⭐ 第三個特別值得記：它**不會**讓「refresh token 認證得了」那條紅，因為前綴那道會擋住 ——
+那正是第二道存在的意義，而**分表本身**是由 `/refresh` 那條斷言釘住的。
+
+## 4. 狀態
 
 | | |
 |---|---|
-| S1 兩條都成立 | ✅ 讀程式 ＋ 實跑確認（§2.1、§3.1） |
-| S1 的修法（§2.3） | 📄 **提案**：兩張表 ＋ 認證側的前綴第二道 |
-| S4 要不要修、怎麼修（§3.4） | ⏳ **等維護者**：A（照規格收掉，我的建議）／B（只收 refresh）／C（開關） |
-| 兩個洞幾支 PR | ⏳ 看 S4 的答案：S1 自己一支；S4 若選 A 可以同一支（同一塊程式、同一組測試），但它是 client 可見的行為改變，標 `[BREAKING]` |
-| 遷移 | ✅ **不需要**（server 從未上線）。⚠️ 理由有期限 |
+| 兩條都成立 | ✅ 讀程式 ＋ 實跑確認（§2.1、§3.1） |
+| S1 的修法（§2.3） | ✅ **已實作**：兩張表 ＋ 認證側的前綴第二道 |
+| S4 的修法（§3.4） | ✅ **已實作，選項 A**（維護者 2026-11-09）：登入既有 `device_id` 先收掉該裝置的 access ＋ refresh |
+| 幾支 PR | ✅ **一支**：同一塊程式、同一組測試。client 可見的行為改變 ⇒ 標 `[BREAKING]` |
+| 遷移 | ✅ **不需要**（server 從未真實上線，沒有既有的 refresh token 要搬）。⚠️ 理由有期限 |
+| 要不要送回 upstream | ⏳ **等維護者**（§1.2：兩個洞都是繼承的，修法是主動偏離） |

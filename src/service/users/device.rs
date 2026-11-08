@@ -32,10 +32,11 @@ const DEVICE_ID_LENGTH: usize = 10;
 /// generated user access token length
 pub const TOKEN_LENGTH: usize = 32;
 
-/// What every refresh token starts with. It makes a refresh token recognisable
-/// on sight, which is what the second gate in `find_from_token` uses; the
-/// credentials are told apart by the table they are in, not by this
-/// (/docs/design/accounts/session-tokens.md §2.3).
+/// What every refresh token starts with.
+///
+/// It makes a refresh token recognisable on sight, which is what the second
+/// gate in `find_from_token` uses; the credentials are told apart by the table
+/// they are in, not by this (/docs/design/accounts/session-tokens.md §2.3).
 pub const REFRESH_TOKEN_PREFIX: &str = "refresh_";
 
 /// Adds a new device to a user.
