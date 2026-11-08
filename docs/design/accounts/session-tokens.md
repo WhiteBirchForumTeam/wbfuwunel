@@ -32,6 +32,40 @@ txn.raw_put(&self.db.token_userdeviceid, refresh_token, value);
 pointer (an access token resolves but will not match)」—— 它用「解析得到 ＋ 指標對得上」
 來分辨兩者，所以**「解析得到」對兩種憑證都成立**，而認證那一側只問了前半。
 
+### 1.1 兩種憑證的定義（這一節是後面兩個洞的判準）
+
+| | access token | refresh token |
+|---|---|---|
+| 用在哪 | **每一個** API 請求的 `Authorization: Bearer` | **只有** `/refresh`（與 OAuth 的 token 端點） |
+| 權限 | 這個裝置的全部 | 只能做一件事：換一組新的 token |
+| 每次使用後 | 不變 | **輪替**（舊的退成 `spent`，留一代） |
+| 該不該長命 | ❌ 不該：`access_token_ttl` 預設 7 天 | ⭐ **可以，而且預設就是永不過期**（`refresh_token_ttl` 預設 0）|
+| 偷到之後 | 7 天內的全權，過期自己失效 | 可以一直換新的 —— 但**每次換都輪替** ⇒ 合法裝置下一次 refresh 會拿到「已經被用過」的答案，`refresh_token_reuse_revoke` 收掉整個裝置 ⇒ **看得見** |
+
+⭐ **所以「refresh token 不過期」本身是合理的設計，不是洞**（維護者 2026-11-08 問到）：
+一台裝置要能一直登著而不必保存密碼，就需要一把長命的憑證；它敢長命，是因為它
+**單一用途 ＋ 每次輪替 ＋ 重放看得出來**。真正不該長命的是 access token，而它確實只有 7 天。
+
+🚨 **§2 的洞不是「它太長命」，是「它同時是一把 access token」**：長命 × 全權 × 不輪替
+＝ 一把永久的全權金鑰，而且那套重放偵測永遠不會動（§2.2 第 2 點）。
+⇒ 📎 §2.3 的修法**完全不動它的壽命**：refresh token 照樣永不過期，只是不能當 Bearer 用。
+
+### 1.2 這兩個洞是 upstream 的，不是這個 fork 弄出來的
+
+2026-11-08 逐行對過 `upstream/main`（`b89011524`）：
+
+| 行為 | upstream | 本 fork | |
+|---|---|---|---|
+| `set_refresh_token` 把 refresh token 寫進 `token_userdeviceid` | ✅ 有（`device.rs` 的 `txn.raw_put(&self.db.token_userdeviceid, refresh_token, value)`） | 同 | **繼承** |
+| 認證只讀那張表、沒有任何前綴檢查 | ✅ 同（`api/router/auth.rs` 的 `find_token`） | 同 | **繼承** |
+| 一個裝置可以有多把 access token | ✅ **刻意**（commit `6726324c7`，2026-05-29：「A device may hold several access tokens」） | 同 | **繼承** |
+| 既有 `device_id` 重新登入只 `set_access_token`、不刪舊的 | ✅ 同（`api/client/session/mod.rs`） | 同（包在 `issue_session` 裡） | **繼承** |
+| 差別 | 有 device lock（`lock_device` ／ `issue_tokens`），refresh 輪替的結構不同 | `issue_session` ＋ `admit` 閘（wbf 通道共用） | 只是重構，**沒有改這兩個行為** |
+
+⇒ **修這兩條都是這個 fork 主動偏離 upstream**，而且動到的是 upstream 還在改的檔
+（`users/device.rs`）⇒ 以後 merge upstream 會在這裡撞。這是決定的一部分，不是細節。
+📎 另一條路是把修法也送回 upstream；要不要送由維護者決定。
+
 ## 2. S1：refresh token 可以直接當 access token 用
 
 ### 2.1 實跑（2026-11-08，`target/e2e/tuwunel.exe`，全新資料庫）
@@ -49,11 +83,13 @@ login: expires_in_ms=604800000 has_refresh=True
 
 ### 2.2 為什麼這比「多一把 token」嚴重
 
-1. 🔴 **期限剛好反過來。** `access_token_ttl` 預設 **604800**（7 天）；
-   `refresh_token_ttl` 預設 **0**，而 config 自己寫著「The default of `0` disables
-   refresh-token expiry entirely」⇒ 那把能當 access token 用的憑證**永不過期**。
-   client 乖乖輪替 access token，而那把長命的憑證同時是一把長命的 access token，
-   整個 refresh 機制想達成的事（access token 短命）被它自己抵銷掉。
+1. 🔴 **它把一把「刻意長命的單一用途憑證」變成一把「永不過期的全權金鑰」。**
+   `access_token_ttl` 預設 7 天，`refresh_token_ttl` 預設 0（永不過期）—— ⭐ 而後者
+   **是對的**（§1.1）：單一用途 ＋ 每次輪替 ＋ 重放看得見，所以它敢長命。
+   🚨 洞在於**那三個前提在「當 access token 用」這條路上一個都不成立**：不是單一用途
+   （全部端點）、不會輪替（當 Bearer 用不會碰 `/refresh`）、看不見（下一點）。
+   ⇒ 於是 client 乖乖輪替 7 天期的 access token，而同一個 session 手上還有一把
+   **永久的**全權憑證。
 2. 🚨 **重用偵測整套被繞過。** 這個 fork 為 refresh token 做了相當完整的防護 ——
    spent token 保留一代、`refresh_token_reuse_grace`（預設 15 秒）分辨善意的重送、
    `refresh_token_reuse_revoke` 在真的重放時收掉裝置（`users/device.rs` 的
@@ -166,22 +202,37 @@ index lets device removal enumerate and revoke every one.
 
 ### 3.4 要維護者決定的是什麼
 
-問題不是「要不要修」，而是**「重新登入該不該結束上一個 session」**。三個選法：
+問題不是「要不要修」，而是**「重新登入該不該結束上一個 session」**。四個選法：
 
-| | 做法 | 代價 |
-|---|---|---|
-| **A** | 照規格的強版本：登入既有 `device_id` 時收掉該裝置先前的 access ＋ refresh token | 關掉 upstream 刻意留的「一裝置多把 token」。而且**同一個裝置真的有兩個 client 在跑**（例如桌面與 CLI 共用一個 device_id）時，後登入的會把前一個踢掉 |
-| **B** | 只收 **refresh token**：舊的 access token 留著自己過期（7 天），但**不能再自我續命** | 改得最小，擋掉 §3.1 最後一行那個「無限續命」；舊 access token 仍有最多 7 天的窗口。而沒要求 refresh 的登入給的是**永不過期**的 token，所以這一條只在 client 有用 refresh 時才有意義 |
-| **C** | 設定開關（預設照 A，可關回 upstream 行為） | 多一個設定、多一組測試；而「安全預設 ＋ 可退回」是這個 repo 已經有的模式（`refresh_token_reuse_revoke` 就是） |
+| | 做法 | 代價 | 會不會把裝置鎖在門外 |
+|---|---|---|---|
+| **A** | 照規格的強版本：登入既有 `device_id` 時收掉該裝置先前的 access ＋ refresh token | 關掉 upstream 刻意留的「一裝置多把 token」；**同一個 `device_id` 真的有兩個 client 在跑**時，後登入的會把前一個踢掉 | ❌ **不會。** 剛登入的那個 client 當場拿到新的一組；被收掉的是同一個 `device_id` 的**上一個持有者**，它要重新登入（密碼）—— 而它本來就有密碼才登得進來 |
+| **B** | 只收 **refresh token**：舊 access token 留著自己過期（7 天），但不能再自我續命 | 改得最小，擋掉 §3.1 最後一行那個無限續命；舊 access token 仍有最多 7 天的窗口。而沒要求 refresh 的登入給的是**永不過期**的 token，所以這條只對有用 refresh 的 client 有意義 | ❌ 不會，風險比 A 更小 |
+| **C** | 設定開關（預設 A，可關回 upstream 行為） | 多一個設定、多一組測試；而「安全預設 ＋ 可退回」是這個 repo 已經有的模式（`refresh_token_reuse_revoke` 就是） | 同 A，而且有退路 |
+| **D** | **不修**，接受 upstream 的行為，只修 §2 的 S1 | 「我重新登入了」不會讓舊 session 失效；要收掉只能靠 `/logout`（它是乾淨的） | 完全不會 |
 
-⭐ **我的建議是 A，而且不加開關**：「我重新登入了」在使用者心裡**就是**「舊的那個不算了」，
-而這條路是補救被偷 token 的人唯一會自己做的事。upstream 那個索引**不會白費** ——
-它正是 A 要用的東西（枚舉一個裝置的每一把 token 然後全撤）。
-📎 而「同一裝置兩個 client」那個代價，在這個 fork 裡站得住腳的機會很低：device_id 是
-client 自己產生的，兩個 client 本來就該有兩個。
+#### 鎖在門外的風險，實際長什麼樣（維護者 2026-11-08 問到）
 
-⚠️ 若選 A：這是**對 Matrix client 可見的行為改變**（雖然是朝規格那一邊），依
-`matrix-compat-best-effort` 的約定要先讓維護者同意 —— 這一節就是在問。
+⭐ **A 不會讓任何裝置失去「回得來」的能力** —— 收掉 token 不等於收掉帳號：重新登入的那個
+client 手上有密碼（它剛用密碼登入），而被收掉的那一個要回來也是用密碼。這跟
+`/logout` 的處境完全一樣，而 `/logout` 本來就會把那把 token 收掉。
+
+🚨 真正會痛的只有一種 client：**登入成功之後沒有改用新 token、繼續拿舊的那把用。**
+那種 client 在 A 之下會突然 401。本專案的 client 不是這樣（`wbf-matrix-client`
+每次登入都用回來的 `access_token` 開通道，而且它連 refresh token 都沒要求：
+`backend/matrix_sdk.rs` 的 `refresh_token: None`）。
+
+📎 反過來說，**不修（D）的代價是補救的路只剩 `/logout`**：使用者懷疑自己被盜時會做的事
+是「改密碼、重新登入」，而那兩件在今天都不會讓偷走的 token 失效。
+（改密碼帶 `logout_devices` 時會 —— 那條走 `remove_device`。）
+
+⇒ **我的建議仍然是 A，而且不加開關。** upstream 那個索引不會白費：它正是 A 要用的東西
+（枚舉一個裝置的每一把 token 然後全撤）。而「同一個 `device_id` 兩個 client」在這個 fork
+裡站得住腳的機會很低 —— `device_id` 是 client 自己產生的，兩個 client 本來就該有兩個。
+
+⚠️ 若選 A：這是**對 Matrix client 可見的行為改變**（雖然是朝規格那一邊），而且是
+**主動偏離 upstream**（§1.2）⇒ 依 `matrix-compat-best-effort` 的約定要先讓維護者同意，
+標 `[BREAKING]`。這一節就是在問。
 
 ### 3.5 測試（A 版）
 
