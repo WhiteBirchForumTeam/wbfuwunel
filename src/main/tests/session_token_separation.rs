@@ -7,9 +7,10 @@ use tuwunel_core::{
 	Err, Result,
 	ruma::{DeviceId, UserId, device_id, user_id},
 };
+use futures::future::join;
 use tuwunel_service::{
 	Services,
-	users::{Register, login::admit_any},
+	users::{Register, device::generate_refresh_token, login::admit_any},
 };
 
 /// The two things that make an access token and a refresh token different
@@ -57,6 +58,9 @@ async fn two_credentials_two_jobs(services: &Services) -> Result {
 	let alice: &UserId = user_id!("@alice:localhost");
 	let device: &DeviceId = device_id!("DEVICEONE");
 	let other_device: &DeviceId = device_id!("DEVICETWO");
+	// The device the OIDC-shaped path logs in on, and the one two logins race for.
+	let oidc_device: &DeviceId = device_id!("DEVICEOIDC");
+	let race_device: &DeviceId = device_id!("DEVICERACE");
 
 	services
 		.users
@@ -241,6 +245,85 @@ async fn two_credentials_two_jobs(services: &Services) -> Result {
 		.is_err()
 	{
 		return Err!("logging in on one device revoked another device's token");
+	}
+
+	// ---- §3: the same promise on the path that does not go through `issue_session` ----
+
+	// 🚨 This is the shape of the OIDC authorization code grant: it issues a
+	// token through `create_device` with a `device_id` the client asked for,
+	// which may be one the user already has. Before `start_session` it revoked
+	// nothing, so the previous session survived (review of PR #126, rumia and
+	// oliver).
+	//
+	// ⭐ And the token it leaves behind is the worst kind: a login that did not
+	// ask for a refresh token has no expiry at all, so it would authenticate for
+	// ever rather than for a week.
+	let no_expiry = services
+		.users
+		.issue_session(alice, Some(oidc_device), Some("before oidc"), false, None, &mut admit_any)
+		.await?;
+
+	if no_expiry.expires_in.is_some() {
+		return Err!("this login was supposed to produce a token with no expiry, so the point below is lost");
+	}
+
+	let (oidc_token, oidc_expires) = services.users.generate_access_token(true);
+	services
+		.users
+		.create_device(
+			alice,
+			Some(oidc_device),
+			(Some(&oidc_token), oidc_expires),
+			Some(&generate_refresh_token()),
+			Some("OIDC Client"),
+			None,
+		)
+		.await?;
+
+	if services
+		.users
+		.find_from_token(&no_expiry.access_token)
+		.await
+		.is_ok()
+	{
+		return Err!("issuing a token through create_device left the device's previous session alive");
+	}
+	if services
+		.users
+		.find_from_token(&oidc_token)
+		.await
+		.is_err()
+	{
+		return Err!("the token create_device issued does not authenticate");
+	}
+
+	// ---- §3.7: two logins at once must not both end up valid ----
+
+	// ⭐ The lock is what makes this deterministic: both logins revoke and write
+	// under it, so whichever goes second leaves exactly one live token. Without
+	// it they interleave as revoke/revoke/write/write and both survive.
+	let (first_race, second_race) = join(
+		services
+			.users
+			.issue_session(alice, Some(race_device), Some("race one"), true, None, &mut admit_any),
+		services
+			.users
+			.issue_session(alice, Some(race_device), Some("race two"), true, None, &mut admit_any),
+	)
+	.await;
+
+	let first_race = first_race?;
+	let second_race = second_race?;
+
+	let mut survivors = 0_usize;
+	for token in [&first_race.access_token, &second_race.access_token] {
+		if services.users.find_from_token(token).await.is_ok() {
+			survivors = survivors.saturating_add(1);
+		}
+	}
+
+	if survivors != 1 {
+		return Err!("two concurrent logins on one device left {survivors} live tokens, not 1");
 	}
 
 	Ok(())

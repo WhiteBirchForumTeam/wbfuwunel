@@ -53,6 +53,12 @@ pub struct Service {
 	login_limiter: IpTokenBuckets,
 	/// One per device: a `CryptoState` is read and pushed under it (`keys.rs`).
 	crypto_state_locks: MutexMap<(OwnedUserId, OwnedDeviceId), ()>,
+	/// One per device, held while a login or a refresh replaces that device's
+	/// tokens: taking the old ones away and writing the new one are two
+	/// transactions, so without it two concurrent logins can interleave into
+	/// "both are still valid" — which is exactly what a login is supposed to end
+	/// (/docs/design/accounts/session-tokens.md §3.7).
+	session_locks: MutexMap<(OwnedUserId, OwnedDeviceId), ()>,
 }
 
 struct Data {
@@ -93,6 +99,7 @@ impl crate::Service for Service {
 			services: args.services.clone(),
 			login_limiter: IpTokenBuckets::new(),
 			crypto_state_locks: MutexMap::new(),
+			session_locks: MutexMap::new(),
 			db: Data {
 				keychangeid_userid: args.db["keychangeid_userid"].clone(),
 				keyid_key: args.db["keyid_key"].clone(),

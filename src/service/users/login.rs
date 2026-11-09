@@ -125,21 +125,17 @@ pub async fn issue_session(
 	let refresh_token = expires_in.is_some().then(generate_refresh_token);
 
 	let device_id = if existing_device.is_some() {
-		// 🚨 Before the new tokens are written, not after: `remove_tokens` drops
-		// *every* token this device holds, so doing it afterwards would take the
-		// ones just issued with it.
-		//
 		// ⭐ Logging in again on a device ends that device's previous session: this
 		// is what a user does when they think a token was stolen, and it is the
 		// stronger of the two readings the spec gives (the device section says the
 		// server will invalidate the previous tokens; `/login` says it may)
-		// (/docs/design/accounts/session-tokens.md §3). 📎 Connections opened with
-		// the old token end at their next frame, where `revalidate` asks about it
-		// again — bounded by `wbf_ws_idle_timeout`, the same way a locked account's
-		// are (/docs/design/wire/session-teardown.md §4.3).
-		self.remove_tokens(user_id, &final_device_id).await;
-
-		self.set_access_token(user_id, &final_device_id, &access_token, expires_in, refresh_token.as_deref())
+		// (/docs/design/accounts/session-tokens.md §3). `start_session` is where
+		// that happens — for this path and for every other way of logging in.
+		// 📎 Connections opened with the old token end at their next frame, where
+		// `revalidate` asks about it again — bounded by `wbf_ws_idle_timeout`, the
+		// same way a locked account's are
+		// (/docs/design/wire/session-teardown.md §4.3).
+		self.start_session(user_id, &final_device_id, &access_token, expires_in, refresh_token.as_deref())
 			.await?;
 
 		final_device_id
@@ -186,6 +182,17 @@ pub async fn refresh_session(&self, presented: &str, admit: AdmitSession<'_>) ->
 	if !presented.starts_with(REFRESH_TOKEN_PREFIX) {
 		return Err!(Request(Forbidden("Refresh token is malformed.")));
 	}
+
+	// 🚨 Classified twice on purpose, and the second time under the device's
+	// session lock: the lock is keyed by (user, device), which only the first
+	// classification can tell us, and a login on that device between the two
+	// would otherwise let this one write a third token after the login revoked
+	// the others (/docs/design/accounts/session-tokens.md §3.7). The first
+	// classification is a read; the decision that counts is the second.
+	let _session = match self.classify_refresh_token(presented).await.owner() {
+		| Some(owner) => Some(self.session_locks.lock(&owner).await),
+		| None => None,
+	};
 
 	match self.classify_refresh_token(presented).await {
 		| RefreshToken::Current { user_id, device_id, expires_at } => {

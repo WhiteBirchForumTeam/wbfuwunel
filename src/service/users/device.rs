@@ -67,8 +67,12 @@ pub async fn create_device(
 		last_seen_ip: client_ip.map(to_small_string),
 	});
 
+	// 🚨 `start_session`, not `set_access_token`: the id may name a device this
+	// user already has (the OIDC device scope lets a client ask for one), and
+	// issuing a token on it is a login, so that device's previous session ends
+	// here (/docs/design/accounts/session-tokens.md §3).
 	if let Some(access_token) = access_token {
-		self.set_access_token(user_id, &device_id, access_token, expires_in, refresh_token)
+		self.start_session(user_id, &device_id, access_token, expires_in, refresh_token)
 			.await?;
 	}
 
@@ -295,6 +299,61 @@ pub async fn remove_tokens(&self, user_id: &UserId, device_id: &DeviceId) {
 		.map(Result::ok);
 
 	join(remove_access, remove_refresh).await;
+}
+
+/// Starts a session on `device_id`: the tokens that device already had go
+/// first, then the new ones are written.
+///
+/// 🚨 **Every path that logs in has to come through here**, which is the point
+/// of it being one function: a login ending that device's previous session is a
+/// promise, and a promise kept by "each caller remembers to revoke first" is
+/// kept by all but one of them. The one that forgot was the OIDC authorization
+/// code grant, which issues tokens through `create_device` and so never saw
+/// `issue_session`'s revocation (review of PR #126, rumia and oliver). Asked
+/// here rather than trusted there.
+///
+/// ⚠️ **A refresh must not come through here.** It issues a new access token for
+/// a session that continues, and the old one stays valid until it expires — a
+/// connection authenticated with it keeps working across a refresh
+/// (`tests/e2e/e2e7.ps1` `[4.3c]` pins that). Refreshes call `set_access_token`
+/// directly, under the same lock.
+///
+/// 📎 It revokes unconditionally rather than asking whether the device is new:
+/// on a new device there is nothing to take away, and `create_device` writes
+/// the device's metadata before this runs, so "does it exist" cannot answer
+/// that question here anyway.
+///
+/// Args:
+///     user_id: example: @alice:localhost
+///     device_id: the device the session is on, example: "DEVICEONE"
+///     access_token: example: "a1b2c3…" (32 random chars, no prefix)
+///     expires_in: `None` for a token with no expiry, example: Some(7 days)
+///     refresh_token: example: Some("refresh_…")
+/// Return:
+///     Result  the write's own error; `Ok` once the new tokens are the only
+///     ones this device has.
+#[implement(super::Service)]
+#[tracing::instrument(level = "debug", skip(self, access_token, refresh_token))]
+pub async fn start_session(
+	&self,
+	user_id: &UserId,
+	device_id: &DeviceId,
+	access_token: &str,
+	expires_in: Option<Duration>,
+	refresh_token: Option<&str>,
+) -> Result {
+	// 🚨 Held across both steps: taking the old tokens away and writing the new
+	// one are separate transactions, so two concurrent logins would otherwise
+	// interleave as revoke/revoke/write/write and leave both valid.
+	let _session = self
+		.session_locks
+		.lock(&(user_id.to_owned(), device_id.to_owned()))
+		.await;
+
+	self.remove_tokens(user_id, device_id).await;
+
+	self.set_access_token(user_id, device_id, access_token, expires_in, refresh_token)
+		.await
 }
 
 /// Replaces the access token of one device.
@@ -610,6 +669,23 @@ pub enum RefreshToken {
 
 	/// Not a recognised refresh token.
 	Unknown,
+}
+
+impl RefreshToken {
+	/// Whose session this token names.
+	///
+	/// Return:
+	///     Option<(user, device)>  `None` only for `Unknown`, which names no
+	///     session; both other kinds carry one.
+	#[must_use]
+	pub fn owner(&self) -> Option<(OwnedUserId, OwnedDeviceId)> {
+		match self {
+			| Self::Current { user_id, device_id, .. }
+			| Self::Replayed { user_id, device_id, .. } =>
+				Some((user_id.clone(), device_id.clone())),
+			| Self::Unknown => None,
+		}
+	}
 }
 
 /// Classify a presented refresh token for the token-endpoint rotation path.
