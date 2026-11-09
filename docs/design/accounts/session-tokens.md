@@ -145,7 +145,7 @@ spentrefresh_userdeviceid ← 不動（上一代的 refresh token，重放偵測
 5. 🔴 **第二道自己也要有測試**：直接把一把 `refresh_` 開頭的字串寫進 access 表，
    然後認證 → 要被拒。不然「第二道」只是一句註解。
 
-### 2.5 ⏳ 跟著冒出來的一個問題：被撤銷的 refresh token 該回 401 還是 403
+### 2.5 ✅ 被撤銷的 refresh token 回 403 `M_FORBIDDEN`（維護者 2026-11-09：維持現狀）
 
 `/refresh` 拿到一把**不認識**的 refresh token 時回 **403 `M_FORBIDDEN`**
 （`RefreshToken::Unknown` 那條，upstream 也是這樣），而「已經被用過」那條回
@@ -157,13 +157,14 @@ refresh token 變成「不認識」⇒ client 收到 403。而 Matrix 規格的 
 而 401 ＋ `soft_logout: false` 正是在告訴 client「這個 session 沒了，重新登入」——
 403 沒有這個意思，client 多半只會當成一個錯誤。
 
-⇒ 📄 **建議把 `Unknown` 改成 401 `M_UNKNOWN_TOKEN`（`soft_logout: false`）**，理由跟 §3 選 A
-一樣是「朝規格那一邊」，而且它是這支造成的後果 —— 但它同樣是 client 可見的改變，
-所以**等維護者**。⏳ 在那之前 `tests/e2e/e2e18.ps1` 的 `[1.5c]`、`[2.2]` 只釘「被拒絕」
-並把代碼印出來，答案定了就收成一個。
+我曾建議把 `Unknown` 改成 401 `M_UNKNOWN_TOKEN`（`soft_logout: false`），理由跟 §3 選 A
+一樣是「朝規格那一邊」。✅ **維護者 2026-11-09 決定維持現狀：不改** —— 這個差別沒有改變
+client 做得到的事，兩個代碼說的都是「這把不能用了」。
 
-📎 **真的要改的話，跟著要動的還有一處**：`tests/e2e/e2e7.ps1` 的 `[4.8c]` 寫的預期就是
-「Refresh with an unknown token → 403 `M_FORBIDDEN`」（2026-11-09 實跑還是那樣）。
+⇒ 📌 **所以這就是契約，測試跟著收口**：`tests/e2e/e2e18.ps1` 的 `[1.5c]`、`[2.2]`
+原本寫成「401 或 403 都算」（答案未定前的權宜），現在**釘成 403 ＋ `M_FORBIDDEN`** ——
+問題關掉之後留著「兩個都接受」等於放棄辨別力。
+📎 `tests/e2e/e2e7.ps1` 的 `[4.8c]`（不認識的 refresh token → 403）本來就是這樣，不用動。
 
 ## 3. S4：同一個 `device_id` 重新登入，舊 token 都還活著
 

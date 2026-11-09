@@ -79,12 +79,13 @@ try {
   Check '[1.5b] ... and it really revoked the session: the access token of that device is gone' `
     ((Whoami $refreshed.json.access_token) -eq 401) "status=$(Whoami $refreshed.json.access_token)"
   $afterRevoke = Http Post '/_matrix/client/v3/refresh' @{ refresh_token = $refreshed.json.refresh_token } $null
-  # ⚠️ 401 or 403: a revoked refresh token lands in the "unrecognized" branch, which answers 403
-  # M_FORBIDDEN, while the spec's /refresh describes 401 M_UNKNOWN_TOKEN for a token that is unknown
-  # or already used. Which one this server should give is ⏳ open
-  # (/docs/design/accounts/session-tokens.md §2.5); the check pins "refused" and logs the code so the
-  # answer is one assertion away.
-  Check '[1.5c] ... and so is the refresh token itself' ($afterRevoke.status -in 401,403) "status=$($afterRevoke.status) errcode=$($afterRevoke.json.errcode)"
+  # A revoked refresh token lands in the "unrecognized" branch, which answers 403 M_FORBIDDEN -- as
+  # upstream does, and as the maintainer decided to leave it on 2026-11-09 (the spec's /refresh
+  # describes 401 M_UNKNOWN_TOKEN; the difference does not change what a client can do here).
+  # 📌 Pinned exactly, not "401 or 403": the question is closed, so this is the contract now
+  # (/docs/design/accounts/session-tokens.md §2.5, and e2e7 [4.8c] for an unknown token).
+  Check '[1.5c] ... and so is the refresh token itself (403 M_FORBIDDEN, the unrecognized branch)' `
+    ($afterRevoke.status -eq 403 -and $afterRevoke.json.errcode -eq 'M_FORBIDDEN') "status=$($afterRevoke.status) errcode=$($afterRevoke.json.errcode)"
 
   Log '################ Scenario 2: logging in again on a device ends its previous session ################'
   $one = (Login 'alice' 'DEVICETWO' $true).json
@@ -96,9 +97,9 @@ try {
   Check '[2.1] the token from the previous login on that device is refused' ((Whoami $one.access_token) -eq 401) "status=$(Whoami $one.access_token)"
   Check '[2.1b] ... while the new one works' ((Whoami $two.access_token) -eq 200) "status=$(Whoami $two.access_token)"
   $oldRefresh = Http Post '/_matrix/client/v3/refresh' @{ refresh_token = $one.refresh_token } $null
-  # Same open question as [1.5c] about which refusal code this should be.
+  # Same refusal as [1.5c], and pinned the same way.
   Check '[2.2] the previous refresh token cannot mint a new pair (it could, for ever, before the gate)' `
-    ($oldRefresh.status -in 401,403) "status=$($oldRefresh.status) errcode=$($oldRefresh.json.errcode)"
+    ($oldRefresh.status -eq 403 -and $oldRefresh.json.errcode -eq 'M_FORBIDDEN') "status=$($oldRefresh.status) errcode=$($oldRefresh.json.errcode)"
   Check '[2.3] the other device is untouched: this is not "revoke everything"' ((Whoami $elsewhere.access_token) -eq 200) "status=$(Whoami $elsewhere.access_token)"
   $list = (Http Get '/_matrix/client/v3/devices' $null $two.access_token).json.devices | ForEach-Object { $_.device_id }
   Check '[2.4] the device itself is still there: a login is not a logout' ($list -contains 'DEVICETWO' -and $list -contains 'DEVICETHREE') "devices=$($list -join ',')"
