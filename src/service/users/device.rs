@@ -208,12 +208,14 @@ pub fn all_device_ids<'a>(
 /// That is why refresh tokens are stored in a table of their own: this lookup
 /// cannot find one. The prefix refusal below is the second gate, kept **because**
 /// it should be unreachable — it is what catches a future writer putting a
-/// refresh token back into this table, and it fails by refusing (CLAUDE.md A5).
+/// refresh token back into this table, and a gate that fails by refusing is the
+/// kind to keep on a path where failing open hands out a session.
 /// Whoever needs either kind (RFC7009 revocation) asks
 /// `find_from_access_or_refresh_token`.
 ///
 /// Args:
-///     token: example: "syt_abc…" (a refresh token is refused)
+///     token: 32 random characters, no prefix, example: "a1b2c3…" (a refresh
+///         token is refused)
 /// Return:
 ///     Result<(user, device, expires_at)>  Err not-found for an unknown token,
 ///     a refresh token, or any string with the refresh prefix.
@@ -253,7 +255,7 @@ pub async fn find_from_refresh_token(
 /// (/docs/design/accounts/session-tokens.md §2.3).
 ///
 /// Args:
-///     token: example: "syt_abc…" or "refresh_abc…"
+///     token: either kind, example: "a1b2c3…" or "refresh_abc…"
 /// Return:
 ///     Result<(user, device, expires_at)>  Err not-found when neither table has
 ///     it.

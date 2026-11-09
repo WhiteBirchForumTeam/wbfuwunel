@@ -1,13 +1,12 @@
 #![cfg(test)]
 
-use std::{fs::remove_dir_all, process::id as process_id};
+use std::{fs::remove_dir_all, process::id as process_id, sync::Arc};
 
 use tuwunel::{Args, Runtime, Server, async_run, async_start, async_stop};
 use tuwunel_core::{
 	Err, Result,
 	ruma::{DeviceId, UserId, device_id, user_id},
 };
-use futures::future::join;
 use tuwunel_service::{
 	Services,
 	users::{Register, device::generate_refresh_token, login::admit_any},
@@ -54,13 +53,12 @@ fn refresh_tokens_do_not_authenticate_and_a_relogin_ends_the_old_session() -> Re
 	result
 }
 
-async fn two_credentials_two_jobs(services: &Services) -> Result {
+async fn two_credentials_two_jobs(services: &Arc<Services>) -> Result {
 	let alice: &UserId = user_id!("@alice:localhost");
 	let device: &DeviceId = device_id!("DEVICEONE");
 	let other_device: &DeviceId = device_id!("DEVICETWO");
 	// The device the OIDC-shaped path logs in on, and the one two logins race for.
 	let oidc_device: &DeviceId = device_id!("DEVICEOIDC");
-	let race_device: &DeviceId = device_id!("DEVICERACE");
 
 	services
 		.users
@@ -299,31 +297,57 @@ async fn two_credentials_two_jobs(services: &Services) -> Result {
 
 	// ---- §3.7: two logins at once must not both end up valid ----
 
-	// ⭐ The lock is what makes this deterministic: both logins revoke and write
-	// under it, so whichever goes second leaves exactly one live token. Without
-	// it they interleave as revoke/revoke/write/write and both survive.
-	let (first_race, second_race) = join(
-		services
-			.users
-			.issue_session(alice, Some(race_device), Some("race one"), true, None, &mut admit_any),
-		services
-			.users
-			.issue_session(alice, Some(race_device), Some("race two"), true, None, &mut admit_any),
-	)
-	.await;
+	// ⭐ The lock is what makes this deterministic: every login revokes and writes
+	// under it, so the last one leaves exactly one live token. Without it they
+	// interleave as revoke/revoke/write/write and several survive.
+	//
+	// 🚨 Spawned, not joined: futures joined in one task are polled
+	// cooperatively and in practice run one after the other, so a `join` of two
+	// logins passes with the lock removed (measured 2026-11-09: three runs, all
+	// green). Separate tasks on the runtime's worker threads are what makes the
+	// window real. RACE_LOGINS is more than two for the same reason — one pair
+	// may not collide.
+	const RACE_LOGINS: usize = 8;
 
-	let first_race = first_race?;
-	let second_race = second_race?;
+	let mut racing = Vec::with_capacity(RACE_LOGINS);
+	for i in 0..RACE_LOGINS {
+		let services = services.clone();
+		racing.push(tokio::spawn(async move {
+			services
+				.users
+				.issue_session(
+					user_id!("@alice:localhost"),
+					Some(device_id!("DEVICERACE")),
+					Some("race"),
+					true,
+					None,
+					&mut admit_any,
+				)
+				.await
+				.map(|issued| (i, issued.access_token))
+		}));
+	}
+
+	let mut race_tokens = Vec::with_capacity(RACE_LOGINS);
+	for task in racing {
+		match task.await {
+			| Ok(Ok((_, token))) => race_tokens.push(token),
+			| Ok(Err(e)) => return Err!("a racing login failed: {e}"),
+			| Err(e) => return Err!("a racing login's task failed: {e}"),
+		}
+	}
 
 	let mut survivors = 0_usize;
-	for token in [&first_race.access_token, &second_race.access_token] {
+	for token in &race_tokens {
 		if services.users.find_from_token(token).await.is_ok() {
 			survivors = survivors.saturating_add(1);
 		}
 	}
 
 	if survivors != 1 {
-		return Err!("two concurrent logins on one device left {survivors} live tokens, not 1");
+		return Err!(
+			"{RACE_LOGINS} concurrent logins on one device left {survivors} live tokens, not 1"
+		);
 	}
 
 	Ok(())
