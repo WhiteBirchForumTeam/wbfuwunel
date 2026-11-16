@@ -350,5 +350,48 @@ async fn two_credentials_two_jobs(services: &Arc<Services>) -> Result {
 		);
 	}
 
+	// ---- a locked account mints nothing, on any refresh path ----
+
+	// 🚨 This gate is why the OIDC refresh grant now calls `refresh_session`
+	// instead of carrying its own copy of the rules: that copy never asked
+	// `locked_check`, so a locked account could still mint access tokens through
+	// OAuth while the same request on `/_matrix/client/v3/refresh` was refused
+	// (found while fixing the review's 🟡 about the lock; the gate itself came
+	// from the review of PR #30).
+	//
+	// 📎 Asked here, at the one implementation both endpoints now use. The OAuth
+	// endpoint's own wiring (parameter in, response shape out) stays read-verified
+	// (/docs/design/accounts/session-tokens.md §3.8).
+	let locked: &UserId = user_id!("@locked:localhost");
+	services
+		.users
+		.full_register(Register {
+			user_id: Some(locked),
+			password: Some("correct-horse-battery"),
+			..Default::default()
+		})
+		.await?;
+
+	let locked_session = services
+		.users
+		.issue_session(locked, Some(device), Some("before the lock"), true, None, &mut admit_any)
+		.await?;
+
+	let Some(locked_refresh) = locked_session.refresh_token.clone() else {
+		return Err!("the locked account's login produced no refresh token, so this case is vacuous");
+	};
+
+	// Locked by whoever: the gate only asks whether a record exists.
+	services.users.set_locked(locked, alice);
+
+	if services
+		.users
+		.refresh_session(&locked_refresh, &mut admit_any)
+		.await
+		.is_ok()
+	{
+		return Err!("a locked account still minted tokens from its refresh token");
+	}
+
 	Ok(())
 }
