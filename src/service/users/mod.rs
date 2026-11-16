@@ -58,6 +58,13 @@ pub struct Service {
 	/// transactions, so without it two concurrent logins can interleave into
 	/// "both are still valid" — which is exactly what a login is supposed to end
 	/// (/docs/design/accounts/session-tokens.md §3.7).
+	///
+	/// 📎 Taken by `start_session` (every login) and `refresh_session` (every
+	/// refresh, including the OAuth grant, which calls it rather than keeping a
+	/// copy of the rules — §3.8). ⚠️ **Not** by the revocation side
+	/// (`remove_device`, `remove_tokens`): that gap is §3.8b, and taking it
+	/// there deadlocks the refresh path, which already holds this while it
+	/// revokes a replay.
 	session_locks: MutexMap<(OwnedUserId, OwnedDeviceId), ()>,
 }
 

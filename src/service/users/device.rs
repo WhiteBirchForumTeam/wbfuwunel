@@ -101,6 +101,13 @@ pub(super) fn resolve_device_id(device_id: Option<&DeviceId>) -> OwnedDeviceId {
 /// no path of its own: `revalidate` already asks `locked_check` before every
 /// frame, so a locked account's connection goes at its next frame — bounded by
 /// `wbf_ws_idle_timeout`, not immediate (§4.3, 維護者 2026-10-02).
+///
+/// 🚨 **Do not take `session_locks` in here.** It would close the interleave
+/// where a logout and a login cross (`/docs/design/accounts/session-tokens.md`
+/// §3.8b), but `refresh_session` calls this **while holding** that lock to
+/// revoke a replayed token, and a tokio mutex is not reentrant — it would
+/// deadlock the refresh path instead. Closing that gap means splitting this
+/// into a locked and an already-locked entry point.
 #[implement(super::Service)]
 #[tracing::instrument(level = "info", skip(self))]
 pub async fn remove_device(&self, user_id: &UserId, device_id: &DeviceId) {

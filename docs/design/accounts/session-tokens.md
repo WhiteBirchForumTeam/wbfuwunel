@@ -278,7 +278,7 @@ client 手上有密碼（它剛用密碼登入），而被收掉的那一個要�
 ⚠️ 代價跟鎖定帳號那條一樣：**不是立刻**，上限是 `wbf_ws_idle_timeout`（同 §4.3）。
 
 
-### 3.6b 審查抓到的第三條登入路：OIDC（PR #126 的 r1）
+### 3.6 審查抓到的第三條登入路：OIDC（PR #126 的 r1）
 
 🚨 **「重新登入收掉舊 token」第一版只做在 `issue_session` 裡，而那不是唯一的登入路。**
 OIDC 的授權碼核發（`api/oidc/token.rs` 的 `issue_tokens`）把 scope 裡的
@@ -305,7 +305,8 @@ OIDC 的授權碼核發（`api/oidc/token.rs` 的 `issue_tokens`）把 scope 裡
 收舊的（`remove_tokens`）與寫新的（`set_access_token`）是**兩個交易**，所以兩個同時的登入
 可以交錯成「收、收、寫、寫」⇒ 兩把都活著，而那正是登入該結束的狀態（審查 r1 的 🟡2）。
 ⇒ 維護者 2026-11-09 選了**加鎖**：per-`(user, device)` 的 `session_locks`，
-`start_session` 與 `refresh_session` 都持它。
+`start_session` 與 `refresh_session` 都持它 —— 而「所有的 refresh 都走 `refresh_session`」
+是 r2 才變成真的，見 §3.8。
 
 ⚠️ **refresh 要分兩段分類**：鎖的鍵是 `(user, device)`，而那只有第一次分類才知道；
 所以第一次分類是**讀**，拿到鍵之後上鎖，**第二次分類才是算數的那次**（upstream 的
@@ -322,7 +323,57 @@ OIDC 的授權碼核發（`api/oidc/token.rs` 的 `issue_tokens`）把 scope 裡
 📎 競態測試大概就是這樣，留著它比沒有好，但**別把它當成「鎖有效」的證明**：證明在程式的
 結構裡（revoke 與 write 同在一把鎖內），測試只是在它壞掉時有機會喊。
 
-### 3.6 變異驗證（2026-11-09，五個各自驗）
+### 3.8 🚨 refresh 的規則有兩份實作 —— 而那份複製品漏了 `locked_check`
+
+r2 的四份審查都指出同一件事：**OIDC 的 refresh grant 沒持 §3.7 那把鎖**
+（`api/oidc/token.rs` 的 `token_refresh` 自己 `classify_refresh_token` 再
+`set_access_token`，而 `session_locks` 是 users 服務的私有欄位，它拿不到）。
+
+⭐ **去看那段的時候，真正的病不是「少一把鎖」，是 refresh 的規則有兩份實作** ——
+`users::refresh_session` 一份、`oidc/token.rs` 一份，而後者把分類、過期（含
+`refresh_token_hard_logout`）、重用 grace、重放撤銷全部抄了一遍。而它**已經漂移了兩次**：
+
+| 漂掉的 | 後果 |
+|---|---|
+| 🚨 **從來沒問 `locked_check`** | **被鎖定的帳號可以透過 OIDC refresh 換到新的 access token**，而同一個請求打 `/_matrix/client/v3/refresh` 是被拒的（那道閘是 PR #30 的審查補上的，理由一模一樣：「舊的 `/refresh` 漏了」）。⚠️ **四份審查都沒抓到這條** —— 它們看的是鎖 |
+| 沒持 session 鎖 | §3.7 那個交錯：refresh 在一次重新登入收完之後補一把回去 ⇒ 兩把都活著 |
+
+⇒ **兩件都不是靠補那份複製品解決的**：`token_refresh` 改成呼叫 `refresh_session`，
+只留 OAuth 真正自己的事（參數、回應形狀）。鎖與 `locked_check` 都是「順便」跟著來的，
+📎 而這正是為什麼第二份實作本身就是 bug —— ⭐ 它不是「可能會漂移」，它**已經**漂了兩次，
+而漂掉的那一次沒有任何測試或審查會喊。
+
+📎 **client 看得到的 OAuth 回應沒變**：`token_error_response` 把所有 client 錯誤都映成
+400 `invalid_grant`，而 `refresh_session` 的錯誤（403 Forbidden／401 `M_UNKNOWN_TOKEN`／
+401 `M_USER_LOCKED`）全是 client 錯誤 ⇒ 還是 400 `invalid_grant`，只有訊息字串不同。
+
+⚠️ **測試釘在共用的那一層**（鎖定帳號的 refresh 必須被拒），而 OAuth 端點自己的接線
+（參數進、回應形狀出）仍然只有**讀過**、沒有測試覆蓋 —— 同 §3.6 的 `create_device`
+那條（審查 🟢2 也點出過）。要覆蓋它得跑完整的 OIDC 授權碼流程，那是另一支的規模。
+
+### 3.8b ⏸ 鎖沒有覆蓋「撤銷」那一側（已知殘餘，rumia r2 🟡2）
+
+`start_session` 保證「撤銷 ＋ 寫入」在同一把鎖內，但**撤銷自己那幾扇門**
+（`/logout`、`/logout/all`、admin 刪裝置、改密碼帶 `logout_devices`、RFC7009 撤銷）
+走的是 `remove_device` ／ `remove_tokens`，**不拿這把鎖**。於是 logout 與 login 交錯時：
+
+```
+logout: remove_tokens ─────────────────────────────► 刪 metadata / to-device / pusher
+login :            start_session(收舊的, 寫新的)        ← 寫在中間
+```
+
+⇒ `token_userdeviceid` 留下一把認證得了的 token，而裝置的 metadata 已經被刪掉：
+`find_from_token` 只查 token 表，`/devices` 卻看不到它。
+
+**嚴重度低**（要同一裝置同時 logout 與登入；而能用登入取勝的人本來就有密碼 ⇒ 不是提權，
+是一致性破洞），而 base 上這個窗口以同寬或更寬存在 ⇒ ⏸ **這支不修**。
+
+🚨 **但下一個要修的人必須先讀這一句**：**不要直接在 `remove_device` 裡面上鎖。**
+`refresh_session` 的重放撤銷分支**是在持鎖的狀態下**呼叫 `remove_device` 的，而 tokio 的
+mutex 不可重入 ⇒ 會自鎖死。正解是拆成「已持鎖」與「自己上鎖」兩個入口
+（rumia r2 🟡2 指出這個陷阱）。📎 `remove_device` 的註解裡也放了同一句警告。
+
+### 3.9 變異驗證（六個各自驗）
 
 🚨 分開驗，因為同一支測試在第一個失敗就停 —— 一起弄壞只證明得了第一道：
 
@@ -331,8 +382,9 @@ OIDC 的授權碼核發（`api/oidc/token.rs` 的 `issue_tokens`）把 scope 裡
 | `find_from_token` 的前綴第二道改成 `false && …` | 「a refresh-prefixed token sitting in the access table authenticates」 |
 | `issue_session` 裡的撤銷拿掉 | 「the access token from the first login still authenticates after a re-login on its device」 |
 | `set_refresh_token` 寫回 `token_userdeviceid` | 「the refresh token is not in the refresh table, so /refresh cannot work」 |
-| `create_device` 改回 `set_access_token`（＝ §3.6b 那個洞） | 「issuing a token through create_device left the device's previous session alive」 |
+| `create_device` 改回 `set_access_token`（＝ §3.6 那個洞） | 「issuing a token through create_device left the device's previous session alive」 |
 | `start_session` 的 session 鎖拿掉 | 「8 concurrent logins on one device left 5 live tokens, not 1」—— ⚠️ 2／3，見 §3.7 |
+| `refresh_session` 兩處 `locked_check` 拿掉（＝ §3.8 那個洞） | 「a locked account still minted tokens from its refresh token」 |
 
 ⭐ 第三個特別值得記：它**不會**讓「refresh token 認證得了」那條紅，因為前綴那道會擋住 ——
 那正是第二道存在的意義，而**分表本身**是由 `/refresh` 那條斷言釘住的。
