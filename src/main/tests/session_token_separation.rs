@@ -5,7 +5,7 @@ use std::{fs::remove_dir_all, process::id as process_id, sync::Arc};
 use tuwunel::{Args, Runtime, Server, async_run, async_start, async_stop};
 use tuwunel_core::{
 	Err, Result,
-	ruma::{DeviceId, UserId, device_id, user_id},
+	ruma::{DeviceId, UserId, api::error::ErrorKind, device_id, user_id},
 };
 use tuwunel_service::{
 	Services,
@@ -384,13 +384,21 @@ async fn two_credentials_two_jobs(services: &Arc<Services>) -> Result {
 	// Locked by whoever: the gate only asks whether a record exists.
 	services.users.set_locked(locked, alice);
 
-	if services
+	// ⭐ The error kind, not just "it failed": the same refresh token could later
+	// be refused for an unrelated reason — rotated away by an earlier section, or
+	// a changed gate above it — and `is_err()` alone would then pass while saying
+	// nothing about the lock (review of PR #126, oliver).
+	match services
 		.users
 		.refresh_session(&locked_refresh, &mut admit_any)
 		.await
-		.is_ok()
 	{
-		return Err!("a locked account still minted tokens from its refresh token");
+		| Ok(_) => return Err!("a locked account still minted tokens from its refresh token"),
+		| Err(e) if e.kind() == ErrorKind::UserLocked => {},
+		| Err(e) =>
+			return Err!(
+				"the locked account's refresh was refused, but for the wrong reason: {e:?}"
+			),
 	}
 
 	Ok(())

@@ -264,7 +264,7 @@ client 手上有密碼（它剛用密碼登入），而被收掉的那一個要�
 2. 🚨 **第一個 session 的 refresh token 不能再換一組**（§3.1 最後一行的反面）。
 3. **另一個裝置的 token 仍然有效** —— 這條防的是「修過頭，把整個帳號的 token 都收了」。
 4. 裝置還在：`device_exists` 仍然是 true（登入不是登出）。
-5. **OIDC 形狀的那條**（§3.6b）：先用一次「不要 refresh token」的登入拿到一把
+5. **OIDC 形狀的那條**（§3.6）：先用一次「不要 refresh token」的登入拿到一把
    **永不過期**的 token（測試自己先斷言 `expires_in` 是 `None`，不然這條的重點會掉），
    再走 `create_device` 發一組 ⇒ 舊那把要認證不了。
 6. **八個同時的登入只剩一把**（§3.7）。
@@ -386,6 +386,10 @@ mutex 不可重入 ⇒ 會自鎖死。正解是拆成「已持鎖」與「自己
 | `start_session` 的 session 鎖拿掉 | 「8 concurrent logins on one device left 5 live tokens, not 1」—— ⚠️ 2／3，見 §3.7 |
 | `refresh_session` 兩處 `locked_check` 拿掉（＝ §3.8 那個洞） | 「a locked account still minted tokens from its refresh token」 |
 
+📌 **而那一條測試比對的是錯誤種類（`M_USER_LOCKED`），不是「有沒有失敗」**
+（審查 r3，oliver）：同一把 refresh token 日後可能因為別的原因被拒（被前面的段落輪替掉、
+或上面某一道閘門改了），那時 `is_err()` 會空過 —— 而「空過」正是變異驗證抓不到的那一種壞法。
+
 ⭐ 第三個特別值得記：它**不會**讓「refresh token 認證得了」那條紅，因為前綴那道會擋住 ——
 那正是第二道存在的意義，而**分表本身**是由 `/refresh` 那條斷言釘住的。
 
@@ -395,7 +399,7 @@ mutex 不可重入 ⇒ 會自鎖死。正解是拆成「已持鎖」與「自己
 |---|---|
 | 兩條都成立 | ✅ 讀程式 ＋ 實跑確認（§2.1、§3.1） |
 | S1 的修法（§2.3） | ✅ **已實作**：兩張表 ＋ 認證側的前綴第二道 |
-| S4 的修法（§3.4） | ✅ **已實作，選項 A**（維護者 2026-11-09）：登入既有 `device_id` 先收掉該裝置的 access ＋ refresh，收斂在 `start_session`（§3.6b） |
+| S4 的修法（§3.4） | ✅ **已實作，選項 A**（維護者 2026-11-09）：登入既有 `device_id` 先收掉該裝置的 access ＋ refresh，收斂在 `start_session`（§3.6） |
 | 並發（§3.7） | ✅ **已實作，選項 A**（維護者 2026-11-09）：per-`(user, device)` 的 session 鎖；測試穩定綠但變異偵測是 2／3，理由寫在 §3.7 |
 | 幾支 PR | ✅ **一支**：同一塊程式、同一組測試。client 可見的行為改變 ⇒ 標 `[BREAKING]` |
 | 遷移 | ✅ **不需要**（server 從未真實上線，沒有既有的 refresh token 要搬）。⚠️ 理由有期限 |

@@ -12,7 +12,7 @@ use ruma::{
 	api::error::{ErrorKind, UnknownTokenErrorData},
 };
 use tuwunel_core::{
-	Err, Error, Result, debug_info, implement, info,
+	Err, Error, Result, debug_info, implement, info, warn,
 	utils::{
 		future::OptionFutureExt,
 		rate_limit::limit_exceeded,
@@ -240,7 +240,12 @@ pub async fn refresh_session(&self, presented: &str, admit: AdmitSession<'_>) ->
 
 		| RefreshToken::Replayed { user_id, device_id, .. } => {
 			let revoke = self.services.server.config.refresh_token_reuse_revoke;
-			debug_info!(?user_id, ?device_id, revoke, "refresh token reused after rotation");
+			// 🚨 `warn!`, not a debug line: a refresh token used again after it
+			// rotated is the signal that someone else has a copy of it — the one
+			// thing the rotation exists to make visible. Both endpoints log
+			// through here, so the OAuth grant gets it too (review of PR #126,
+			// oliver: the copy it used to keep warned, this path did not).
+			warn!(?user_id, ?device_id, revoke, "refresh token reused after rotation");
 
 			if revoke {
 				self.remove_device(&user_id, &device_id).await;

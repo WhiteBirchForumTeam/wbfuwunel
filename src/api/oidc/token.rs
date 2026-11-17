@@ -280,7 +280,6 @@ async fn issue_tokens(services: &Services, grant: ApprovedGrant<'_>) -> Result<R
 	Ok(Json(response).into_response())
 }
 
-
 /// RFC6749 §6: the refresh token grant.
 ///
 /// 🚨 **The rules live in `users::refresh_session`, not here.** This endpoint
