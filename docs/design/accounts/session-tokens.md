@@ -257,7 +257,7 @@ client 手上有密碼（它剛用密碼登入），而被收掉的那一個要�
 
 ### 3.5 測試（實際做的）
 
-**整合測試**（`src/main/tests/session_token_separation.rs`，一支裡兩節，真 server ＋ 真資料庫）：
+**整合測試**（`src/main/tests/session_token_separation.rs`，同一支測試檔，真 server ＋ 真資料庫）：
 
 1. 同一個 `device_id` 登入兩次 → 第一次的 access token、以及**那次 refresh 換到的那把**，
    兩把都不再認證。
@@ -268,6 +268,8 @@ client 手上有密碼（它剛用密碼登入），而被收掉的那一個要�
    **永不過期**的 token（測試自己先斷言 `expires_in` 是 `None`，不然這條的重點會掉），
    再走 `create_device` 發一組 ⇒ 舊那把要認證不了。
 6. **八個同時的登入只剩一把**（§3.7）。
+7. **鎖定帳號的 refresh 被拒**（§3.8），而且比對的是**錯誤種類**
+   （`ErrorKind::UserLocked`）—— 只問「有沒有失敗」的寫法日後會空過（§3.9）。
 
 **e2e**（`tests/e2e/e2e18.ps1`，情境 2 ＋ 情境 3）：同樣四件事走**公開 HTTP**，外加
 通道那一半 —— refresh token 開不了連線；既有連線在重新登入後的**下一個 frame** 被拒。
@@ -305,8 +307,9 @@ OIDC 的授權碼核發（`api/oidc/token.rs` 的 `issue_tokens`）把 scope 裡
 收舊的（`remove_tokens`）與寫新的（`set_access_token`）是**兩個交易**，所以兩個同時的登入
 可以交錯成「收、收、寫、寫」⇒ 兩把都活著，而那正是登入該結束的狀態（審查 r1 的 🟡2）。
 ⇒ 維護者 2026-11-09 選了**加鎖**：per-`(user, device)` 的 `session_locks`，
-`start_session` 與 `refresh_session` 都持它 —— 而「所有的 refresh 都走 `refresh_session`」
-是 r2 才變成真的，見 §3.8。
+`start_session` 與 `refresh_session` 都持它。
+⚠️ 而「**所有**的 refresh 都走 `refresh_session`」這件事本身，是 **r3** 才變成真的
+（commit `a0d1c7a`）—— r2 那輪審查指出的正是它還不真：OIDC 那條自己一份。見 §3.8。
 
 ⚠️ **refresh 要分兩段分類**：鎖的鍵是 `(user, device)`，而那只有第一次分類才知道；
 所以第一次分類是**讀**，拿到鍵之後上鎖，**第二次分類才是算數的那次**（upstream 的
@@ -401,6 +404,8 @@ mutex 不可重入 ⇒ 會自鎖死。正解是拆成「已持鎖」與「自己
 | S1 的修法（§2.3） | ✅ **已實作**：兩張表 ＋ 認證側的前綴第二道 |
 | S4 的修法（§3.4） | ✅ **已實作，選項 A**（維護者 2026-11-09）：登入既有 `device_id` 先收掉該裝置的 access ＋ refresh，收斂在 `start_session`（§3.6） |
 | 並發（§3.7） | ✅ **已實作，選項 A**（維護者 2026-11-09）：per-`(user, device)` 的 session 鎖；測試穩定綠但變異偵測是 2／3，理由寫在 §3.7 |
+| 🚨 **OIDC refresh 的兩份實作**（§3.8） | ✅ **已修**：`token_refresh` 改呼叫 `refresh_session`，鎖與 `locked_check` 跟著唯一的那份實作。⭐ 這條是修審查的 🟡 時找到的：**被鎖定的帳號可以透過 OIDC refresh 換到新 token**，四份審查都沒抓到。⚠️ OAuth 端點自己的接線仍是讀過未測 |
+| 撤銷側不在鎖內（§3.8b） | ⏸ **這支不修**：已知殘餘，base 上同寬或更寬。🚨 陷阱（直接在 `remove_device` 上鎖會自鎖死）寫進那個函式的註解 |
 | 幾支 PR | ✅ **一支**：同一塊程式、同一組測試。client 可見的行為改變 ⇒ 標 `[BREAKING]` |
 | 遷移 | ✅ **不需要**（server 從未真實上線，沒有既有的 refresh token 要搬）。⚠️ 理由有期限 |
 | 要不要送回 upstream | ⏸ **暫不處理**（維護者 2026-11-09）。所以這兩條是本 fork 明確的偏離，以後 merge upstream 碰到 `users/device.rs` 時照 §1.2 讀 |
