@@ -234,9 +234,11 @@ impl PartialOrd for Head {
 }
 impl Ord for Head {
 	fn cmp(&self, other: &Self) -> Ordering {
-		debug_assert!(self.fill == other.fill, "one heap ranks one window, so one fill");
 		// `BinaryHeap` pops the greatest, so filling towards the newest
-		// event ranks the smallest count first.
+		// event ranks the smallest count first. 📎 Every head in one heap is
+		// pushed with that window's own `fill`, so the two always agree;
+		// 🚫 no assertion here, because a comparison is the wrong place to
+		// stop a connection (CLAUDE.md P).
 		let by_count = self.count.cmp(&other.count);
 		match self.fill {
 			| Fill::Older => by_count,

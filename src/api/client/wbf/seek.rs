@@ -18,6 +18,8 @@
 //!
 //! See `/docs/design/events/seek-window.md` §3 and §4.
 
+use std::slice;
+
 use ruma::{EventId, OwnedEventId, OwnedRoomId, RoomId, UserId};
 use serde_json::{Value, json};
 use tuwunel_core::{
@@ -217,8 +219,10 @@ pub(super) async fn handle_event_seek(
 		limit: request.limit,
 	};
 
-	let rooms = [request.room_id.clone()];
-	let window = collect_window(services, user, &rooms, &spec, data_max).await;
+	// One room, borrowed as the slice `collect_window` takes: a seek never
+	// merges rooms, so there is nothing to build a list out of.
+	let rooms = slice::from_ref(&request.room_id);
+	let window = collect_window(services, user, rooms, &spec, data_max).await;
 
 	for pack in build_batches(view.header.id, &window, request.batch, data_max) {
 		reply.send(pack?).await?;
