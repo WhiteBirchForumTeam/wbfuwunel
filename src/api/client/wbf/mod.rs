@@ -1174,6 +1174,7 @@ const SERVER_FEATURES: &[&str] = &[
 	"upload",
 	"download",
 	"recent",
+	"seek",
 	"batch",
 	"seq",
 	"attachments",
@@ -1205,6 +1206,9 @@ fn hello(services: &Services, ctx: &PackContext<'_>, view: &PackView<'_>) -> Vec
 			// For debugging; 0 over HTTP. A client need not use it.
 			"connection_id": ctx.connection,
 			"recent_default_limit": services.config.wbf_recent_default_limit,
+			// A `Seek` window is much smaller than a `Recent` one, and the
+			// number is config: a client reads it rather than hardcoding 20.
+			"seek_default_limit": services.config.wbf_seek_default_limit,
 			"recent_max_limit": services.config.wbf_recent_max_limit,
 			"recent_default_batch": services.config.wbf_recent_default_batch,
 			"recent_max_batch": services.config.wbf_recent_max_batch,
@@ -1310,6 +1314,7 @@ mod tests {
 			"upload",
 			"download",
 			"recent",
+			"seek",
 			"batch",
 			"seq",
 			"attachments",

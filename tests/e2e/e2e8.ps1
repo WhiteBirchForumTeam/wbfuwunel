@@ -181,7 +181,7 @@ Check '[1.4b] redaction event itself got the next seq' ($seqsAfter.Count -eq $se
 $ws = Ws-Open $tokA
 $hello = Ws-Call $ws (Json-Pack 1 1 0 1 @{ protocol = 1; client = 'e2e8'; features = @() } $null)
 $feat = @($hello.meta.features)
-Check '[1.5] Hello features include recent, batch and seq' (($feat -contains 'recent') -and ($feat -contains 'batch') -and ($feat -contains 'seq')) "features=$($feat -join ',')"
+Check '[1.5] Hello features include recent, seek, batch and seq' (($feat -contains 'recent') -and ($feat -contains 'seek') -and ($feat -contains 'batch') -and ($feat -contains 'seq')) "features=$($feat -join ',')"
 
 # [1.6] Event/Recent over WS: newest first, paged by cursor to exhaustion, union equals both rooms
 # alice is the first user, so she is also in the admin room: expect the union over every joined room
@@ -332,9 +332,9 @@ Check '[1.10e] older stops at the start of this server copy: one event, the anch
   ($toStart.events.Count -eq 1 -and $toStart.events[0].event_id -eq $sOrder[0] -and $toStart.meta.complete -eq $true) `
   (Describe $toStart)
 $deflt = Seek-Ws $ws 55 $rS $oldest 'newer' $null
-Check '[1.10f] no limit = 20, not Recent 320: the window is cut at 20 and says more=true' `
-  ($deflt.meta.tc -eq 20 -and $deflt.events.Count -eq 20 -and $deflt.meta.complete -eq $false -and $sOrder.Count -gt 20) `
-  "tc=$($deflt.meta.tc) room_events=$($sOrder.Count)"
+Check '[1.10f] no limit = 20, not Recent 320: the window is cut at the default Hello announces' `
+  ($deflt.meta.tc -eq 20 -and $deflt.events.Count -eq 20 -and $deflt.meta.complete -eq $false -and $sOrder.Count -gt 20 -and $hello.meta.seek_default_limit -eq 20) `
+  "tc=$($deflt.meta.tc) announced=$($hello.meta.seek_default_limit) room_events=$($sOrder.Count)"
 # The rejections the shape rests on, each a different code.
 $both = Seek-Ws $ws 56 $rS $mid 'newer' 5 $null -BothAnchors
 Check '[1.10g] both anchors -> InvalidRequest; no precedence, so the answer cannot depend on which field is read first' `

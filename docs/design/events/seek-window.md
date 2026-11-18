@@ -220,6 +220,7 @@ UI 真的要兩邊，就發兩次（`older` 一次、`newer` 一次），而錨�
 | 掃描、過濾、切 Batch | `src/api/client/wbf/recent.rs` ——⭐ **同一個 `collect_window`**，多一個 `WindowSpec { fill, from, stop_at, limit }`；`Recent` 永遠是 `Fill::Older`|
 | 常數、准入、dispatch | `src/api/client/wbf/mod.rs`（`event::SEEK = 0x08`，與 `RECENT` 同一列准入）|
 | 設定 | `wbf_seek_default_limit`（預設 20）|
+| 協商 | `Hello` 的 `features` 多一個 `"seek"`，meta 多一個 `seek_default_limit` —— 📎 client 讀它，🚫 不要把 20 寫死 |
 
 🚨 **實作時推翻了我在 §7 寫的一件事**（原文留著對照）：`pdus`／`pdus_rev` 的游標是**不含**的。
 所以「窗含錨點」是**自己做**的 —— `scan_start_including(anchor, fill)` 把游標往反方向退一格，
