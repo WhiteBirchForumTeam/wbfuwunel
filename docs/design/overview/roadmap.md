@@ -266,6 +266,59 @@ tower-http 的 `TimeoutBody`，**收到一個框就重新計時**，它是框間
 ⏳ **下一支建議 per-user 上限，不用 per-address**：user 來自 token，**不需要相信任何 header**；
 per-address 的強度等於 `client_ip` 的可信度（見 [/docs/design/wire/pack-pipeline.md](../wire/pack-pipeline.md) §2.2）。
 
+### 2.18 ✅ 媒體被刪得太早：釋放只釋放，刪除只在掃描裡（[/docs/design/media/premature-deletion.md](../media/premature-deletion.md) §2，外部審查的媒體第三條，實作 PR #122，2026-11-08 合併）
+
+洞的形狀：刪不刪的判準 `is_removable` 有三個條件（本站、`mxc_managed` 有列、沒有持有者），
+**保護期不在裡面** —— 它只寫在掃描的候選過濾裡。而收集器在**任何**持有者被拿掉時當場問它
+⇒ 任何人兩個 `PUT /profile/{uid}/avatar_url`（設成受害者的 mxc、再改掉），就把別人剛上傳的
+檔案從「保護期內」搬進「剛被釋放」那一類，**幾秒內刪掉**。
+
+⭐ **修法（維護者 2026-11-07）：釋放持有者只釋放，刪除只在掃描裡，保護期進 `is_removable`。**
+收集器整個退場，門檻由 `get_grace_cutoff_millis()` 一處算。
+⇒ 不可逆的動作從**六七條最容易寫錯的釋放路**上拔下來了；那些路反覆寫錯的歷史記在
+[/docs/design/media/media-holders.md](../media/media-holders.md) §1。
+
+⚠️ **行為與限制**：
+- **刪除慢最多一個掃描間隔**（`media_gc_sweep_interval`，預設 3600 秒）；保護期內被釋放的要等保護期過完。
+- 🚨 **掃描是唯一的刪除者** ⇒ 它沒跑就完全不刪。所以它每次都留一行 log，而且第一次 tick 是
+  **啟動後一分鐘**而不是一個完整間隔（否則重啟比間隔頻繁的站**永遠不刪**，審查抓到）。
+- 🔴 **`save_unredacted_events = false` 的站**：redact 之後 bytes 要等保護期（從上傳算、至少 7 天）
+  才消失 ⇒ 那段時間內拿得到 mxc 的人還下載得到。**急件用 `!admin media delete <mxc>`**（不受保護期管）。
+
+⏳ **洞 B 不在這一支**：引用讀取器只看四個固定位置（巢狀、陣列看不見）。維護者 2026-11-08 定
+**解法在「宣告才算」的約定**那一端，不是 server 去猜 content 的形狀 ⇒ 轉成 **issue #124** 追蹤，
+不是必修。
+
+### 2.19 ✅ access token 與 refresh token 是兩種憑證（[/docs/design/accounts/session-tokens.md](../accounts/session-tokens.md)，外部審查 S1＋S4，實作 PR #126，2026-11-18 合併）
+
+🚨 **`[BREAKING]`**，兩件事：
+
+1. **refresh token 不再能當 access token 用**（S1）。根因是「這個字串是不是一把 access token」由
+   **它在哪張表**回答，而 refresh token 寫在 access 那張 ⇒ 它可以直接當 Bearer 用（實跑：`whoami`
+   200、`PUT account_data` 200）。⭐ 而洞**不是**「它太長命」—— 永不過期對 refresh token 是對的
+   （單一用途 ＋ 每次輪替 ＋ 重放看得見）；洞在於當 Bearer 用時那三個前提一個都不成立，於是整套
+   重放偵測**永遠不會亮**。⇒ 新 map `refresh_userdeviceid`，認證只讀 access 那張 ＋ 前綴拒絕當第二道。
+2. **登入既有 `device_id` 會收掉該裝置先前的 access ＋ refresh token**（S4，維護者 2026-11-09 選
+   規格的強版本）。收斂在 `start_session`，所以每一條登入路都經過 —— 包括 OIDC 的授權碼核發
+   （第一版漏了它，而它留下的舊 token 可能**永不過期**）。並發用 per-`(user, device)` 的 session 鎖。
+
+📎 **這兩條在 upstream 上都存在**（§1.2 逐行對照，含 upstream 刻意加的「一裝置多把 token」），
+所以這支是本 fork **主動偏離**；維護者 2026-11-09 決定**暫不送回上游** ⇒ 以後 merge upstream 碰到
+`users/device.rs` 要照那一節讀。
+
+⚠️ **行為與限制**：
+- **重新登入會踢掉同一個 `device_id` 的上一個持有者**（它要重新登入）。本專案的 client 不受影響。
+- 舊連線**不是立刻**斷：`revalidate` 在下一個 frame 收掉，上限 `wbf_ws_idle_timeout`
+  （[/docs/design/wire/session-teardown.md](../wire/session-teardown.md) §3 的第二個例外）。
+- 被撤銷的 refresh token 回 **403 `M_FORBIDDEN`**（維護者 2026-11-09：維持現狀）。
+- 🔴 **已知殘餘**：撤銷側（`/logout`、admin 刪裝置、RFC7009）**不在鎖內** ⇒ logout 撞 login 可能
+  留下一把認證得了的 token 而裝置 metadata 已刪（§3.8b；🚨 直接在 `remove_device` 上鎖會自鎖死）。
+  OAuth 端點自己的接線（參數進、回應形狀出）**讀過未測**。
+
+🚨 **修審查意見時另外翻出一條**：OIDC 的 refresh grant 自己抄了一份 refresh 規則，而那份
+**從來沒問 `locked_check`** ⇒ 被鎖定的帳號可以透過 OAuth 換到新的 access token。⭐ 四份審查都沒
+抓到它，因為它們看的是鎖；⇒ 刪掉複製品改呼叫 `refresh_session`（§3.8）。
+
 ## 3. 候選（要不要做，由維護者決定）
 
 | 項目 | 一句話 | 前提 / 觸發條件 |
