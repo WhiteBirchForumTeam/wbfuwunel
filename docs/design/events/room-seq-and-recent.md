@@ -93,7 +93,7 @@ kind `0x14 Event`（/docs/design/wire/wire-format.md §3.3 已分配給 send／m
 { "rooms": ["!r:localhost"], "cg_seq": <g_seq>, "before": <g_seq>, "limit": 320, "batch": 10 }
 ```
 
-📌 **「從一個指定的位置往哪個方向讀一扇窗」是別人的工作**：`0x14 0x08 Seek`，見
+📌 **「從一個指定的錨點往哪個方向讀一扇窗」是別人的工作**（單一房＋一個錨點，窗含錨點那則）：`0x14 0x08 Seek`，見
 [/docs/design/events/seek-window.md](seek-window.md)。`Recent` 這一支的語意是「**追到現在**」
 （所以它有 `cg_seq` 這個水位、而且預設從最新那端開始）。
 ⚠️ 兩者**共用回應的 `0x03 Batch`**，所以下面 `fs`／`ls` 的定義是「第一則／最後一則」，
