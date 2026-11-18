@@ -2,7 +2,7 @@
 
 > 號碼總表與共通規則在 [index.md](index.md)。這份只寫**每支端點帶什麼、回什麼、會怎麼被拒**。
 > 請求的前 4 bytes 一律是 `01 14 SS 10`；成功回覆 `01 01 02 14`、失敗 `01 01 03 14`。`id` 填 0。
-> ⚠️ 這個 kind 同時有**原生**的 pack：`Recent`（`0x01`）、`Send`（`0x02`）、`Batch`（`0x03`）、`Subscribe`（`0x04`）、`Unsubscribe`（`0x05`）、`Push`（`0x06`）。那些**不帶** bit4，規格在 [/docs/design/wire/wire-format.md](../design/wire/wire-format.md) §3.2。帶了 bit4 送原生的號碼會回 `UnknownKind`。
+> ⚠️ 這個 kind 同時有**原生**的 pack：`Recent`（`0x01`）、`Send`（`0x02`）、`Batch`（`0x03`）、`Subscribe`（`0x04`）、`Unsubscribe`（`0x05`）、`Push`（`0x06`）、`DeviceChanged`（`0x07`）、`Seek`（`0x08`）。那些**不帶** bit4，規格在 [/docs/design/wire/wire-format.md](../design/wire/wire-format.md) §3.2。帶了 bit4 送原生的號碼會回 `UnknownKind`。
 
 ## `0x20` GetEvent —— 用 event id 拿單一則
 
@@ -126,7 +126,7 @@ data  {"errcode":"M_FORBIDDEN","error":"You don't have permission to post that t
 | 回覆 data | `{"event_id":"$Zm9vYmFy","origin_server_ts":1789911854000}` |
 
 📎 **`ts` 是毫秒**，`dir` 是 `b`（找那個時間點**之前**最近的一則）或 `f`（之後最近的一則）。兩個都是必填。
-📎 這支是「跳到某天」的做法：拿到 `event_id` 之後用 `0x25` Context 或 `Event/Recent` 帶 `before` 把附近的讀出來。
+📎 這支是「跳到某天」的做法：拿到 `event_id` 之後用 `0x25` Context 拿它前後幾則，或用原生的 `Event/Seek`（`0x08`）從它往一個方向滾下去（[/docs/design/events/seek-window.md](../design/events/seek-window.md) §2.1）。
 **會怎麼被拒**：那個方向沒有事件 → `NotFound`（404）；不在房裡 → `Forbidden`（403）。
 
 ## 這個 kind 共通的拒絕

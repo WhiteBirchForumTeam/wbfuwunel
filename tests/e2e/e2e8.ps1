@@ -79,6 +79,36 @@ function Recent-Http($tok, [uint32]$id, $limit, $after, $before) {
   $p.events = @()
   $p
 }
+# One Seek window over WS: one room, one anchor, one direction (0x14 0x08).
+# $anchor is either an event id (a string) or a g_seq (a number); whichever it is goes in the matching
+# field, and the two must never both be sent (the server refuses that on purpose, seek-window.md 3).
+# Returns the same shape as Recent-Ws: .events in the window's own order, .batches, .meta (+ returned/complete/next).
+function Seek-Ws($ws, [uint32]$id, $room, $anchor, [string]$dir, $limit, $batch, [switch]$BothAnchors, [switch]$NoAnchor) {
+  $meta = @{}
+  if ($null -ne $room) { $meta.room_id = $room }
+  if ($dir -ne '') { $meta.direction = $dir }
+  if ($null -ne $limit) { $meta.limit = $limit }
+  if ($null -ne $batch) { $meta.batch = $batch }
+  if (-not $NoAnchor) {
+    if ($anchor -is [string]) { $meta.event_id = $anchor } else { $meta.g_seq = [int64]$anchor }
+    if ($BothAnchors) { $meta.event_id = "$anchor"; $meta.g_seq = 1 }
+  }
+  Ws-Send $ws (Json-Pack 0x14 8 (Conv $id) 0 $meta $null)
+  $batches = @(); $events = @()
+  do {
+    $p = Ws-Recv-Bounded $ws 15000
+    if ($p.subtype -ne 3 -or $p.kind -ne 0x14) { $p.events = @(); $p.batches = @(); return $p }
+    $batches += ,$p
+    $events += @(Batch-Events ([byte[]]$p.data))
+  } while ($p.meta.r -ne 0)
+  $last = $batches[-1]
+  $last.events = $events; $last.batches = $batches
+  $isComplete = ($last.meta.PSObject.Properties.Name -contains 'more') -and ($last.meta.more -eq $false)
+  $last.meta | Add-Member -NotePropertyName returned -NotePropertyValue ([int]$last.meta.tc) -Force
+  $last.meta | Add-Member -NotePropertyName complete -NotePropertyValue $isComplete -Force
+  $last.meta | Add-Member -NotePropertyName next -NotePropertyValue $(if ($isComplete) { $null } else { [int64]$last.meta.ls }) -Force
+  $last
+}
 function Is-DescendingTs($events) {
   for ($i = 1; $i -lt $events.Count; $i++) { if ($events[$i].origin_server_ts -gt $events[$i-1].origin_server_ts) { return $false } }
   $true
@@ -262,6 +292,75 @@ try {
   $unknown = Ws-Call $ws (New-Pack 0x14 0x7f 0 0 8 @() @())
   Check '[1.9d] unknown Event subtype -> UnknownKind' ($unknown.subtype -eq 3 -and $unknown.meta.code -eq 'UnknownKind') (Describe $unknown)
 } catch { Check '[1.9d] unknown Event subtype -> UnknownKind' $false ("exception: " + $_.Exception.Message + " " + $_.InvocationInfo.PositionMessage) }
+
+# [1.10] Event/Seek (0x14 0x08): one room, one anchor, one direction - the fill direction Recent does not have.
+# A room of its own with more than one default window in it, so "default limit 20" is a real assertion.
+$rS = (Api Post '/_matrix/client/v3/createRoom' '{"preset":"private_chat","name":"seek"}' $tokA).room_id
+$sIds = @(); 1..25 | ForEach-Object { $sIds += ,(Send-Msg $rS "seek $_" $tokA) }
+$sFwd = @((Room-Messages $rS $tokA 'f' 100).chunk)            # oldest first, state events included
+$sOrder = @($sFwd | ForEach-Object { $_.event_id })
+$mid = $sIds[9]                                               # the 10th message, well inside the room
+$midG = GSeqOf (Get-Event $rS $mid $tokA)
+$midAt = $sOrder.IndexOf($mid)
+
+$newer = Seek-Ws $ws 50 $rS $mid 'newer' 5
+Check '[1.10] Seek newer: the window starts at the anchor itself and reads oldest -> newest' `
+  ($newer.subtype -eq 3 -and $newer.events.Count -eq 5 -and $newer.events[0].event_id -eq $mid -and (($newer.events | ForEach-Object { $_.event_id }) -join ',') -eq (($sOrder[$midAt..($midAt+4)]) -join ',')) `
+  (Describe $newer)
+$older = Seek-Ws $ws 51 $rS $mid 'older' 5
+$expectOlder = @(($midAt-4)..$midAt | ForEach-Object { $sOrder[$_] })
+[array]::Reverse($expectOlder)
+Check '[1.10a] Seek older: the same anchor is the first event again, then newest -> oldest' `
+  ($older.subtype -eq 3 -and $older.events.Count -eq 5 -and $older.events[0].event_id -eq $mid -and (($older.events | ForEach-Object { $_.event_id }) -join ',') -eq ($expectOlder -join ',')) `
+  (Describe $older)
+Check '[1.10b] Seek newer is not Recent: it fills from the anchor, not from the newest end' `
+  ($newer.events[-1].event_id -ne $sIds[-1] -and (GSeqOf $newer.events[0]) -eq $midG -and (GSeqOf $newer.events[-1]) -gt $midG) `
+  "first=$(GSeqOf $newer.events[0]) last=$(GSeqOf $newer.events[-1]) anchor=$midG"
+# The written-down cost of including the anchor: continuing with g_seq = ls repeats that one event (seek-window.md 4.1).
+$next = Seek-Ws $ws 52 $rS ([int64]$newer.meta.ls) 'newer' 5
+$joined = @(@($newer.events | ForEach-Object { $_.event_id }) + @($next.events[1..4] | ForEach-Object { $_.event_id }))
+Check '[1.10c] continuing with g_seq = ls repeats exactly that one event, and nothing is skipped' `
+  ($next.events[0].event_id -eq $newer.events[-1].event_id -and ($joined -join ',') -eq (($sOrder[$midAt..($midAt+8)]) -join ',')) `
+  (Describe $next)
+$byPos = Seek-Ws $ws 53 $rS $midG 'newer' 5
+Check '[1.10d] the two anchor kinds are the same anchor: event_id and g_seq give an identical window' `
+  ((($byPos.events | ForEach-Object { $_.event_id }) -join ',') -eq (($newer.events | ForEach-Object { $_.event_id }) -join ',') -and [int64]$byPos.meta.fs -eq [int64]$newer.meta.fs -and [int64]$byPos.meta.ls -eq [int64]$newer.meta.ls) `
+  (Describe $byPos)
+$oldest = GSeqOf $sFwd[0]
+$toStart = Seek-Ws $ws 54 $rS $oldest 'older' 50
+Check '[1.10e] older stops at the start of this server copy: one event, the anchor, and more=false' `
+  ($toStart.events.Count -eq 1 -and $toStart.events[0].event_id -eq $sOrder[0] -and $toStart.meta.complete -eq $true) `
+  (Describe $toStart)
+$deflt = Seek-Ws $ws 55 $rS $oldest 'newer' $null
+Check '[1.10f] no limit = 20, not Recent 320: the window is cut at 20 and says more=true' `
+  ($deflt.meta.tc -eq 20 -and $deflt.events.Count -eq 20 -and $deflt.meta.complete -eq $false -and $sOrder.Count -gt 20) `
+  "tc=$($deflt.meta.tc) room_events=$($sOrder.Count)"
+# The rejections the shape rests on, each a different code.
+$both = Seek-Ws $ws 56 $rS $mid 'newer' 5 $null -BothAnchors
+Check '[1.10g] both anchors -> InvalidRequest; no precedence, so the answer cannot depend on which field is read first' `
+  ($both.kind -eq 1 -and $both.meta.code_id -eq 1201) (Describe $both)
+$neither = Seek-Ws $ws 57 $rS $null 'newer' 5 $null -NoAnchor
+Check '[1.10h] no anchor -> InvalidRequest' ($neither.kind -eq 1 -and $neither.meta.code_id -eq 1201) (Describe $neither)
+$noDir = Seek-Ws $ws 58 $rS $mid '' 5
+Check '[1.10i] no direction -> InvalidRequest, because there is no default on purpose' ($noDir.kind -eq 1 -and $noDir.meta.code_id -eq 1201) (Describe $noDir)
+$badDir = Seek-Ws $ws 59 $rS $mid 'forward' 5
+Check '[1.10j] direction=forward -> InvalidRequest' ($badDir.kind -eq 1 -and $badDir.meta.code_id -eq 1201) (Describe $badDir)
+$noRoom = Seek-Ws $ws 60 $null $mid 'newer' 5
+Check '[1.10k] no room_id -> InvalidRequest' ($noRoom.kind -eq 1 -and $noRoom.meta.code_id -eq 1201) (Describe $noRoom)
+$notIn = Seek-Ws $ws 61 '!nobody-is-in-this:localhost' $mid 'newer' 5
+Check '[1.10l] a room the caller is not in -> Forbidden, and it says nothing about the event' `
+  ($notIn.kind -eq 1 -and $notIn.meta.code_id -eq 1302) (Describe $notIn)
+$ghost = Seek-Ws $ws 62 $rS '$this-event-does-not-exist:localhost' 'newer' 5
+Check '[1.10m] an event id that does not exist -> NotFound' ($ghost.kind -eq 1 -and $ghost.meta.code_id -eq 1501) (Describe $ghost)
+$elsewhere = Seek-Ws $ws 63 $rS $m2 'newer' 5
+Check '[1.10n] an event of another room the caller IS in -> NotFound, not that other room window' `
+  ($elsewhere.kind -eq 1 -and $elsewhere.meta.code_id -eq 1501) (Describe $elsewhere)
+$farPos = Seek-Ws $ws 64 $rS 999999999 'older' 5
+Check '[1.10o] a g_seq this room has no event at -> NotFound; it does not seek to the nearest' `
+  ($farPos.kind -eq 1 -and $farPos.meta.code_id -eq 1501) (Describe $farPos)
+$seekHttp = Send-Pack (Json-Pack 0x14 8 (Conv 65) 0 @{ room_id = $rS; event_id = $mid; direction = 'newer' } $null) $tokA
+Check '[1.10p] Seek over HTTP -> Unsupported, because its reply streams; id copied' `
+  ($seekHttp.kind -eq 1 -and $seekHttp.meta.code -eq 'Unsupported' -and $seekHttp.id -eq (Conv 65)) (Describe $seekHttp)
 
 $ws.Dispose(); $wsB.Dispose()
 Stop-Server $p

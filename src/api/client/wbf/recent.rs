@@ -23,7 +23,9 @@ use std::{
 };
 
 use futures::{Stream, StreamExt};
-use ruma::{OwnedRoomId, RoomId, UserId, events::AnyTimelineEvent, serde::Raw};
+use ruma::{
+	OwnedRoomId, RoomId, UserId, api::Direction, events::AnyTimelineEvent, serde::Raw,
+};
 use serde_json::{Value, json};
 use tuwunel_core::{
 	Result, debug_warn,
@@ -151,12 +153,76 @@ fn g_seq_field(meta: &Value, name: &str) -> std::result::Result<Option<PduCount>
 	}
 }
 
+/// Which way a window fills from its cursor.
+///
+/// 🚨 This is not a presentation detail: it picks the iterator, the heap's
+/// order and which side of the cursor an event has to be on. `Recent` only
+/// ever fills `Older` (its window ends at the client's watermark); `Seek`
+/// takes it from the request (/docs/design/events/seek-window.md §4).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Fill {
+	/// Away from the newest event: the window reads newest first.
+	Older,
+	/// Towards the newest event: the window reads oldest first.
+	Newer,
+}
+
+/// One window to gather: which way, from where, and where to stop.
+///
+/// ⭐ Both subtypes build one of these and hand it to `collect_window`. The
+/// scan is written **once**: a second copy for the other direction would
+/// drift, and the drift would be silent (this repo had exactly that in the
+/// OIDC refresh path, PR #126).
+pub(super) struct WindowSpec {
+	pub(super) fill: Fill,
+	/// The cursor the scan starts at, **exclusive** — `None` starts at the
+	/// timeline's end for this `fill`.
+	///
+	/// 🚨 Exclusive is the iterator's own rule, not a choice made here:
+	/// `pdus`/`pdus_rev` shift the key by one before seeking ("+1 so we
+	/// don't send the base event", `pdu_count_to_id`). A window that must
+	/// *include* its anchor passes `scan_start_including(anchor, fill)`.
+	pub(super) from: Option<PduCount>,
+	/// The window ends when it reaches this count (`Recent`'s `cg_seq`: the
+	/// newest the client already has). `None` reads to the end.
+	pub(super) stop_at: Option<PduCount>,
+	/// Most events in this window.
+	pub(super) limit: usize,
+}
+
+/// The cursor that makes `anchor` the first event a scan yields.
+///
+/// Args:
+///     anchor: the event to start at, example: PduCount::from_signed(50)
+///     fill: which way the window then fills
+/// Return:
+///     PduCount  one step against `fill`, so the exclusive scan starts on
+///     `anchor` itself. ⚠️ Saturates at the integer boundary: at
+///     `PduCount::min()` filling `Newer`, or `PduCount::max()` filling
+///     `Older`, there is no step left to take and the anchor stays
+///     excluded. No served event has either count (the global counter hands
+///     out 1, 2, 3…), so this is a boundary that cannot be reached from a
+///     real anchor rather than a case to answer for.
+pub(super) fn scan_start_including(anchor: PduCount, fill: Fill) -> PduCount {
+	let against = match fill {
+		| Fill::Older => Direction::Forward,
+		| Fill::Newer => Direction::Backward,
+	};
+
+	anchor.saturating_inc(against)
+}
+
 type RoomStream<'a> = Pin<Box<dyn Stream<Item = Result<PdusIterItem>> + Send + 'a>>;
 
 /// One room's next candidate, keyed for the heap by its global count.
+///
+/// ⚠️ `fill` is here because the heap must pop the end the window fills
+/// from: the newest candidate when filling `Older`, the oldest when filling
+/// `Newer`. Every head in one heap shares the window's `fill`.
 struct Head {
 	count: PduCount,
 	room: usize,
+	fill: Fill,
 }
 
 impl PartialEq for Head {
@@ -167,7 +233,16 @@ impl PartialOrd for Head {
 	fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
 }
 impl Ord for Head {
-	fn cmp(&self, other: &Self) -> Ordering { self.count.cmp(&other.count) }
+	fn cmp(&self, other: &Self) -> Ordering {
+		debug_assert!(self.fill == other.fill, "one heap ranks one window, so one fill");
+		// `BinaryHeap` pops the greatest, so filling towards the newest
+		// event ranks the smallest count first.
+		let by_count = self.count.cmp(&other.count);
+		match self.fill {
+			| Fill::Older => by_count,
+			| Fill::Newer => by_count.reverse(),
+		}
+	}
 }
 
 /// One event of a window, as it will be sent: its `g_seq` and its JSON.
@@ -176,7 +251,7 @@ pub(super) struct WindowEvent {
 	pub(super) json: Vec<u8>,
 }
 
-/// A window's events, newest first, and whether it stopped at a cap.
+/// A window's events in its `fill` order, and whether it stopped at a cap.
 pub(super) struct Window {
 	pub(super) events: Vec<WindowEvent>,
 	/// True when the window stopped at `limit` or at `wbf_window_max_bytes`,
@@ -210,8 +285,8 @@ pub(super) async fn window_after(
 	cg_seq: Option<PduCount>,
 	limit: usize,
 ) -> Window {
-	let request = RecentRequest { rooms: None, limit, batch: 1, cg_seq, before: None };
-	collect_window(services, user, rooms, &request, services.config.wbf_data_max_bytes).await
+	let spec = WindowSpec { fill: Fill::Older, from: None, stop_at: cg_seq, limit };
+	collect_window(services, user, rooms, &spec, services.config.wbf_data_max_bytes).await
 }
 
 /// Args:
@@ -237,7 +312,13 @@ pub(super) async fn handle_event_recent(
 	let data_max = services.config.wbf_data_max_bytes;
 	let rooms = resolve_rooms(services, user, request.rooms.as_deref()).await?;
 
-	let window = collect_window(services, user, &rooms, &request, data_max).await;
+	let spec = WindowSpec {
+		fill: Fill::Older,
+		from: request.before,
+		stop_at: request.cg_seq,
+		limit: request.limit,
+	};
+	let window = collect_window(services, user, &rooms, &spec, data_max).await;
 
 	// One pack at a time: building them all first held the window twice.
 	for pack in build_batches(view.header.id, &window, request.batch, data_max) {
@@ -287,9 +368,9 @@ async fn resolve_rooms(
 	Ok(named.to_vec())
 }
 
-/// The window's events, newest first: at most `limit` and at most
-/// `wbf_window_max_bytes` of them (bytes asked first), all newer than
-/// `cg_seq` and older than `before`, visible to `user`, each passed through
+/// The window's events in `fill` order: at most `limit` and at most
+/// `wbf_window_max_bytes` of them (bytes asked first), all on the `fill`
+/// side of `from` and not past `stop_at`, visible to `user`, each passed through
 /// the `bundle_aggregations` every Matrix read endpoint uses (so an erased
 /// sender's event is pruned for a late joiner), and each small enough for a
 /// pack of its own. 📎 Not MSC4115's `unsigned.membership`: `/messages` adds
@@ -301,11 +382,12 @@ async fn resolve_rooms(
 ///
 /// Args:
 ///     rooms: what this window covers, already checked (`resolve_rooms`)
-async fn collect_window(
+///     spec: which way, from where, how far
+pub(super) async fn collect_window(
 	services: &Services,
 	user: &UserId,
 	rooms: &[OwnedRoomId],
-	request: &RecentRequest,
+	spec: &WindowSpec,
 	data_max: usize,
 ) -> Window {
 	// 🚨 One stream per room, and each room **once**. A name repeated in the
@@ -327,15 +409,15 @@ async fn collect_window(
 	}
 	let rooms = once;
 
-	// One reverse stream per room, each already past `before`. The heads
-	// hold the event the heap is ranking; the streams wait behind them.
+	// One stream per room, each already past `from`. The heads hold the
+	// event the heap is ranking; the streams wait behind them.
 	let mut streams: Vec<RoomStream<'_>> = rooms
 		.iter()
 		.map(|room_id| {
-			let stream = services
-				.timeline
-				.pdus_rev(Some(user), room_id, request.before);
-			let boxed: RoomStream<'_> = Box::pin(stream);
+			let boxed: RoomStream<'_> = match spec.fill {
+				| Fill::Older => Box::pin(services.timeline.pdus_rev(Some(user), room_id, spec.from)),
+				| Fill::Newer => Box::pin(services.timeline.pdus(Some(user), room_id, spec.from)),
+			};
 			boxed
 		})
 		.collect();
@@ -344,21 +426,22 @@ async fn collect_window(
 	for (room, stream) in streams.iter_mut().enumerate() {
 		let head = next_item(stream).await;
 		if let Some((count, _)) = &head {
-			heap.push(Head { count: *count, room });
+			heap.push(Head { count: *count, room, fill: spec.fill });
 		}
 		heads.push(head);
 	}
 
-	let mut window: Vec<WindowEvent> = Vec::with_capacity(request.limit.min(1024));
-	let mut budget = WindowBudget::new(request.limit, services.config.wbf_window_max_bytes);
+	let mut window: Vec<WindowEvent> = Vec::with_capacity(spec.limit.min(1024));
+	let mut budget = WindowBudget::new(spec.limit, services.config.wbf_window_max_bytes);
 
 	while !budget.is_count_full() {
-		let Some(Head { count, room }) = heap.pop() else {
+		let Some(Head { count, room, .. }) = heap.pop() else {
 			break;
 		};
-		if !is_newer_than_after(count, request.cg_seq) {
-			// The heap is descending: everything left is at or below the
-			// watermark, which the client already has.
+		if !is_before_stop(count, spec.stop_at, spec.fill) {
+			// The heap pops in `fill` order, so everything left is past the
+			// stop too: when filling `Older` that is the watermark the
+			// client already has.
 			break;
 		}
 		let Some(item) = heads[room].take() else {
@@ -370,7 +453,7 @@ async fn collect_window(
 		// purpose: an event the filters drop still advances the cursor, so its
 		// room must already be represented by its next candidate.
 		if let Some(next) = next_item(&mut streams[room]).await {
-			heap.push(Head { count: next.0, room });
+			heap.push(Head { count: next.0, room, fill: spec.fill });
 			heads[room] = Some(next);
 		}
 
@@ -406,7 +489,7 @@ async fn collect_window(
 		}
 		if !budget.try_admit(json.len()) {
 			// Full by bytes. This event is the next window's first: the
-			// client's `before` is the `ls` of the last one that joined.
+			// client's cursor is the `ls` of the last one that joined.
 			break;
 		}
 
@@ -430,7 +513,7 @@ async fn collect_window(
 ///     `seq` 0, 1, 2…; exactly one (empty) pack for an empty window. Every
 ///     pack's meta is `{tc, bc, fs, ls, r, more}`, the last has `r = 0`, and
 ///     `more` is the same in all of them.
-fn build_batches(
+pub(super) fn build_batches(
 	id: u64,
 	window: &Window,
 	batch: usize,
@@ -478,8 +561,22 @@ fn batch_pack(
 		.finish())
 }
 
-/// Whether an event at `count` is one the client does not have yet.
-fn is_newer_than_after(count: PduCount, cg_seq: Option<PduCount>) -> bool { cg_seq.is_none_or(|cg_seq| count > cg_seq) }
+/// Whether the scan has not yet reached the window's far end.
+///
+/// Args:
+///     count: the candidate's g_seq, example: PduCount::from_signed(4711)
+///     stop_at: where the window ends, example: Some(4700); None = no end
+///     fill: which way the window fills
+/// Return:
+///     bool  true while `count` is strictly on the near side of `stop_at`
+///     (so the stop itself is never admitted — `Recent`'s `cg_seq` is the
+///     newest event the client already holds); always true without a stop.
+fn is_before_stop(count: PduCount, stop_at: Option<PduCount>, fill: Fill) -> bool {
+	stop_at.is_none_or(|stop| match fill {
+		| Fill::Older => count > stop,
+		| Fill::Newer => count < stop,
+	})
+}
 
 /// The room's next event, skipping rows that fail to decode.
 async fn next_item(stream: &mut RoomStream<'_>) -> Option<PdusIterItem> {

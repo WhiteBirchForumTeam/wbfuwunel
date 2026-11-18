@@ -3858,6 +3858,17 @@ pub struct Config {
 	#[serde(default = "default_wbf_recent_max_limit")]
 	pub wbf_recent_max_limit: usize,
 
+	/// How many events one `Event/Seek` request (one window) returns when the
+	/// request does not say. Much smaller than `wbf_recent_default_limit`:
+	/// `Recent` catches a client up across every joined room, while a `Seek`
+	/// is one room around one anchor — a screenful plus enough to scroll into
+	/// (`/docs/design/events/seek-window.md` §3). A larger `limit` is still
+	/// clamped to `wbf_recent_max_limit`.
+	///
+	/// default: 20
+	#[serde(default = "default_wbf_seek_default_limit")]
+	pub wbf_seek_default_limit: usize,
+
 	/// How many events one `Event/Batch` pack carries when the `Recent`
 	/// request does not say. A client writes one batch to its database at a
 	/// time, so this is the granularity of its progress.
@@ -6290,6 +6301,8 @@ fn default_wbf_ws_corrupt_budget() -> u32 { 8 }
 fn default_wbf_recent_default_limit() -> usize { 320 }
 
 fn default_wbf_recent_max_limit() -> usize { 500 }
+
+fn default_wbf_seek_default_limit() -> usize { 20 }
 
 fn default_wbf_recent_default_batch() -> usize { 10 }
 

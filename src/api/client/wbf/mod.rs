@@ -49,6 +49,7 @@ mod device;
 mod draft;
 mod invites;
 mod recent;
+mod seek;
 mod send;
 mod session;
 mod subscribe;
@@ -91,6 +92,10 @@ mod event {
 	pub(super) const SUBSCRIBE: u8 = 0x04;
 	pub(super) const UNSUBSCRIBE: u8 = 0x05;
 	// 0x06 Push is server to client only: `streams::EVENT_PUSH_SUBTYPE`.
+	// 0x07 DeviceChanged is server to client only, the same way.
+	/// One room's window from one anchor, either way: the fill direction
+	/// `Recent` does not have.
+	pub(super) const SEEK: u8 = 0x08;
 }
 
 /// # `POST /_wbf/v1/pack`
@@ -494,8 +499,9 @@ const fn admission(kind: Kind, subtype: u8) -> Option<Admission> {
 		// Download is addressed by the mxc in its meta, not by a conversation.
 		| (Kind::Download, download::INFO | download::READ) => Some(logged_in_any_transport),
 		| (Kind::Event, event::SEND) => Some(logged_in_any_transport),
-		// Its reply is a stream of `Batch` packs: WebSocket only.
-		| (Kind::Event, event::RECENT) => Some(with(logged_in_websocket_only, IdType::ClientConversation)),
+		// Their reply is a stream of `Batch` packs: WebSocket only.
+		| (Kind::Event, event::RECENT | event::SEEK) =>
+			Some(with(logged_in_websocket_only, IdType::ClientConversation)),
 		// They change what a connection listens to: WebSocket only.
 		| (Kind::Event, event::SUBSCRIBE | event::UNSUBSCRIBE) =>
 			Some(with(logged_in_websocket_only, IdType::ClientConversation)),
@@ -718,6 +724,10 @@ async fn dispatch_native(
 		| (Kind::Session, subtype) => session::handle(services, ctx, subtype, view, reply).await,
 		| (Kind::Event, event::RECENT) => {
 			recent::handle_event_recent(services, ctx.user()?, view, reply).await?;
+			Ok(SessionChange::Keep)
+		},
+		| (Kind::Event, event::SEEK) => {
+			seek::handle_event_seek(services, ctx.user()?, view, reply).await?;
 			Ok(SessionChange::Keep)
 		},
 		| (Kind::Event, event::SUBSCRIBE) => {

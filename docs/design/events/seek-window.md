@@ -180,8 +180,13 @@ UI 真的要兩邊，就發兩次（`older` 一次、`newer` 一次），而錨�
   - 錨點翻譯 —— `event_id` → `PduCount`（`timeline::get_pdu_count`），失敗一律 `NotFound`；
     先驗房（`rooms_joined`）再驗錨點（§3.1 的順序）。
   - 窗的收集函式多一個方向參數 —— `pdus_rev` ↔ `pdus`、「比錨點新／舊」的判斷對偶、
-    **起點含錨點**（§4.1：`pdus`／`pdus_rev` 的 `from` 本來就是含的，所以這一條不必特別做，
-    但要有測試把它釘住 —— 哪天為了別的理由改成 `from + 1` 就壞了）。
+    **起點含錨點**（§4.1）。
+    🚨 **這裡我先前寫反了，實作時查清楚**：`pdus`／`pdus_rev` 的游標是**不含**的 ——
+    `pdu_count_to_id` 裡那行 `count.saturating_inc(dir)` 寫著 `// +1 so we don't send the
+    base event`。所以含錨點**要自己做**：游標往**反方向**退一格（`newer` 退到 `錨點 - 1`、
+    `older` 進到 `錨點 + 1`），那一格正是 `scan_start_including`，而它有測試釘住。
+    📎 連帶一件事也確認了：`Recent` 的 `before` 是**不含**的（它的文件沒寫錯），
+    所以 `Recent` 的續接**不重疊**，重疊只有 `Seek` 有（§4.1 那是刻意的）。
   - ⭐ **同一個函式加方向，不是複製一份**（複製品會漂移，而漂掉的那次沒有人會喊 ——
     這個 repo 2026-11-17 才在 OIDC 的 refresh 上吃過一次）。
   - 📎 單一房 ⇒ **不需要 k 路合併**（`Recent` 的那段 heap 是為了跨房）。
@@ -206,3 +211,36 @@ UI 真的要兩邊，就發兩次（`older` 一次、`newer` 一次），而錨�
   `seek_older_start`、`seek_by_event_id`，加上被拒的那一組；client repo 照舊複製一份逐 byte 比。
 - 合併後：`CHANGELOG-fork.md` 一列、roadmap 一節、
   [/docs/design/wire/wire-format.md](../wire/wire-format.md) §3.3 的表加一列。
+
+## 9. 實作（維護者 2026-11-18 核可後）
+
+| | 落在哪 |
+|---|---|
+| 解析、錨點翻譯、handler | `src/api/client/wbf/seek.rs`（新檔）|
+| 掃描、過濾、切 Batch | `src/api/client/wbf/recent.rs` ——⭐ **同一個 `collect_window`**，多一個 `WindowSpec { fill, from, stop_at, limit }`；`Recent` 永遠是 `Fill::Older`|
+| 常數、准入、dispatch | `src/api/client/wbf/mod.rs`（`event::SEEK = 0x08`，與 `RECENT` 同一列准入）|
+| 設定 | `wbf_seek_default_limit`（預設 20）|
+
+🚨 **實作時推翻了我在 §7 寫的一件事**（原文留著對照）：`pdus`／`pdus_rev` 的游標是**不含**的。
+所以「窗含錨點」是**自己做**的 —— `scan_start_including(anchor, fill)` 把游標往反方向退一格，
+而它有一條單元測試專門釘這件事（`the_scan_starts_one_step_back_so_the_anchor_is_the_first_event`）。
+📎 它同時是那個反方向的**邊界**的紀錄：退一格在 `PduCount::min()`／`max()` 會飽和而退不動，
+但全域計數器發的是 1、2、3…，所以真的錨點碰不到那兩個值。
+
+### 9.1 驗了什麼
+
+- **單元**（`seek.rs` 的 `mod tests`，4 條）：錨點二選一（兩個都給、都不給、型別錯都紅）、
+  `direction` 沒有預設、`room_id` 必填且是單一房、游標退一格的方向。
+  📎 這幾條驗的是**形狀**，不需要資料庫。
+- **e2e**（`tests/e2e/e2e8.ps1` 情境 1 的 `[1.10]`…`[1.10p]`，16 條）：窗含錨點（兩個方向各一條）、
+  `newer` 是從錨點填而不是從最新端填、**續接只重疊一則而且沒有缺號**、兩種錨點回一模一樣的窗、
+  走到本站副本開頭時 `more = false`、沒給 `limit` 是 20（不是 `Recent` 的 320），
+  以及七條拒絕（兩種錯的錨點、兩種錯的 `direction`、缺 `room_id`、不在房 `Forbidden`、
+  三種翻不到 `NotFound`）。
+  ⚠️ 這些**只能**在 e2e 驗：`Seek` 只走 WebSocket，而 `collect_window` 是 crate 內部的。
+
+### 9.2 還沒做
+
+- **向量**（`/docs/design/wire/wbf-vectors.json` 的 `seek_*`）—— client repo 逐 byte 比的那份，
+  等 client 端要接的時候一起補。
+- 中心窗（§6）。
