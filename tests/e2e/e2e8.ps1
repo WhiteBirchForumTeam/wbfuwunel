@@ -358,6 +358,18 @@ Check '[1.10n] an event of another room the caller IS in -> NotFound, not that o
 $farPos = Seek-Ws $ws 64 $rS 999999999 'older' 5
 Check '[1.10o] a g_seq this room has no event at -> NotFound; it does not seek to the nearest' `
   ($farPos.kind -eq 1 -and $farPos.meta.code_id -eq 1501) (Describe $farPos)
+# 🚨 An anchor the caller cannot see is NotFound too, not a window around it: history_visibility=joined
+# hides what came before bob joined, and an event he was never shown must not work as a position either.
+$rH = (Api Post '/_matrix/client/v3/createRoom' '{"preset":"public_chat","name":"hidden history","initial_state":[{"type":"m.room.history_visibility","state_key":"","content":{"history_visibility":"joined"}}]}' $tokA).room_id
+$hBefore = Send-Msg $rH 'before bob joined' $tokA
+$null = Api Post "/_matrix/client/v3/join/$([uri]::EscapeDataString($rH))" '{}' $tokB
+$hAfter = Send-Msg $rH 'after bob joined' $tokA
+$aliceSees = Seek-Ws $ws 66 $rH $hBefore 'newer' 5
+$bobCannot = Seek-Ws $wsB 67 $rH $hBefore 'newer' 5
+$bobCan = Seek-Ws $wsB 68 $rH $hAfter 'newer' 5
+Check '[1.10q] an anchor the caller cannot see -> NotFound, while the same anchor works for someone who can' `
+  ($aliceSees.subtype -eq 3 -and $aliceSees.events[0].event_id -eq $hBefore -and $bobCannot.kind -eq 1 -and $bobCannot.meta.code_id -eq 1501 -and $bobCan.subtype -eq 3 -and $bobCan.events[0].event_id -eq $hAfter) `
+  "alice=$($aliceSees.meta.tc) bob_before=$($bobCannot.meta.code) bob_after=$($bobCan.meta.tc)"
 $seekHttp = Send-Pack (Json-Pack 0x14 8 (Conv 65) 0 @{ room_id = $rS; event_id = $mid; direction = 'newer' } $null) $tokA
 Check '[1.10p] Seek over HTTP -> Unsupported, because its reply streams; id copied' `
   ($seekHttp.kind -eq 1 -and $seekHttp.meta.code -eq 'Unsupported' -and $seekHttp.id -eq (Conv 65)) (Describe $seekHttp)
