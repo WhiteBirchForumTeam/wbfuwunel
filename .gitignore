@@ -118,3 +118,6 @@ tests/playwright/output.log
 
 # Claude 的暫存腳本，不進 repo
 /scratchpad/
+
+# Claude 在這台機器上的本地設定（並行度上限等），不進 repo
+/.claude/settings.local.json

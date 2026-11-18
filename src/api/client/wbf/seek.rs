@@ -337,16 +337,19 @@ mod tests {
 	fn a_direction_is_required_and_has_no_default() {
 		assert_eq!(fill_field(&json!({ "direction": "newer" })).unwrap(), Fill::Newer);
 		assert_eq!(fill_field(&json!({ "direction": "older" })).unwrap(), Fill::Older);
-		assert!(fill_field(&json!({})).is_err());
-		assert!(fill_field(&json!({ "direction": "forward" })).is_err());
-		assert!(fill_field(&json!({ "direction": 1 })).is_err());
+		assert!(fill_field(&json!({})).is_err(), "a missing direction has no default to fall back to");
+		assert!(fill_field(&json!({ "direction": "forward" })).is_err(), "only the two strings");
+		assert!(fill_field(&json!({ "direction": 1 })).is_err(), "and only as a string");
 	}
 
 	#[test]
 	fn a_room_is_required_and_is_one_room() {
-		assert!(room_id_field(&json!({ "room_id": "!r:localhost" })).is_ok());
-		assert!(room_id_field(&json!({})).is_err());
-		assert!(room_id_field(&json!({ "room_id": ["!r:localhost"] })).is_err());
+		assert!(room_id_field(&json!({ "room_id": "!r:localhost" })).is_ok(), "one room id is the shape");
+		assert!(room_id_field(&json!({})).is_err(), "a seek is about a position inside a room");
+		assert!(
+			room_id_field(&json!({ "room_id": ["!r:localhost"] })).is_err(),
+			"a list is `Recent`'s shape, not this one's"
+		);
 	}
 
 	#[test]

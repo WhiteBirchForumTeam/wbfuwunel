@@ -64,10 +64,31 @@ release 慢在 thin LTO：連結時把整支程式跨 crate 重新最佳化，�
 
 ```powershell
 # vcvars64 之後，PATH 照上面那段設好
+pwsh tests/run-unit-tests.ps1          # 兩套都跑，並行度上限 2
+pwsh tests/run-unit-tests.ps1 -Jobs 6  # 記憶體夠的機器自己調高
+```
+
+`tests/run-unit-tests.ps1` 做的就是下面這兩條，外加並行度上限與 `-Cdebuginfo=0`：
+
+```powershell
 $env:RUSTFLAGS = '-Cdebuginfo=0'
 $features = 'brotli_compression,element_hacks,gzip_compression,media_thumbnail,release_max_log_level,url_preview,zstd_compression'
-cargo test -p tuwunel --no-default-features --features $features --no-fail-fast
+cargo test --workspace --exclude tuwunel -j 2 --no-fail-fast -- --test-threads 2
+cargo test -p tuwunel --no-default-features --features $features -j 2 --no-fail-fast
 ```
+
+🚨 **第二套不能帶 `-- --test-threads`**：`src/main/tests` 每一支都走 `Args::default_test`，而
+`Args::default()` 就是 `Args::parse()` —— 它拿 **test binary 自己的命令列**給 clap 解，所以 harness
+的參數會被當成 server 的參數：`error: unexpected argument '--test-threads' found`，38 個 target
+一起死（2026-11-18 實踩）。⭐ 那一套靠 `RUST_TEST_THREADS=2`，libtest 讀得到而 clap 看不到。
+
+🚨 **為什麼要有上限**（維護者 2026-11-18 指定這台機器最多 2 條）：`cargo test` 預設的並行度是
+邏輯核心數，而 `src/main/tests` 的 44 個 target **每一個都把整台 server 靜態連結一次**（含
+rocksdb）⇒ 記憶體峰值在連結，不在跑測試。
+📎 第二個來源：每個整合測試的 server 都開 `db_cache_capacity_mb = 128 + 64 × 核心數`
+（6 核 ⇒ **512 MB**）＋ `db_write_buffer_capacity_mb = 48 + 4 × 核心數`，而
+`Args::default_test` 沒有壓它 —— 測試要的其實是幾十則事件。壓那兩個值可以每個 target 省掉
+半 GB，而且不犧牲速度；**還沒做**。
 
 三個參數都有理由，少一個就會卡住：
 
