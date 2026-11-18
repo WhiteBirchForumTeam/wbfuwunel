@@ -678,6 +678,13 @@ pub(super) static MAPS: &[Descriptor] = &[
 		..descriptor::RANDOM_SMALL
 	},
 	Descriptor {
+		// Refresh tokens live apart from `token_userdeviceid` on purpose: what makes a string
+		// an access token is the table it is in, so a refresh token cannot authenticate a
+		// request (/docs/design/accounts/session-tokens.md §2).
+		name: "refresh_userdeviceid",
+		..descriptor::RANDOM_SMALL
+	},
+	Descriptor {
 		name: "spentrefresh_userdeviceid",
 		..descriptor::RANDOM_SMALL
 	},

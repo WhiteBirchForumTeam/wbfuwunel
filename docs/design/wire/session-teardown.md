@@ -84,8 +84,17 @@ PR #103 之後 session 在**每一個 frame**（含 Ping／Pong）之前都重�
 📎 這正是 [/docs/design/overview/why-not-matrix-and-core-design.md](../overview/why-not-matrix-and-core-design.md)
 講的「接縫要少而明確」：一個閘門，不是三處各做一次。
 
-⚠️ **唯一的例外是鎖帳號**：`set_locked(user)` 是另一個漏斗（`users/mod.rs:333`，4 個呼叫點），
+⚠️ **兩個例外。**
+
+**例外一：鎖帳號** —— `set_locked(user)` 是另一個漏斗（`users/mod.rs:333`，4 個呼叫點），
 而且它是**使用者**粒度、不碰裝置 —— 它要自己一條路。
+
+**例外二：在既有裝置上重新登入**（2026-11-09 起，見
+[/docs/design/accounts/session-tokens.md](../accounts/session-tokens.md) §3）—— `start_session`
+走 `remove_tokens`，**不走 `remove_device`**。這是刻意的：登入不是登出，裝置、to-device
+佇列、pusher 都要留著，只有上一個 session 的 token 要死。
+⇒ 舊連線不會被這條路拆掉，而是在**下一個 frame** 被 `revalidate` 收掉（§4.3 的前半），
+上限 `wbf_ws_idle_timeout`。📎 所以它不在上面那張表裡，但它確實會讓一條連線結束。
 
 
 ### 3.1 🚨 機械上的缺口：socket 要死，得由接收迴圈放手

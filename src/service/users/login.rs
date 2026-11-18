@@ -12,7 +12,7 @@ use ruma::{
 	api::error::{ErrorKind, UnknownTokenErrorData},
 };
 use tuwunel_core::{
-	Err, Error, Result, debug_info, implement, info,
+	Err, Error, Result, debug_info, implement, info, warn,
 	utils::{
 		future::OptionFutureExt,
 		rate_limit::limit_exceeded,
@@ -22,7 +22,9 @@ use tuwunel_core::{
 	},
 };
 
-use super::device::{RefreshToken, generate_refresh_token, resolve_device_id};
+use super::device::{
+	REFRESH_TOKEN_PREFIX, RefreshToken, generate_refresh_token, resolve_device_id,
+};
 
 /// What a successful login hands the client: the fields of the Matrix
 /// `/login` response that name the session.
@@ -123,7 +125,17 @@ pub async fn issue_session(
 	let refresh_token = expires_in.is_some().then(generate_refresh_token);
 
 	let device_id = if existing_device.is_some() {
-		self.set_access_token(user_id, &final_device_id, &access_token, expires_in, refresh_token.as_deref())
+		// ⭐ Logging in again on a device ends that device's previous session: this
+		// is what a user does when they think a token was stolen, and it is the
+		// stronger of the two readings the spec gives (the device section says the
+		// server will invalidate the previous tokens; `/login` says it may)
+		// (/docs/design/accounts/session-tokens.md §3). `start_session` is where
+		// that happens — for this path and for every other way of logging in.
+		// 📎 Connections opened with the old token end at their next frame, where
+		// `revalidate` asks about it again — bounded by `wbf_ws_idle_timeout`, the
+		// same way a locked account's are
+		// (/docs/design/wire/session-teardown.md §4.3).
+		self.start_session(user_id, &final_device_id, &access_token, expires_in, refresh_token.as_deref())
 			.await?;
 
 		final_device_id
@@ -167,9 +179,20 @@ pub async fn issue_session(
 ///     is then still current and usable elsewhere).
 #[implement(super::Service)]
 pub async fn refresh_session(&self, presented: &str, admit: AdmitSession<'_>) -> Result<RefreshedSession> {
-	if !presented.starts_with("refresh_") {
+	if !presented.starts_with(REFRESH_TOKEN_PREFIX) {
 		return Err!(Request(Forbidden("Refresh token is malformed.")));
 	}
+
+	// 🚨 Classified twice on purpose, and the second time under the device's
+	// session lock: the lock is keyed by (user, device), which only the first
+	// classification can tell us, and a login on that device between the two
+	// would otherwise let this one write a third token after the login revoked
+	// the others (/docs/design/accounts/session-tokens.md §3.7). The first
+	// classification is a read; the decision that counts is the second.
+	let _session = match self.classify_refresh_token(presented).await.owner() {
+		| Some(owner) => Some(self.session_locks.lock(&owner).await),
+		| None => None,
+	};
 
 	match self.classify_refresh_token(presented).await {
 		| RefreshToken::Current { user_id, device_id, expires_at } => {
@@ -217,7 +240,12 @@ pub async fn refresh_session(&self, presented: &str, admit: AdmitSession<'_>) ->
 
 		| RefreshToken::Replayed { user_id, device_id, .. } => {
 			let revoke = self.services.server.config.refresh_token_reuse_revoke;
-			debug_info!(?user_id, ?device_id, revoke, "refresh token reused after rotation");
+			// 🚨 `warn!`, not a debug line: a refresh token used again after it
+			// rotated is the signal that someone else has a copy of it — the one
+			// thing the rotation exists to make visible. Both endpoints log
+			// through here, so the OAuth grant gets it too (review of PR #126,
+			// oliver: the copy it used to keep warned, this path did not).
+			warn!(?user_id, ?device_id, revoke, "refresh token reused after rotation");
 
 			if revoke {
 				self.remove_device(&user_id, &device_id).await;

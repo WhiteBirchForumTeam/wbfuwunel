@@ -15,17 +15,13 @@ use serde::Deserialize;
 use serde_json::json;
 use tuwunel_core::{
 	Err, Error, Result, err, info,
-	utils::{
-		BoolExt,
-		future::OptionFutureExt,
-		time::{now, timepoint_has_passed},
-	},
+	utils::time::now,
 	warn,
 };
 use tuwunel_service::{
 	Services,
 	oauth::server::{DeviceGrantPoll, IdTokenClaims, Server, narrow_scope},
-	users::device::{RefreshToken, generate_refresh_token},
+	users::{device::generate_refresh_token, login::admit_any},
 };
 
 use super::oauth_error;
@@ -284,80 +280,47 @@ async fn issue_tokens(services: &Services, grant: ApprovedGrant<'_>) -> Result<R
 	Ok(Json(response).into_response())
 }
 
+/// RFC6749 §6: the refresh token grant.
+///
+/// 🚨 **The rules live in `users::refresh_session`, not here.** This endpoint
+/// used to carry its own copy of them — classify, honour the expiry and the
+/// hard-logout setting, the reuse grace window, revoke on replay — and a second
+/// copy of a rule is a copy that drifts. It had already drifted twice by the
+/// time this was written (review of PR #126):
+///
+/// - it never asked `locked_check`, so a **locked account could still mint
+///   access tokens here** while the same request on `/_matrix/client/v3/refresh`
+///   was refused (that gate was added to the shared path by the review of PR
+///   #30, for the same reason);
+/// - it did not hold the device's session lock, so a refresh could write a token
+///   back after a concurrent login had revoked everything
+///   (/docs/design/accounts/session-tokens.md §3.7).
+///
+/// ⭐ Both are gone by calling the one implementation rather than by patching
+/// this copy. What stays here is what is actually OAuth's: the parameter, and
+/// the response shape.
+///
+/// 📎 `admit_any`: there is no connection to count against a device's limit, the
+/// same as the HTTP endpoint.
 async fn token_refresh(services: &Services, body: &TokenRequest) -> Result<Response<Body>> {
 	let presented = body
 		.refresh_token
 		.as_deref()
 		.ok_or_else(|| err!(Request(InvalidParam("refresh_token is required"))))?;
 
-	match services
+	let refreshed = services
 		.users
-		.classify_refresh_token(presented)
-		.await
-	{
-		| RefreshToken::Current { user_id, device_id, expires_at } => {
-			if expires_at.is_some_and(timepoint_has_passed) {
-				services
-					.server
-					.config
-					.refresh_token_hard_logout
-					.then_async(|| services.users.remove_device(&user_id, &device_id))
-					.unwrap_or_else_async(async || {
-						services
-							.users
-							.remove_refresh_token(&user_id, &device_id)
-							.await
-							.ok();
-					})
-					.await;
+		.refresh_session(presented, &mut admit_any)
+		.await?;
 
-				return Err!(Request(Forbidden("Refresh token has expired")));
-			}
+	// Every minting branch returns one: the rotated token, or the unchanged
+	// current one for a benign double-submit. No token means the shared path
+	// changed shape, and answering OAuth without one would strand the client.
+	let refresh_token = refreshed
+		.refresh_token
+		.ok_or_else(|| err!("A refreshed session carried no refresh token."))?;
 
-			let (access_token, expires_in) = services.users.generate_access_token(true);
-			let refresh_token = generate_refresh_token();
-			services
-				.users
-				.set_access_token(
-					&user_id,
-					&device_id,
-					&access_token,
-					expires_in,
-					Some(&refresh_token),
-				)
-				.await?;
-
-			token_refresh_response(&access_token, &refresh_token, expires_in)
-		},
-
-		| RefreshToken::Replayed { user_id, device_id, current, grace } if grace => {
-			// Benign double-submit: re-issue an access token for the unchanged
-			// refresh token rather than rotating it.
-			let (access_token, expires_in) = services.users.generate_access_token(true);
-			services
-				.users
-				.set_access_token(&user_id, &device_id, &access_token, expires_in, None)
-				.await?;
-
-			token_refresh_response(&access_token, &current, expires_in)
-		},
-
-		| RefreshToken::Replayed { user_id, device_id, .. } => {
-			let revoke = services.server.config.refresh_token_reuse_revoke;
-			warn!(%user_id, %device_id, revoke, "OIDC refresh token reused after rotation");
-
-			if revoke {
-				services
-					.users
-					.remove_device(&user_id, &device_id)
-					.await;
-			}
-
-			Err!(Request(Forbidden("Refresh token has already been used")))
-		},
-
-		| RefreshToken::Unknown => Err!(Request(Forbidden("Invalid refresh token"))),
-	}
+	token_refresh_response(&refreshed.access_token, &refresh_token, refreshed.expires_in)
 }
 
 fn token_refresh_response(

@@ -53,6 +53,19 @@ pub struct Service {
 	login_limiter: IpTokenBuckets,
 	/// One per device: a `CryptoState` is read and pushed under it (`keys.rs`).
 	crypto_state_locks: MutexMap<(OwnedUserId, OwnedDeviceId), ()>,
+	/// One per device, held while a login or a refresh replaces that device's
+	/// tokens: taking the old ones away and writing the new one are two
+	/// transactions, so without it two concurrent logins can interleave into
+	/// "both are still valid" — which is exactly what a login is supposed to end
+	/// (/docs/design/accounts/session-tokens.md §3.7).
+	///
+	/// 📎 Taken by `start_session` (every login) and `refresh_session` (every
+	/// refresh, including the OAuth grant, which calls it rather than keeping a
+	/// copy of the rules — §3.8). ⚠️ **Not** by the revocation side
+	/// (`remove_device`, `remove_tokens`): that gap is §3.8b, and taking it
+	/// there deadlocks the refresh path, which already holds this while it
+	/// revokes a replay.
+	session_locks: MutexMap<(OwnedUserId, OwnedDeviceId), ()>,
 }
 
 struct Data {
@@ -62,6 +75,7 @@ struct Data {
 	openidtoken_expiresatuserid: Arc<Map>,
 	logintoken_expiresatuserid: Arc<Map>,
 	todeviceid_events: Arc<Map>,
+	refresh_userdeviceid: Arc<Map>,
 	spentrefresh_userdeviceid: Arc<Map>,
 	token_userdeviceid: Arc<Map>,
 	userdeviceid_metadata: Arc<Map>,
@@ -92,6 +106,7 @@ impl crate::Service for Service {
 			services: args.services.clone(),
 			login_limiter: IpTokenBuckets::new(),
 			crypto_state_locks: MutexMap::new(),
+			session_locks: MutexMap::new(),
 			db: Data {
 				keychangeid_userid: args.db["keychangeid_userid"].clone(),
 				keyid_key: args.db["keyid_key"].clone(),
@@ -101,6 +116,7 @@ impl crate::Service for Service {
 				oidcdevice_userdeviceid: args.db["oidcdevice_userdeviceid"].clone(),
 				oidccskeybypass_userid: args.db["oidccskeybypass_userid"].clone(),
 				todeviceid_events: args.db["todeviceid_events"].clone(),
+				refresh_userdeviceid: args.db["refresh_userdeviceid"].clone(),
 				spentrefresh_userdeviceid: args.db["spentrefresh_userdeviceid"].clone(),
 				token_userdeviceid: args.db["token_userdeviceid"].clone(),
 				userdeviceid_metadata: args.db["userdeviceid_metadata"].clone(),
