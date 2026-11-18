@@ -55,6 +55,7 @@
 | 文件 | 講什麼 |
 |---|---|
 | [/docs/design/events/room-seq-and-recent.md](events/room-seq-and-recent.md) | 每房連續序號 `r_seq`、全域 `g_seq`、跨房間的「最近 N 則」（`Event/Recent`） |
+| [/docs/design/events/seek-window.md](events/seek-window.md) | 📄 **提案**：`Event/Seek`（`0x14 0x08`）—— 單一房 ＋ 一個錨點（`event_id` 或 `g_seq`，二選一）往 `newer` ／ `older` 讀一扇窗，**窗含錨點那則**（issue #64，「跳到訊息再往下滾」要的那個能力）|
 | [/docs/design/events/event-push.md](events/event-push.md) | 連線訂閱自己的帳號，server 把新事件推過來 |
 | [/docs/design/events/invites-on-the-wire.md](events/invites-on-the-wire.md) | 邀請走**自己的**訂閱線（新 kind `0x05 Invite`，形狀同構於 `0x16 Device`，issue #111）。🚨 §3.3：水位是**那張表本身**，每次連線一輪完整快照 —— client 存的號碼補不到「邀請被收回」。§6：聯邦給的 `invite_room_state` 進門時沒有上限 |
 | [/docs/design/events/streaming-messages.md](events/streaming-messages.md) | Draft Message：草稿一開始就是一則真的佔位訊息，之後的變化只廣播不進庫 |
