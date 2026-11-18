@@ -87,13 +87,17 @@ kind `0x14 Event`（/docs/design/wire/wire-format.md §3.3 已分配給 send／m
 ⚠️ **選的是那七個 byte 的值，第一個 byte 是型別 `0x01`**（client 的會話號，[/docs/design/wire/wire-format.md](../wire/wire-format.md) §2.2，PR #47）：裸值（型別 `0x00`）在 handler 之前就被回 `InvalidRequest`。
 **只走 WebSocket**；HTTP 回 `Error(Unsupported)`。這一段自 [/docs/design/wire/pack-pipeline.md](../wire/pack-pipeline.md) §6（維護者 2026-09-07 定）改寫，那份是權威。
 
-請求 meta（JSON，明文，server 要讀）；六個欄位都可省略：
+請求 meta（JSON，明文，server 要讀）；五個欄位都可省略：
 
 ```json
-{ "rooms": ["!r:localhost"], "cg_seq": <g_seq>, "before": <g_seq>, "after": <g_seq>, "limit": 320, "batch": 10 }
+{ "rooms": ["!r:localhost"], "cg_seq": <g_seq>, "before": <g_seq>, "limit": 320, "batch": 10 }
 ```
 
-📎 `after` 是 §2.5 的往新的窗；下面先講原本那個方向。
+📌 **「從一個指定的位置往哪個方向讀一扇窗」是別人的工作**：`0x14 0x08 Seek`，見
+[/docs/design/events/seek-window.md](seek-window.md)。`Recent` 這一支的語意是「**追到現在**」
+（所以它有 `cg_seq` 這個水位、而且預設從最新那端開始）。
+⚠️ 兩者**共用回應的 `0x03 Batch`**，所以下面 `fs`／`ls` 的定義是「第一則／最後一則」，
+🚫 不是「最新／最舊」。
 
 - `rooms`：只讀這幾個房間；省略（或 `null`）= **每個加入的房**（原本的行為）。⭐ **一個房間 ＋ `before` 就是那個房間的歷史** —— 不必另開一個 subtype，因為它跟「最近 N 則」本來就是同一個問題，只是窗窄了一點。
   🚨 **點名了一個你不在的房，整個請求回 `Forbidden`**，而不是默默把它留白 —— `Subscribe` 把這種房間列進 `skipped` 照常登記（那是一個長期登記，部分成功有意義），但**一扇窗是一個問題的答案**，而缺了一個房間的答案是錯的、而且 client 看不出來。
@@ -174,69 +178,6 @@ BinaryHeap 以 count 為鍵，每次彈最大的、再從那條串流補一個
 
 `/docs/design/wire/wbf-vectors.json`：`recent_first_start`（`limit=2, batch=1`）、`recent_with_cached_g_seq`、`recent_next_window`，與它的回應 `batch_first`（`r=1`）、`batch_last`（`r=0`）、
 `batch_empty_window`；data 用兩個最小事件，長度前綴。client repo 複製一份寫測試。
-
-### 2.5 往新的窗：`after`（issue #64，維護者 2026-11-18 同意）
-
-#### 缺的是什麼：過濾有，**填的方向**沒有
-
-`cg_seq` 是一個「只要比它新」的**過濾器**，但窗一律從**最新那端**往回填
-（`pdus_rev` ＋ 碰到 `cg_seq` 就停）。所以：
-
-| 想要的 | 今天拿到的 |
-|---|---|
-| 錨點 `g_seq = 50`、`limit = 20` → **51…70** | **481…500**（整個房最新的 20 則） |
-
-🚨 **而 client 兜不出來**：`g_seq` 是**全域**的號碼，房間裡下一則訊息可能是 51、也可能是 5000
-（中間全是別房的事件）⇒ client 算不出「錨點之後第 20 則」的號碼，沒辦法用 `before` 框出往新的窗。
-📎 唯一能走到 51…70 的現有方法是從最新那端一路往回翻 —— 那是**離線回來補進度**的正確用法，
-拿來做「跳過去再往下滾」等於要把整個房翻一遍。
-
-⇒ 缺的精確地說是**一行語意：窗從哪一端開始填**。底層的正向迭代器
-（`timeline::pdus(user, room, from)`，`Direction::Forward`）本來就在。
-
-#### 規則
-
-- **`after`（g_seq）：窗從舊端填，只收比它新的，不含它本身。**
-- ⭐ **方向由欄位決定**，不另加一個 `dir` 欄位：`before`／`cg_seq` ⇒ 新→舊（原本的）；`after` ⇒ 舊→新。
-- 🔴 **`after` 與 `cg_seq` 同時出現 ⇒ `InvalidRequest`**：兩個都是「比它新」，但一個是**停下來**的界、
-  一個是**開始填**的點，同時給沒有唯一答案。與其挑一個優先，不如拒絕
-  （⚠️ 這條要有測試，不然下一個人會「順手」讓它過）。
-- ✅ **`after` ＋ `before` 合法**：`before` 當**天花板**（收到它之前停）。這正是「把錨點和我手上
-  那段之間的洞補起來」—— 往新走到自己已有的那段就停，不必重收。
-- `rooms`／`limit`／`batch` 語意不變；`rooms` 省略時跨所有加入的房照樣合併，只是比較的方向反過來。
-
-#### 回應
-
-- 事件 **舊→新** 排（跟填的方向一致）。
-- `fs`／`ls` 照 §2.1 的定義（**第一則／最後一則**）⇒ 往新的窗裡 `fs` 是最舊、`ls` 是最新，
-  **下一窗帶 `after = ls`**。
-- `tc`／`bc`／`r`／`more` 與不變量 `tc = 已送 + bc + r` 都不變。`more` 讀作「停在上限，
-  **行進方向上**可能還有」。空窗一樣是一個 `bc = 0, r = 0` 的 Batch。
-- 🚨 **往新那一端是活的**：往新走會**追上現在**。追到時 `more = false`，而更新的事件由訂閱推送
-  送達 ⇒ client 照既有規則收斂（它本來就按 `g_seq` 去重）。
-  ⚠️ 這跟往舊走碰到「本站副本的開頭」不是同一種邊界：那個是靜止的，這個會動
-  —— 所以 `more = false` 在這個方向**不表示**「以後也不會有」。
-
-#### 不在這一支
-
-`at_event_id`（以 `event_id` 為錨、前後各 N 則的**中心窗**）是 issue #64 的另一半，另開一支。
-📎 它建立在這一支上：中心窗 ＝ 往舊一段 ＋ 錨點 ＋ 往新一段，而往新那段就是這裡做的東西。
-🚨 **錨點那支要定的事**（先記著，免得到時重想）：`event_id` → `PduCount` 的翻譯失敗時一律
-`NotFound`（不分「不存在」與「你看不到」，否則任何人都能拿 id 探出「有這麼一則」）；
-⚠️ outlier（存著但從沒進時間線）也走這條，因為它連 HTTP `/context` 都答不了
-（維護者 2026-11-18 定，一併否決了「另給一個碼讓 client 改走 HTTP」的提案 —— 那個提案
-建立在「舊資料沒有位置」這個**錯誤**的前提上：位置來自 `pdu_id`，不是 `unsigned` 的 `g_seq`）。
-
-#### 驗收
-
-- **單元**：填的方向（錨點之後的 N 則，不是最新的 N 則）、`after` ＋ `before` 的天花板、
-  `limit`／bytes 截斷之後 `ls` 是下一窗的起點、空窗、k 路合併的**升序**、
-  🔴 `after` ＋ `cg_seq` 同時出現要被拒。
-- **e2e**（`tests/e2e/e2e8.ps1`，`Recent` 的既有場景在那裡）：跳到中間那則之後往新翻兩窗，
-  事件集合與順序對得上 `/messages` 的反序；追到最新時 `more = false`；
-  `after` ＋ `cg_seq` → `Error(InvalidRequest)`。
-- **向量**（§2.4）：`recent_forward_start`、`recent_forward_next`、以及被拒的那一組，
-  client repo 照舊複製一份逐 byte 比。
 
 ## 3. 不在這次裡（候選，另開）
 
