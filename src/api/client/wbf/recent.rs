@@ -595,7 +595,32 @@ mod tests {
 	use serde_json::Value;
 	use tuwunel_core::wbf::{Kind, decode};
 
-	use super::{EVENT_LEN_PREFIX, Window, WindowEvent, build_batches, event};
+	use tuwunel_core::matrix::pdu::PduCount;
+
+	use super::{
+		EVENT_LEN_PREFIX, Fill, Window, WindowEvent, build_batches, event, is_before_stop,
+	};
+
+	/// The window's far end, both ways.
+	///
+	/// ⚠️ The `Newer` arm has no caller today (`Seek` passes no stop and
+	/// `Recent` only fills `Older`), so this test is the only thing that
+	/// exercises it — without it, the dual would be a claim nothing checks.
+	#[test]
+	fn a_window_stops_before_its_far_end_whichever_way_it_fills() {
+		let at = PduCount::from_signed(50);
+		// Filling away from the newest event, the stop is a floor.
+		assert!(is_before_stop(PduCount::from_signed(51), Some(at), Fill::Older));
+		assert!(!is_before_stop(at, Some(at), Fill::Older), "the stop itself is the client's newest");
+		assert!(!is_before_stop(PduCount::from_signed(49), Some(at), Fill::Older));
+		// Filling towards it, the same number is a ceiling.
+		assert!(is_before_stop(PduCount::from_signed(49), Some(at), Fill::Newer));
+		assert!(!is_before_stop(at, Some(at), Fill::Newer));
+		assert!(!is_before_stop(PduCount::from_signed(51), Some(at), Fill::Newer));
+		// No stop reads to the end either way.
+		assert!(is_before_stop(at, None, Fill::Older));
+		assert!(is_before_stop(at, None, Fill::Newer));
+	}
 
 	fn window(count: usize) -> Window {
 		// Newest first: g_seq 100, 99, 98…
