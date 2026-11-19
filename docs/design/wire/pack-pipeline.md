@@ -357,7 +357,7 @@ server 在 `(cg_seq, before)` 之間從最新往舊，**只收這一窗**：收�
 |---|---|
 | header | `IS_RESPONSE = 1`；`id` 抄請求；`seq` 從 0 起嚴格 +1；沒有 `IS_LAST` |
 | meta | `{ "tc": 320, "bc": 10, "fs": 20000, "ls": 19991, "r": 310, "more": true }` |
-| data | `bc` 則事件，每則 **u32 大端長度 ＋ 事件 JSON bytes**，新到舊排（`fs ≥ ls`） |
+| data | `bc` 則事件，每則 **u32 大端長度 ＋ 事件 JSON bytes**，**順序跟著請求的方向**：`Recent` 與 `Event/Seek` 的 `older` 是新到舊（`fs ≥ ls`）、`Seek` 的 `newer` 是舊到新（`fs ≤ ls`）。🚫 **`fs ≥ ls` 不是不變量** —— 照它寫驗證的 client 會拒絕合法的 `newer` 回應（見 [/docs/design/events/seek-window.md](../events/seek-window.md) §4）|
 
 | meta 欄 | 意思 |
 |---|---|
@@ -419,7 +419,7 @@ first byte 是 30 房間的堆合併＋可見性過濾＋收齊 320 則的時間
 - 一窗收完（`r = 0`）且 `more = false`：這窗已經回到 `cg_seq`，同步結束；把 `cg_seq` 存成**第一窗第一個 Batch 的 `fs`**（這輪最新的一條；比它新的下輪會來）。
 - `more = true`（或沒有這個欄位）：可能還有更舊的，帶 `before = 最後的 ls` 再叫一窗；**水位不動**。剛好沒有更舊的會拿到一個空 Batch，一個來回的代價。
 - 🚨 **不要再用 `tc < limit` 判斷同步結束**（PR #53 之前的規則）。窗被 bytes 截斷時 `tc < limit` 而且**還有更舊的**，照舊規則會把水位推過去、那段就再也補不回來。`more` 是唯一分得開這兩種情況的東西。
-- 中途斷線或收到 `Error`：已收到的 Batch 有效；從最後一個 `ls` 續問。**不要**在中途推水位：回應是新到舊，第一批之後還有比舊 `cg_seq` 新的。
+- 中途斷線或收到 `Error`：已收到的 Batch 有效；從最後一個 `ls` 續問。**不要**在中途推水位：`Recent`（與 `Seek` 的 `older`）回應是新到舊，第一批之後還有比舊 `cg_seq` 新的。
 - 總數（一萬）是 client 自己累計的；server 每窗只知道自己的 `tc`。
 
 ### 6.5 HTTP

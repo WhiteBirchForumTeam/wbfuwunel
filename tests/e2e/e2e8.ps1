@@ -358,6 +358,15 @@ Check '[1.10n] an event of another room the caller IS in -> NotFound, not that o
 $farPos = Seek-Ws $ws 64 $rS 999999999 'older' 5
 Check '[1.10o] a g_seq this room has no event at -> NotFound; it does not seek to the nearest' `
   ($farPos.kind -eq 1 -and $farPos.meta.code_id -eq 1501) (Describe $farPos)
+# The other direction's continuation, so the rule is not held up by symmetry alone (審查者 rumia, #129):
+# older also continues with g_seq = ls, overlapping exactly that one event.
+$olderNext = Seek-Ws $ws 69 $rS ([int64]$older.meta.ls) 'older' 5
+$olderJoined = @(@($older.events | ForEach-Object { $_.event_id }) + @($olderNext.events[1..4] | ForEach-Object { $_.event_id }))
+$expectOlderNine = @(($midAt-8)..$midAt | ForEach-Object { $sOrder[$_] })
+[array]::Reverse($expectOlderNine)
+Check '[1.10r] older continues the same way: one overlapping event, nothing skipped' `
+  ($olderNext.events[0].event_id -eq $older.events[-1].event_id -and ($olderJoined -join ',') -eq ($expectOlderNine -join ',')) `
+  (Describe $olderNext)
 # 🚨 An anchor the caller cannot see is NotFound too, not a window around it: history_visibility=joined
 # hides what came before bob joined, and an event he was never shown must not work as a position either.
 $rH = (Api Post '/_matrix/client/v3/createRoom' '{"preset":"public_chat","name":"hidden history","initial_state":[{"type":"m.room.history_visibility","state_key":"","content":{"history_visibility":"joined"}}]}' $tokA).room_id

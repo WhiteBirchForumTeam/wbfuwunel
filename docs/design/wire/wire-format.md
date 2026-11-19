@@ -119,7 +119,7 @@ offset=4  size=8   id  ＝ [id_type: 1 byte] ‖ [值: 7 byte 大端]
 | `id_type` | 誰鑄 | 值是什麼 | 用在 |
 |---|---|---|---|
 | `0x00` | — | **整個 id 必須是 0** | 沒有會話的包：`Control/Hello`、`Ping`、`Session/*`、`Download/*`（用 meta 的 mxc 定位）、`Upload/Create`、`Stream/Draft`（還沒有錨） |
-| `0x01` | **client** | 它自己挑的會話號 | `Event/Recent`、`Event/Subscribe`／`Unsubscribe`、`Device/Subscribe`／`Unsubscribe`／`Fetch`／`ItemsDestroy`、`Invite/Subscribe`／`Unsubscribe`／`Fetch` |
+| `0x01` | **client** | 它自己挑的會話號 | `Event/Recent`、**`Event/Seek`**、`Event/Subscribe`／`Unsubscribe`、`Device/Subscribe`／`Unsubscribe`／`Fetch`／`ItemsDestroy`、`Invite/Subscribe`／`Unsubscribe`／`Fetch` |
 | `0x02` | **server**（資料庫） | 事件位置 `g_seq` | `Stream/Abandon`／`Keypoint`／`Delta`／`Append`／`Demand`（草稿的錨） |
 | `0x03` | **server** | 上傳 id。⚠️ **去掉型別 byte 就是 mxc 的 media id** | `Upload/Chunk`／`Status`／`Seal`／`Abort` |
 | `0x04`–`0xEF` | — | 未分配 | 🚨 照 §3.4 的同一條鐵律：**先在這張表加一列，才能發** |
@@ -211,7 +211,7 @@ Matrix 對 media id 只要求 1–255 個 `[A-Za-z0-9_-]`，所以**不需要 pa
 | | `0x03 Logout` | `{ "all"?: bool }`；回應 `{}`，緊接 server 送 Close 1000 關線 | 無 |
 | `0x14 Event` | `0x01 Recent` | `{ "rooms"?: ["!…"], "limit": 320?, "cg_seq": <g_seq>?, "before": <g_seq>?, "batch": 10? }`（沒帶 `rooms` = 每個加入的房；**一個房 ＋ `before` 就是那個房的歷史**；點名了不在的房→ `Forbidden`），**`id` 由 client 選**（回應抄它）；回應是一串 `0x03 Batch`，不是 `Ack`；**只走 WS**，HTTP 回 `Error(Unsupported)` | 無 |
 | `0x14 Event` | `0x08 Seek` | `{ "room_id": "!…", "event_id"?: "$…", "g_seq"?: <g_seq>, "direction": "newer" \| "older", "limit": 20?, "batch": 10? }` —— **從一個錨點往一個方向**讀一扇窗。🔴 `room_id` 必填且**剛好一個房**（不在 → `Forbidden`）；**錨點 `event_id` 與 `g_seq` 剛好給一個**（都給／都不給 → `InvalidRequest`；翻不到、outlier、看不到、不在那個房 → **都是 `NotFound`**）；`direction` 必填，⚠️ 故意沒有預設值。🔴 **窗含錨點那則**，兩個方向都含 ⇒ 帶 `g_seq = ls` 續下一窗時**有一則重疊**（client 本來就按 `g_seq` 去重）。`limit` 預設 **20**（`wbf_seek_default_limit`），上限沿用 `wbf_recent_max_limit`。回應是一串 `0x03 Batch`，`older` 是新→舊、`newer` 是舊→新；**只走 WS**。見 [/docs/design/events/seek-window.md](../events/seek-window.md) | 無 |
-| `0x14 Event` | `0x03 Batch`（只有 server → client） | `{ "tc", "bc", "fs", "ls", "r", "more" }`：這一窗總則數、這批則數、**這批第一則／最後一則**的 g_seq（⚠️ 不是「最新／最舊」—— `Seek` 的 `newer` 方向順序是反的，而這兩個欄位不該因為方向換一套意思）、這批之後還剩幾則；`r = 0` 就是這窗結束。**`more`**：這窗停在上限（`limit` 或 `wbf_window_max_bytes`）、更舊的可能還有 —— 🚨 **判斷「還要不要翻下一窗」看它，不看 `tc < limit`**（沒有這個欄位當 `true`）。`id` 抄 `Recent`，`seq` 從 0 嚴格 +1 | `bc` 則事件，每則 u32 大端長度 ＋ 事件 JSON（含 `room_id`；`unsigned` 帶 `org.wbftw.wbfuwunel.r_seq` 與 `…g_seq`），新到舊，見 [/docs/design/events/room-seq-and-recent.md](../events/room-seq-and-recent.md) §2、[/docs/design/wire/pack-pipeline.md](pack-pipeline.md) §6 |
+| `0x14 Event` | `0x03 Batch`（只有 server → client） | `{ "tc", "bc", "fs", "ls", "r", "more" }`：這一窗總則數、這批則數、**這批第一則／最後一則**的 g_seq（⚠️ 不是「最新／最舊」—— `Seek` 的 `newer` 方向順序是反的，而這兩個欄位不該因為方向換一套意思）、這批之後還剩幾則；`r = 0` 就是這窗結束。**`more`**：這窗停在上限（`limit` 或 `wbf_window_max_bytes`）、更舊的可能還有 —— 🚨 **判斷「還要不要翻下一窗」看它，不看 `tc < limit`**（沒有這個欄位當 `true`）。`id` **抄請求**（`Recent` 或 `Seek`），`seq` 從 0 嚴格 +1 | `bc` 則事件，每則 u32 大端長度 ＋ 事件 JSON（含 `room_id`；`unsigned` 帶 `org.wbftw.wbfuwunel.r_seq` 與 `…g_seq`），**順序跟著請求的方向**（`Recent` 與 `Seek` 的 `older` 是新到舊、`Seek` 的 `newer` 是舊到新 ⇒ 🚫 `fs ≥ ls` 不是不變量），見 [/docs/design/events/room-seq-and-recent.md](../events/room-seq-and-recent.md) §2、[/docs/design/events/seek-window.md](../events/seek-window.md) §4、[/docs/design/wire/pack-pipeline.md](pack-pipeline.md) §6 |
 | `0x14 Event` | `0x04 Subscribe` | `{ "rooms"?: ["!…"], "cg_seq"?: <g_seq> }`，**`id` 由 client 選**（之後每個 `Push` 抄它）；沒帶 `rooms` = 帳號層（所有加入的房，含之後加入的）；回應 `{ "latest_g_seq", "joined", "skipped": […] }`；**只走 WS** | 無 |
 | | `0x05 Unsubscribe` | `{ "rooms"?: ["!…"] }`；沒帶 = 全退；回應 `{}`；退不存在的是 no-op。**退訂退的是當下的 channel，不是黑名單**：帳號層訂閱者（`Subscribe` 沒帶 `rooms`）點名退掉某房之後，**再加入那個房時仍會被自動加回來** | 無 |
 | | `0x06 Push`（只有 server → client） | `{ "bc", "fs", "ls", "gap": bool }`；`id` 抄 `Subscribe`，`seq` 每推一次 +1；`gap: true` = 前面有推送被丟，**或 `cg_seq` 的補窗被上限截斷了**（PR #53，帶在補窗的第一個 `Push`），用 `Recent` 補；事件驅動類，不 Ack、不重送，見 [/docs/design/events/event-push.md](../events/event-push.md) | `bc` 則事件，跟 `Batch` 同一個長度前綴切法 |
@@ -388,7 +388,7 @@ WebSocket 本身保證到達順序，所以**順序錯一定是邏輯錯誤**，
 ### 4.1 `seq` 屬於**會話**，不屬於 kind、也不屬於連線
 
 ⭐ **`id` 是會話的名字，`seq` 是它裡面的計數**（PR #42 定案，實作在 `service/streams/subscribers.rs`）。
-會話由開啟它的那個指令命名 —— `Subscribe`、`Fetch`、`Recent`、`Upload/Create` —— 之後屬於它的每一包都抄那個 `id`，
+會話由開啟它的那個指令命名 —— `Subscribe`、`Fetch`、`Recent`、**`Seek`**、`Upload/Create` —— 之後屬於它的每一包都抄那個 `id`，
 `seq` 只在**那段會話內**遞增。
 
 | 🚫 不是這樣 | 為什麼不行 |

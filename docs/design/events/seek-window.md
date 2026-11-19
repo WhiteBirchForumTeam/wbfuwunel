@@ -233,11 +233,16 @@ UI 真的要兩邊，就發兩次（`older` 一次、`newer` 一次），而錨�
 - **單元**（`seek.rs` 的 `mod tests`，4 條）：錨點二選一（兩個都給、都不給、型別錯都紅）、
   `direction` 沒有預設、`room_id` 必填且是單一房、游標退一格的方向。
   📎 這幾條驗的是**形狀**，不需要資料庫。
-- **e2e**（`tests/e2e/e2e8.ps1` 情境 1 的 `[1.10]`…`[1.10p]`，16 條）：窗含錨點（兩個方向各一條）、
+- **e2e**（`tests/e2e/e2e8.ps1` 情境 1 的 `[1.10]`…`[1.10r]`，**19 條**）：窗含錨點（兩個方向各一條）、
   `newer` 是從錨點填而不是從最新端填、**續接只重疊一則而且沒有缺號**、兩種錨點回一模一樣的窗、
   走到本站副本開頭時 `more = false`、沒給 `limit` 是 20（不是 `Recent` 的 320），
-  以及七條拒絕（兩種錯的錨點、兩種錯的 `direction`、缺 `room_id`、不在房 `Forbidden`、
-  三種翻不到 `NotFound`）。
+  🔴 **錨點看不到就是 `NotFound`**（`history_visibility: joined` 的房，bob 拿他加入之前那則當錨點 →
+  `NotFound`，而同一則對看得到的 alice 成立、bob 加入之後那則對 bob 成立 —— ⭐ 三件一起驗，
+  因為只驗 `NotFound` 的話，任何「把錨點全拒掉」的 bug 也會讓它綠），
+  以及**十一條拒絕**：兩種錯的錨點、兩種錯的 `direction`、缺 `room_id`、不在房 `Forbidden`、
+  三種翻不到 `NotFound`（不存在／別房／這房沒有那個位置）、可見性 `NotFound`、走 HTTP 的 `Unsupported`。
+  📎 **兩個方向各有一條續接**：`newer` 的 `[1.10c]` 與 `older` 的 `[1.10r]`，都驗「下一窗第一則 ＝ 上一窗 `ls`」
+  而且合起來沒有缺號。
   ⚠️ 這些**只能**在 e2e 驗：`Seek` 只走 WebSocket，而 `collect_window` 是 crate 內部的。
 
 ### 9.2 還沒做

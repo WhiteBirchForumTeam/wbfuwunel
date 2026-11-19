@@ -92,19 +92,29 @@ impl RecentRequest {
 	}
 }
 
+/// One count from a request's meta, never above the configured ceiling.
+///
+/// 🚨 **The fallback is clamped too.** It used to be `map_or(default, …)`,
+/// which let a `default` above `max` through whenever the field was absent:
+/// `wbf_seek_default_limit = 10000` with `wbf_recent_max_limit = 500` served
+/// a 10000-event window to a request that said nothing, and `Hello`
+/// announced a default above its own maximum (#129, 審查者 cirno 與 rumia).
+/// ⭐ The ceiling is what bounds the scan and the time to the first byte, so
+/// it has to hold on the path nobody passes a value on.
+///
 /// Args:
 ///     meta: the request meta, example: `{"limit":320}`
 ///     name: example: "limit"
 ///     default: used when absent or not a number, example: 320
 ///     max: example: 500
 /// Return:
-///     usize  the field clamped to `max`; `default` when absent or not a
-///     non-negative integer.
-fn count_field(meta: &Value, name: &str, default: usize, max: usize) -> usize {
+///     usize  the field clamped to `max`; `default` clamped to `max` when the
+///     field is absent or is not a non-negative integer.
+pub(super) fn count_field(meta: &Value, name: &str, default: usize, max: usize) -> usize {
 	meta[name]
 		.as_u64()
 		.and_then(|value| usize::try_from(value).ok())
-		.map_or(default, |value| value.min(max))
+		.map_or_else(|| default.min(max), |value| value.min(max))
 }
 
 /// The rooms a window is about.
@@ -597,9 +607,32 @@ mod tests {
 
 	use tuwunel_core::matrix::pdu::PduCount;
 
+	use serde_json::json;
+
 	use super::{
-		EVENT_LEN_PREFIX, Fill, Window, WindowEvent, build_batches, event, is_before_stop,
+		EVENT_LEN_PREFIX, Fill, Window, WindowEvent, build_batches, count_field, event,
+		is_before_stop,
 	};
+
+	/// 🔴 The ceiling holds on every path, the one nobody passes a value on
+	/// included: a misconfigured `default` above `max` must not become the
+	/// window's size (#129).
+	#[test]
+	fn a_count_never_exceeds_the_max_even_when_the_default_does() {
+		assert_eq!(count_field(&json!({ "limit": 320 }), "limit", 20, 500), 320, "a value under the max is itself");
+		assert_eq!(count_field(&json!({ "limit": 10000 }), "limit", 20, 500), 500, "a value over it is clamped");
+		assert_eq!(count_field(&json!({}), "limit", 20, 500), 20, "absent is the default");
+		assert_eq!(
+			count_field(&json!({}), "limit", 10000, 500),
+			500,
+			"absent with a default over the max is still the max"
+		);
+		assert_eq!(
+			count_field(&json!({ "limit": "320" }), "limit", 10000, 500),
+			500,
+			"so is a value of the wrong type, which falls back the same way"
+		);
+	}
 
 	/// The window's far end, both ways.
 	///

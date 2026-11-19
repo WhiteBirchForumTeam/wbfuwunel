@@ -30,7 +30,7 @@ use tuwunel_service::Services;
 
 use super::{
 	Failure, Reject, Reply,
-	recent::{Fill, WindowSpec, build_batches, collect_window, scan_start_including},
+	recent::{Fill, WindowSpec, build_batches, collect_window, count_field, scan_start_including},
 };
 
 /// Which event the window starts at, as the client named it.
@@ -153,21 +153,6 @@ fn fill_field(meta: &Value) -> Result<Fill, Reject> {
 			"`direction` must be \"newer\" or \"older\"",
 		)),
 	}
-}
-
-/// Args:
-///     meta: the request meta, example: `{"limit":20}`
-///     name: example: "limit"
-///     default: used when absent or not a number, example: 20
-///     max: example: 500
-/// Return:
-///     usize  the field clamped to `max`; `default` when absent or not a
-///     non-negative integer.
-fn count_field(meta: &Value, name: &str, default: usize, max: usize) -> usize {
-	meta[name]
-		.as_u64()
-		.and_then(|value| usize::try_from(value).ok())
-		.map_or(default, |value| value.min(max))
 }
 
 /// Args:
