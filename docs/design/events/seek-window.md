@@ -245,6 +245,12 @@ UI 真的要兩邊，就發兩次（`older` 一次、`newer` 一次），而錨�
   而且合起來沒有缺號。
   ⚠️ 這些**只能**在 e2e 驗：`Seek` 只走 WebSocket，而 `collect_window` 是 crate 內部的。
 
+⚠️ **四種翻不到裡，`outlier` 那一種沒有測試。** §8 的驗收寫「四種各一條」，實際只有三條
+（不存在／別房／看不到）。🚫 不補一條假的：outlier 在 e2e 上不好造（要一個存著但從沒進時間線的
+事件），而**它在結構上就查不到** —— `timeline::get_pdu_id` 只讀 `eventid_pduid`，outlier 在
+`eventid_outlierpdu`，兩張表沒有交集。⭐ 寫在這裡是為了讓讀 §8 的人不會以為它被驗過
+（審查者 oliver 2026-11-20）。
+
 ### 9.2 還沒做
 
 - **向量**（`/docs/design/wire/wbf-vectors.json` 的 `seek_*`）—— client repo 逐 byte 比的那份，

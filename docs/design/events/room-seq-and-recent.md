@@ -128,7 +128,7 @@ server **不記任何跨請求的狀態**，下一窗是 client 再叫一次 `Re
     HTTP `/messages` 往回翻到邊界時會去聯邦抓（`backfill_if_required`），`Recent` **不會**。
     📎 今天 `allow_federation = false`，每個房的第一則必然是本站寫的 `m.room.create`，所以兩者沒有差別；
     等哪天開了聯邦，client 🚫 不要把「窗到底了」讀成「這個房間沒有更早的歷史」—— 那時最後一個 Batch 會多一個明確的邊界旗標（相容的增補），要更早的歷史走 `/messages`。
-  - `more`：這一窗停在**上限**（`limit` 或 `wbf_window_max_bytes`），更舊的可能還有；`false` = 停在沒有事件了。同一窗每個 Batch 都一樣（PR #53，欄位語意的權威在 [/docs/design/wire/pack-pipeline.md](../wire/pack-pipeline.md) §6.2）。
+  - `more`：這一窗停在**上限**（`limit` 或 `wbf_window_max_bytes`），**行進方向上**可能還有（`Recent` 永遠是更舊的；`Seek` 的 `newer` 是更新的，見 [/docs/design/events/seek-window.md](seek-window.md) §4）；`false` = 停在沒有事件了。同一窗每個 Batch 都一樣（PR #53，欄位語意的權威在 [/docs/design/wire/pack-pipeline.md](../wire/pack-pipeline.md) §6.2）。
   - 不變量：`tc = 已送 + bc + r`。空窗（`tc = 0`）送一個 `bc = 0, r = 0, fs = ls = 0` 的 Batch。
 - data：`bc` 則事件，每則 **u32 大端長度 ＋ 事件 JSON bytes**（不是 JSON 陣列：client 切事件只看四個 byte，不掃逗號、不先 parse 整段），
   新到舊排。事件是完整的 `Pdu` 格式，含 `room_id`；`unsigned` 帶 `r_seq`、`g_seq`。一個 Batch 的 data 另受 `wbf_data_max_bytes` 限，

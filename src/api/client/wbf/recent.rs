@@ -607,12 +607,46 @@ mod tests {
 
 	use tuwunel_core::matrix::pdu::PduCount;
 
+	use std::collections::BinaryHeap;
+
 	use serde_json::json;
 
 	use super::{
-		EVENT_LEN_PREFIX, Fill, Window, WindowEvent, build_batches, count_field, event,
+		EVENT_LEN_PREFIX, Fill, Head, Window, WindowEvent, build_batches, count_field, event,
 		is_before_stop,
 	};
+
+	/// The heap must pop the end the window fills from.
+	///
+	/// ⚠️ Nothing else can tell this branch apart today: `Seek` reads one
+	/// room, so its heap never holds two heads, and `Recent` only ever fills
+	/// `Older`. 🚨 Removing `.reverse()` left the whole suite green (#129,
+	/// 審查者 oliver's mutation 3) — the same hole `is_before_stop` had, in
+	/// the same shape, so it gets the same answer: a test that asks the
+	/// branch directly.
+	#[test]
+	fn the_heap_pops_the_end_the_window_fills_from() {
+		let older: PduCount = PduCount::from_signed(50);
+		let newer: PduCount = PduCount::from_signed(60);
+
+		let mut filling_older = BinaryHeap::new();
+		filling_older.push(Head { count: older, room: 0, fill: Fill::Older });
+		filling_older.push(Head { count: newer, room: 1, fill: Fill::Older });
+		assert_eq!(
+			filling_older.pop().map(|head| head.count),
+			Some(newer),
+			"filling away from the newest event takes the newest candidate first"
+		);
+
+		let mut filling_newer = BinaryHeap::new();
+		filling_newer.push(Head { count: newer, room: 0, fill: Fill::Newer });
+		filling_newer.push(Head { count: older, room: 1, fill: Fill::Newer });
+		assert_eq!(
+			filling_newer.pop().map(|head| head.count),
+			Some(older),
+			"filling towards it takes the oldest candidate first"
+		);
+	}
 
 	/// 🔴 The ceiling holds on every path, the one nobody passes a value on
 	/// included: a misconfigured `default` above `max` must not become the
